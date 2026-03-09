@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import h3
+
 from grid_core.app.api.code import batch_generate_st, generate_st, parse_st
 from grid_core.app.api.grid import cover, locate
 from grid_core.app.api.topology import children, code_to_geometry, neighbors, parent
@@ -40,7 +42,8 @@ def test_locate_endpoint_function_isea4h():
     req = LocateRequest(grid_type="isea4h", level=7, point=[116.391, 39.907])
     resp = locate(req)
     assert resp.cell.grid_type == "isea4h"
-    assert resp.cell.space_code.startswith("HX7-")
+    assert h3.is_valid_cell(resp.cell.space_code)
+    assert h3.get_resolution(resp.cell.space_code) == 7
 
 
 def test_st_code_functions():

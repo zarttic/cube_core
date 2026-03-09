@@ -23,7 +23,7 @@
 - 元操作能力
   - Geohash：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
   - MGRS（第一阶段增强）：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
-  - ISEA4H（第一阶段近似版）：点定位、几何覆盖、邻接/父子级、编码转几何（采用分层等角近似格网，便于 MVP 演示与联调）
+  - ISEA4H（第一阶段）：基于 Uber H3 的点定位、几何覆盖、邻接/父子级、编码转几何
 
 ## 技术栈
 

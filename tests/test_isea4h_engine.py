@@ -1,3 +1,4 @@
+import h3
 import pytest
 
 from grid_core.app.core.exceptions import ValidationError
@@ -8,7 +9,8 @@ def test_isea4h_locate_point_returns_cell():
     engine = ISEA4HEngine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=6)
     assert cell.grid_type == "isea4h"
-    assert cell.space_code.startswith("HX6-")
+    assert h3.is_valid_cell(cell.space_code)
+    assert h3.get_resolution(cell.space_code) == 6
     assert len(cell.bbox) == 4
     assert len(cell.center) == 2
 
@@ -52,6 +54,9 @@ def test_isea4h_validation():
     with pytest.raises(ValidationError):
         engine.locate_point(lon=116.391, lat=39.907, level=13)
     with pytest.raises(ValidationError):
-        engine.neighbors("HX6-1-1", k=0)
+        engine.neighbors("invalid-cell", k=1)
     with pytest.raises(ValidationError):
-        engine.parent("HX1-0-0")
+        engine.neighbors(engine.locate_point(lon=116.391, lat=39.907, level=6).space_code, k=0)
+    with pytest.raises(ValidationError):
+        root_code = engine.locate_point(lon=116.391, lat=39.907, level=1).space_code
+        engine.parent(root_code)

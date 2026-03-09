@@ -214,17 +214,16 @@ Track every development task with scope, decisions, changes, and validation resu
 - Next:
   - Start `TASK-0015`: implement first-phase ISEA4H engine capability.
 
-## 2026-03-09 | TASK-0015 | Implement first-phase ISEA4H capability
-- Goal: Move ISEA4H from placeholder to runnable MVP capability for API/frontend integration.
-- Scope: ISEA4H engine implementation, routing/demo tests, docs sync.
+## 2026-03-09 | TASK-0015 | Replace ISEA4H approximation with Uber H3
+- Goal: Align ISEA4H track with hexagonal grid implementation by switching to Uber H3.
+- Scope: ISEA4H engine refactor, dependency update, tests/docs sync.
 - Key Changes:
-  - Implemented `ISEA4HEngine` core methods:
-    - `locate_point`, `cover_geometry`, `code_to_bbox`, `code_to_center`, `code_to_geometry`
-    - `neighbors`, `parent`, `children`
-  - Adopted MVP hierarchical equal-angle approximation grid with `HX{level}-{ix}-{iy}` code format.
+  - Refactored `ISEA4HEngine` to use H3 native cell ids and topology APIs.
+  - Implemented H3-based `locate/cover/geometry/neighbors/parent/children`.
+  - Added dependency `h3>=4.4.0`.
   - Added dedicated tests in `tests/test_isea4h_engine.py`.
-  - Updated routing/demo tests to validate ISEA4H runnable behavior.
-  - Updated README docs to reflect ISEA4H first-phase support.
+  - Updated routing/demo/API tests to validate H3-backed ISEA4H behavior.
+  - Updated README docs to reflect H3-backed ISEA4H support.
 - Validation:
   - `python -m pytest -q tests`
   - Result: passed.

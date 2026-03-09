@@ -1,3 +1,4 @@
+import h3
 from fastapi.responses import HTMLResponse
 
 from grid_core.app.api.demo import map_page, sdk_children, sdk_code_to_geometry, sdk_cover, sdk_locate, sdk_neighbors, sdk_parent
@@ -35,7 +36,7 @@ def test_demo_sdk_cover_geohash_works():
 def test_demo_sdk_locate_isea4h_works():
     resp = sdk_locate(LocateRequest(grid_type="isea4h", level=7, point=[116.391, 39.907]))
     assert resp.cell.grid_type == "isea4h"
-    assert resp.cell.space_code.startswith("HX7-")
+    assert h3.is_valid_cell(resp.cell.space_code)
 
 
 def test_demo_sdk_topology_geohash_roundtrip():
