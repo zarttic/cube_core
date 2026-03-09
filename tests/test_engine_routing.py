@@ -12,10 +12,11 @@ def test_grid_service_geohash_route_still_works():
     assert cell.grid_type == "geohash"
 
 
-def test_grid_service_mgrs_route_returns_not_implemented():
+def test_grid_service_mgrs_route_works_for_locate():
     service = GridService()
-    with pytest.raises(NotImplementedCapabilityError):
-        service.locate(GridType.MGRS, level=6, point=[116.391, 39.907])
+    cell = service.locate(GridType.MGRS, level=5, point=[116.391, 39.907])
+    assert cell.grid_type == "mgrs"
+    assert cell.space_code.startswith("50S")
 
 
 def test_topology_service_isea4h_route_returns_not_implemented():

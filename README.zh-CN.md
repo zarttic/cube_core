@@ -11,21 +11,19 @@
 
 ## 当前实现状态（MVP）
 
-当前版本已完成 Geohash 主能力闭环：
+当前版本能力状态：
 
 - 空间剖分
-  - 点定位：`/v1/grid/locate`
-  - 几何覆盖：`/v1/grid/cover`
-  - 支持 `geometry` 与 `bbox` 输入
+  - Geohash：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，支持 `geometry` 与 `bbox`）
+  - MGRS（第一阶段）：点定位（`/v1/grid/locate`）
 - 编码能力
-  - 时空编码生成：`/v1/code/st`
+  - 时空编码生成：`/v1/code/st`（支持 `geohash/mgrs/isea4h` 前缀编码）
   - 批量时空编码生成：`/v1/code/st/batch`
   - 时空编码解析：`/v1/code/parse`
 - 元操作能力
-  - 邻接计算：`/v1/topology/neighbors`
-  - 父级推导：`/v1/topology/parent`
-  - 子级推导：`/v1/topology/children`
-  - 编码转几何：`/v1/topology/geometry`
+  - Geohash：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
+  - MGRS（第一阶段）：编码转几何（`/v1/topology/geometry`）
+  - ISEA4H：已接入统一路由骨架，当前返回明确未实现错误
 
 ## 技术栈
 
@@ -65,6 +63,6 @@ python -m pytest -q tests
 
 ## 后续规划
 
-- 接入 MGRS 引擎
-- ISEA4H 接口定义与分阶段落地
+- 完善 MGRS 覆盖能力与拓扑能力
+- ISEA4H 算法分阶段落地
 - 批量能力与覆盖精度策略增强（`minimal` 后续可引入跨层级最小覆盖优化）

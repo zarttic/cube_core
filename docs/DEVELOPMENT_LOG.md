@@ -93,3 +93,18 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 22 passed.
 - Next:
   - Start `TASK-0007`: implement first-phase MGRS capabilities (locate + parse/geometry basics).
+
+## 2026-03-09 | TASK-0007 | Implement first-phase MGRS capability
+- Goal: Deliver first runnable MGRS engine capability in MVP (locate + basic reverse geometry).
+- Scope: dependency setup, MGRS engine implementation, API/service test coverage, docs sync.
+- Key Changes:
+  - Added dependency `mgrs` in `requirements.txt`.
+  - Implemented `MGRSEngine` first-phase methods: `locate_point`, `code_to_bbox`, `code_to_center`, `code_to_geometry`.
+  - Kept unsupported methods (`cover/neighbors/parent/children`) as explicit `NotImplementedCapabilityError`.
+  - Added/updated tests for MGRS engine behavior, API locate/geometry route, and service routing.
+  - Updated README files to reflect multi-engine current status.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 28 passed.
+- Next:
+  - Start `TASK-0008`: ISEA4H API-level placeholder completion with consistent response contracts.

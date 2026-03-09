@@ -2,10 +2,11 @@ from datetime import datetime, timezone
 
 from grid_core.app.api.code import batch_generate_st, generate_st, parse_st
 from grid_core.app.api.grid import cover, locate
-from grid_core.app.api.topology import children, parent
+from grid_core.app.api.topology import children, code_to_geometry, parent
 from grid_core.app.main import health
 from grid_core.app.models.request import (
     ChildrenRequest,
+    CodeToGeometryRequest,
     CoverRequest,
     LocateRequest,
     ParentRequest,
@@ -25,6 +26,13 @@ def test_locate_endpoint_function():
     resp = locate(req)
     assert resp.cell.grid_type == "geohash"
     assert len(resp.cell.space_code) == 7
+
+
+def test_locate_endpoint_function_mgrs():
+    req = LocateRequest(grid_type="mgrs", level=5, point=[116.391, 39.907])
+    resp = locate(req)
+    assert resp.cell.grid_type == "mgrs"
+    assert resp.cell.space_code.startswith("50S")
 
 
 def test_st_code_functions():
@@ -87,3 +95,15 @@ def test_topology_parent_children_functions():
 
     children_resp = children(ChildrenRequest(grid_type="geohash", code="wtw3sj", target_level=7))
     assert len(children_resp.child_codes) == 32
+
+
+def test_topology_code_to_geometry_function_mgrs():
+    locate_resp = locate(LocateRequest(grid_type="mgrs", level=5, point=[116.391, 39.907]))
+    geo_resp = code_to_geometry(
+        CodeToGeometryRequest(
+            grid_type="mgrs",
+            code=locate_resp.cell.space_code,
+            boundary_type="polygon",
+        )
+    )
+    assert geo_resp.geometry["type"] == "Polygon"

@@ -39,6 +39,8 @@ pytest -q
 
 ## MVP limits
 
-- Supports `grid_type=geohash` only.
+- `geohash` supports locate/cover/topology base capabilities.
+- `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`).
+- `isea4h` is routing-ready with explicit not-implemented responses.
 - `cover_mode=intersect/contain/minimal` implemented.
 - CRS fixed to `EPSG:4326`.
