@@ -36,6 +36,13 @@ def test_locate_endpoint_function_mgrs():
     assert resp.cell.space_code.startswith("50S")
 
 
+def test_locate_endpoint_function_isea4h():
+    req = LocateRequest(grid_type="isea4h", level=7, point=[116.391, 39.907])
+    resp = locate(req)
+    assert resp.cell.grid_type == "isea4h"
+    assert resp.cell.space_code.startswith("HX7-")
+
+
 def test_st_code_functions():
     gen_req = STCodeGenerateRequest(
         grid_type="geohash",

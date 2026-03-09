@@ -45,7 +45,7 @@ pytest -q
 
 - `geohash` supports locate/cover/topology base capabilities.
 - `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain`.
-- `isea4h` is routing-ready with explicit not-implemented responses.
+- `isea4h` supports first-phase runnable capability (`locate/cover/topology`), using an MVP hierarchical equal-angle approximation.
 - `cover_mode=intersect/contain/minimal` implemented.
 - Frontend visualizer available at `/v1/demo/map` with API/SDK switch.
 - Frontend visualizer supports `locate/cover/neighbors/parent/children` map rendering.

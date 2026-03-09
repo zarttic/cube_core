@@ -1,0 +1,57 @@
+import pytest
+
+from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.engines.isea4h_engine import ISEA4HEngine
+
+
+def test_isea4h_locate_point_returns_cell():
+    engine = ISEA4HEngine()
+    cell = engine.locate_point(lon=116.391, lat=39.907, level=6)
+    assert cell.grid_type == "isea4h"
+    assert cell.space_code.startswith("HX6-")
+    assert len(cell.bbox) == 4
+    assert len(cell.center) == 2
+
+
+def test_isea4h_code_to_bbox_and_geometry():
+    engine = ISEA4HEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=5).space_code
+    bbox = engine.code_to_bbox(code)
+    geometry = engine.code_to_geometry(code)
+    assert bbox[0] < bbox[2]
+    assert bbox[1] < bbox[3]
+    assert geometry["type"] == "Polygon"
+
+
+def test_isea4h_neighbors_parent_children():
+    engine = ISEA4HEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=4).space_code
+    neighbors = engine.neighbors(code, k=1)
+    parent = engine.parent(code)
+    children = engine.children(parent, target_level=4)
+    assert len(neighbors) > 0
+    assert code not in neighbors
+    assert code in children
+
+
+def test_isea4h_cover_modes():
+    engine = ISEA4HEngine()
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
+    }
+    intersect = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="intersect")}
+    contain = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="contain")}
+    minimal = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="minimal")}
+    assert contain.issubset(intersect)
+    assert minimal == intersect
+
+
+def test_isea4h_validation():
+    engine = ISEA4HEngine()
+    with pytest.raises(ValidationError):
+        engine.locate_point(lon=116.391, lat=39.907, level=13)
+    with pytest.raises(ValidationError):
+        engine.neighbors("HX6-1-1", k=0)
+    with pytest.raises(ValidationError):
+        engine.parent("HX1-0-0")

@@ -1,8 +1,6 @@
-import pytest
 from fastapi.responses import HTMLResponse
 
 from grid_core.app.api.demo import map_page, sdk_children, sdk_code_to_geometry, sdk_cover, sdk_locate, sdk_neighbors, sdk_parent
-from grid_core.app.core.exceptions import NotImplementedCapabilityError
 from grid_core.app.models.request import ChildrenRequest, CodeToGeometryRequest, CoverRequest, LocateRequest, NeighborsRequest, ParentRequest
 
 
@@ -34,9 +32,10 @@ def test_demo_sdk_cover_geohash_works():
     assert resp.statistics["cell_count"] > 0
 
 
-def test_demo_sdk_locate_isea4h_returns_not_implemented():
-    with pytest.raises(NotImplementedCapabilityError):
-        sdk_locate(LocateRequest(grid_type="isea4h", level=7, point=[116.391, 39.907]))
+def test_demo_sdk_locate_isea4h_works():
+    resp = sdk_locate(LocateRequest(grid_type="isea4h", level=7, point=[116.391, 39.907]))
+    assert resp.cell.grid_type == "isea4h"
+    assert resp.cell.space_code.startswith("HX7-")
 
 
 def test_demo_sdk_topology_geohash_roundtrip():

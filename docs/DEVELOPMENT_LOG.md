@@ -212,4 +212,21 @@ Track every development task with scope, decisions, changes, and validation resu
   - `python -m pytest -q tests`
   - Result: 53 passed.
 - Next:
-  - Start `TASK-0015`: add frontend draw-polygon selection and interactive cover preview.
+  - Start `TASK-0015`: implement first-phase ISEA4H engine capability.
+
+## 2026-03-09 | TASK-0015 | Implement first-phase ISEA4H capability
+- Goal: Move ISEA4H from placeholder to runnable MVP capability for API/frontend integration.
+- Scope: ISEA4H engine implementation, routing/demo tests, docs sync.
+- Key Changes:
+  - Implemented `ISEA4HEngine` core methods:
+    - `locate_point`, `cover_geometry`, `code_to_bbox`, `code_to_center`, `code_to_geometry`
+    - `neighbors`, `parent`, `children`
+  - Adopted MVP hierarchical equal-angle approximation grid with `HX{level}-{ix}-{iy}` code format.
+  - Added dedicated tests in `tests/test_isea4h_engine.py`.
+  - Updated routing/demo tests to validate ISEA4H runnable behavior.
+  - Updated README docs to reflect ISEA4H first-phase support.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: passed.
+- Next:
+  - Start `TASK-0016`: frontend draw-polygon selection and interactive cover preview.
