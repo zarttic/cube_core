@@ -36,3 +36,45 @@ def test_mgrs_cover_not_implemented_yet():
     engine = MGRSEngine()
     with pytest.raises(NotImplementedCapabilityError):
         engine.cover_geometry({"type": "Point", "coordinates": [116.391, 39.907]}, level=5, cover_mode="intersect")
+
+
+def test_mgrs_neighbors_k1_non_empty():
+    engine = MGRSEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=5).space_code
+    codes = engine.neighbors(code, k=1)
+
+    assert len(codes) > 0
+    assert code not in codes
+    assert all(engine._precision_from_code(c) == 5 for c in codes)
+
+
+def test_mgrs_neighbors_k_validation():
+    engine = MGRSEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=5).space_code
+    with pytest.raises(ValidationError):
+        engine.neighbors(code, k=0)
+
+
+def test_mgrs_parent_and_children_roundtrip():
+    engine = MGRSEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=3).space_code
+    parent = engine.parent(code)
+    children = engine.children(parent, target_level=3)
+
+    assert parent == code[:-2]
+    assert len(children) == 100
+    assert code in children
+
+
+def test_mgrs_parent_validation():
+    engine = MGRSEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=1).space_code
+    with pytest.raises(ValidationError):
+        engine.parent(code)
+
+
+def test_mgrs_children_validation():
+    engine = MGRSEngine()
+    code = engine.locate_point(lon=116.391, lat=39.907, level=3).space_code
+    with pytest.raises(ValidationError):
+        engine.children(code, target_level=3)

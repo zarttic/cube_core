@@ -2,13 +2,14 @@ from datetime import datetime, timezone
 
 from grid_core.app.api.code import batch_generate_st, generate_st, parse_st
 from grid_core.app.api.grid import cover, locate
-from grid_core.app.api.topology import children, code_to_geometry, parent
+from grid_core.app.api.topology import children, code_to_geometry, neighbors, parent
 from grid_core.app.main import health
 from grid_core.app.models.request import (
     ChildrenRequest,
     CodeToGeometryRequest,
     CoverRequest,
     LocateRequest,
+    NeighborsRequest,
     ParentRequest,
     STCodeBatchGenerateRequest,
     STCodeGenerateRequest,
@@ -107,3 +108,18 @@ def test_topology_code_to_geometry_function_mgrs():
         )
     )
     assert geo_resp.geometry["type"] == "Polygon"
+
+
+def test_topology_mgrs_parent_children_neighbors_functions():
+    locate_resp = locate(LocateRequest(grid_type="mgrs", level=3, point=[116.391, 39.907]))
+    code = locate_resp.cell.space_code
+
+    parent_resp = parent(ParentRequest(grid_type="mgrs", code=code))
+    assert parent_resp.parent_code == code[:-2]
+
+    children_resp = children(ChildrenRequest(grid_type="mgrs", code=parent_resp.parent_code, target_level=3))
+    assert len(children_resp.child_codes) == 100
+    assert code in children_resp.child_codes
+
+    neighbors_resp = neighbors(NeighborsRequest(grid_type="mgrs", code=code, k=1))
+    assert neighbors_resp.statistics["count"] > 0

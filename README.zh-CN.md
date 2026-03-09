@@ -22,7 +22,7 @@
   - 时空编码解析：`/v1/code/parse`
 - 元操作能力
   - Geohash：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
-  - MGRS（第一阶段）：编码转几何（`/v1/topology/geometry`）
+  - MGRS（第一阶段增强）：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
   - ISEA4H：已接入统一路由骨架，当前返回明确未实现错误
 
 ## 技术栈
@@ -63,6 +63,6 @@ python -m pytest -q tests
 
 ## 后续规划
 
-- 完善 MGRS 覆盖能力与拓扑能力
+- 完善 MGRS 覆盖能力
 - ISEA4H 算法分阶段落地
 - 批量能力与覆盖精度策略增强（`minimal` 后续可引入跨层级最小覆盖优化）

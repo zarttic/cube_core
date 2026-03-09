@@ -108,3 +108,31 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 28 passed.
 - Next:
   - Start `TASK-0008`: ISEA4H API-level placeholder completion with consistent response contracts.
+
+## 2026-03-09 | TASK-0008 | Complete ISEA4H API placeholder error contract
+- Goal: Keep ISEA4H as phased placeholder while making API responses consistent and explicit.
+- Scope: global exception mapping, error-handler tests, log/docs sync.
+- Key Changes:
+  - Updated global error handler to map `NotImplementedCapabilityError` to HTTP `501`.
+  - Preserved unified error body contract: `{"error": {"code", "message"}}`.
+  - Added tests to verify error-handler status/body mapping for `NotImplementedCapabilityError` and `ValidationError`.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 30 passed.
+- Next:
+  - Start `TASK-0009`: MGRS topology capability enhancement (neighbors/parent/children).
+
+## 2026-03-09 | TASK-0009 | Enhance MGRS topology capability
+- Goal: Move MGRS from locate/geometry-only to basic topology operations for API usability.
+- Scope: MGRS engine topology methods, API tests, docs sync.
+- Key Changes:
+  - Implemented `MGRSEngine.neighbors` using UTM offsets at current MGRS precision level.
+  - Implemented `MGRSEngine.parent` and `MGRSEngine.children` with level validation and deterministic outputs.
+  - Added validation for invalid `k` and invalid/non-progressive child target levels.
+  - Added/updated tests in `tests/test_mgrs_engine.py` and `tests/test_api.py` for MGRS topology methods.
+  - Updated README files to reflect MGRS topology capability status.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: passed.
+- Next:
+  - Start `TASK-0010`: MGRS geometry cover capability (intersect baseline).

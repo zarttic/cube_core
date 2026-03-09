@@ -58,13 +58,47 @@ class MGRSEngine:
         return [sw_lon, sw_lat, ne_lon, ne_lat]
 
     def neighbors(self, code: str, k: int = 1):
-        raise NotImplementedCapabilityError("MGRS neighbors is not implemented yet")
+        if k < 1:
+            raise ValidationError("k must be >= 1")
+        precision = self._precision_from_code(code)
+        zone, hemisphere, easting, northing = self._parse_utm(code)
+        cell_size_m = 10 ** (5 - precision)
+
+        neighbors: set[str] = set()
+        for dx in range(-k, k + 1):
+            for dy in range(-k, k + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                try:
+                    neighbor = self._converter.UTMToMGRS(
+                        zone,
+                        hemisphere,
+                        easting + dx * cell_size_m,
+                        northing + dy * cell_size_m,
+                        MGRSPrecision=precision,
+                    )
+                except Exception:
+                    continue
+                if self._precision_from_code(neighbor) == precision:
+                    neighbors.add(neighbor)
+        return sorted(neighbors)
 
     def parent(self, code: str):
-        raise NotImplementedCapabilityError("MGRS parent is not implemented yet")
+        precision = self._precision_from_code(code)
+        if precision <= 1:
+            raise ValidationError("Root MGRS level has no parent")
+        return code[:-2]
 
     def children(self, code: str, target_level: int):
-        raise NotImplementedCapabilityError("MGRS children is not implemented yet")
+        target_precision = self._validate_level(target_level)
+        current_precision = self._precision_from_code(code)
+        if target_precision <= current_precision:
+            raise ValidationError("target_level must be greater than current MGRS level")
+
+        out = [code]
+        for _ in range(target_precision - current_precision):
+            out = [f"{prefix}{easting}{northing}" for prefix in out for easting in range(10) for northing in range(10)]
+        return out
 
     def _build_cell(self, code: str, level: int) -> GridCell:
         bbox = self.code_to_bbox(code)
@@ -97,3 +131,9 @@ class MGRSEngine:
         if precision < 0 or precision > 5:
             raise ValidationError("Invalid MGRS precision")
         return precision
+
+    def _parse_utm(self, code: str) -> tuple[int, str, float, float]:
+        try:
+            return self._converter.MGRSToUTM(code)
+        except Exception as exc:
+            raise ValidationError("Invalid MGRS code") from exc
