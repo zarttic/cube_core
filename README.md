@@ -40,5 +40,5 @@ pytest -q
 ## MVP limits
 
 - Supports `grid_type=geohash` only.
-- `cover_mode=intersect` implemented; `contain/minimal` return explicit not-implemented errors.
+- `cover_mode=intersect/contain/minimal` implemented.
 - CRS fixed to `EPSG:4326`.

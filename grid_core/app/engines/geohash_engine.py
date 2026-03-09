@@ -3,7 +3,7 @@ from __future__ import annotations
 from shapely.geometry import box
 
 from grid_core.app.core.enums import CoverMode
-from grid_core.app.core.exceptions import NotImplementedCapabilityError, ValidationError
+from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils import geohash_utils
 from grid_core.app.utils.geometry import to_shapely
@@ -19,11 +19,7 @@ class GeohashEngine:
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str) -> list[GridCell]:
         self._validate_level(level)
-        if cover_mode == CoverMode.CONTAIN.value:
-            raise NotImplementedCapabilityError("cover_mode=contain is not implemented in MVP")
-        if cover_mode == CoverMode.MINIMAL.value:
-            raise NotImplementedCapabilityError("cover_mode=minimal is not implemented in MVP")
-        if cover_mode != CoverMode.INTERSECT.value:
+        if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
 
         shp = to_shapely(geometry)
@@ -39,15 +35,20 @@ class GeohashEngine:
         min_iy = max(0, int((min_lat + 90.0) // lat_step) - 1)
         max_iy = min(lat_bins - 1, int((max_lat + 90.0) // lat_step) + 1)
 
-        cells = []
+        selected_codes: set[str] = set()
         for ix in range(min_ix, max_ix + 1):
             for iy in range(min_iy, max_iy + 1):
                 code = geohash_utils.from_grid_index(ix, iy, level)
                 bbox = geohash_utils.decode_bbox(code)
                 cell_poly = box(*bbox)
-                if cell_poly.intersects(shp):
-                    cells.append(self._build_cell(code, level))
-        return cells
+                if cover_mode == CoverMode.INTERSECT.value and cell_poly.intersects(shp):
+                    selected_codes.add(code)
+                elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
+                    selected_codes.add(code)
+                elif cover_mode == CoverMode.MINIMAL.value and cell_poly.intersects(shp):
+                    selected_codes.add(code)
+
+        return [self._build_cell(code, level) for code in sorted(selected_codes)]
 
     def code_to_geometry(self, code: str) -> dict:
         return geohash_utils.polygon_from_bbox(geohash_utils.decode_bbox(code))

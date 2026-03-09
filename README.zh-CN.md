@@ -67,4 +67,4 @@ python -m pytest -q tests
 
 - 接入 MGRS 引擎
 - ISEA4H 接口定义与分阶段落地
-- 批量能力与覆盖模式增强（`contain` / `minimal`）
+- 批量能力与覆盖精度策略增强（`minimal` 后续可引入跨层级最小覆盖优化）
