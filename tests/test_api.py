@@ -90,6 +90,23 @@ def test_cover_with_polar_bbox_input():
     assert resp.statistics["cell_count"] > 0
 
 
+def test_cover_with_bbox_input_mgrs():
+    req = CoverRequest(grid_type="mgrs", level=3, cover_mode="intersect", bbox=[116.385, 39.903, 116.397, 39.911])
+    resp = cover(req)
+    assert resp.grid_type == "mgrs"
+    assert resp.statistics["cell_count"] > 0
+
+
+def test_cover_with_bbox_input_mgrs_contain():
+    intersect_req = CoverRequest(grid_type="mgrs", level=2, cover_mode="intersect", bbox=[116.37, 39.89, 116.43, 39.93])
+    contain_req = CoverRequest(grid_type="mgrs", level=2, cover_mode="contain", bbox=[116.37, 39.89, 116.43, 39.93])
+    intersect_resp = cover(intersect_req)
+    contain_resp = cover(contain_req)
+
+    assert contain_resp.grid_type == "mgrs"
+    assert contain_resp.statistics["cell_count"] <= intersect_resp.statistics["cell_count"]
+
+
 def test_topology_parent_children_functions():
     parent_resp = parent(ParentRequest(grid_type="geohash", code="wtw3sjq"))
     assert parent_resp.parent_code == "wtw3sj"

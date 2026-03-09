@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-import mgrs
+from collections import deque
 
-from grid_core.app.core.exceptions import NotImplementedCapabilityError, ValidationError
+import mgrs
+from shapely.geometry import box
+
+from grid_core.app.core.enums import CoverMode
+from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.models.grid_cell import GridCell
+from grid_core.app.utils.geometry import to_shapely
 
 
 class MGRSEngine:
@@ -18,7 +23,44 @@ class MGRSEngine:
         return self._build_cell(code=code, level=level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
-        raise NotImplementedCapabilityError("MGRS cover geometry is not implemented yet")
+        precision = self._validate_level(level)
+        if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value}:
+            raise ValidationError("MGRS cover supports only intersect/contain mode in MVP")
+
+        shp = to_shapely(geometry)
+        seeds = self._seed_points(shp)
+        seed_codes = {
+            self.locate_point(lon=lon, lat=lat, level=precision).space_code for lon, lat in seeds if -90.0 <= lat <= 90.0
+        }
+        if not seed_codes:
+            return []
+
+        selected: set[str] = set()
+        visited: set[str] = set()
+        queue = deque(sorted(seed_codes))
+
+        while queue:
+            code = queue.popleft()
+            if code in visited:
+                continue
+            visited.add(code)
+
+            cell_poly = box(*self.code_to_bbox(code))
+            intersects = cell_poly.intersects(shp)
+            if not intersects:
+                continue
+
+            if cover_mode == CoverMode.INTERSECT.value or shp.covers(cell_poly):
+                selected.add(code)
+
+            if len(selected) > 20000:
+                raise ValidationError("MGRS cover result too large for MVP")
+
+            for neighbor in self.neighbors(code, k=1):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        return [self._build_cell(code=code, level=precision) for code in sorted(selected)]
 
     def code_to_geometry(self, code: str):
         min_lon, min_lat, max_lon, max_lat = self.code_to_bbox(code)
@@ -137,3 +179,31 @@ class MGRSEngine:
             return self._converter.MGRSToUTM(code)
         except Exception as exc:
             raise ValidationError("Invalid MGRS code") from exc
+
+    @staticmethod
+    def _seed_points(shp) -> list[tuple[float, float]]:
+        points: set[tuple[float, float]] = set()
+        geoms = list(shp.geoms) if hasattr(shp, "geoms") else [shp]
+
+        for geom in geoms:
+            rp = geom.representative_point()
+            points.add((float(rp.x), float(rp.y)))
+
+            min_lon, min_lat, max_lon, max_lat = geom.bounds
+            mid_lon = (min_lon + max_lon) / 2.0
+            mid_lat = (min_lat + max_lat) / 2.0
+            points.update(
+                {
+                    (min_lon, min_lat),
+                    (min_lon, max_lat),
+                    (max_lon, min_lat),
+                    (max_lon, max_lat),
+                    (mid_lon, min_lat),
+                    (mid_lon, max_lat),
+                    (min_lon, mid_lat),
+                    (max_lon, mid_lat),
+                    (mid_lon, mid_lat),
+                }
+            )
+
+        return sorted(points)

@@ -15,7 +15,7 @@
 
 - 空间剖分
   - Geohash：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，支持 `geometry` 与 `bbox`）
-  - MGRS（第一阶段）：点定位（`/v1/grid/locate`）
+  - MGRS（第一阶段增强）：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，当前支持 `intersect/contain`）
 - 编码能力
   - 时空编码生成：`/v1/code/st`（支持 `geohash/mgrs/isea4h` 前缀编码）
   - 批量时空编码生成：`/v1/code/st/batch`
@@ -63,6 +63,6 @@ python -m pytest -q tests
 
 ## 后续规划
 
-- 完善 MGRS 覆盖能力
+- 扩展 MGRS 覆盖模式（`minimal`）
 - ISEA4H 算法分阶段落地
 - 批量能力与覆盖精度策略增强（`minimal` 后续可引入跨层级最小覆盖优化）

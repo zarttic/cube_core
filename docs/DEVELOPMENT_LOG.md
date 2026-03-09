@@ -133,6 +133,50 @@ Track every development task with scope, decisions, changes, and validation resu
   - Updated README files to reflect MGRS topology capability status.
 - Validation:
   - `python -m pytest -q tests`
-  - Result: passed.
+  - Result: 36 passed.
 - Next:
   - Start `TASK-0010`: MGRS geometry cover capability (intersect baseline).
+
+## 2026-03-09 | TASK-0010 | Add MGRS cover intersect baseline
+- Goal: Provide first runnable MGRS geometry cover to unblock API usage for polygon/bbox inputs.
+- Scope: MGRS cover engine logic, tests, docs/log sync.
+- Key Changes:
+  - Implemented `MGRSEngine.cover_geometry` with `intersect` baseline support.
+  - Added seed-point initialization + neighbor flood expansion to discover intersecting MGRS cells.
+  - Added result-size safety guard (`>20000`) for MVP.
+  - Added/updated tests for MGRS cover behavior in engine and API layers.
+  - Updated README files to reflect MGRS cover capability status.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 38 passed.
+- Next:
+  - Start `TASK-0011`: improve MGRS cover performance and add `contain` mode.
+
+## 2026-03-09 | TASK-0011 | Add MGRS cover contain mode
+- Goal: Extend MGRS cover capability beyond intersect so API can support stricter coverage semantics.
+- Scope: MGRS cover-mode logic, engine/API tests, docs/log sync.
+- Key Changes:
+  - Extended `MGRSEngine.cover_geometry` to support `contain` mode in addition to `intersect`.
+  - Kept explicit validation for unsupported mode (`minimal` still pending).
+  - Added tests to verify `contain` output is a subset of `intersect` output.
+  - Added API-level regression test for MGRS `cover_mode=contain`.
+  - Updated README files to reflect current MGRS cover mode support.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 41 passed.
+- Next:
+  - Start `TASK-0012`: improve MGRS cover robustness near UTM zone boundaries.
+
+## 2026-03-09 | TASK-0012 | Expand regression tests and branch coverage
+- Goal: Increase test coverage with focus on service-layer validation branches and error contracts.
+- Scope: test suite only (`CodeService`, `GridService`, global error handler).
+- Key Changes:
+  - Added `tests/test_grid_service.py` covering CRS validation, missing-geometry validation, and `boundary_type=bbox` geometry stripping.
+  - Extended `tests/test_code_service.py` with `isea4h` prefix path plus invalid prefix/format parse failure cases.
+  - Extended `tests/test_error_handler.py` for default `400` branches (`ParseError` and generic `GridCoreError`).
+  - Kept existing capability tests for MGRS cover/topology and API behavior.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 48 passed.
+- Next:
+  - Start `TASK-0013`: MGRS cover zone-boundary robustness tests and algorithm hardening.
