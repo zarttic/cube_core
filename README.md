@@ -48,4 +48,5 @@ pytest -q
 - `isea4h` is routing-ready with explicit not-implemented responses.
 - `cover_mode=intersect/contain/minimal` implemented.
 - Frontend visualizer available at `/v1/demo/map` with API/SDK switch.
+- Frontend visualizer supports `locate/cover/neighbors/parent/children` map rendering.
 - CRS fixed to `EPSG:4326`.

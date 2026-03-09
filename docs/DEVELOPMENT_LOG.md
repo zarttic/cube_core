@@ -192,6 +192,24 @@ Track every development task with scope, decisions, changes, and validation resu
   - Updated README docs with visualizer entrypoint.
 - Validation:
   - `python -m pytest -q tests`
-  - Result: passed.
+  - Result: 52 passed.
 - Next:
   - Start `TASK-0014`: add frontend topology panel (neighbors/parent/children visualization).
+
+## 2026-03-09 | TASK-0014 | Add topology visualization to frontend demo
+- Goal: Visualize topology operations (`neighbors/parent/children`) directly on map for API/SDK modes.
+- Scope: demo SDK topology routes, frontend interactions, tests, docs sync.
+- Key Changes:
+  - Added demo SDK topology routes:
+    - `/v1/demo/sdk/topology/neighbors`
+    - `/v1/demo/sdk/topology/geometry`
+    - `/v1/demo/sdk/topology/parent`
+    - `/v1/demo/sdk/topology/children`
+  - Extended frontend panel and map rendering for `neighbors/parent/children`.
+  - Added topology roundtrip tests for demo SDK routes and updated demo-page assertions.
+  - Updated README files to include topology visualization support.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 53 passed.
+- Next:
+  - Start `TASK-0015`: add frontend draw-polygon selection and interactive cover preview.

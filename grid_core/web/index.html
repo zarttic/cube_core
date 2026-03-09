@@ -154,6 +154,9 @@
             <select id="op">
               <option value="locate">locate</option>
               <option value="cover">cover</option>
+              <option value="neighbors">neighbors</option>
+              <option value="parent">parent</option>
+              <option value="children">children</option>
             </select>
           </div>
         </div>
@@ -189,6 +192,11 @@
           <input id="bbox" type="text" value="116.385,39.903,116.397,39.911" />
         </div>
 
+        <div>
+          <label for="code">拓扑 code（neighbors/parent/children 用；留空将先按当前点 locate）</label>
+          <input id="code" type="text" value="" />
+        </div>
+
         <div class="row2">
           <div>
             <label for="coverMode">cover_mode</label>
@@ -204,6 +212,17 @@
               <option value="polygon">polygon</option>
               <option value="bbox">bbox</option>
             </select>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div>
+            <label for="k">neighbors k</label>
+            <input id="k" type="number" min="1" max="5" value="1" />
+          </div>
+          <div>
+            <label for="targetLevel">children target_level</label>
+            <input id="targetLevel" type="number" min="1" max="12" value="7" />
           </div>
         </div>
 
@@ -274,6 +293,11 @@
       L.circleMarker([lat, lon], { radius: 5, color: "#152520", fillOpacity: 1 }).addTo(layerGroup);
     }
 
+    function drawGeometry(geometry, gridType, label) {
+      const style = styleByType(gridType);
+      L.geoJSON(geometry, { style }).bindTooltip(label || "").addTo(layerGroup);
+    }
+
     function parseBboxInput(value) {
       const items = value.split(",").map((v) => Number(v.trim()));
       if (items.length !== 4 || items.some((n) => Number.isNaN(n))) {
@@ -304,16 +328,20 @@
       const lon = Number(document.getElementById("lon").value);
       const lat = Number(document.getElementById("lat").value);
       const bboxText = document.getElementById("bbox").value;
+      let code = document.getElementById("code").value.trim();
       const coverMode = document.getElementById("coverMode").value;
       const boundaryType = document.getElementById("boundaryType").value;
-      const prefix = source === "api" ? "/v1/grid" : "/v1/demo/sdk";
+      const k = Number(document.getElementById("k").value);
+      const targetLevel = Number(document.getElementById("targetLevel").value);
+      const gridPrefix = source === "api" ? "/v1/grid" : "/v1/demo/sdk";
+      const topologyPrefix = source === "api" ? "/v1/topology" : "/v1/demo/sdk/topology";
 
       clearMap();
       setStatus("请求中...", true);
 
       try {
         if (op === "locate") {
-          const data = await requestJson(`${prefix}/locate`, {
+          const data = await requestJson(`${gridPrefix}/locate`, {
             grid_type: gridType,
             level,
             point: [lon, lat],
@@ -327,22 +355,88 @@
         }
 
         const bbox = parseBboxInput(bboxText);
-        const data = await requestJson(`${prefix}/cover`, {
-          grid_type: gridType,
-          level,
-          cover_mode: coverMode,
-          boundary_type: boundaryType,
-          bbox,
-          crs: "EPSG:4326",
-        });
-        for (const cell of data.cells) {
-          drawCell(cell, gridType);
+        if (op === "cover") {
+          const data = await requestJson(`${gridPrefix}/cover`, {
+            grid_type: gridType,
+            level,
+            cover_mode: coverMode,
+            boundary_type: boundaryType,
+            bbox,
+            crs: "EPSG:4326",
+          });
+          for (const cell of data.cells) {
+            drawCell(cell, gridType);
+          }
+          if (data.cells.length > 0) {
+            map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
+          }
+          raw.textContent = JSON.stringify(data, null, 2);
+          setStatus(`cover 成功：${data.statistics.cell_count} 个网格`, true);
+          return;
         }
-        if (data.cells.length > 0) {
+
+        if (!code) {
+          const located = await requestJson(`${gridPrefix}/locate`, {
+            grid_type: gridType,
+            level,
+            point: [lon, lat],
+          });
+          code = located.cell.space_code;
+          document.getElementById("code").value = code;
+        }
+
+        if (op === "parent") {
+          const data = await requestJson(`${topologyPrefix}/parent`, { grid_type: gridType, code });
+          const parentGeo = await requestJson(`${topologyPrefix}/geometry`, {
+            grid_type: gridType,
+            code: data.parent_code,
+            boundary_type: "polygon",
+          });
+          drawGeometry(parentGeo.geometry, gridType, data.parent_code);
+          map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
+          raw.textContent = JSON.stringify({ ...data, geometry: parentGeo.geometry }, null, 2);
+          setStatus(`parent 成功：${data.parent_code}`, true);
+          return;
+        }
+
+        if (op === "neighbors") {
+          const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: gridType, code, k });
+          const codes = data.result_codes.slice(0, 200);
+          for (const c of codes) {
+            const geo = await requestJson(`${topologyPrefix}/geometry`, {
+              grid_type: gridType,
+              code: c,
+              boundary_type: "polygon",
+            });
+            drawGeometry(geo.geometry, gridType, c);
+          }
+          if (codes.length > 0) {
+            map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
+          }
+          raw.textContent = JSON.stringify(data, null, 2);
+          setStatus(`neighbors 成功：${data.statistics.count} 个编码`, true);
+          return;
+        }
+
+        const data = await requestJson(`${topologyPrefix}/children`, {
+          grid_type: gridType,
+          code,
+          target_level: targetLevel,
+        });
+        const childCodes = data.child_codes.slice(0, 200);
+        for (const c of childCodes) {
+          const geo = await requestJson(`${topologyPrefix}/geometry`, {
+            grid_type: gridType,
+            code: c,
+            boundary_type: "polygon",
+          });
+          drawGeometry(geo.geometry, gridType, c);
+        }
+        if (childCodes.length > 0) {
           map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
         }
         raw.textContent = JSON.stringify(data, null, 2);
-        setStatus(`cover 成功：${data.statistics.cell_count} 个网格`, true);
+        setStatus(`children 成功：${data.statistics.count} 个编码（可视化前 200）`, true);
       } catch (err) {
         raw.textContent = String(err);
         setStatus(`失败：${err.message || err}`, false);
