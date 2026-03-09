@@ -279,3 +279,17 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 62 passed.
 - Next:
   - Start `TASK-0019`: cache and reuse geohash cell polygons for heavy cover workloads.
+
+## 2026-03-09 | TASK-0019 | Add consolidated status and forward plan doc
+- Goal: Make handoff easier by documenting completed work and upcoming tasks in one place.
+- Scope: docs only (status summary + roadmap + execution checklist).
+- Key Changes:
+  - Added `docs/STATUS_AND_PLAN.md` with:
+    - implemented capability snapshot,
+    - next planned tasks (`TASK-0019` onward),
+    - acceptance criteria and execution rule.
+  - Added links in `README.md` and `README.zh-CN.md`.
+- Validation:
+  - Documentation consistency review completed.
+- Next:
+  - Execute `TASK-0019`: geohash cover hot-path optimization.

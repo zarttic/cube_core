@@ -44,6 +44,7 @@ python -m grid_core.app.perf_smoke
 ## Development Docs
 
 - Task log: `docs/DEVELOPMENT_LOG.md`
+- Status & next plan: `docs/STATUS_AND_PLAN.md`
 - Bug log: `docs/BUG_LOG.md`
 - Process guideline: `docs/DOC_WORKFLOW.md`
 

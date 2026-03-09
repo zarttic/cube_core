@@ -64,6 +64,7 @@ python -m grid_core.app.perf_smoke
 为满足可追溯开发管理，项目内置以下文档：
 
 - 开发任务记录：`docs/DEVELOPMENT_LOG.md`
+- 当前状态与后续计划：`docs/STATUS_AND_PLAN.md`
 - Bug 排查记录：`docs/BUG_LOG.md`
 - 记录流程规范：`docs/DOC_WORKFLOW.md`
 
