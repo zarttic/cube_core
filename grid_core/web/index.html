@@ -462,13 +462,18 @@
         if (op === "neighbors") {
           const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: gridType, code, k });
           const codes = data.result_codes.slice(0, 200);
+          const geometryResp = codes.length
+            ? await requestJson(`${topologyPrefix}/geometries`, {
+                grid_type: gridType,
+                codes,
+                boundary_type: "polygon",
+              })
+            : { geometries: {} };
           for (const c of codes) {
-            const geo = await requestJson(`${topologyPrefix}/geometry`, {
-              grid_type: gridType,
-              code: c,
-              boundary_type: "polygon",
-            });
-            drawGeometry(geo.geometry, gridType, c);
+            const geo = geometryResp.geometries[c];
+            if (geo) {
+              drawGeometry(geo, gridType, c);
+            }
           }
           if (codes.length > 0) {
             map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
@@ -484,13 +489,18 @@
           target_level: targetLevel,
         });
         const childCodes = data.child_codes.slice(0, 200);
+        const geometryResp = childCodes.length
+          ? await requestJson(`${topologyPrefix}/geometries`, {
+              grid_type: gridType,
+              codes: childCodes,
+              boundary_type: "polygon",
+            })
+          : { geometries: {} };
         for (const c of childCodes) {
-          const geo = await requestJson(`${topologyPrefix}/geometry`, {
-            grid_type: gridType,
-            code: c,
-            boundary_type: "polygon",
-          });
-          drawGeometry(geo.geometry, gridType, c);
+          const geo = geometryResp.geometries[c];
+          if (geo) {
+            drawGeometry(geo, gridType, c);
+          }
         }
         if (childCodes.length > 0) {
           map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });

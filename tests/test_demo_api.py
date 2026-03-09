@@ -1,8 +1,25 @@
 import h3
 from fastapi.responses import HTMLResponse
 
-from grid_core.app.api.demo import map_page, sdk_children, sdk_code_to_geometry, sdk_cover, sdk_locate, sdk_neighbors, sdk_parent
-from grid_core.app.models.request import ChildrenRequest, CodeToGeometryRequest, CoverRequest, LocateRequest, NeighborsRequest, ParentRequest
+from grid_core.app.api.demo import (
+    map_page,
+    sdk_children,
+    sdk_code_to_geometry,
+    sdk_codes_to_geometries,
+    sdk_cover,
+    sdk_locate,
+    sdk_neighbors,
+    sdk_parent,
+)
+from grid_core.app.models.request import (
+    BatchCodeToGeometryRequest,
+    ChildrenRequest,
+    CodeToGeometryRequest,
+    CoverRequest,
+    LocateRequest,
+    NeighborsRequest,
+    ParentRequest,
+)
 
 
 def test_demo_map_page_loads_html():
@@ -75,3 +92,8 @@ def test_demo_sdk_topology_geohash_roundtrip():
         CodeToGeometryRequest(grid_type="geohash", code=code, boundary_type="polygon")
     )
     assert geometry_resp.geometry["type"] == "Polygon"
+
+    geometry_batch = sdk_codes_to_geometries(
+        BatchCodeToGeometryRequest(grid_type="geohash", codes=neighbors_resp.result_codes[:3], boundary_type="polygon")
+    )
+    assert geometry_batch.statistics["count"] == 3

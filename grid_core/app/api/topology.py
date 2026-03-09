@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
-from grid_core.app.models.request import ChildrenRequest, CodeToGeometryRequest, NeighborsRequest, ParentRequest
-from grid_core.app.models.response import ChildrenResponse, GeometryResponse, NeighborsResponse, ParentResponse
+from grid_core.app.models.request import BatchCodeToGeometryRequest, ChildrenRequest, CodeToGeometryRequest, NeighborsRequest, ParentRequest
+from grid_core.app.models.response import BatchGeometryResponse, ChildrenResponse, GeometryResponse, NeighborsResponse, ParentResponse
 from grid_core.app.services.topology_service import TopologyService
 
 router = APIRouter(prefix="/topology", tags=["topology"])
@@ -18,6 +18,12 @@ def neighbors(req: NeighborsRequest) -> NeighborsResponse:
 def code_to_geometry(req: CodeToGeometryRequest) -> GeometryResponse:
     geometry = service.code_to_geometry(req.grid_type, req.code, req.boundary_type)
     return GeometryResponse(geometry=geometry)
+
+
+@router.post("/geometries", response_model=BatchGeometryResponse)
+def codes_to_geometries(req: BatchCodeToGeometryRequest) -> BatchGeometryResponse:
+    geometries = service.codes_to_geometries(req.grid_type, req.codes, req.boundary_type)
+    return BatchGeometryResponse(geometries=geometries, statistics={"count": len(geometries)})
 
 
 @router.post("/parent", response_model=ParentResponse)

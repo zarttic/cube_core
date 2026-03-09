@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 import h3
 from shapely.geometry import Polygon
 
@@ -25,13 +27,16 @@ class ISEA4HEngine:
         shp = to_shapely(geometry)
         candidate_codes = set(h3.geo_to_cells(geometry, level))
         selected: set[str] = set()
+        boundary_cache: dict[str, list[list[float]]] = {}
         for code in candidate_codes:
-            cell_poly = Polygon(self._boundary_lnglat(code))
+            boundary = self._boundary_lnglat(code)
+            boundary_cache[code] = boundary
+            cell_poly = Polygon(boundary)
             if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} and cell_poly.intersects(shp):
                 selected.add(code)
             elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
                 selected.add(code)
-        return [self._build_cell(code, level) for code in sorted(selected)]
+        return [self._build_cell(code, level, boundary=boundary_cache.get(code)) for code in sorted(selected)]
 
     def code_to_geometry(self, code: str) -> dict:
         self._validate_code(code)
@@ -73,24 +78,37 @@ class ISEA4HEngine:
             raise ValidationError("target_level must be greater than current level")
         return sorted(h3.cell_to_children(code, target_level))
 
-    def _build_cell(self, code: str, level: int) -> GridCell:
+    def _build_cell(self, code: str, level: int, boundary: list[list[float]] | None = None) -> GridCell:
+        boundary = boundary or self._boundary_lnglat(code)
+        lons = [p[0] for p in boundary]
+        lats = [p[1] for p in boundary]
+        bbox = [min(lons), min(lats), max(lons), max(lats)]
+        lat, lon = h3.cell_to_latlng(code)
+        geometry = {"type": "Polygon", "coordinates": [boundary]}
         return GridCell(
             grid_type=self.grid_type,
             level=level,
             cell_id=code,
             space_code=code,
-            center=self.code_to_center(code),
-            bbox=self.code_to_bbox(code),
-            geometry=self.code_to_geometry(code),
+            center=[lon, lat],
+            bbox=bbox,
+            geometry=geometry,
             metadata={"precision": level, "zone": None, "facet": "h3"},
         )
 
-    @staticmethod
-    def _boundary_lnglat(code: str) -> list[list[float]]:
-        ring = [[lon, lat] for lat, lon in h3.cell_to_boundary(code)]
+    @lru_cache(maxsize=50000)
+    def _boundary_cached(self, code: str) -> tuple[tuple[float, float], ...]:
+        ring = tuple((lon, lat) for lat, lon in h3.cell_to_boundary(code))
         if ring and ring[0] != ring[-1]:
-            ring.append(ring[0])
+            ring = ring + (ring[0],)
         return ring
+
+    @staticmethod
+    def _ring_to_list(ring: tuple[tuple[float, float], ...]) -> list[list[float]]:
+        return [[lon, lat] for lon, lat in ring]
+
+    def _boundary_lnglat(self, code: str) -> list[list[float]]:
+        return self._ring_to_list(self._boundary_cached(code))
 
     @staticmethod
     def _validate_level(level: int) -> None:

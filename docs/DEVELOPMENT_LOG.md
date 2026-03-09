@@ -243,3 +243,24 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 60 passed.
 - Next:
   - Start `TASK-0017`: frontend layer management (legend, opacity, result paging).
+
+## 2026-03-09 | TASK-0017 | Performance optimization pass
+- Goal: Reduce visualization latency and engine hot-path overhead.
+- Scope: topology API batching, frontend request strategy, engine computation/cache optimization.
+- Key Changes:
+  - Added batch topology geometry endpoints:
+    - `/v1/topology/geometries`
+    - `/v1/demo/sdk/topology/geometries`
+  - Updated frontend topology visualization (`neighbors/children`) to use single batch geometry request instead of serial N+1 calls.
+  - Optimized `MGRSEngine`:
+    - Added LRU cache for `code_to_bbox` and `neighbors`.
+    - Removed repeated bbox/center/geometry recomputation in `_build_cell`.
+  - Optimized `ISEA4HEngine`:
+    - Added boundary caching.
+    - Reused cover-stage boundary data when building response cells.
+  - Added/updated tests for batch geometry API and demo SDK batch route.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 61 passed.
+- Next:
+  - Start `TASK-0018`: add benchmark script and CI performance smoke check.

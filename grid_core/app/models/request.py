@@ -68,6 +68,12 @@ class CodeToGeometryRequest(BaseModel):
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 
+class BatchCodeToGeometryRequest(BaseModel):
+    grid_type: GridType = GridType.GEOHASH
+    codes: list[str] = Field(min_length=1, max_length=500)
+    boundary_type: BoundaryType = BoundaryType.POLYGON
+
+
 class ParentRequest(BaseModel):
     grid_type: GridType = GridType.GEOHASH
     code: str

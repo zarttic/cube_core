@@ -21,6 +21,9 @@ class TopologyService:
             }
         return engine.code_to_geometry(code)
 
+    def codes_to_geometries(self, grid_type: GridType, codes: list[str], boundary_type: BoundaryType) -> dict[str, dict]:
+        return {code: self.code_to_geometry(grid_type, code, boundary_type) for code in codes}
+
     def parent(self, grid_type: GridType, code: str) -> str:
         engine = self._registry.get_engine(grid_type)
         return engine.parent(code)

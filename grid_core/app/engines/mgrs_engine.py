@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
 
 import mgrs
 from shapely.geometry import box
@@ -63,25 +64,16 @@ class MGRSEngine:
         return [self._build_cell(code=code, level=precision) for code in sorted(selected)]
 
     def code_to_geometry(self, code: str):
-        min_lon, min_lat, max_lon, max_lat = self.code_to_bbox(code)
-        return {
-            "type": "Polygon",
-            "coordinates": [
-                [
-                    [min_lon, min_lat],
-                    [max_lon, min_lat],
-                    [max_lon, max_lat],
-                    [min_lon, max_lat],
-                    [min_lon, min_lat],
-                ]
-            ],
-        }
+        return self._geometry_from_bbox(self.code_to_bbox(code))
 
     def code_to_center(self, code: str):
-        min_lon, min_lat, max_lon, max_lat = self.code_to_bbox(code)
-        return [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
+        return self._center_from_bbox(self.code_to_bbox(code))
 
     def code_to_bbox(self, code: str):
+        return list(self._code_to_bbox_cached(code))
+
+    @lru_cache(maxsize=50000)
+    def _code_to_bbox_cached(self, code: str) -> tuple[float, float, float, float]:
         precision = self._precision_from_code(code)
         zone, hemisphere, easting, northing = self._converter.MGRSToUTM(code)
         cell_size_m = 10 ** (5 - precision)
@@ -97,9 +89,13 @@ class MGRSEngine:
         sw_lat, sw_lon = self._converter.toLatLon(sw_code)
         ne_lat, ne_lon = self._converter.toLatLon(ne_code)
 
-        return [sw_lon, sw_lat, ne_lon, ne_lat]
+        return sw_lon, sw_lat, ne_lon, ne_lat
 
     def neighbors(self, code: str, k: int = 1):
+        return list(self._neighbors_cached(code, k))
+
+    @lru_cache(maxsize=50000)
+    def _neighbors_cached(self, code: str, k: int) -> tuple[str, ...]:
         if k < 1:
             raise ValidationError("k must be >= 1")
         precision = self._precision_from_code(code)
@@ -123,7 +119,7 @@ class MGRSEngine:
                     continue
                 if self._precision_from_code(neighbor) == precision:
                     neighbors.add(neighbor)
-        return sorted(neighbors)
+        return tuple(sorted(neighbors))
 
     def parent(self, code: str):
         precision = self._precision_from_code(code)
@@ -144,15 +140,14 @@ class MGRSEngine:
 
     def _build_cell(self, code: str, level: int) -> GridCell:
         bbox = self.code_to_bbox(code)
-        center = self.code_to_center(code)
         return GridCell(
             grid_type=self.grid_type,
             level=level,
             cell_id=code,
             space_code=code,
-            center=center,
+            center=self._center_from_bbox(bbox),
             bbox=bbox,
-            geometry=self.code_to_geometry(code),
+            geometry=self._geometry_from_bbox(bbox),
             metadata={"precision": self._precision_from_code(code), "zone": code[:3], "facet": None},
         )
 
@@ -179,6 +174,27 @@ class MGRSEngine:
             return self._converter.MGRSToUTM(code)
         except Exception as exc:
             raise ValidationError("Invalid MGRS code") from exc
+
+    @staticmethod
+    def _center_from_bbox(bbox: list[float] | tuple[float, float, float, float]) -> list[float]:
+        min_lon, min_lat, max_lon, max_lat = bbox
+        return [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
+
+    @staticmethod
+    def _geometry_from_bbox(bbox: list[float] | tuple[float, float, float, float]) -> dict:
+        min_lon, min_lat, max_lon, max_lat = bbox
+        return {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [min_lon, min_lat],
+                    [max_lon, min_lat],
+                    [max_lon, max_lat],
+                    [min_lon, max_lat],
+                    [min_lon, min_lat],
+                ]
+            ],
+        }
 
     @staticmethod
     def _seed_points(shp) -> list[tuple[float, float]]:

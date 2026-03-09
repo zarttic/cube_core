@@ -52,6 +52,10 @@ class GeometryResponse(BaseResponse):
     geometry: dict[str, Any]
 
 
+class BatchGeometryResponse(BaseResponse):
+    geometries: dict[str, dict[str, Any]]
+
+
 class ParentResponse(BaseResponse):
     parent_code: str
 

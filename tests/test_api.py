@@ -4,9 +4,10 @@ import h3
 
 from grid_core.app.api.code import batch_generate_st, generate_st, parse_st
 from grid_core.app.api.grid import cover, locate
-from grid_core.app.api.topology import children, code_to_geometry, neighbors, parent
+from grid_core.app.api.topology import children, code_to_geometry, codes_to_geometries, neighbors, parent
 from grid_core.app.main import health
 from grid_core.app.models.request import (
+    BatchCodeToGeometryRequest,
     ChildrenRequest,
     CodeToGeometryRequest,
     CoverRequest,
@@ -150,3 +151,13 @@ def test_topology_mgrs_parent_children_neighbors_functions():
 
     neighbors_resp = neighbors(NeighborsRequest(grid_type="mgrs", code=code, k=1))
     assert neighbors_resp.statistics["count"] > 0
+
+
+def test_topology_batch_geometry_function():
+    cell = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell
+    neighbor_codes = neighbors(NeighborsRequest(grid_type="geohash", code=cell.space_code, k=1)).result_codes[:5]
+    resp = codes_to_geometries(
+        BatchCodeToGeometryRequest(grid_type="geohash", codes=neighbor_codes, boundary_type="polygon")
+    )
+    assert resp.statistics["count"] == len(neighbor_codes)
+    assert set(resp.geometries.keys()) == set(neighbor_codes)
