@@ -258,7 +258,7 @@
 
     const raw = document.getElementById("raw");
     const statusEl = document.getElementById("status");
-    let layerGroup = L.layerGroup().addTo(map);
+    let layerGroup = L.featureGroup().addTo(map);
     const drawItems = new L.FeatureGroup().addTo(map);
     let drawnGeometry = null;
 
@@ -310,7 +310,7 @@
 
     function clearMap() {
       map.removeLayer(layerGroup);
-      layerGroup = L.layerGroup().addTo(map);
+      layerGroup = L.featureGroup().addTo(map);
     }
 
     function bboxToPolygon(bbox) {

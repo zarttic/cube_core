@@ -12,6 +12,7 @@ def test_demo_map_page_loads_html():
     assert "Grid Visualizer" in html
     assert "neighbors" in html
     assert "leaflet-draw" in html
+    assert "L.featureGroup()" in html
 
 
 def test_demo_sdk_locate_geohash_works():
