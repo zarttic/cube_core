@@ -264,3 +264,18 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 61 passed.
 - Next:
   - Start `TASK-0018`: add benchmark script and CI performance smoke check.
+
+## 2026-03-09 | TASK-0018 | Add benchmark script and CI perf smoke check
+- Goal: Keep performance regressions visible in CI with a lightweight baseline benchmark.
+- Scope: perf smoke module, CI workflow, tests/docs sync.
+- Key Changes:
+  - Added `grid_core.app.perf_smoke` benchmark/smoke module.
+  - Added CI `perf-smoke` job in `.github/workflows/ci.yml`.
+  - Added test `tests/test_perf_smoke.py` for benchmark output contract.
+  - Updated README docs with perf smoke command.
+- Validation:
+  - `python -m grid_core.app.perf_smoke`
+  - `python -m pytest -q tests`
+  - Result: 62 passed.
+- Next:
+  - Start `TASK-0019`: cache and reuse geohash cell polygons for heavy cover workloads.

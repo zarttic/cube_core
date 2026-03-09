@@ -35,6 +35,12 @@ curl -X POST http://127.0.0.1:8000/v1/code/st \
 pytest -q
 ```
 
+## Performance Smoke
+
+```bash
+python -m grid_core.app.perf_smoke
+```
+
 ## Development Docs
 
 - Task log: `docs/DEVELOPMENT_LOG.md`

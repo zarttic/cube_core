@@ -53,6 +53,12 @@ uvicorn grid_core.app.main:app --reload
 python -m pytest -q tests
 ```
 
+## 性能烟测
+
+```bash
+python -m grid_core.app.perf_smoke
+```
+
 ## 文档规范（开发过程记录）
 
 为满足可追溯开发管理，项目内置以下文档：
