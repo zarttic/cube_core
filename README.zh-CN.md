@@ -44,7 +44,7 @@ uvicorn grid_core.app.main:app --reload
 
 - 健康检查：`GET /health`
 - API 前缀：`/v1`
-- 前端可视化：`/v1/demo/map`（支持 API/SDK 两种调用模式，支持 `locate/cover/neighbors/parent/children` 地图展示）
+- 前端可视化：`/v1/demo/map`（支持 API/SDK 两种调用模式，支持 `locate/cover/neighbors/parent/children` 地图展示，并支持绘制 polygon/rectangle 做 cover 预览）
 
 ## 测试
 

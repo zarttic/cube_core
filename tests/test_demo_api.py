@@ -11,6 +11,7 @@ def test_demo_map_page_loads_html():
     html = resp.body.decode("utf-8")
     assert "Grid Visualizer" in html
     assert "neighbors" in html
+    assert "leaflet-draw" in html
 
 
 def test_demo_sdk_locate_geohash_works():
@@ -27,6 +28,23 @@ def test_demo_sdk_cover_geohash_works():
             cover_mode="intersect",
             boundary_type="polygon",
             bbox=[116.385, 39.903, 116.397, 39.911],
+        )
+    )
+    assert resp.grid_type == "geohash"
+    assert resp.statistics["cell_count"] > 0
+
+
+def test_demo_sdk_cover_geohash_with_geometry_works():
+    resp = sdk_cover(
+        CoverRequest(
+            grid_type="geohash",
+            level=6,
+            cover_mode="intersect",
+            boundary_type="polygon",
+            geometry={
+                "type": "Polygon",
+                "coordinates": [[[116.385, 39.903], [116.397, 39.903], [116.397, 39.911], [116.385, 39.911], [116.385, 39.903]]],
+            },
         )
     )
     assert resp.grid_type == "geohash"

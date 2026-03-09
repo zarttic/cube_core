@@ -13,6 +13,7 @@
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin=""
   />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
   <style>
     :root {
       --bg-a: #f8f7f4;
@@ -193,6 +194,11 @@
         </div>
 
         <div>
+          <label for="geometryJson">Geometry（cover 用；地图绘制后会自动填充）</label>
+          <textarea id="geometryJson" rows="4" placeholder='{"type":"Polygon","coordinates":[[[...]]]}'></textarea>
+        </div>
+
+        <div>
           <label for="code">拓扑 code（neighbors/parent/children 用；留空将先按当前点 locate）</label>
           <input id="code" type="text" value="" />
         </div>
@@ -227,6 +233,7 @@
         </div>
 
         <button id="runBtn">运行可视化</button>
+        <button id="clearDrawBtn" type="button">清空绘制</button>
       </div>
       <div id="status" class="status"></div>
     </section>
@@ -242,6 +249,7 @@
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
     crossorigin=""
   ></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
   <script>
     const map = L.map("map", { zoomControl: true }).setView([39.907, 116.391], 11);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -251,6 +259,43 @@
     const raw = document.getElementById("raw");
     const statusEl = document.getElementById("status");
     let layerGroup = L.layerGroup().addTo(map);
+    const drawItems = new L.FeatureGroup().addTo(map);
+    let drawnGeometry = null;
+
+    const drawControl = new L.Control.Draw({
+      draw: {
+        marker: false,
+        circle: false,
+        circlemarker: false,
+        polyline: false,
+        polygon: true,
+        rectangle: true,
+      },
+      edit: {
+        featureGroup: drawItems,
+        remove: true,
+      },
+    });
+    map.addControl(drawControl);
+
+    map.on(L.Draw.Event.CREATED, (e) => {
+      drawItems.clearLayers();
+      drawItems.addLayer(e.layer);
+      drawnGeometry = e.layer.toGeoJSON().geometry;
+      document.getElementById("geometryJson").value = JSON.stringify(drawnGeometry);
+      setStatus("已接收绘制几何，可直接运行 cover", true);
+    });
+
+    map.on(L.Draw.Event.EDITED, () => {
+      const layer = drawItems.getLayers()[0];
+      drawnGeometry = layer ? layer.toGeoJSON().geometry : null;
+      document.getElementById("geometryJson").value = drawnGeometry ? JSON.stringify(drawnGeometry) : "";
+    });
+
+    map.on(L.Draw.Event.DELETED, () => {
+      drawnGeometry = null;
+      document.getElementById("geometryJson").value = "";
+    });
 
     const palette = {
       geohash: "#f08a24",
@@ -306,6 +351,17 @@
       return items;
     }
 
+    function parseGeometryInput(value) {
+      if (!value.trim()) {
+        return null;
+      }
+      try {
+        return JSON.parse(value);
+      } catch {
+        throw new Error("Geometry JSON 格式错误");
+      }
+    }
+
     async function requestJson(url, payload) {
       const resp = await fetch(url, {
         method: "POST",
@@ -328,6 +384,7 @@
       const lon = Number(document.getElementById("lon").value);
       const lat = Number(document.getElementById("lat").value);
       const bboxText = document.getElementById("bbox").value;
+      const geometryText = document.getElementById("geometryJson").value;
       let code = document.getElementById("code").value.trim();
       const coverMode = document.getElementById("coverMode").value;
       const boundaryType = document.getElementById("boundaryType").value;
@@ -354,6 +411,8 @@
           return;
         }
 
+        const manualGeometry = parseGeometryInput(geometryText);
+        const coverageGeometry = manualGeometry || drawnGeometry;
         const bbox = parseBboxInput(bboxText);
         if (op === "cover") {
           const data = await requestJson(`${gridPrefix}/cover`, {
@@ -361,7 +420,8 @@
             level,
             cover_mode: coverMode,
             boundary_type: boundaryType,
-            bbox,
+            geometry: coverageGeometry,
+            bbox: coverageGeometry ? null : bbox,
             crs: "EPSG:4326",
           });
           for (const cell of data.cells) {
@@ -444,6 +504,12 @@
     }
 
     document.getElementById("runBtn").addEventListener("click", run);
+    document.getElementById("clearDrawBtn").addEventListener("click", () => {
+      drawItems.clearLayers();
+      drawnGeometry = null;
+      document.getElementById("geometryJson").value = "";
+      setStatus("绘制已清空", true);
+    });
     run();
   </script>
 </body>

@@ -226,6 +226,20 @@ Track every development task with scope, decisions, changes, and validation resu
   - Updated README docs to reflect H3-backed ISEA4H support.
 - Validation:
   - `python -m pytest -q tests`
-  - Result: passed.
+  - Result: 59 passed.
 - Next:
   - Start `TASK-0016`: frontend draw-polygon selection and interactive cover preview.
+
+## 2026-03-09 | TASK-0016 | Add frontend draw-polygon cover preview
+- Goal: Improve visual workflow by enabling map-drawn geometry for cover requests.
+- Scope: frontend demo interaction + demo tests/docs sync.
+- Key Changes:
+  - Integrated `leaflet-draw` into `/v1/demo/map`.
+  - Added polygon/rectangle draw, edit, delete support and synced drawn geometry to request payload.
+  - Added clear-draw action and priority logic: `geometry` (drawn/manual JSON) overrides bbox for cover.
+  - Added demo test for `sdk_cover` geometry input path and updated demo page assertions.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 60 passed.
+- Next:
+  - Start `TASK-0017`: frontend layer management (legend, opacity, result paging).

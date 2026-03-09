@@ -49,4 +49,5 @@ pytest -q
 - `cover_mode=intersect/contain/minimal` implemented.
 - Frontend visualizer available at `/v1/demo/map` with API/SDK switch.
 - Frontend visualizer supports `locate/cover/neighbors/parent/children` map rendering.
+- Frontend visualizer supports drawing polygon/rectangle on map for `cover` preview.
 - CRS fixed to `EPSG:4326`.
