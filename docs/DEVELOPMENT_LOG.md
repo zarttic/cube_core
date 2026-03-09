@@ -65,3 +65,16 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 13 passed.
 - Next:
   - Improve `minimal` with cross-level optimization (currently same-level minimal candidate set).
+
+## 2026-03-09 | TASK-0005 | Improve boundary stability for geohash cover
+- Goal: Improve robustness for boundary-heavy coverage cases (dateline crossing and polar bbox).
+- Scope: geometry bbox conversion, geohash cover candidate scan, boundary tests.
+- Key Changes:
+  - Updated `bbox_to_polygon` to validate ranges and support dateline-crossing bbox via `MultiPolygon` split.
+  - Optimized geohash cover candidate generation to build candidate indices per geometry part instead of single global bounds scan.
+  - Added tests for dateline-crossing bbox, polar bbox, and geometry conversion behavior.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 18 passed.
+- Next:
+  - Start `TASK-0006`: introduce engine registry/routing skeleton for multi-grid extension.

@@ -23,30 +23,34 @@ class GeohashEngine:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
 
         shp = to_shapely(geometry)
-        min_lon, min_lat, max_lon, max_lat = shp.bounds
-
         lon_step, lat_step = geohash_utils.cell_size(level)
         lon_bits, lat_bits = geohash_utils.bits_for_precision(level)
         lon_bins = 2**lon_bits
         lat_bins = 2**lat_bits
 
-        min_ix = max(0, int((min_lon + 180.0) // lon_step) - 1)
-        max_ix = min(lon_bins - 1, int((max_lon + 180.0) // lon_step) + 1)
-        min_iy = max(0, int((min_lat + 90.0) // lat_step) - 1)
-        max_iy = min(lat_bins - 1, int((max_lat + 90.0) // lat_step) + 1)
+        geoms = list(shp.geoms) if hasattr(shp, "geoms") else [shp]
+        candidate_indices: set[tuple[int, int]] = set()
+        for geom in geoms:
+            min_lon, min_lat, max_lon, max_lat = geom.bounds
+            min_ix = max(0, int((min_lon + 180.0) // lon_step) - 1)
+            max_ix = min(lon_bins - 1, int((max_lon + 180.0) // lon_step) + 1)
+            min_iy = max(0, int((min_lat + 90.0) // lat_step) - 1)
+            max_iy = min(lat_bins - 1, int((max_lat + 90.0) // lat_step) + 1)
+            for ix in range(min_ix, max_ix + 1):
+                for iy in range(min_iy, max_iy + 1):
+                    candidate_indices.add((ix, iy))
 
         selected_codes: set[str] = set()
-        for ix in range(min_ix, max_ix + 1):
-            for iy in range(min_iy, max_iy + 1):
-                code = geohash_utils.from_grid_index(ix, iy, level)
-                bbox = geohash_utils.decode_bbox(code)
-                cell_poly = box(*bbox)
-                if cover_mode == CoverMode.INTERSECT.value and cell_poly.intersects(shp):
-                    selected_codes.add(code)
-                elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
-                    selected_codes.add(code)
-                elif cover_mode == CoverMode.MINIMAL.value and cell_poly.intersects(shp):
-                    selected_codes.add(code)
+        for ix, iy in sorted(candidate_indices):
+            code = geohash_utils.from_grid_index(ix, iy, level)
+            bbox = geohash_utils.decode_bbox(code)
+            cell_poly = box(*bbox)
+            if cover_mode == CoverMode.INTERSECT.value and cell_poly.intersects(shp):
+                selected_codes.add(code)
+            elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
+                selected_codes.add(code)
+            elif cover_mode == CoverMode.MINIMAL.value and cell_poly.intersects(shp):
+                selected_codes.add(code)
 
         return [self._build_cell(code, level) for code in sorted(selected_codes)]
 

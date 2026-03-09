@@ -67,6 +67,20 @@ def test_cover_with_bbox_input():
     assert resp.statistics["cell_count"] > 0
 
 
+def test_cover_with_dateline_crossing_bbox_input():
+    req = CoverRequest(grid_type="geohash", level=3, cover_mode="intersect", bbox=[170.0, -10.0, -170.0, 10.0])
+    resp = cover(req)
+    assert resp.grid_type == "geohash"
+    assert resp.statistics["cell_count"] > 0
+
+
+def test_cover_with_polar_bbox_input():
+    req = CoverRequest(grid_type="geohash", level=4, cover_mode="intersect", bbox=[-30.0, 85.0, 30.0, 89.0])
+    resp = cover(req)
+    assert resp.grid_type == "geohash"
+    assert resp.statistics["cell_count"] > 0
+
+
 def test_topology_parent_children_functions():
     parent_resp = parent(ParentRequest(grid_type="geohash", code="wtw3sjq"))
     assert parent_resp.parent_code == "wtw3sj"

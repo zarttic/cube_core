@@ -1,4 +1,5 @@
 from grid_core.app.engines.geohash_engine import GeohashEngine
+from grid_core.app.utils.geometry import bbox_to_polygon
 from grid_core.app.utils import geohash_utils
 
 
@@ -80,3 +81,13 @@ def test_cover_minimal_is_subset_of_intersect():
 
     assert minimal_codes.issubset(intersect_codes)
     assert len(minimal_codes) > 0
+
+
+def test_cover_intersect_dateline_crossing_bbox_polygon():
+    engine = GeohashEngine()
+    geometry = bbox_to_polygon([170.0, -10.0, -170.0, 10.0]).__geo_interface__
+
+    cells = engine.cover_geometry(geometry, level=3, cover_mode="intersect")
+
+    assert len(cells) > 0
+    assert all(-90.0 <= cell.center[1] <= 90.0 for cell in cells)
