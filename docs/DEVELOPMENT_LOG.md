@@ -180,3 +180,18 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 48 passed.
 - Next:
   - Start `TASK-0013`: MGRS cover zone-boundary robustness tests and algorithm hardening.
+
+## 2026-03-09 | TASK-0013 | Add frontend map visualizer (API/SDK dual mode)
+- Goal: Provide an interactive frontend for map partition visualization across geohash/mgrs/isea4h.
+- Scope: demo API routes, frontend static page, tests, docs/log sync.
+- Key Changes:
+  - Added `/v1/demo/map` visualization page based on Leaflet.
+  - Added SDK-style demo endpoints: `/v1/demo/sdk/locate` and `/v1/demo/sdk/cover`.
+  - Frontend supports three grid types (`geohash/mgrs/isea4h`) and API/SDK mode switch.
+  - Added tests for demo page and demo SDK endpoints.
+  - Updated README docs with visualizer entrypoint.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: passed.
+- Next:
+  - Start `TASK-0014`: add frontend topology panel (neighbors/parent/children visualization).

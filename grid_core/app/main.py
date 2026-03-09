@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from grid_core.app.api.code import router as code_router
+from grid_core.app.api.demo import router as demo_router
 from grid_core.app.api.grid import router as grid_router
 from grid_core.app.api.topology import router as topology_router
 from grid_core.app.core.config import config
@@ -13,6 +14,7 @@ app = FastAPI(title=config.app_name)
 app.include_router(grid_router, prefix=config.api_prefix)
 app.include_router(code_router, prefix=config.api_prefix)
 app.include_router(topology_router, prefix=config.api_prefix)
+app.include_router(demo_router, prefix=config.api_prefix)
 
 
 @app.get("/health")

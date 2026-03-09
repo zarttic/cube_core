@@ -13,6 +13,10 @@ pip install -r requirements.txt
 uvicorn grid_core.app.main:app --reload
 ```
 
+Open visual demo:
+
+- `http://127.0.0.1:8000/v1/demo/map`
+
 ## API examples
 
 ```bash
@@ -43,4 +47,5 @@ pytest -q
 - `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain`.
 - `isea4h` is routing-ready with explicit not-implemented responses.
 - `cover_mode=intersect/contain/minimal` implemented.
+- Frontend visualizer available at `/v1/demo/map` with API/SDK switch.
 - CRS fixed to `EPSG:4326`.
