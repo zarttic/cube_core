@@ -3,6 +3,8 @@ from enum import Enum
 
 class GridType(str, Enum):
     GEOHASH = "geohash"
+    MGRS = "mgrs"
+    ISEA4H = "isea4h"
 
 
 class CoverMode(str, Enum):

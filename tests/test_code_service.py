@@ -40,3 +40,21 @@ def test_batch_generate_st_code():
         "gh:7:wtw3sjq:202603091530:v1",
         "gh:7:wtw3sjr:202603091531:v1",
     ]
+
+
+def test_generate_and_parse_st_code_for_mgrs():
+    service = CodeService()
+    result = service.generate_st_code(
+        grid_type=GridType.MGRS,
+        level=5,
+        space_code="50SMG1234",
+        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        time_granularity=TimeGranularity.HOUR,
+        version="v1",
+    )
+    assert result.st_code == "mgrs:5:50SMG1234:2026030915:v1"
+
+    parsed = service.parse_st_code(result.st_code)
+    assert parsed.grid_type == "mgrs"
+    assert parsed.level == 5
+    assert parsed.space_code == "50SMG1234"

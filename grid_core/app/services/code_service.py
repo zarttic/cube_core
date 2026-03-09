@@ -5,7 +5,11 @@ from grid_core.app.utils.timecode import to_time_code
 from grid_core.app.utils.validator import parse_st_code
 
 
-PREFIX_MAP = {GridType.GEOHASH: "gh"}
+PREFIX_MAP = {
+    GridType.GEOHASH: "gh",
+    GridType.MGRS: "mgrs",
+    GridType.ISEA4H: "hx",
+}
 PREFIX_MAP_REVERSE = {v: k for k, v in PREFIX_MAP.items()}
 
 
@@ -20,7 +24,7 @@ class CodeService:
         version: str,
     ) -> STCode:
         if grid_type not in PREFIX_MAP:
-            raise ValidationError(f"Unsupported grid_type in MVP: {grid_type}")
+            raise ValidationError(f"Unsupported grid_type: {grid_type}")
         time_code = to_time_code(timestamp, time_granularity)
         prefix = PREFIX_MAP[grid_type]
         st_code = f"{prefix}:{level}:{space_code}:{time_code}:{version}"
@@ -37,7 +41,7 @@ class CodeService:
         parsed = parse_st_code(st_code)
         prefix = parsed["prefix"]
         if prefix not in PREFIX_MAP_REVERSE:
-            raise ValidationError(f"Unsupported grid prefix in MVP: {prefix}")
+            raise ValidationError(f"Unsupported grid prefix: {prefix}")
         grid_type = PREFIX_MAP_REVERSE[prefix]
         return STCode(
             grid_type=grid_type.value,

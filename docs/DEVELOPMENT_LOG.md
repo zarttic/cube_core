@@ -78,3 +78,18 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 18 passed.
 - Next:
   - Start `TASK-0006`: introduce engine registry/routing skeleton for multi-grid extension.
+
+## 2026-03-09 | TASK-0006 | Add multi-engine routing skeleton
+- Goal: Refactor service layer to route by `grid_type` and prepare MGRS/ISEA4H phased integration.
+- Scope: enums, engine registry, placeholder engines, service routing, tests.
+- Key Changes:
+  - Added `GridType.MGRS` and `GridType.ISEA4H`.
+  - Added `GridEngineRegistry` and two placeholder engines: `MGRSEngine` / `ISEA4HEngine`.
+  - Updated `GridService` and `TopologyService` to resolve engines via registry instead of geohash-only branch logic.
+  - Extended ST code prefix map to support `mgrs` and `hx`.
+  - Added routing and prefix tests for new types.
+- Validation:
+  - `python -m pytest -q tests`
+  - Result: 22 passed.
+- Next:
+  - Start `TASK-0007`: implement first-phase MGRS capabilities (locate + parse/geometry basics).
