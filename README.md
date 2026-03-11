@@ -29,6 +29,30 @@ curl -X POST http://127.0.0.1:8000/v1/code/st \
   -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute","version":"v1"}'
 ```
 
+## Python SDK usage
+
+```bash
+pip install -e .
+```
+
+```python
+from datetime import datetime, timezone
+
+from grid_core.sdk import CubeEncoderSDK
+
+sdk = CubeEncoderSDK()
+cell = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907])
+neighbors = sdk.neighbors(grid_type="geohash", code=cell.space_code, k=1)
+st_code = sdk.generate_st_code(
+    grid_type="geohash",
+    level=7,
+    space_code=cell.space_code,
+    timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
+    time_granularity="minute",
+    version="v1",
+).st_code
+```
+
 ## Test
 
 ```bash
@@ -51,7 +75,7 @@ python -m grid_core.app.perf_smoke
 ## MVP limits
 
 - `geohash` supports locate/cover/topology base capabilities.
-- `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain`.
+- `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain/minimal`.
 - `isea4h` is now backed by Uber H3 for first-phase runnable capability (`locate/cover/topology`).
 - `cover_mode=intersect/contain/minimal` implemented.
 - Frontend visualizer available at `/v1/demo/map` with API/SDK switch.

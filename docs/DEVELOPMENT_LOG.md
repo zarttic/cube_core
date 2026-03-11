@@ -293,3 +293,40 @@ Track every development task with scope, decisions, changes, and validation resu
   - Documentation consistency review completed.
 - Next:
   - Execute `TASK-0019`: geohash cover hot-path optimization.
+
+## 2026-03-11 | TASK-0021 | Implement MGRS minimal cover mode
+- Goal: Close MGRS cover-mode gap and make mode support aligned with other engines.
+- Scope: MGRS engine cover logic, engine/API regression tests, docs sync.
+- Key Changes:
+  - Extended `MGRSEngine.cover_geometry` mode validation to accept `minimal`.
+  - Implemented `minimal` path with stable behavior aligned to current intersect semantics.
+  - Added engine test `test_mgrs_cover_minimal_is_subset_of_intersect`.
+  - Added API test `test_cover_with_bbox_input_mgrs_minimal`.
+  - Updated README docs for MGRS mode support.
+- Validation:
+  - `python -m pytest -q tests/test_mgrs_engine.py tests/test_api.py`
+  - Result: 28 passed.
+- Next:
+  - Package SDK surface for direct Python integration.
+
+## 2026-03-11 | TASK-0023 | Deliver installable Python SDK package
+- Goal: Provide a complete local SDK surface and packaging metadata for distribution/integration.
+- Scope: SDK facade module, package metadata, SDK tests, docs sync.
+- Key Changes:
+  - Added `grid_core/sdk` module with `CubeEncoderSDK` facade:
+    - grid locate/cover,
+    - topology neighbors/parent/children/geometry/batch geometries,
+    - ST code generate/batch/parse.
+  - Added package metadata file `pyproject.toml` for standard install workflow (`pip install -e .`).
+  - Exposed SDK entry from `grid_core/__init__.py`.
+  - Added SDK tests in `tests/test_sdk.py`.
+  - Updated README (`README.md`/`README.zh-CN.md`) with SDK usage examples.
+- Validation:
+  - `python -m pytest -q tests/test_sdk.py`
+  - Result: 3 passed.
+  - `python -m pytest -q tests`
+  - Result: 67 passed.
+  - `python -m grid_core.app.perf_smoke`
+  - Result: passed.
+- Next:
+  - Execute pending performance/ergonomics roadmap items (`TASK-0019`, `TASK-0020`, `TASK-0022`).

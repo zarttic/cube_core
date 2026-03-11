@@ -25,8 +25,8 @@ class MGRSEngine:
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
         precision = self._validate_level(level)
-        if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value}:
-            raise ValidationError("MGRS cover supports only intersect/contain mode in MVP")
+        if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
+            raise ValidationError("MGRS cover supports only intersect/contain/minimal mode in MVP")
 
         shp = to_shapely(geometry)
         seeds = self._seed_points(shp)
@@ -51,7 +51,7 @@ class MGRSEngine:
             if not intersects:
                 continue
 
-            if cover_mode == CoverMode.INTERSECT.value or shp.covers(cell_poly):
+            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} or shp.covers(cell_poly):
                 selected.add(code)
 
             if len(selected) > 20000:

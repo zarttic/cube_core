@@ -8,7 +8,7 @@ Single-page handoff for ongoing development:
 
 ---
 
-## Current Status (as of 2026-03-09)
+## Current Status (as of 2026-03-11)
 
 ### Implemented capabilities
 - Multi-engine routing:
@@ -17,7 +17,7 @@ Single-page handoff for ongoing development:
   - `isea4h` (H3-backed)
 - Grid APIs:
   - `/v1/grid/locate`
-  - `/v1/grid/cover` (`intersect/contain/minimal`, engine-dependent)
+  - `/v1/grid/cover` (`intersect/contain/minimal`)
 - Topology APIs:
   - `/v1/topology/neighbors`
   - `/v1/topology/parent`
@@ -28,6 +28,10 @@ Single-page handoff for ongoing development:
   - `/v1/code/st`
   - `/v1/code/st/batch`
   - `/v1/code/parse`
+- Python SDK:
+  - `pip install -e .`
+  - `from grid_core.sdk import CubeEncoderSDK`
+  - Full parity methods for grid/topology/ST-code core flows
 - Demo frontend:
   - `/v1/demo/map`
   - API/SDK switch
@@ -38,7 +42,7 @@ Single-page handoff for ongoing development:
   - CI `perf-smoke` job
 
 ### Quality baseline
-- Latest full test result: `62 passed`
+- Latest full test result: `67 passed`
 - Core docs maintained:
   - `docs/DEVELOPMENT_LOG.md`
   - `docs/BUG_LOG.md`
@@ -71,16 +75,6 @@ Single-page handoff for ongoing development:
   - Frontend remains mobile/desktop usable.
   - Demo tests extended for new controls.
 
-### TASK-0021: MGRS `minimal` cover mode
-- Goal:
-  - Close the remaining MGRS cover-mode gap.
-- Planned changes:
-  - Implement `minimal` behavior and document semantics.
-  - Add engine/API tests to enforce subset/consistency invariants.
-- Acceptance criteria:
-  - Existing `intersect/contain` behavior unchanged.
-  - New tests cover edge cases and pass.
-
 ### TASK-0022: Perf trend visibility in CI artifacts
 - Goal:
   - Keep performance evolution visible over time.
@@ -89,6 +83,17 @@ Single-page handoff for ongoing development:
   - Keep threshold env vars centralized and documented.
 - Acceptance criteria:
   - PR can inspect perf output artifacts directly.
+
+### TASK-0024: SDK release pipeline and versioning policy
+- Goal:
+  - Make SDK release process reproducible for team delivery.
+- Planned changes:
+  - Add version bump rule and changelog section for SDK API changes.
+  - Add CI job for package build validation.
+  - Add install/import smoke test for wheel/sdist artifacts.
+- Acceptance criteria:
+  - `python -m build` succeeds in CI.
+  - Artifact install smoke test passes.
 
 ---
 

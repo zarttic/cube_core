@@ -15,7 +15,7 @@
 
 - 空间剖分
   - Geohash：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，支持 `geometry` 与 `bbox`）
-  - MGRS（第一阶段增强）：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，当前支持 `intersect/contain`）
+  - MGRS（第一阶段增强）：点定位（`/v1/grid/locate`）、几何覆盖（`/v1/grid/cover`，当前支持 `intersect/contain/minimal`）
 - 编码能力
   - 时空编码生成：`/v1/code/st`（支持 `geohash/mgrs/isea4h` 前缀编码）
   - 批量时空编码生成：`/v1/code/st/batch`
@@ -38,6 +38,30 @@
 ```bash
 pip install -r requirements.txt
 uvicorn grid_core.app.main:app --reload
+```
+
+作为 Python SDK 使用：
+
+```bash
+pip install -e .
+```
+
+```python
+from datetime import datetime, timezone
+
+from grid_core.sdk import CubeEncoderSDK
+
+sdk = CubeEncoderSDK()
+cell = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907])
+neighbors = sdk.neighbors(grid_type="geohash", code=cell.space_code, k=1)
+st_code = sdk.generate_st_code(
+    grid_type="geohash",
+    level=7,
+    space_code=cell.space_code,
+    timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
+    time_granularity="minute",
+    version="v1",
+).st_code
 ```
 
 启动后可访问：
@@ -72,6 +96,5 @@ python -m grid_core.app.perf_smoke
 
 ## 后续规划
 
-- 扩展 MGRS 覆盖模式（`minimal`）
 - ISEA4H 算法分阶段落地
 - 批量能力与覆盖精度策略增强（`minimal` 后续可引入跨层级最小覆盖优化）

@@ -50,7 +50,7 @@ def test_mgrs_cover_mode_validation():
     engine = MGRSEngine()
     geometry = {"type": "Point", "coordinates": [116.391, 39.907]}
     with pytest.raises(ValidationError):
-        engine.cover_geometry(geometry, level=3, cover_mode="minimal")
+        engine.cover_geometry(geometry, level=3, cover_mode="invalid_mode")
 
 
 def test_mgrs_cover_contain_is_subset_of_intersect():
@@ -64,6 +64,19 @@ def test_mgrs_cover_contain_is_subset_of_intersect():
 
     assert contain_codes.issubset(intersect_codes)
     assert len(contain_codes) <= len(intersect_codes)
+
+
+def test_mgrs_cover_minimal_is_subset_of_intersect():
+    engine = MGRSEngine()
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
+    }
+    intersect_codes = {c.space_code for c in engine.cover_geometry(geometry, level=2, cover_mode="intersect")}
+    minimal_codes = {c.space_code for c in engine.cover_geometry(geometry, level=2, cover_mode="minimal")}
+
+    assert minimal_codes.issubset(intersect_codes)
+    assert len(minimal_codes) <= len(intersect_codes)
 
 
 def test_mgrs_neighbors_k1_non_empty():

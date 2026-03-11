@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cube-encoder"
+version = "0.1.0"
+description = "Grid partition and space-time encoding engine with Python SDK and FastAPI APIs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "pydantic>=2.8.0",
+  "shapely>=2.0.0",
+  "mgrs>=1.4.6",
+  "h3>=4.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grid_core*"]
