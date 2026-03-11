@@ -42,7 +42,7 @@ Single-page handoff for ongoing development:
   - CI `perf-smoke` job
 
 ### Quality baseline
-- Latest full test result: `71 passed`
+- Latest full test result: `72 passed`
 - Core docs maintained:
   - `docs/DEVELOPMENT_LOG.md`
   - `docs/BUG_LOG.md`

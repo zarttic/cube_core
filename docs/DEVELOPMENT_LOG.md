@@ -366,3 +366,30 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: passed.
 - Next:
   - Execute remaining frontend ergonomics task (`TASK-0020`).
+
+## 2026-03-11 | TASK-0026 | Frontend UI alignment with `cube_front_demo` and backend integration
+- Goal: Align demo frontend style/layout with `cube_front_demo` while preserving/adding backend-connected capabilities.
+- Scope: demo web assets, demo routes, frontend integration logic, demo tests.
+- Key Changes:
+  - Imported multi-page frontend assets (`index/encoding/partition/styles/script`) into `grid_core/web`.
+  - Extended demo routes:
+    - HTML pages: `/v1/demo/map`, `/v1/demo/encoding`, `/v1/demo/partition`, `/v1/demo/index.html`
+    - Static assets: `/v1/demo/script.js`, `/v1/demo/styles.css`
+  - Reworked encoding-page frontend logic to use real backend APIs:
+    - grid locate/cover via `/v1/grid/*` or `/v1/demo/sdk/*` (switchable source),
+    - st-code generate/parse/batch via `/v1/code/*`,
+    - topology neighbors/parent/children/geometry/geometries via `/v1/topology/*` or sdk equivalents.
+  - Added missing capabilities from existing repo frontend into new UI:
+    - API/SDK data-source switch,
+    - polygon/rectangle draw for cover geometry input,
+    - topology batch geometries rendering path.
+  - Updated demo API tests for new pages/assets.
+- Validation:
+  - `python -m pytest -q tests/test_demo_api.py tests/test_api.py tests/test_sdk.py`
+  - Result: 26 passed.
+  - `python -m pytest -q tests`
+  - Result: 72 passed.
+  - `python -m grid_core.app.perf_smoke`
+  - Result: passed.
+- Next:
+  - Continue frontend ergonomics iteration (`TASK-0020`) on layer controls and result cap UI.

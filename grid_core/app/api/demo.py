@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from grid_core.app.models.request import (
     BatchCodeToGeometryRequest,
@@ -30,11 +30,55 @@ router = APIRouter(prefix="/demo", tags=["demo"])
 grid_service = GridService()
 topology_service = TopologyService()
 INDEX_HTML = Path(__file__).resolve().parents[2] / "web" / "index.html"
+ENCODING_HTML = Path(__file__).resolve().parents[2] / "web" / "encoding.html"
+PARTITION_HTML = Path(__file__).resolve().parents[2] / "web" / "partition.html"
+SCRIPT_JS = Path(__file__).resolve().parents[2] / "web" / "script.js"
+STYLES_CSS = Path(__file__).resolve().parents[2] / "web" / "styles.css"
 
 
 @router.get("/map", response_class=HTMLResponse)
 def map_page() -> HTMLResponse:
     return HTMLResponse(INDEX_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/", response_class=HTMLResponse)
+def demo_home() -> HTMLResponse:
+    return HTMLResponse(INDEX_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/index.html", response_class=HTMLResponse)
+def demo_index_page() -> HTMLResponse:
+    return HTMLResponse(INDEX_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/encoding", response_class=HTMLResponse)
+def encoding_page() -> HTMLResponse:
+    return HTMLResponse(ENCODING_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/encoding.html", response_class=HTMLResponse)
+def encoding_html_page() -> HTMLResponse:
+    return HTMLResponse(ENCODING_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/partition", response_class=HTMLResponse)
+def partition_page() -> HTMLResponse:
+    return HTMLResponse(PARTITION_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/partition.html", response_class=HTMLResponse)
+def partition_html_page() -> HTMLResponse:
+    return HTMLResponse(PARTITION_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/script.js", response_class=PlainTextResponse)
+def demo_script() -> PlainTextResponse:
+    return PlainTextResponse(SCRIPT_JS.read_text(encoding="utf-8"), media_type="application/javascript")
+
+
+@router.get("/styles.css", response_class=PlainTextResponse)
+def demo_styles() -> PlainTextResponse:
+    return PlainTextResponse(STYLES_CSS.read_text(encoding="utf-8"), media_type="text/css")
 
 
 @router.post("/sdk/locate", response_model=LocateResponse)

@@ -1,526 +1,302 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cube Encoder Grid Visualizer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin=""
-  />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-  <style>
-    :root {
-      --bg-a: #f8f7f4;
-      --bg-b: #dce7e3;
-      --panel: #ffffff;
-      --ink: #152520;
-      --muted: #5b7369;
-      --line: #c5d7d0;
-      --ok: #1d7a5b;
-      --err: #aa3d2c;
-      --geo: #f08a24;
-      --mgrs: #187f8e;
-      --isea: #e04c3a;
-    }
-
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Space Grotesk", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 15% 10%, #ffffff 0%, transparent 35%),
-        radial-gradient(circle at 80% 15%, #e9f3ef 0%, transparent 40%),
-        linear-gradient(135deg, var(--bg-a), var(--bg-b));
-      min-height: 100vh;
-    }
-
-    .wrap {
-      max-width: 1320px;
-      margin: 0 auto;
-      padding: 20px 16px 28px;
-      display: grid;
-      grid-template-columns: 340px 1fr;
-      gap: 16px;
-    }
-
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 16px;
-      box-shadow: 0 10px 24px rgba(21, 37, 32, 0.08);
-    }
-
-    .title {
-      margin: 0 0 6px;
-      font-size: 22px;
-      line-height: 1.2;
-      letter-spacing: 0.02em;
-    }
-
-    .sub {
-      margin: 0 0 16px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .grid { display: grid; gap: 10px; }
-    label { font-size: 12px; color: var(--muted); font-weight: 600; }
-    input, select, button, textarea {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 9px 10px;
-      font-family: inherit;
-      font-size: 14px;
-      background: #fff;
-      color: var(--ink);
-    }
-
-    button {
-      cursor: pointer;
-      font-weight: 700;
-      background: linear-gradient(135deg, #1f8f6a, #176e7b);
-      border: none;
-      color: #fff;
-      transition: transform 120ms ease, filter 120ms ease;
-    }
-    button:hover { filter: brightness(1.03); transform: translateY(-1px); }
-
-    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .status {
-      margin-top: 12px;
-      min-height: 20px;
-      font-size: 13px;
-      font-weight: 600;
-    }
-    .ok { color: var(--ok); }
-    .err { color: var(--err); }
-
-    .map-wrap {
-      display: grid;
-      grid-template-rows: 1fr 150px;
-      gap: 12px;
-      min-height: 82vh;
-    }
-    #map {
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      overflow: hidden;
-      min-height: 540px;
-    }
-
-    #raw {
-      font-family: "IBM Plex Mono", monospace;
-      font-size: 12px;
-      color: #203b31;
-      background: #f6faf8;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      overflow: auto;
-      margin: 0;
-    }
-
-    @media (max-width: 980px) {
-      .wrap { grid-template-columns: 1fr; }
-      .map-wrap { min-height: 70vh; }
-      #map { min-height: 420px; }
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>全球离散格网与数据剖分系统</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 </head>
 <body>
-  <div class="wrap">
-    <section class="panel">
-      <h1 class="title">Grid Visualizer</h1>
-      <p class="sub">同时演示 Geohash / MGRS / ISEA4H。数据源可切 API 或 SDK。</p>
-      <div class="grid">
-        <div class="row2">
-          <div>
-            <label for="source">数据来源</label>
-            <select id="source">
-              <option value="api">API (/v1/grid/*)</option>
-              <option value="sdk">SDK (/v1/demo/sdk/*)</option>
-            </select>
-          </div>
-          <div>
-            <label for="op">操作</label>
-            <select id="op">
-              <option value="locate">locate</option>
-              <option value="cover">cover</option>
-              <option value="neighbors">neighbors</option>
-              <option value="parent">parent</option>
-              <option value="children">children</option>
-            </select>
-          </div>
+    <!-- 顶部导航 -->
+    <header class="site-header">
+        <div class="header-container">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="site-title">全球离散格网与数据剖分系统</span>
+                    <span class="site-subtitle">Global Discrete Grid and Data Partitioning System</span>
+                </div>
+            </div>
+            <nav class="main-nav">
+                <a href="index.html" class="nav-item active">首页</a>
+                <a href="encoding.html" class="nav-item">格网编码</a>
+                <a href="partition.html" class="nav-item">数据剖分</a>
+            </nav>
         </div>
+    </header>
 
-        <div class="row2">
-          <div>
-            <label for="gridType">格网类型</label>
-            <select id="gridType">
-              <option value="geohash">geohash</option>
-              <option value="mgrs">mgrs</option>
-              <option value="isea4h">isea4h</option>
-            </select>
-          </div>
-          <div>
-            <label for="level">层级</label>
-            <input id="level" type="number" min="1" max="12" value="6" />
-          </div>
+    <!-- Banner 区域 -->
+    <section class="hero-banner">
+        <div class="banner-overlay"></div>
+        <div class="banner-content">
+            <h1>全球离散格网与数据剖分系统</h1>
+            <p>构建全球统一空间基准框架，实现多源遥感数据的高效组织与智能分析</p>
+            <div class="banner-actions">
+                <a href="encoding.html" class="btn btn-primary btn-large">进入编码系统</a>
+                <a href="partition.html" class="btn btn-outline btn-large">进入数据剖分</a>
+            </div>
         </div>
-
-        <div class="row2">
-          <div>
-            <label for="lon">经度</label>
-            <input id="lon" type="number" step="0.000001" value="116.391" />
-          </div>
-          <div>
-            <label for="lat">纬度</label>
-            <input id="lat" type="number" step="0.000001" value="39.907" />
-          </div>
+        <div class="banner-stats">
+            <div class="stat-card">
+                <div class="stat-number">3</div>
+                <div class="stat-label">格网类型</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">4</div>
+                <div class="stat-label">数据源支持</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">12</div>
+                <div class="stat-label">层级精度</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">全球</div>
+                <div class="stat-label">覆盖范围</div>
+            </div>
         </div>
-
-        <div>
-          <label for="bbox">BBox（cover 用，格式 `minLon,minLat,maxLon,maxLat`）</label>
-          <input id="bbox" type="text" value="116.385,39.903,116.397,39.911" />
-        </div>
-
-        <div>
-          <label for="geometryJson">Geometry（cover 用；地图绘制后会自动填充）</label>
-          <textarea id="geometryJson" rows="4" placeholder='{"type":"Polygon","coordinates":[[[...]]]}'></textarea>
-        </div>
-
-        <div>
-          <label for="code">拓扑 code（neighbors/parent/children 用；留空将先按当前点 locate）</label>
-          <input id="code" type="text" value="" />
-        </div>
-
-        <div class="row2">
-          <div>
-            <label for="coverMode">cover_mode</label>
-            <select id="coverMode">
-              <option value="intersect">intersect</option>
-              <option value="contain">contain</option>
-              <option value="minimal">minimal</option>
-            </select>
-          </div>
-          <div>
-            <label for="boundaryType">boundary_type</label>
-            <select id="boundaryType">
-              <option value="polygon">polygon</option>
-              <option value="bbox">bbox</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="row2">
-          <div>
-            <label for="k">neighbors k</label>
-            <input id="k" type="number" min="1" max="5" value="1" />
-          </div>
-          <div>
-            <label for="targetLevel">children target_level</label>
-            <input id="targetLevel" type="number" min="1" max="12" value="7" />
-          </div>
-        </div>
-
-        <button id="runBtn">运行可视化</button>
-        <button id="clearDrawBtn" type="button">清空绘制</button>
-      </div>
-      <div id="status" class="status"></div>
     </section>
 
-    <section class="map-wrap">
-      <div id="map"></div>
-      <pre id="raw">等待请求...</pre>
+    <!-- 系统介绍 -->
+    <section class="intro-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>系统概述</h2>
+                <p>面向全球遥感数据的一体化格网编码与剖分处理平台</p>
+            </div>
+            <div class="intro-content">
+                <div class="intro-text">
+                    <p>本系统基于层次递归的格网划分思想，将地球表面离散为多层级、无缝衔接的规则几何单元，支持经纬度格网（Geohash）、平面格网（MGRS）和六边形格网（ISEA4H DGGS）三种划分方式，为每个空间单元提供稳定的编码标识与几何边界表达能力。</p>
+                    <p>系统实现多源遥感数据的统一接入与格网化剖分，支持光学遥感卫星、碳卫星、雷达遥感卫星及信息产品数据的标准化处理，构建分析就绪数据立方体，支撑全球尺度数据组织、跨区域统计与跨源融合等应用场景。</p>
+                </div>
+                <div class="intro-image">
+                    <div class="globe-visual">
+                        <div class="globe-grid"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </section>
-  </div>
 
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin=""
-  ></script>
-  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
-  <script>
-    const map = L.map("map", { zoomControl: true }).setView([39.907, 116.391], 11);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors",
-    }).addTo(map);
+    <!-- 子系统入口 -->
+    <section class="systems-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>核心功能</h2>
+                <p>两大子系统协同工作，实现从格网编码到数据剖分的完整流程</p>
+            </div>
+            <div class="systems-grid">
+                <!-- 编码系统卡片 -->
+                <a href="encoding.html" class="system-card">
+                    <div class="card-icon encoding-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <rect x="3" y="3" width="18" height="18" rx="2"/>
+                            <path d="M3 9h18M9 21V9"/>
+                        </svg>
+                    </div>
+                    <div class="card-content">
+                        <h3>格网模型与时空编码系统</h3>
+                        <p>实现全球离散格网的划分、编码与元操作，支持Geohash、MGRS、ISEA4H三种格网类型，提供空间拓扑运算与坐标双向映射能力。</p>
+                        <ul class="card-features">
+                            <li>格网划分与定位</li>
+                            <li>时空编码生成</li>
+                            <li>拓扑关系运算</li>
+                            <li>坐标双向转换</li>
+                        </ul>
+                    </div>
+                    <div class="card-arrow">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M5 12h14M12 5l7 7-7 7"/>
+                        </svg>
+                    </div>
+                </a>
 
-    const raw = document.getElementById("raw");
-    const statusEl = document.getElementById("status");
-    let layerGroup = L.featureGroup().addTo(map);
-    const drawItems = new L.FeatureGroup().addTo(map);
-    let drawnGeometry = null;
+                <!-- 数据剖分系统卡片 -->
+                <a href="partition.html" class="system-card">
+                    <div class="card-icon partition-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                        </svg>
+                    </div>
+                    <div class="card-content">
+                        <h3>分析就绪数据剖分系统</h3>
+                        <p>支持光学遥感、碳卫星、雷达遥感及信息产品数据的多源剖分处理，生成标准化数据立方体，提供自动化质检与入库管理。</p>
+                        <ul class="card-features">
+                            <li>光学遥感数据剖分</li>
+                            <li>碳卫星数据处理</li>
+                            <li>雷达遥感数据剖分</li>
+                            <li>自动化质检入库</li>
+                        </ul>
+                    </div>
+                    <div class="card-arrow">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M5 12h14M12 5l7 7-7 7"/>
+                        </svg>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </section>
 
-    const drawControl = new L.Control.Draw({
-      draw: {
-        marker: false,
-        circle: false,
-        circlemarker: false,
-        polyline: false,
-        polygon: true,
-        rectangle: true,
-      },
-      edit: {
-        featureGroup: drawItems,
-        remove: true,
-      },
-    });
-    map.addControl(drawControl);
+    <!-- 格网类型展示 -->
+    <section class="grid-types-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>支持的格网类型</h2>
+                <p>三种格网体系满足不同应用场景需求</p>
+            </div>
+            <div class="grid-types-grid">
+                <div class="grid-type-card">
+                    <div class="type-visual geohash-visual">
+                        <div class="grid-demo" id="geohashDemo"></div>
+                    </div>
+                    <div class="type-info">
+                        <h3>Geohash 经纬度格网</h3>
+                        <p>采用Geohash编码体系实现空间单元的层级划分与编码定位，支持经纬度与Geohash编码的双向转换。</p>
+                        <div class="type-tags">
+                            <span>层级递归</span>
+                            <span>编码定位</span>
+                            <span>边界计算</span>
+                        </div>
+                    </div>
+                </div>
 
-    map.on(L.Draw.Event.CREATED, (e) => {
-      drawItems.clearLayers();
-      drawItems.addLayer(e.layer);
-      drawnGeometry = e.layer.toGeoJSON().geometry;
-      document.getElementById("geometryJson").value = JSON.stringify(drawnGeometry);
-      setStatus("已接收绘制几何，可直接运行 cover", true);
-    });
+                <div class="grid-type-card">
+                    <div class="type-visual mgrs-visual">
+                        <div class="grid-demo" id="mgrsDemo"></div>
+                    </div>
+                    <div class="type-info">
+                        <h3>MGRS 平面格网</h3>
+                        <p>采用军事格网参考系统实现按经度带和分区组织的平面网格表达，支持WGS84经纬度与UTM/MGRS体系转换。</p>
+                        <div class="type-tags">
+                            <span>分带分区</span>
+                            <span>UTM投影</span>
+                            <span>跨区处理</span>
+                        </div>
+                    </div>
+                </div>
 
-    map.on(L.Draw.Event.EDITED, () => {
-      const layer = drawItems.getLayers()[0];
-      drawnGeometry = layer ? layer.toGeoJSON().geometry : null;
-      document.getElementById("geometryJson").value = drawnGeometry ? JSON.stringify(drawnGeometry) : "";
-    });
+                <div class="grid-type-card">
+                    <div class="type-visual hexagon-visual">
+                        <div class="grid-demo" id="hexagonDemo"></div>
+                    </div>
+                    <div class="type-info">
+                        <h3>ISEA4H 六边形格网</h3>
+                        <p>采用逆斯奈德等积投影的四孔径六边形全球离散格网系统，确保全球不同纬度区域面积与形状的均匀性。</p>
+                        <div class="type-tags">
+                            <span>等积投影</span>
+                            <span>六边形剖分</span>
+                            <span>极区优化</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
 
-    map.on(L.Draw.Event.DELETED, () => {
-      drawnGeometry = null;
-      document.getElementById("geometryJson").value = "";
-    });
+    <!-- 数据源支持 -->
+    <section class="data-sources-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>数据源支持</h2>
+                <p>支持多类型遥感卫星数据的标准化处理</p>
+            </div>
+            <div class="sources-grid">
+                <div class="source-card">
+                    <div class="source-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                            <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                            <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                    </div>
+                    <h4>光学遥感卫星</h4>
+                    <p>Landsat、Sentinel、高分系列等光学影像数据的格网化剖分</p>
+                </div>
+                <div class="source-card">
+                    <div class="source-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M2 12h20"/>
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                        </svg>
+                    </div>
+                    <h4>碳卫星数据</h4>
+                    <p>OCO-2、TANSAT、GOSAT等温室气体浓度观测数据处理</p>
+                </div>
+                <div class="source-card">
+                    <div class="source-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M4.93 4.93a10 10 0 0 1 14.14 0"/>
+                            <path d="M7.76 7.76a6 6 0 0 1 8.48 0"/>
+                            <circle cx="12" cy="12" r="2"/>
+                            <path d="M12 12v-2"/>
+                            <path d="M12 12l1.41 1.41"/>
+                        </svg>
+                    </div>
+                    <h4>雷达遥感卫星</h4>
+                    <p>Sentinel-1、ALOS-2、TerraSAR-X等SAR数据剖分</p>
+                </div>
+                <div class="source-card">
+                    <div class="source-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
+                            <path d="M22 12A10 10 0 0 0 12 2v10z"/>
+                        </svg>
+                    </div>
+                    <h4>信息产品</h4>
+                    <p>土地覆盖、变化检测、植被指数等专题产品处理</p>
+                </div>
+            </div>
+        </div>
+    </section>
 
-    const palette = {
-      geohash: "#f08a24",
-      mgrs: "#187f8e",
-      isea4h: "#e04c3a",
-    };
+    <!-- 底部 -->
+    <footer class="site-footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-info">
+                    <div class="footer-logo">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10"/>
+                        </svg>
+                        <span>全球离散格网与数据剖分系统</span>
+                    </div>
+                    <p>构建全球统一空间基准框架，支撑多源数据融合分析</p>
+                </div>
+                <div class="footer-links">
+                    <div class="link-group">
+                        <h4>快速导航</h4>
+                        <a href="encoding.html">编码系统</a>
+                        <a href="partition.html">数据剖分</a>
+                    </div>
+                    <div class="link-group">
+                        <h4>相关资源</h4>
+                        <a href="#">技术文档</a>
+                        <a href="#">API接口</a>
+                    </div>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2024 全球离散格网与数据剖分系统 All Rights Reserved</p>
+            </div>
+        </div>
+    </footer>
 
-    function setStatus(text, ok) {
-      statusEl.className = ok ? "status ok" : "status err";
-      statusEl.textContent = text;
-    }
-
-    function clearMap() {
-      map.removeLayer(layerGroup);
-      layerGroup = L.featureGroup().addTo(map);
-    }
-
-    function bboxToPolygon(bbox) {
-      const [minLon, minLat, maxLon, maxLat] = bbox;
-      return {
-        type: "Polygon",
-        coordinates: [[
-          [minLon, minLat], [maxLon, minLat], [maxLon, maxLat], [minLon, maxLat], [minLon, minLat]
-        ]],
-      };
-    }
-
-    function styleByType(gridType) {
-      const color = palette[gridType] || "#333";
-      return { color, weight: 1.5, fillColor: color, fillOpacity: 0.16 };
-    }
-
-    function drawCell(cell, gridType) {
-      const style = styleByType(gridType);
-      const geo = cell.geometry || bboxToPolygon(cell.bbox);
-      L.geoJSON(geo, { style }).bindTooltip(cell.space_code).addTo(layerGroup);
-    }
-
-    function drawPoint(lon, lat) {
-      L.circleMarker([lat, lon], { radius: 5, color: "#152520", fillOpacity: 1 }).addTo(layerGroup);
-    }
-
-    function drawGeometry(geometry, gridType, label) {
-      const style = styleByType(gridType);
-      L.geoJSON(geometry, { style }).bindTooltip(label || "").addTo(layerGroup);
-    }
-
-    function parseBboxInput(value) {
-      const items = value.split(",").map((v) => Number(v.trim()));
-      if (items.length !== 4 || items.some((n) => Number.isNaN(n))) {
-        throw new Error("BBox 输入格式错误，应为 4 个数字");
-      }
-      return items;
-    }
-
-    function parseGeometryInput(value) {
-      if (!value.trim()) {
-        return null;
-      }
-      try {
-        return JSON.parse(value);
-      } catch {
-        throw new Error("Geometry JSON 格式错误");
-      }
-    }
-
-    async function requestJson(url, payload) {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        const msg = data?.error?.message || `HTTP ${resp.status}`;
-        throw new Error(msg);
-      }
-      return data;
-    }
-
-    async function run() {
-      const source = document.getElementById("source").value;
-      const op = document.getElementById("op").value;
-      const gridType = document.getElementById("gridType").value;
-      const level = Number(document.getElementById("level").value);
-      const lon = Number(document.getElementById("lon").value);
-      const lat = Number(document.getElementById("lat").value);
-      const bboxText = document.getElementById("bbox").value;
-      const geometryText = document.getElementById("geometryJson").value;
-      let code = document.getElementById("code").value.trim();
-      const coverMode = document.getElementById("coverMode").value;
-      const boundaryType = document.getElementById("boundaryType").value;
-      const k = Number(document.getElementById("k").value);
-      const targetLevel = Number(document.getElementById("targetLevel").value);
-      const gridPrefix = source === "api" ? "/v1/grid" : "/v1/demo/sdk";
-      const topologyPrefix = source === "api" ? "/v1/topology" : "/v1/demo/sdk/topology";
-
-      clearMap();
-      setStatus("请求中...", true);
-
-      try {
-        if (op === "locate") {
-          const data = await requestJson(`${gridPrefix}/locate`, {
-            grid_type: gridType,
-            level,
-            point: [lon, lat],
-          });
-          drawPoint(lon, lat);
-          drawCell(data.cell, gridType);
-          map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
-          raw.textContent = JSON.stringify(data, null, 2);
-          setStatus(`locate 成功：${data.cell.space_code}`, true);
-          return;
-        }
-
-        const manualGeometry = parseGeometryInput(geometryText);
-        const coverageGeometry = manualGeometry || drawnGeometry;
-        const bbox = parseBboxInput(bboxText);
-        if (op === "cover") {
-          const data = await requestJson(`${gridPrefix}/cover`, {
-            grid_type: gridType,
-            level,
-            cover_mode: coverMode,
-            boundary_type: boundaryType,
-            geometry: coverageGeometry,
-            bbox: coverageGeometry ? null : bbox,
-            crs: "EPSG:4326",
-          });
-          for (const cell of data.cells) {
-            drawCell(cell, gridType);
-          }
-          if (data.cells.length > 0) {
-            map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
-          }
-          raw.textContent = JSON.stringify(data, null, 2);
-          setStatus(`cover 成功：${data.statistics.cell_count} 个网格`, true);
-          return;
-        }
-
-        if (!code) {
-          const located = await requestJson(`${gridPrefix}/locate`, {
-            grid_type: gridType,
-            level,
-            point: [lon, lat],
-          });
-          code = located.cell.space_code;
-          document.getElementById("code").value = code;
-        }
-
-        if (op === "parent") {
-          const data = await requestJson(`${topologyPrefix}/parent`, { grid_type: gridType, code });
-          const parentGeo = await requestJson(`${topologyPrefix}/geometry`, {
-            grid_type: gridType,
-            code: data.parent_code,
-            boundary_type: "polygon",
-          });
-          drawGeometry(parentGeo.geometry, gridType, data.parent_code);
-          map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
-          raw.textContent = JSON.stringify({ ...data, geometry: parentGeo.geometry }, null, 2);
-          setStatus(`parent 成功：${data.parent_code}`, true);
-          return;
-        }
-
-        if (op === "neighbors") {
-          const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: gridType, code, k });
-          const codes = data.result_codes.slice(0, 200);
-          const geometryResp = codes.length
-            ? await requestJson(`${topologyPrefix}/geometries`, {
-                grid_type: gridType,
-                codes,
-                boundary_type: "polygon",
-              })
-            : { geometries: {} };
-          for (const c of codes) {
-            const geo = geometryResp.geometries[c];
-            if (geo) {
-              drawGeometry(geo, gridType, c);
-            }
-          }
-          if (codes.length > 0) {
-            map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
-          }
-          raw.textContent = JSON.stringify(data, null, 2);
-          setStatus(`neighbors 成功：${data.statistics.count} 个编码`, true);
-          return;
-        }
-
-        const data = await requestJson(`${topologyPrefix}/children`, {
-          grid_type: gridType,
-          code,
-          target_level: targetLevel,
-        });
-        const childCodes = data.child_codes.slice(0, 200);
-        const geometryResp = childCodes.length
-          ? await requestJson(`${topologyPrefix}/geometries`, {
-              grid_type: gridType,
-              codes: childCodes,
-              boundary_type: "polygon",
-            })
-          : { geometries: {} };
-        for (const c of childCodes) {
-          const geo = geometryResp.geometries[c];
-          if (geo) {
-            drawGeometry(geo, gridType, c);
-          }
-        }
-        if (childCodes.length > 0) {
-          map.fitBounds(layerGroup.getBounds(), { padding: [20, 20] });
-        }
-        raw.textContent = JSON.stringify(data, null, 2);
-        setStatus(`children 成功：${data.statistics.count} 个编码（可视化前 200）`, true);
-      } catch (err) {
-        raw.textContent = String(err);
-        setStatus(`失败：${err.message || err}`, false);
-      }
-    }
-
-    document.getElementById("runBtn").addEventListener("click", run);
-    document.getElementById("clearDrawBtn").addEventListener("click", () => {
-      drawItems.clearLayers();
-      drawnGeometry = null;
-      document.getElementById("geometryJson").value = "";
-      setStatus("绘制已清空", true);
-    });
-    run();
-  </script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="script.js"></script>
 </body>
 </html>

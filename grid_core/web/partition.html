@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分析就绪数据剖分系统</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+    <!-- 顶部导航 -->
+    <header class="site-header">
+        <div class="header-container">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="site-title">全球离散格网与数据剖分系统</span>
+                    <span class="site-subtitle">Global Discrete Grid and Data Partitioning System</span>
+                </div>
+            </div>
+            <nav class="main-nav">
+                <a href="index.html" class="nav-item">首页</a>
+                <a href="encoding.html" class="nav-item">格网编码</a>
+                <a href="partition.html" class="nav-item active">数据剖分</a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- 页面标题区 -->
+    <section class="page-header">
+        <div class="container">
+            <div class="breadcrumb">
+                <a href="index.html">首页</a>
+                <span>/</span>
+                <span>分析就绪数据剖分系统</span>
+            </div>
+            <h1>分析就绪数据剖分系统</h1>
+            <p>支持多源遥感数据的格网化剖分处理，生成标准化数据立方体</p>
+        </div>
+    </section>
+
+    <!-- 功能模块导航 -->
+    <section class="module-nav">
+        <div class="container">
+            <div class="module-tabs">
+                <button class="module-tab active" data-module="partition-optical">
+                    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                        <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                        <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
+                    </svg>
+                    <span>光学遥感</span>
+                </button>
+                <button class="module-tab" data-module="partition-carbon">
+                    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M2 12h20"/>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                    <span>碳卫星</span>
+                </button>
+                <button class="module-tab" data-module="partition-radar">
+                    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4.93 4.93a10 10 0 0 1 14.14 0"/>
+                        <path d="M7.76 7.76a6 6 0 0 1 8.48 0"/>
+                        <circle cx="12" cy="12" r="2"/>
+                        <path d="M12 12v-2"/>
+                        <path d="M12 12l1.41 1.41"/>
+                    </svg>
+                    <span>雷达遥感</span>
+                </button>
+                <button class="module-tab" data-module="partition-product">
+                    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
+                        <path d="M22 12A10 10 0 0 0 12 2v10z"/>
+                    </svg>
+                    <span>信息产品</span>
+                </button>
+                <button class="module-tab" data-module="partition-qc">
+                    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="9 11 12 14 22 4"/>
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                    </svg>
+                    <span>自动质检</span>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- 主内容区 -->
+    <main class="main-content-area">
+        <div class="container">
+
+            <!-- 光学遥感数据剖分 -->
+            <div id="partition-optical" class="module-content active">
+                <div class="module-intro">
+                    <h2>光学遥感卫星数据剖分</h2>
+                    <p>在全球离散格网层级体系下，对原始光学遥感影像进行空间维度重构与标准化切分，输出嵌入时空编码和传感器参数的标准化数据块。</p>
+                </div>
+
+                <div class="workspace">
+                    <div class="workspace-sidebar">
+                        <div class="config-panel">
+                            <h3>数据配置</h3>
+
+                            <div class="form-group">
+                                <label>数据源类型</label>
+                                <select class="form-select" id="opticalDataSource">
+                                    <option value="loaded">从载入子系统获取</option>
+                                    <option value="local">本地数据源</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group" id="loadedDataQueueGroup">
+                                <label>待剖分数据队列</label>
+                                <div class="data-queue-panel" id="opticalDataQueue">
+                                    <div class="queue-header">
+                                        <span class="queue-title">已载入数据</span>
+                                        <span class="queue-count" id="opticalQueueCount">3 个批次</span>
+                                    </div>
+                                    <div class="queue-list">
+                                        <div class="queue-item selected" data-batch-id="B20240307001">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">Landsat-8_OLI_20240307</span>
+                                                <span class="item-meta">10980×10980 像素 | 10m</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="B20240307002">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">Sentinel-2_MSI_20240307</span>
+                                                <span class="item-meta">10980×10980 像素 | 10m</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="B20240307003">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">高分一号_PMS_20240306</span>
+                                                <span class="item-meta">12000×12000 像素 | 2m</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-small btn-refresh" onclick="refreshDataQueue('optical')">
+                                        <svg style="width:12px;height:12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                                        刷新队列
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-group" id="localFileGroup" style="display:none;">
+                                <label>上传数据文件</label>
+                                <div class="file-upload">
+                                    <input type="file" id="opticalFile" accept=".tif,.tiff,.h5" hidden>
+                                    <label for="opticalFile" class="upload-btn">
+                                        <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 选择文件
+                                    </label>
+                                    <span class="file-name" id="opticalFileName">未选择文件</span>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>剖分格网</label>
+                                <select class="form-select">
+                                    <option value="geohash">Geohash (逻辑剖分)</option>
+                                    <option value="mgrs">MGRS (逻辑剖分)</option>
+                                    <option value="isea4h">ISEA4H (实体剖分)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>目标层级</label>
+                                <input type="number" class="form-input" value="8" min="1" max="12">
+                            </div>
+
+                            <div class="form-group">
+                                <label>波段选择</label>
+                                <div class="checkbox-group">
+                                    <label class="checkbox-label"><input type="checkbox" checked> 红 (B4)</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 绿 (B3)</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 蓝 (B2)</label>
+                                    <label class="checkbox-label"><input type="checkbox"> 近红外 (B5)</label>
+                                    <label class="checkbox-label"><input type="checkbox"> 短波红外 (B6)</label>
+                                </div>
+                            </div>
+
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" onclick="resetDemo()">重置</button>
+                                <button class="btn btn-primary" onclick="runDemo()">开始剖分</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-main">
+                        <div class="map-panel">
+                            <div class="panel-header">
+                                <h3>剖分预览 - 格网覆盖</h3>
+                            </div>
+                            <div id="opticalMap" class="leaflet-map"></div>
+                            <div class="preview-info">
+                                <div class="info-item">
+                                    <span>影像尺寸:</span>
+                                    <span id="imageSize">10980 × 10980 像素</span>
+                                </div>
+                                <div class="info-item">
+                                    <span>空间分辨率:</span>
+                                    <span id="spatialRes">10m</span>
+                                </div>
+                                <div class="info-item">
+                                    <span>预计切片数:</span>
+                                    <span id="tileCount">256</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-result">
+                        <div class="result-panel">
+                            <h3>剖分结果</h3>
+                            <div class="results-content" id="opticalResults">
+                                <div class="empty-state">
+                                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                    </svg>
+                                    <p>配置参数并上传数据以开始剖分</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 碳卫星数据剖分 -->
+            <div id="partition-carbon" class="module-content">
+                <div class="module-intro">
+                    <h2>碳卫星数据剖分</h2>
+                    <p>对碳监测卫星的温室气体浓度观测数据进行空间维度重构与标准化切分，将离散的观测足迹映射为统一的格网化数据单元。</p>
+                </div>
+
+                <div class="workspace">
+                    <div class="workspace-sidebar">
+                        <div class="config-panel">
+                            <h3>碳卫星配置</h3>
+
+                            <div class="form-group">
+                                <label>数据源</label>
+                                <select class="form-select" id="carbonDataSource">
+                                    <option value="loaded">从载入子系统获取</option>
+                                    <option value="local">本地数据源</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group" id="carbonQueueGroup">
+                                <label>待剖分数据队列</label>
+                                <div class="data-queue-panel" id="carbonDataQueue">
+                                    <div class="queue-header">
+                                        <span class="queue-title">已载入碳卫星数据</span>
+                                        <span class="queue-count" id="carbonQueueCount">2 个批次</span>
+                                    </div>
+                                    <div class="queue-list">
+                                        <div class="queue-item selected" data-batch-id="C20240307001">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">OCO-2_XCO2_20240307</span>
+                                                <span class="item-meta">1247 footprints | 全球</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="C20240307002">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">TANSAT_XCO2_20240306</span>
+                                                <span class="item-meta">856 footprints | 东亚</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-small btn-refresh" onclick="refreshDataQueue('carbon')">
+                                        <svg style="width:12px;height:12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                                        刷新队列
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-group" id="carbonLocalGroup" style="display:none;">
+                                <label>上传数据</label>
+                                <div class="file-upload">
+                                    <input type="file" id="carbonFile" accept=".nc,.h5,.hdf" hidden>
+                                    <label for="carbonFile" class="upload-btn">
+                                        <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 选择文件
+                                    </label>
+                                    <span class="file-name" id="carbonFileName">未选择文件</span>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Footprint 映射方式</label>
+                                <select class="form-select">
+                                    <option>重心落入</option>
+                                    <option>面积加权</option>
+                                    <option>最近邻</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>质量控制</label>
+                                <div class="checkbox-group">
+                                    <label class="checkbox-label"><input type="checkbox" checked> 启用 QA 筛选</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 云掩膜</label>
+                                    <label class="checkbox-label"><input type="checkbox"> 偏差校正</label>
+                                </div>
+                            </div>
+
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" onclick="resetDemo()">重置</button>
+                                <button class="btn btn-primary" onclick="runDemo()">开始剖分</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-main">
+                        <div class="map-panel">
+                            <div class="panel-header">
+                                <h3>观测足迹地图分布</h3>
+                            </div>
+                            <div id="carbonMap" class="leaflet-map"></div>
+                            <div class="carbon-stats">
+                                <div class="stat-item">
+                                    <span class="stat-label">Footprint 数量</span>
+                                    <span class="stat-value" id="footprintCount">1,247</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">覆盖格网数</span>
+                                    <span class="stat-value" id="gridCoverageCount">89</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">有效数据比例</span>
+                                    <span class="stat-value" id="validDataRatio">86.5%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-result">
+                        <div class="result-panel">
+                            <h3>数据立方体</h3>
+                            <div class="results-content" id="carbonResults">
+                                <div class="empty-state">
+                                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <circle cx="12" cy="12" r="10"/>
+                                        <path d="M2 12h20"/>
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                                    </svg>
+                                    <p>上传数据并执行剖分以生成立方体</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 雷达遥感数据剖分 -->
+            <div id="partition-radar" class="module-content">
+                <div class="module-intro">
+                    <h2>雷达遥感卫星数据剖分</h2>
+                    <p>对一致性雷达遥感数据进行统一接入与格网化剖分，支持多波段载荷数据，以格网编码、观测时间、极化方式等为核心维度组织数据。</p>
+                </div>
+
+                <div class="workspace">
+                    <div class="workspace-sidebar">
+                        <div class="config-panel">
+                            <h3>雷达数据配置</h3>
+
+                            <div class="form-group">
+                                <label>数据源</label>
+                                <select class="form-select" id="radarDataSource">
+                                    <option value="loaded">从载入子系统获取</option>
+                                    <option value="local">本地数据源</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group" id="radarQueueGroup">
+                                <label>待剖分数据队列</label>
+                                <div class="data-queue-panel" id="radarDataQueue">
+                                    <div class="queue-header">
+                                        <span class="queue-title">已载入雷达数据</span>
+                                        <span class="queue-count" id="radarQueueCount">2 个批次</span>
+                                    </div>
+                                    <div class="queue-list">
+                                        <div class="queue-item selected" data-batch-id="R20240307001">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">Sentinel-1A_GRD_20240307</span>
+                                                <span class="item-meta">VV+VH | C波段</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="R20240307002">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">Sentinel-1B_SLC_20240306</span>
+                                                <span class="item-meta">VV+VH | C波段</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-small btn-refresh" onclick="refreshDataQueue('radar')">
+                                        <svg style="width:12px;height:12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                                        刷新队列
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-group" id="radarLocalGroup" style="display:none;">
+                                <label>上传数据</label>
+                                <div class="file-upload">
+                                    <input type="file" id="radarFile" accept=".tif,.tiff,.zip" hidden>
+                                    <label for="radarFile" class="upload-btn">
+                                        <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 选择文件
+                                    </label>
+                                    <span class="file-name" id="radarFileName">未选择文件</span>
+                                </div>
+                            </div>
+
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" onclick="resetDemo()">重置</button>
+                                <button class="btn btn-primary" onclick="runDemo()">开始剖分</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-main">
+                        <div class="map-panel">
+                            <div class="panel-header">
+                                <h3>SAR 成像几何与剖分预览</h3>
+                            </div>
+                            <div id="radarMap" class="leaflet-map"></div>
+                            <div class="geometry-params">
+                                <div class="param-item">
+                                    <span>入射角:</span>
+                                    <span>34.3°</span>
+                                </div>
+                                <div class="param-item">
+                                    <span>方位向分辨率:</span>
+                                    <span>20m</span>
+                                </div>
+                                <div class="param-item">
+                                    <span>距离向分辨率:</span>
+                                    <span>5m</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-result">
+                        <div class="result-panel">
+                            <h3>剖分结果</h3>
+                            <div class="results-content" id="radarResults">
+                                <div class="empty-state">
+                                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M4.93 4.93a10 10 0 0 1 14.14 0"/>
+                                        <path d="M7.76 7.76a6 6 0 0 1 8.48 0"/>
+                                        <circle cx="12" cy="12" r="2"/>
+                                        <path d="M12 12v-2"/>
+                                        <path d="M12 12l1.41 1.41"/>
+                                    </svg>
+                                    <p>配置参数并上传雷达数据</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 信息产品剖分 -->
+            <div id="partition-product" class="module-content">
+                <div class="module-intro">
+                    <h2>信息产品数据剖分</h2>
+                    <p>对遥感信息产品数据进行统一接入与格网化剖分，面向专题分类、统计融合产品、经纬度格点产品等类型进行格网裁切与分辨率适配。</p>
+                </div>
+
+                <div class="workspace">
+                    <div class="workspace-sidebar">
+                        <div class="config-panel">
+                            <h3>产品配置</h3>
+
+                            <div class="form-group">
+                                <label>数据源</label>
+                                <select class="form-select" id="productDataSource">
+                                    <option value="loaded">从载入子系统获取</option>
+                                    <option value="local">本地数据源</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group" id="productQueueGroup">
+                                <label>待剖分数据队列</label>
+                                <div class="data-queue-panel" id="productDataQueue">
+                                    <div class="queue-header">
+                                        <span class="queue-title">已载入产品数据</span>
+                                        <span class="queue-count" id="productQueueCount">3 个批次</span>
+                                    </div>
+                                    <div class="queue-list">
+                                        <div class="queue-item selected" data-batch-id="P20240307001">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">LandCover_GLC_2023</span>
+                                                <span class="item-meta">土地覆盖 | 30m</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="P20240307002">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">NDVI_MOD13Q1_202403</span>
+                                                <span class="item-meta">植被指数 | 250m</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                        <div class="queue-item" data-batch-id="P20240307003">
+                                            <div class="queue-item-info">
+                                                <span class="item-name">LST_MOD11A1_20240307</span>
+                                                <span class="item-meta">地表温度 | 1km</span>
+                                            </div>
+                                            <span class="item-status ready">就绪</span>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-small btn-refresh" onclick="refreshDataQueue('product')">
+                                        <svg style="width:12px;height:12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                                        刷新队列
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-group" id="productLocalGroup" style="display:none;">
+                                <label>上传产品</label>
+                                <div class="file-upload">
+                                    <input type="file" id="productFile" hidden>
+                                    <label for="productFile" class="upload-btn">
+                                        <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 选择文件
+                                    </label>
+                                    <span class="file-name" id="productFileName">未选择文件</span>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>剖分方式</label>
+                                <div class="radio-group">
+                                    <label class="radio-label">
+                                        <input type="radio" name="productSplit" value="category" checked>
+                                        <span class="radio-custom"></span>
+                                        <span>按类别统计</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="productSplit" value="grid">
+                                        <span class="radio-custom"></span>
+                                        <span>按格网裁切</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" onclick="resetDemo()">重置</button>
+                                <button class="btn btn-primary" onclick="runDemo()">开始剖分</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-main">
+                        <div class="map-panel">
+                            <div class="panel-header">
+                                <h3>产品地图预览</h3>
+                            </div>
+                            <div id="productMap" class="leaflet-map"></div>
+                            <div class="product-legend-horizontal">
+                                <div class="legend-row">
+                                    <span class="color-box" style="background:#228B22"></span>
+                                    <span>森林 45.2%</span>
+                                </div>
+                                <div class="legend-row">
+                                    <span class="color-box" style="background:#FFD700"></span>
+                                    <span>农田 28.6%</span>
+                                </div>
+                                <div class="legend-row">
+                                    <span class="color-box" style="background:#A9A9A9"></span>
+                                    <span>建筑 15.3%</span>
+                                </div>
+                                <div class="legend-row">
+                                    <span class="color-box" style="background:#4169E1"></span>
+                                    <span>水体 11.9%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-result">
+                        <div class="result-panel">
+                            <h3>统计结果</h3>
+                            <div class="results-content" id="productResults">
+                                <div class="empty-state">
+                                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
+                                        <path d="M22 12A10 10 0 0 0 12 2v10z"/>
+                                    </svg>
+                                    <p>上传产品数据并执行剖分</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 自动质检 -->
+            <div id="partition-qc" class="module-content">
+                <div class="module-intro">
+                    <h2>剖分数据自动化质检</h2>
+                    <p>对剖分后的遥感数据进行快速质量评估，通过自动化流程拦截不合格数据块，确保入库数据的可靠性。</p>
+                </div>
+
+                <div class="workspace">
+                    <div class="workspace-sidebar">
+                        <div class="config-panel">
+                            <h3>质检配置</h3>
+
+                            <div class="form-group">
+                                <label>质检项目</label>
+                                <div class="checkbox-group">
+                                    <label class="checkbox-label"><input type="checkbox" checked> 文件完整性</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 元数据一致性</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 空间位置精度</label>
+                                    <label class="checkbox-label"><input type="checkbox" checked> 像素值范围</label>
+                                    <label class="checkbox-label"><input type="checkbox"> 投影一致性</label>
+                                    <label class="checkbox-label"><input type="checkbox"> NoData 检测</label>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>阈值设置</label>
+                                <div class="threshold-group">
+                                    <label>空值比例阈值: <span id="nullThreshold">5%</span></label>
+                                    <input type="range" min="0" max="20" value="5" class="form-range"
+                                           oninput="document.getElementById('nullThreshold').textContent=this.value+'%'">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>选择数据</label>
+                                <div class="file-upload">
+                                    <input type="file" id="qcFile" multiple hidden>
+                                    <label for="qcFile" class="upload-btn">
+                                        <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 选择文件
+                                    </label>
+                                    <span class="file-name" id="qcFileName">未选择文件</span>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>质检模式</label>
+                                <select class="form-select">
+                                    <option>快速扫描</option>
+                                    <option>完整质检</option>
+                                    <option>深度分析</option>
+                                </select>
+                            </div>
+
+                            <div class="action-buttons">
+                                <button class="btn btn-secondary" onclick="resetDemo()">重置</button>
+                                <button class="btn btn-primary" onclick="runDemo()">开始质检</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-main">
+                        <div class="qc-progress">
+                            <div class="progress-ring">
+                                <svg viewBox="0 0 100 100">
+                                    <circle class="progress-bg" cx="50" cy="50" r="45"/>
+                                    <circle class="progress-bar" cx="50" cy="50" r="45" id="qcProgress"/>
+                                </svg>
+                                <div class="progress-text">
+                                    <span class="percent" id="qcPercent">0%</span>
+                                    <span class="label">完成度</span>
+                                </div>
+                            </div>
+
+                            <div class="qc-stats">
+                                <div class="qc-stat passed">
+                                    <span class="count" id="qcPassed">0</span>
+                                    <span class="label">通过</span>
+                                </div>
+                                <div class="qc-stat warning">
+                                    <span class="count" id="qcWarning">0</span>
+                                    <span class="label">警告</span>
+                                </div>
+                                <div class="qc-stat failed">
+                                    <span class="count" id="qcFailed">0</span>
+                                    <span class="label">失败</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-result">
+                        <div class="result-panel">
+                            <h3>质检报告</h3>
+                            <div class="results-content" id="qcResults">
+                                <div class="empty-state">
+                                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <polyline points="9 11 12 14 22 4"/>
+                                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                                    </svg>
+                                    <p>选择数据并启动质检流程</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- 底部 -->
+    <footer class="site-footer">
+        <div class="container">
+            <div class="footer-bottom">
+                <p>&copy; 2024 全球离散格网与数据剖分系统 All Rights Reserved</p>
+            </div>
+        </div>
+    </footer>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
