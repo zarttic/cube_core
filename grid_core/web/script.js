@@ -5,6 +5,8 @@ let maps = {}; // 存储所有地图实例
 let mapLayers = {}; // 存储地图图层
 let drawItems = null;
 let drawnGeometry = null;
+let topologyDrawItems = null;
+let drawnTopologyGeometry = null;
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -114,6 +116,51 @@ function initMaps() {
 
         // 拓扑运算地图
         maps.topology = createMap('topologyMap', [39.9042, 116.4074], 10);
+        if (maps.topology && typeof L.Control.Draw !== 'undefined') {
+            topologyDrawItems = new L.FeatureGroup().addTo(maps.topology);
+            const topologyDrawControl = new L.Control.Draw({
+                draw: {
+                    marker: false,
+                    circle: false,
+                    circlemarker: false,
+                    polyline: false,
+                    polygon: true,
+                    rectangle: true,
+                },
+                edit: {
+                    featureGroup: topologyDrawItems,
+                    remove: true,
+                },
+            });
+            maps.topology.addControl(topologyDrawControl);
+
+            maps.topology.on(L.Draw.Event.CREATED, (e) => {
+                topologyDrawItems.clearLayers();
+                topologyDrawItems.addLayer(e.layer);
+                drawnTopologyGeometry = e.layer.toGeoJSON().geometry;
+                const topologyGeometryJson = document.getElementById('topologyGeometryJson');
+                if (topologyGeometryJson) {
+                    topologyGeometryJson.value = JSON.stringify(drawnTopologyGeometry);
+                }
+            });
+
+            maps.topology.on(L.Draw.Event.EDITED, () => {
+                const layer = topologyDrawItems.getLayers()[0];
+                drawnTopologyGeometry = layer ? layer.toGeoJSON().geometry : null;
+                const topologyGeometryJson = document.getElementById('topologyGeometryJson');
+                if (topologyGeometryJson) {
+                    topologyGeometryJson.value = drawnTopologyGeometry ? JSON.stringify(drawnTopologyGeometry) : '';
+                }
+            });
+
+            maps.topology.on(L.Draw.Event.DELETED, () => {
+                drawnTopologyGeometry = null;
+                const topologyGeometryJson = document.getElementById('topologyGeometryJson');
+                if (topologyGeometryJson) {
+                    topologyGeometryJson.value = '';
+                }
+            });
+        }
 
         // 光学遥感地图
         maps.optical = createMap('opticalMap', [39.9042, 116.4074], 8);
@@ -143,6 +190,13 @@ function initMaps() {
 
                         // 添加标记
                         addMarkerToMap(maps.division, parseFloat(lat), parseFloat(lng), '选中位置');
+                    }
+
+                    const topoLatInput = document.getElementById('topoLat');
+                    const topoLngInput = document.getElementById('topoLng');
+                    if (topoLatInput && topoLngInput && currentPage === 'grid-operations') {
+                        topoLatInput.value = lat;
+                        topoLngInput.value = lng;
                     }
                 });
             }
@@ -368,6 +422,11 @@ function initFormHandlers() {
     if (clearDrawBtn) {
         clearDrawBtn.addEventListener('click', clearDivisionDrawings);
     }
+
+    const clearTopologyDrawBtn = document.getElementById('clearTopologyDrawBtn');
+    if (clearTopologyDrawBtn) {
+        clearTopologyDrawBtn.addEventListener('click', clearTopologyDrawings);
+    }
 }
 
 // 初始化数据源切换
@@ -585,12 +644,15 @@ async function requestJson(url, payload) {
 function clearMapDataLayers(map) {
     if (!map) return;
     map.eachLayer((layer) => {
-        if (!(layer instanceof L.TileLayer) && layer !== drawItems) {
+        if (!(layer instanceof L.TileLayer) && layer !== drawItems && layer !== topologyDrawItems) {
             map.removeLayer(layer);
         }
     });
     if (drawItems && map === maps.division) {
         drawItems.addTo(map);
+    }
+    if (topologyDrawItems && map === maps.topology) {
+        topologyDrawItems.addTo(map);
     }
 }
 
@@ -685,6 +747,15 @@ function clearDivisionDrawings() {
     }
     drawnGeometry = null;
     const geometryJson = document.getElementById('geometryJson');
+    if (geometryJson) geometryJson.value = '';
+}
+
+function clearTopologyDrawings() {
+    if (topologyDrawItems) {
+        topologyDrawItems.clearLayers();
+    }
+    drawnTopologyGeometry = null;
+    const geometryJson = document.getElementById('topologyGeometryJson');
     if (geometryJson) geometryJson.value = '';
 }
 
@@ -815,6 +886,9 @@ function resetDemo() {
     // 重置层级显示
     const levelValue = document.getElementById('levelValue');
     if (levelValue) levelValue.textContent = '6级';
+
+    clearDivisionDrawings();
+    clearTopologyDrawings();
 
     console.log('演示已重置');
     isProcessing = false;
@@ -1020,167 +1094,184 @@ async function runGridOperations() {
 
     const gridType = document.querySelector('input[name="gridType"]:checked')?.value || 'geohash';
     const opType = document.getElementById('topologyOp')?.value || 'neighbors';
+    const inputType = document.getElementById('topologyInputType')?.value || 'point';
     const k = parseInt(document.getElementById('neighborK')?.value || 1, 10);
     const targetLevel = parseInt(document.getElementById('targetLevel')?.value || 6, 10);
     const convertDir = document.getElementById('convertDir')?.value || 'code2coord';
-    let code1 = document.getElementById('opCode1')?.value?.trim() || '';
-    const code2 = document.getElementById('opCode2')?.value?.trim() || '';
-    const lat = parseFloat(document.getElementById('lat')?.value || 39.9042);
-    const lng = parseFloat(document.getElementById('lng')?.value || 116.4074);
     const level = parseInt(document.getElementById('gridLevel')?.value || 6, 10);
-    const baseRows = [{ label: '格网类型', value: gridType }];
+    const selection = await resolveTopologySelection({
+        inputType,
+        gridType,
+        level,
+        gridPrefix,
+    });
+    let baseCodes = selection.baseCodes;
+    if (baseCodes.length === 0) {
+        throw new Error('未从选区生成有效格网编码');
+    }
+    const originalBaseCount = baseCodes.length;
+    if (baseCodes.length > 120) {
+        baseCodes = baseCodes.slice(0, 120);
+    }
 
-    if (!code1) {
+    const baseRows = [
+        { label: '格网类型', value: gridType },
+        { label: '选区类型', value: inputType },
+        { label: '选区编码数', value: String(originalBaseCount) },
+    ];
+    if (originalBaseCount > baseCodes.length) {
+        baseRows.push({ label: '参与运算编码数', value: `${baseCodes.length}（为保证响应速度已截断）` });
+    }
+
+    const resultCodes = new Set();
+    const failedCodes = [];
+    if (opType === 'neighbors') {
+        for (const code of baseCodes) {
+            try {
+                const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: gridType, code, k });
+                data.result_codes.forEach((item) => resultCodes.add(item));
+            } catch {
+                failedCodes.push(code);
+            }
+        }
+    } else if (opType === 'parent') {
+        for (const code of baseCodes) {
+            try {
+                const data = await requestJson(`${topologyPrefix}/parent`, { grid_type: gridType, code });
+                resultCodes.add(data.parent_code);
+            } catch {
+                failedCodes.push(code);
+            }
+        }
+    } else if (opType === 'children') {
+        for (const code of baseCodes) {
+            try {
+                const data = await requestJson(`${topologyPrefix}/children`, {
+                    grid_type: gridType,
+                    code,
+                    target_level: targetLevel,
+                });
+                data.child_codes.forEach((item) => resultCodes.add(item));
+            } catch {
+                failedCodes.push(code);
+            }
+        }
+    }
+
+    const previewBase = baseCodes.slice(0, 100);
+    const previewResults = Array.from(resultCodes).slice(0, 300);
+    const mergedCodes = Array.from(new Set([...previewBase, ...previewResults]));
+    if (mergedCodes.length > 0) {
+        const geometries = await requestJson(`${topologyPrefix}/geometries`, {
+            grid_type: gridType,
+            codes: mergedCodes,
+            boundary_type: 'polygon',
+        });
+        previewBase.forEach((code) => {
+            if (geometries.geometries[code]) {
+                drawGeometryOnMap(map, geometries.geometries[code], gridType, `基准:${code}`);
+            }
+        });
+        previewResults.forEach((code) => {
+            if (geometries.geometries[code]) {
+                drawGeometryOnMap(map, geometries.geometries[code], gridType, code);
+            }
+        });
+    }
+    if (selection.selectionGeometry) {
+        drawGeometryOnMap(map, selection.selectionGeometry, gridType, '选区');
+    }
+    fitMapIfHasLayer(map);
+
+    const rows = [
+        { label: '运算类型', value: opType },
+        { label: '输入编码样例', value: baseCodes.slice(0, 8).join(', '), code: true },
+        { label: '结果数量', value: String(resultCodes.size) },
+        { label: '结果编码样例', value: Array.from(resultCodes).slice(0, 8).join(', '), code: true },
+    ];
+    if (opType === 'neighbors') {
+        rows.splice(2, 0, { label: 'k', value: String(k) });
+    }
+    if (opType === 'children') {
+        rows.splice(2, 0, { label: '目标层级', value: String(targetLevel) });
+    }
+    if (failedCodes.length > 0) {
+        rows.push({ label: '跳过编码数', value: String(failedCodes.length) });
+    }
+    await appendConversionRows(rows, convertDir, {
+        representativeCode: baseCodes[0],
+        targetLevel,
+        selectionPoint: selection.selectionPoint,
+        gridType,
+        gridPrefix,
+        topologyPrefix,
+    });
+    updateResultHtml('operationResults', [...baseRows, ...rows]);
+}
+
+async function resolveTopologySelection(ctx) {
+    const { inputType, gridType, level, gridPrefix } = ctx;
+    if (inputType === 'point') {
+        const lat = parseFloat(document.getElementById('topoLat')?.value || 39.9042);
+        const lng = parseFloat(document.getElementById('topoLng')?.value || 116.4074);
         const located = await requestJson(`${gridPrefix}/locate`, {
             grid_type: gridType,
             level,
             point: [lng, lat],
         });
-        code1 = located.cell.space_code;
-        const codeInput = document.getElementById('opCode1');
-        if (codeInput) codeInput.value = code1;
-    }
-
-    if (opType === 'neighbors') {
-        const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: gridType, code: code1, k });
-        const previewCodes = data.result_codes.slice(0, 200);
-        if (previewCodes.length > 0) {
-            const geometries = await requestJson(`${topologyPrefix}/geometries`, {
-                grid_type: gridType,
-                codes: previewCodes,
-                boundary_type: 'polygon',
-            });
-            previewCodes.forEach((code) => {
-                if (geometries.geometries[code]) {
-                    drawGeometryOnMap(map, geometries.geometries[code], gridType, code);
-                }
-            });
-        }
-        fitMapIfHasLayer(map);
-        const rows = [
-            { label: '运算类型', value: 'neighbors' },
-            { label: '输入编码', value: code1, code: true },
-            { label: 'k', value: String(k) },
-            { label: '结果数量', value: String(data.statistics?.count || data.result_codes.length) },
-            { label: '预览编码', value: previewCodes.slice(0, 8).join(', '), code: true },
-        ];
-        await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
-        updateResultHtml('operationResults', [...baseRows, ...rows]);
-        return;
-    }
-
-    if (opType === 'parent') {
-        const data = await requestJson(`${topologyPrefix}/parent`, { grid_type: gridType, code: code1 });
-        const geo = await requestJson(`${topologyPrefix}/geometry`, {
-            grid_type: gridType,
-            code: data.parent_code,
-            boundary_type: 'polygon',
-        });
-        drawGeometryOnMap(map, geo.geometry, gridType, data.parent_code);
-        fitMapIfHasLayer(map);
-        const rows = [
-            { label: '运算类型', value: 'parent' },
-            { label: '输入编码', value: code1, code: true },
-            { label: '父编码', value: data.parent_code, code: true },
-            { label: '执行时间', value: new Date().toLocaleString('zh-CN') },
-        ];
-        await appendConversionRows(rows, convertDir, { code1: data.parent_code, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
-        updateResultHtml('operationResults', [...baseRows, ...rows]);
-        return;
-    }
-
-    if (opType === 'children') {
-        const data = await requestJson(`${topologyPrefix}/children`, {
-            grid_type: gridType,
-            code: code1,
-            target_level: targetLevel,
-        });
-        const previewCodes = data.child_codes.slice(0, 200);
-        if (previewCodes.length > 0) {
-            const geometries = await requestJson(`${topologyPrefix}/geometries`, {
-                grid_type: gridType,
-                codes: previewCodes,
-                boundary_type: 'polygon',
-            });
-            previewCodes.forEach((code) => {
-                if (geometries.geometries[code]) {
-                    drawGeometryOnMap(map, geometries.geometries[code], gridType, code);
-                }
-            });
-        }
-        fitMapIfHasLayer(map);
-        const rows = [
-            { label: '运算类型', value: 'children' },
-            { label: '输入编码', value: code1, code: true },
-            { label: '目标层级', value: String(targetLevel) },
-            { label: '结果数量', value: String(data.statistics?.count || data.child_codes.length) },
-            { label: '预览编码', value: previewCodes.slice(0, 8).join(', '), code: true },
-        ];
-        await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
-        updateResultHtml('operationResults', [...baseRows, ...rows]);
-        return;
-    }
-
-    if (!code2) {
-        throw new Error('contains/intersect 需要输入对比编码');
-    }
-    const geoA = await requestJson(`${topologyPrefix}/geometry`, {
-        grid_type: gridType,
-        code: code1,
-        boundary_type: 'polygon',
-    });
-    const geoB = await requestJson(`${topologyPrefix}/geometry`, {
-        grid_type: gridType,
-        code: code2,
-        boundary_type: 'polygon',
-    });
-    const relation = evaluateGeometryRelation(geoA.geometry, geoB.geometry);
-
-    drawGeometryOnMap(map, geoA.geometry, gridType, code1);
-    drawGeometryOnMap(map, geoB.geometry, gridType, code2);
-    fitMapIfHasLayer(map);
-    const rows = [
-        { label: '运算类型', value: opType },
-        { label: '编码A', value: code1, code: true },
-        { label: '编码B', value: code2, code: true },
-        {
-            label: '结果',
-            value: opType === 'contains'
-                ? (relation.contains ? '包含' : '不包含')
-                : (relation.intersect ? '相交' : '不相交'),
-        },
-        {
-            label: '判定方式',
-            value: relation.method,
-        },
-    ];
-    await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
-    updateResultHtml('operationResults', [...baseRows, ...rows]);
-}
-
-function geometryToFeature(geometry) {
-    return { type: 'Feature', properties: {}, geometry };
-}
-
-function evaluateGeometryRelation(geometryA, geometryB) {
-    if (window.turf?.booleanContains && window.turf?.booleanIntersects) {
-        const featureA = geometryToFeature(geometryA);
-        const featureB = geometryToFeature(geometryB);
         return {
-            contains: window.turf.booleanContains(featureA, featureB),
-            intersect: window.turf.booleanIntersects(featureA, featureB),
-            method: 'Polygon 精确判定',
+            baseCodes: [located.cell.space_code],
+            selectionPoint: [lng, lat],
+            selectionGeometry: located.cell.geometry || bboxToPolygonGeometry(located.cell.bbox),
         };
     }
 
-    const [aMinLon, aMinLat, aMaxLon, aMaxLat] = extractGeometryBounds(geometryA);
-    const [bMinLon, bMinLat, bMaxLon, bMaxLat] = extractGeometryBounds(geometryB);
-    const contains = aMinLon <= bMinLon && aMinLat <= bMinLat && aMaxLon >= bMaxLon && aMaxLat >= bMaxLat;
-    const intersect = !(aMaxLon < bMinLon || aMinLon > bMaxLon || aMaxLat < bMinLat || aMinLat > bMaxLat);
+    if (inputType === 'bbox') {
+        const bboxText = document.getElementById('topoBbox')?.value || '';
+        const bbox = parseBboxText(bboxText);
+        if (!bbox) {
+            throw new Error('请选择 bbox 输入并填写有效范围');
+        }
+        const covered = await requestJson(`${gridPrefix}/cover`, {
+            grid_type: gridType,
+            level,
+            cover_mode: 'intersect',
+            boundary_type: 'bbox',
+            geometry: null,
+            bbox,
+            crs: 'EPSG:4326',
+        });
+        return {
+            baseCodes: covered.cells.map((c) => c.space_code),
+            selectionPoint: [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
+            selectionGeometry: bboxToPolygonGeometry(bbox),
+        };
+    }
+
+    let geometry = null;
+    const geometryInput = document.getElementById('topologyGeometryJson')?.value || '';
+    if (geometryInput.trim()) {
+        geometry = JSON.parse(geometryInput);
+    } else if (drawnTopologyGeometry) {
+        geometry = drawnTopologyGeometry;
+    }
+    if (!geometry) {
+        throw new Error('请在拓扑地图绘制 polygon/rectangle 作为选区');
+    }
+    const covered = await requestJson(`${gridPrefix}/cover`, {
+        grid_type: gridType,
+        level,
+        cover_mode: 'intersect',
+        boundary_type: 'bbox',
+        geometry,
+        bbox: null,
+        crs: 'EPSG:4326',
+    });
+    const bounds = extractGeometryBounds(geometry);
     return {
-        contains,
-        intersect,
-        method: 'BBox 近似判定（turf 未加载）',
+        baseCodes: covered.cells.map((c) => c.space_code),
+        selectionPoint: [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2],
+        selectionGeometry: geometry,
     };
 }
 
@@ -1202,11 +1293,16 @@ function extractGeometryBounds(geometry) {
 }
 
 async function appendConversionRows(rows, convertDir, ctx) {
-    const { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix } = ctx;
+    const { representativeCode, targetLevel, selectionPoint, gridType, gridPrefix, topologyPrefix } = ctx;
     if (convertDir === 'code2coord') {
+        if (!representativeCode) {
+            rows.push({ label: '转换方向', value: '编码 -> 坐标' });
+            rows.push({ label: '转换结果', value: '-' });
+            return;
+        }
         const bboxResp = await requestJson(`${topologyPrefix}/geometry`, {
             grid_type: gridType,
-            code: code1,
+            code: representativeCode,
             boundary_type: 'bbox',
         });
         const bbox = bboxResp.geometry.bbox;
@@ -1217,6 +1313,7 @@ async function appendConversionRows(rows, convertDir, ctx) {
         return;
     }
 
+    const [lng, lat] = selectionPoint || [116.4074, 39.9042];
     const locateResp = await requestJson(`${gridPrefix}/locate`, {
         grid_type: gridType,
         level: targetLevel,

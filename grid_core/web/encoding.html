@@ -361,7 +361,7 @@
             <div id="grid-operations" class="module-content">
                 <div class="module-intro">
                     <h2>格网编码元操作</h2>
-                    <p>面向"用编码直接做运算与检索"的应用需求，提供基于格网编码的时空拓扑运算和坐标双向转换能力。</p>
+                    <p>通过地图选点/选区自动生成基准格网编码，再执行拓扑运算与坐标转换。</p>
                 </div>
 
                 <div class="workspace">
@@ -375,24 +375,42 @@
                                     <option value="neighbors">邻接单元计算</option>
                                     <option value="parent">父单元推导</option>
                                     <option value="children">子单元生成</option>
-                                    <option value="contains">包含判定</option>
-                                    <option value="intersect">相交判定</option>
                                 </select>
                             </div>
 
                             <div class="form-group">
-                                <label>格网编码</label>
-                                <input type="text" id="opCode1" class="form-input" placeholder="输入格网编码" value="wx4g0b">
+                                <label>选区输入类型</label>
+                                <select id="topologyInputType" class="form-select">
+                                    <option value="point">地图点选</option>
+                                    <option value="bbox">BBox 输入</option>
+                                    <option value="polygon">地图绘制 Polygon/Rectangle</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>点位坐标（点击地图自动填充）</label>
+                                <div class="coord-inputs">
+                                    <input type="number" id="topoLat" class="form-input" value="39.9042" step="0.0001" placeholder="纬度">
+                                    <input type="number" id="topoLng" class="form-input" value="116.4074" step="0.0001" placeholder="经度">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>BBox（可选，minLon,minLat,maxLon,maxLat）</label>
+                                <input type="text" id="topoBbox" class="form-input" placeholder="116.3,39.8,116.5,40.0">
+                            </div>
+
+                            <div class="form-group">
+                                <label>绘制 Geometry（自动填充）</label>
+                                <textarea id="topologyGeometryJson" class="form-textarea" rows="4" placeholder='{"type":"Polygon","coordinates":[[[...]]]}'></textarea>
+                                <button type="button" class="btn btn-small btn-secondary" id="clearTopologyDrawBtn" style="margin-top:8px;">
+                                    清空拓扑选区绘制
+                                </button>
                             </div>
 
                             <div class="form-group">
                                 <label>邻域阶数 (k)</label>
                                 <input type="number" id="neighborK" class="form-input" value="1" min="1" max="3">
-                            </div>
-
-                            <div class="form-group">
-                                <label>对比编码 (可选)</label>
-                                <input type="text" id="opCode2" class="form-input" placeholder="用于包含/相交判定">
                             </div>
 
                             <h3 style="margin-top: 2rem;">坐标转换</h3>
@@ -421,6 +439,7 @@
                         <div class="map-panel">
                             <div class="panel-header">
                                 <h3>拓扑关系地图展示</h3>
+                                <span class="map-hint">支持点击选点，或绘制 polygon/rectangle 作为拓扑选区</span>
                             </div>
                             <div id="topologyMap" class="leaflet-map"></div>
                             <div class="visual-legend">

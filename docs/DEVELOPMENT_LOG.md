@@ -409,3 +409,27 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: 72 passed.
 - Next:
   - Continue frontend ergonomics iteration (`TASK-0020`) on layer controls and result cap UI.
+
+## 2026-03-11 | TASK-0028 | Switch topology operations to region-selection workflow
+- Goal: Restore topology workflow to region-driven operation instead of manual code input.
+- Scope: frontend encoding page (topology panel + script behavior).
+- Key Changes:
+  - Replaced topology inputs from `code/code2` to region selection controls:
+    - point click (`topoLat/topoLng`),
+    - bbox text input,
+    - polygon/rectangle draw on topology map.
+  - Added dedicated topology draw layer and clear action.
+  - Refactored `runGridOperations`:
+    - auto-derive base codes from selected region via backend `locate/cover`,
+    - run `neighbors/parent/children` on derived codes,
+    - render base/result geometries in batch.
+  - Kept coordinate conversion support and bound it to region-derived representative code/point.
+  - Added result-size safety cap for region-derived base code set to keep UI responsive.
+- Validation:
+  - `node --check grid_core/web/script.js`
+  - `python -m pytest -q tests/test_demo_api.py tests/test_api.py`
+  - Result: 23 passed.
+  - `python -m pytest -q tests`
+  - Result: 72 passed.
+- Next:
+  - Continue frontend ergonomics iteration (`TASK-0020`) on layer controls and result cap UI.
