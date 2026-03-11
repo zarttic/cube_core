@@ -5,6 +5,17 @@ from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
 
+def _expand_mgrs_to_level(engine: MGRSEngine, codes: set[str], target_level: int) -> set[str]:
+    out: set[str] = set()
+    for code in codes:
+        precision = engine._precision_from_code(code)
+        if precision == target_level:
+            out.add(code)
+        else:
+            out.update(engine.children(code, target_level))
+    return out
+
+
 def test_mgrs_locate_point_returns_cell():
     engine = MGRSEngine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=5)
@@ -66,7 +77,7 @@ def test_mgrs_cover_contain_is_subset_of_intersect():
     assert len(contain_codes) <= len(intersect_codes)
 
 
-def test_mgrs_cover_minimal_is_subset_of_intersect():
+def test_mgrs_cover_minimal_expanded_is_subset_of_intersect():
     engine = MGRSEngine()
     geometry = {
         "type": "Polygon",
@@ -74,9 +85,10 @@ def test_mgrs_cover_minimal_is_subset_of_intersect():
     }
     intersect_codes = {c.space_code for c in engine.cover_geometry(geometry, level=2, cover_mode="intersect")}
     minimal_codes = {c.space_code for c in engine.cover_geometry(geometry, level=2, cover_mode="minimal")}
+    expanded_minimal = _expand_mgrs_to_level(engine, minimal_codes, target_level=2)
 
-    assert minimal_codes.issubset(intersect_codes)
-    assert len(minimal_codes) <= len(intersect_codes)
+    assert expanded_minimal.issubset(intersect_codes)
+    assert len(minimal_codes) <= len(expanded_minimal)
 
 
 def test_mgrs_neighbors_k1_non_empty():

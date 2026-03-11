@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import statistics
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
+import json
 
 from grid_core.app.core.enums import BoundaryType, GridType
 from grid_core.app.services.grid_service import GridService
@@ -158,6 +161,15 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
 
 def main() -> None:
     results = run_perf_smoke(enforce=True)
+    json_path = os.getenv("PERF_SMOKE_JSON_PATH")
+    if json_path:
+        payload = {
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "results": results,
+        }
+        target = Path(json_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
     print("Performance smoke report:")
     for name, row in results.items():
         print(

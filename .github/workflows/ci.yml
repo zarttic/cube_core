@@ -43,15 +43,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Load perf thresholds
+        run: cat .github/perf-thresholds.env >> "$GITHUB_ENV"
+
       - name: Run performance smoke check
-        env:
-          PERF_MAX_GEOHASH_LOCATE_MS: "4.0"
-          PERF_MAX_MGRS_LOCATE_MS: "15.0"
-          PERF_MAX_H3_LOCATE_MS: "4.0"
-          PERF_MAX_GEOHASH_COVER_MS: "120.0"
-          PERF_MAX_MGRS_COVER_MS: "260.0"
-          PERF_MAX_H3_COVER_MS: "180.0"
-          PERF_MAX_BATCH_GEOMETRY_MS: "70.0"
-          PERF_MAX_MGRS_NEIGHBORS_MS: "30.0"
-          PERF_MAX_H3_NEIGHBORS_MS: "6.0"
-        run: python -m grid_core.app.perf_smoke
+        run: |
+          PERF_SMOKE_JSON_PATH=artifacts/perf-smoke.json python -m grid_core.app.perf_smoke
+
+      - name: Upload perf smoke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-report
+          path: artifacts/perf-smoke.json
+          if-no-files-found: error
+
+  sdk-package-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build SDK package artifacts
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build
+
+      - name: Wheel install smoke test
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -c "from grid_core.sdk import CubeEncoderSDK; c=CubeEncoderSDK().locate('geohash',7,[116.391,39.907]); assert c.space_code"
+
+      - name: SDist install smoke test
+        run: |
+          python -m pip install --force-reinstall dist/*.tar.gz
+          python -c "from grid_core.sdk import CubeEncoderSDK; c=CubeEncoderSDK().locate('mgrs',3,[116.391,39.907]); assert c.space_code"

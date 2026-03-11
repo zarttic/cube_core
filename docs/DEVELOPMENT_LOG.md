@@ -330,3 +330,39 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: passed.
 - Next:
   - Execute pending performance/ergonomics roadmap items (`TASK-0019`, `TASK-0020`, `TASK-0022`).
+
+## 2026-03-11 | TASK-0025 | Stabilize minimal strategy + perf visibility + SDK release pipeline
+- Goal: Raise engine/SDK delivery to long-term stable and scalable baseline.
+- Scope: geohash hot path, multi-engine minimal coarsening, edge-case tests, perf artifact CI, SDK release governance.
+- Key Changes:
+  - Geohash cover hot path:
+    - Added bbox numeric pre-filter before shapely operations.
+    - Reused grid-index-derived bbox (avoid decode roundtrips in cover loop).
+    - Reused prebuilt shapely prepared geometry for intersect checks.
+  - Minimal mode strategy:
+    - Added cross-level sibling coarsening for `geohash`/`mgrs`/`isea4h`.
+    - Updated minimal tests to validate expanded-minimal subset invariants.
+  - Edge/extreme stability:
+    - Added deterministic random bbox stability tests including dateline crossing.
+    - Added MGRS zone-boundary stability tests.
+    - Added ISEA4H polar cover stability test.
+  - Perf observability:
+    - Added JSON perf report export (`PERF_SMOKE_JSON_PATH`) in `perf_smoke`.
+    - Centralized CI perf thresholds into `.github/perf-thresholds.env`.
+    - Added perf report artifact upload in CI.
+  - SDK release governance:
+    - Added `CHANGELOG.md`.
+    - Added `docs/SDK_RELEASE.md` with SemVer and release checklist.
+    - Added CI `sdk-package-smoke` job (build + wheel/sdist install smoke).
+    - Bumped package version to `0.2.0`.
+- Validation:
+  - `python -m pytest -q tests/test_geohash_engine.py tests/test_mgrs_engine.py tests/test_isea4h_engine.py tests/test_engine_stability.py`
+  - Result: 26 passed.
+  - `python -m pytest -q tests/test_perf_smoke.py tests/test_sdk.py`
+  - Result: 5 passed.
+  - `python -m pytest -q tests`
+  - Result: 71 passed.
+  - `python -m grid_core.app.perf_smoke`
+  - Result: passed.
+- Next:
+  - Execute remaining frontend ergonomics task (`TASK-0020`).

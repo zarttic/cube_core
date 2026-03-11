@@ -61,7 +61,10 @@ class MGRSEngine:
                 if neighbor not in visited:
                     queue.append(neighbor)
 
-        return [self._build_cell(code=code, level=precision) for code in sorted(selected)]
+        if cover_mode == CoverMode.MINIMAL.value:
+            selected = self._coarsen_minimal(selected)
+
+        return [self._build_cell(code=code, level=self._precision_from_code(code)) for code in sorted(selected)]
 
     def code_to_geometry(self, code: str):
         return self._geometry_from_bbox(self.code_to_bbox(code))
@@ -223,3 +226,27 @@ class MGRSEngine:
             )
 
         return sorted(points)
+
+    def _coarsen_minimal(self, codes: set[str]) -> set[str]:
+        out = set(codes)
+        changed = True
+        while changed:
+            changed = False
+            grouped: dict[str, set[str]] = {}
+            for code in out:
+                precision = self._precision_from_code(code)
+                if precision <= 1:
+                    continue
+                parent_code = code[:-2]
+                grouped.setdefault(parent_code, set()).add(code)
+
+            for parent_code, child_codes in grouped.items():
+                if len(child_codes) != 100:
+                    continue
+                child_level = self._precision_from_code(parent_code) + 1
+                expected_children = set(self.children(parent_code, child_level))
+                if expected_children == child_codes:
+                    out.difference_update(child_codes)
+                    out.add(parent_code)
+                    changed = True
+        return out

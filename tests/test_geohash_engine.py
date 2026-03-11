@@ -3,6 +3,22 @@ from grid_core.app.utils.geometry import bbox_to_polygon
 from grid_core.app.utils import geohash_utils
 
 
+def _expand_geohash_to_level(codes: set[str], target_level: int) -> set[str]:
+    out: set[str] = set()
+    for code in codes:
+        if len(code) == target_level:
+            out.add(code)
+            continue
+        frontier = [code]
+        while frontier:
+            cur = frontier.pop()
+            if len(cur) == target_level:
+                out.add(cur)
+            else:
+                frontier.extend(f"{cur}{ch}" for ch in geohash_utils.BASE32)
+    return out
+
+
 def test_locate_point_returns_valid_cell():
     engine = GeohashEngine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=7)
@@ -61,7 +77,7 @@ def test_cover_contain_returns_only_fully_contained_cells():
     assert {cell.space_code for cell in cells} == {code}
 
 
-def test_cover_minimal_is_subset_of_intersect():
+def test_cover_minimal_expanded_is_subset_of_intersect():
     engine = GeohashEngine()
     polygon = {
         "type": "Polygon",
@@ -77,10 +93,13 @@ def test_cover_minimal_is_subset_of_intersect():
     }
 
     intersect_codes = {c.space_code for c in engine.cover_geometry(polygon, level=6, cover_mode="intersect")}
-    minimal_codes = {c.space_code for c in engine.cover_geometry(polygon, level=6, cover_mode="minimal")}
+    minimal_cells = engine.cover_geometry(polygon, level=6, cover_mode="minimal")
+    minimal_codes = {c.space_code for c in minimal_cells}
+    expanded_minimal = _expand_geohash_to_level(minimal_codes, target_level=6)
 
-    assert minimal_codes.issubset(intersect_codes)
+    assert expanded_minimal.issubset(intersect_codes)
     assert len(minimal_codes) > 0
+    assert len(minimal_codes) <= len(expanded_minimal)
 
 
 def test_cover_intersect_dateline_crossing_bbox_polygon():

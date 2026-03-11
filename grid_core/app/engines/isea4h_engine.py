@@ -36,7 +36,11 @@ class ISEA4HEngine:
                 selected.add(code)
             elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
                 selected.add(code)
-        return [self._build_cell(code, level, boundary=boundary_cache.get(code)) for code in sorted(selected)]
+        if cover_mode == CoverMode.MINIMAL.value:
+            selected = self._coarsen_minimal(selected)
+        return [
+            self._build_cell(code, h3.get_resolution(code), boundary=boundary_cache.get(code)) for code in sorted(selected)
+        ]
 
     def code_to_geometry(self, code: str) -> dict:
         self._validate_code(code)
@@ -119,3 +123,26 @@ class ISEA4HEngine:
     def _validate_code(code: str) -> None:
         if not h3.is_valid_cell(code):
             raise ValidationError("Invalid ISEA4H code")
+
+    @staticmethod
+    def _coarsen_minimal(codes: set[str]) -> set[str]:
+        out = set(codes)
+        changed = True
+        while changed:
+            changed = False
+            grouped: dict[str, set[str]] = {}
+            for code in out:
+                level = h3.get_resolution(code)
+                if level <= 1:
+                    continue
+                parent_code = h3.cell_to_parent(code, level - 1)
+                grouped.setdefault(parent_code, set()).add(code)
+
+            for parent_code, child_codes in grouped.items():
+                child_level = h3.get_resolution(parent_code) + 1
+                expected_children = set(h3.cell_to_children(parent_code, child_level))
+                if expected_children == child_codes:
+                    out.difference_update(child_codes)
+                    out.add(parent_code)
+                    changed = True
+        return out

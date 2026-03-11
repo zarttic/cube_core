@@ -45,8 +45,16 @@ def test_isea4h_cover_modes():
     intersect = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="intersect")}
     contain = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="contain")}
     minimal = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="minimal")}
+    expanded_minimal: set[str] = set()
+    for code in minimal:
+        code_level = h3.get_resolution(code)
+        if code_level == 6:
+            expanded_minimal.add(code)
+        else:
+            expanded_minimal.update(h3.cell_to_children(code, 6))
     assert contain.issubset(intersect)
-    assert minimal == intersect
+    assert expanded_minimal.issubset(intersect)
+    assert len(minimal) <= len(expanded_minimal)
 
 
 def test_isea4h_validation():

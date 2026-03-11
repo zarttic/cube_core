@@ -25,6 +25,8 @@
   - MGRS（第一阶段增强）：邻接计算（`/v1/topology/neighbors`）、父级推导（`/v1/topology/parent`）、子级推导（`/v1/topology/children`）、编码转几何（`/v1/topology/geometry`）
   - ISEA4H（第一阶段）：基于 Uber H3 的点定位、几何覆盖、邻接/父子级、编码转几何
 
+`cover_mode=minimal` 已支持跨层级合并，返回结果中可能包含低于请求层级的格网单元。
+
 ## 技术栈
 
 - Python 3.11
@@ -91,6 +93,8 @@ python -m grid_core.app.perf_smoke
 - 当前状态与后续计划：`docs/STATUS_AND_PLAN.md`
 - Bug 排查记录：`docs/BUG_LOG.md`
 - 记录流程规范：`docs/DOC_WORKFLOW.md`
+- SDK 发布规范：`docs/SDK_RELEASE.md`
+- 变更记录：`CHANGELOG.md`
 
 每次开发与排障都需要追加记录（append-only）。
 

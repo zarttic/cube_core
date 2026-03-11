@@ -71,6 +71,8 @@ python -m grid_core.app.perf_smoke
 - Status & next plan: `docs/STATUS_AND_PLAN.md`
 - Bug log: `docs/BUG_LOG.md`
 - Process guideline: `docs/DOC_WORKFLOW.md`
+- SDK release policy: `docs/SDK_RELEASE.md`
+- Changelog: `CHANGELOG.md`
 
 ## MVP limits
 
@@ -78,6 +80,7 @@ python -m grid_core.app.perf_smoke
 - `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain/minimal`.
 - `isea4h` is now backed by Uber H3 for first-phase runnable capability (`locate/cover/topology`).
 - `cover_mode=intersect/contain/minimal` implemented.
+- `cover_mode=minimal` supports cross-level coarsening (response cells may include levels lower than request level).
 - Frontend visualizer available at `/v1/demo/map` with API/SDK switch.
 - Frontend visualizer supports `locate/cover/neighbors/parent/children` map rendering.
 - Frontend visualizer supports drawing polygon/rectangle on map for `cover` preview.

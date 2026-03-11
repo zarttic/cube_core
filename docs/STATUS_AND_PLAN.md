@@ -42,7 +42,7 @@ Single-page handoff for ongoing development:
   - CI `perf-smoke` job
 
 ### Quality baseline
-- Latest full test result: `67 passed`
+- Latest full test result: `71 passed`
 - Core docs maintained:
   - `docs/DEVELOPMENT_LOG.md`
   - `docs/BUG_LOG.md`
@@ -52,19 +52,7 @@ Single-page handoff for ongoing development:
 
 ## Next Planned Tasks
 
-### TASK-0019 (Next): Geohash cover hot-path optimization
-- Goal:
-  - Reduce CPU and allocations for large-area geohash cover.
-- Planned changes:
-  - Cache/reuse decoded bbox and polygon objects in geohash cover loops.
-  - Add fast pre-filter before shapely intersection where possible.
-  - Add micro-benchmark case in `perf_smoke`.
-- Acceptance criteria:
-  - No API behavior change.
-  - `python -m pytest -q tests` passes.
-  - `python -m grid_core.app.perf_smoke` passes.
-
-### TASK-0020: Frontend layer controls and rendering ergonomics
+### TASK-0020 (Next): Frontend layer controls and rendering ergonomics
 - Goal:
   - Improve large result-set usability and rendering stability.
 - Planned changes:
@@ -75,25 +63,20 @@ Single-page handoff for ongoing development:
   - Frontend remains mobile/desktop usable.
   - Demo tests extended for new controls.
 
-### TASK-0022: Perf trend visibility in CI artifacts
-- Goal:
-  - Keep performance evolution visible over time.
-- Planned changes:
-  - Export perf smoke JSON artifact in CI.
-  - Keep threshold env vars centralized and documented.
-- Acceptance criteria:
-  - PR can inspect perf output artifacts directly.
+### Completed this round
+- `TASK-0019`: Geohash cover hot-path optimization (bbox pre-filter + prepared geometry + bbox reuse) completed.
+- `TASK-0021`: MGRS `minimal` mode completed.
+- `TASK-0022`: Perf trend visibility completed (JSON artifact export + CI upload + centralized thresholds).
+- `TASK-0024`: SDK release pipeline completed (SemVer/changelog policy + CI package smoke job).
 
-### TASK-0024: SDK release pipeline and versioning policy
+### TASK-0026: Minimal strategy precision tuning
 - Goal:
-  - Make SDK release process reproducible for team delivery.
+  - Improve cross-level minimal output quality and predictability for complex boundaries.
 - Planned changes:
-  - Add version bump rule and changelog section for SDK API changes.
-  - Add CI job for package build validation.
-  - Add install/import smoke test for wheel/sdist artifacts.
+  - Add optional policy knobs for merge aggressiveness.
+  - Add golden test fixtures for mixed-level outputs.
 - Acceptance criteria:
-  - `python -m build` succeeds in CI.
-  - Artifact install smoke test passes.
+  - Invariant tests pass and mixed-level output remains deterministic.
 
 ---
 
