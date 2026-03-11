@@ -400,25 +400,40 @@
                             </div>
 
                             <div class="form-group">
-                                <label>选区输入类型</label>
+                                <label>输入类型</label>
                                 <select id="topologyInputType" class="form-select">
-                                    <option value="point">地图点选</option>
-                                    <option value="bbox">BBox 输入</option>
-                                    <option value="polygon">地图绘制 Polygon/Rectangle</option>
+                                    <option value="point">单点定位</option>
+                                    <option value="bbox">范围框</option>
+                                    <option value="polygon">多边形</option>
                                 </select>
                             </div>
 
                             <div class="form-group">
-                                <label>点位坐标（点击地图自动填充）</label>
-                                <div class="coord-inputs">
-                                    <input type="number" id="topoLat" class="form-input" value="39.9042" step="0.0001" placeholder="纬度">
-                                    <input type="number" id="topoLng" class="form-input" value="116.4074" step="0.0001" placeholder="经度">
+                                <label>精度/层级</label>
+                                <div class="range-group">
+                                    <input type="range" id="topologyLevel" min="1" max="12" value="6" class="form-range">
+                                    <span class="range-value" id="topologyLevelValue">6级</span>
                                 </div>
                             </div>
 
                             <div class="form-group">
-                                <label>BBox（可选，minLon,minLat,maxLon,maxLat）</label>
-                                <input type="text" id="topoBbox" class="form-input" placeholder="116.3,39.8,116.5,40.0">
+                                <label>坐标输入</label>
+                                <div class="coord-inputs">
+                                    <input type="number" id="topoLat" class="form-input" value="39.9042" step="0.0001" placeholder="纬度">
+                                    <input type="number" id="topoLng" class="form-input" value="116.4074" step="0.0001" placeholder="经度">
+                                </div>
+                                <button class="btn btn-small btn-secondary" onclick="getCurrentLocation()">
+                                    <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                                        <circle cx="12" cy="10" r="3"/>
+                                    </svg>
+                                    获取当前位置
+                                </button>
+                            </div>
+
+                            <div class="form-group">
+                                <label>范围半径 (km)</label>
+                                <input type="number" id="topoRadius" class="form-input" value="10" min="0.1" max="1000" step="0.1">
                             </div>
 
                             <div class="form-group">

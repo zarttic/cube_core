@@ -402,6 +402,15 @@ function initFormHandlers() {
             document.getElementById('levelValue').textContent = e.target.value + '级';
         });
     }
+    const topologyLevelSlider = document.getElementById('topologyLevel');
+    if (topologyLevelSlider) {
+        topologyLevelSlider.addEventListener('input', (e) => {
+            const label = document.getElementById('topologyLevelValue');
+            if (label) {
+                label.textContent = e.target.value + '级';
+            }
+        });
+    }
 
     // 编码操作切换
     const encodeOps = document.querySelectorAll('input[name="encodeOp"]');
@@ -929,7 +938,7 @@ async function runGridDivision() {
     const { gridPrefix } = apiPrefixes();
     const gridType = document.querySelector('input[name="gridType"]:checked')?.value || 'geohash';
     const inputType = document.getElementById('inputType')?.value || 'point';
-    const level = parseInt(document.getElementById('gridLevel')?.value || 6, 10);
+    const level = parseInt(document.getElementById('topologyLevel')?.value || 6, 10);
     const lat = parseFloat(document.getElementById('lat')?.value || 39.9042);
     const lng = parseFloat(document.getElementById('lng')?.value || 116.4074);
     const radius = parseFloat(document.getElementById('radius')?.value || 10);
@@ -1253,11 +1262,10 @@ async function resolveTopologySelection(ctx) {
     }
 
     if (inputType === 'bbox') {
-        const bboxText = document.getElementById('topoBbox')?.value || '';
-        const bbox = parseBboxText(bboxText);
-        if (!bbox) {
-            throw new Error('请选择 bbox 输入并填写有效范围');
-        }
+        const lat = parseFloat(document.getElementById('topoLat')?.value || 39.9042);
+        const lng = parseFloat(document.getElementById('topoLng')?.value || 116.4074);
+        const radius = parseFloat(document.getElementById('topoRadius')?.value || 10);
+        const bbox = buildBboxFromRadius(lng, lat, radius);
         const covered = await requestJson(`${gridPrefix}/cover`, {
             grid_type: gridType,
             level,
@@ -1269,7 +1277,7 @@ async function resolveTopologySelection(ctx) {
         });
         return {
             baseCodes: covered.cells.map((c) => c.space_code),
-            selectionPoint: [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
+            selectionPoint: [lng, lat],
             selectionGeometry: bboxToPolygonGeometry(bbox),
         };
     }
@@ -1621,10 +1629,20 @@ function getCurrentLocation() {
                     latInput.value = lat;
                     lngInput.value = lng;
                 }
+                const topoLatInput = document.getElementById('topoLat');
+                const topoLngInput = document.getElementById('topoLng');
+                if (topoLatInput && topoLngInput) {
+                    topoLatInput.value = lat;
+                    topoLngInput.value = lng;
+                }
 
                 if (maps.division) {
                     maps.division.setView([parseFloat(lat), parseFloat(lng)], 12);
                     addMarkerToMap(maps.division, parseFloat(lat), parseFloat(lng), '当前位置');
+                }
+                if (maps.topology) {
+                    maps.topology.setView([parseFloat(lat), parseFloat(lng)], 12);
+                    addMarkerToMap(maps.topology, parseFloat(lat), parseFloat(lng), '当前位置');
                 }
 
                 console.log(`已获取当前位置: ${lat}, ${lng}`);
