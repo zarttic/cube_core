@@ -379,6 +379,27 @@
                             </div>
 
                             <div class="form-group">
+                                <label>格网类型</label>
+                                <div class="radio-group">
+                                    <label class="radio-label">
+                                        <input type="radio" name="topologyGridType" value="geohash" checked>
+                                        <span class="radio-custom"></span>
+                                        <span>Geohash 经纬度格网</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="topologyGridType" value="mgrs">
+                                        <span class="radio-custom"></span>
+                                        <span>MGRS 平面格网</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="topologyGridType" value="isea4h">
+                                        <span class="radio-custom"></span>
+                                        <span>ISEA4H 六边形格网</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
                                 <label>选区输入类型</label>
                                 <select id="topologyInputType" class="form-select">
                                     <option value="point">地图点选</option>

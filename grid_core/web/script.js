@@ -7,6 +7,7 @@ let drawItems = null;
 let drawnGeometry = null;
 let topologyDrawItems = null;
 let drawnTopologyGeometry = null;
+let topologyPreviewLoaded = false;
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -42,6 +43,11 @@ function initModuleTabs() {
             }
 
             currentPage = moduleId;
+            if (moduleId === 'grid-operations') {
+                setTimeout(() => {
+                    autoPreviewTopology();
+                }, 120);
+            }
 
             // 延迟刷新地图
             setTimeout(() => {
@@ -201,7 +207,27 @@ function initMaps() {
                 });
             }
         });
+
+        autoPreviewTopology();
     }, 100);
+}
+
+function autoPreviewTopology() {
+    if (topologyPreviewLoaded || isProcessing || !maps.topology) {
+        return;
+    }
+    const latInput = document.getElementById('topoLat');
+    const lngInput = document.getElementById('topoLng');
+    if (!latInput || !lngInput) {
+        return;
+    }
+    topologyPreviewLoaded = true;
+    const lat = parseFloat(latInput.value || '39.9042');
+    const lng = parseFloat(lngInput.value || '116.4074');
+    addMarkerToMap(maps.topology, lat, lng, `默认展示点 ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+    runGridOperations().catch((err) => {
+        console.error('Topology preview failed', err);
+    });
 }
 
 // 创建地图
@@ -1092,7 +1118,7 @@ async function runGridOperations() {
     if (!map) return;
     clearMapDataLayers(map);
 
-    const gridType = document.querySelector('input[name="gridType"]:checked')?.value || 'geohash';
+    const gridType = document.querySelector('input[name="topologyGridType"]:checked')?.value || 'geohash';
     const opType = document.getElementById('topologyOp')?.value || 'neighbors';
     const inputType = document.getElementById('topologyInputType')?.value || 'point';
     const k = parseInt(document.getElementById('neighborK')?.value || 1, 10);
