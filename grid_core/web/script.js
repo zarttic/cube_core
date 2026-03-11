@@ -1022,11 +1022,13 @@ async function runGridOperations() {
     const opType = document.getElementById('topologyOp')?.value || 'neighbors';
     const k = parseInt(document.getElementById('neighborK')?.value || 1, 10);
     const targetLevel = parseInt(document.getElementById('targetLevel')?.value || 6, 10);
+    const convertDir = document.getElementById('convertDir')?.value || 'code2coord';
     let code1 = document.getElementById('opCode1')?.value?.trim() || '';
     const code2 = document.getElementById('opCode2')?.value?.trim() || '';
     const lat = parseFloat(document.getElementById('lat')?.value || 39.9042);
     const lng = parseFloat(document.getElementById('lng')?.value || 116.4074);
     const level = parseInt(document.getElementById('gridLevel')?.value || 6, 10);
+    const baseRows = [{ label: '格网类型', value: gridType }];
 
     if (!code1) {
         const located = await requestJson(`${gridPrefix}/locate`, {
@@ -1055,13 +1057,15 @@ async function runGridOperations() {
             });
         }
         fitMapIfHasLayer(map);
-        updateResultHtml('operationResults', [
+        const rows = [
             { label: '运算类型', value: 'neighbors' },
             { label: '输入编码', value: code1, code: true },
             { label: 'k', value: String(k) },
             { label: '结果数量', value: String(data.statistics?.count || data.result_codes.length) },
             { label: '预览编码', value: previewCodes.slice(0, 8).join(', '), code: true },
-        ]);
+        ];
+        await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
+        updateResultHtml('operationResults', [...baseRows, ...rows]);
         return;
     }
 
@@ -1074,12 +1078,14 @@ async function runGridOperations() {
         });
         drawGeometryOnMap(map, geo.geometry, gridType, data.parent_code);
         fitMapIfHasLayer(map);
-        updateResultHtml('operationResults', [
+        const rows = [
             { label: '运算类型', value: 'parent' },
             { label: '输入编码', value: code1, code: true },
             { label: '父编码', value: data.parent_code, code: true },
             { label: '执行时间', value: new Date().toLocaleString('zh-CN') },
-        ]);
+        ];
+        await appendConversionRows(rows, convertDir, { code1: data.parent_code, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
+        updateResultHtml('operationResults', [...baseRows, ...rows]);
         return;
     }
 
@@ -1103,13 +1109,15 @@ async function runGridOperations() {
             });
         }
         fitMapIfHasLayer(map);
-        updateResultHtml('operationResults', [
+        const rows = [
             { label: '运算类型', value: 'children' },
             { label: '输入编码', value: code1, code: true },
             { label: '目标层级', value: String(targetLevel) },
             { label: '结果数量', value: String(data.statistics?.count || data.child_codes.length) },
             { label: '预览编码', value: previewCodes.slice(0, 8).join(', '), code: true },
-        ]);
+        ];
+        await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
+        updateResultHtml('operationResults', [...baseRows, ...rows]);
         return;
     }
 
@@ -1119,28 +1127,104 @@ async function runGridOperations() {
     const geoA = await requestJson(`${topologyPrefix}/geometry`, {
         grid_type: gridType,
         code: code1,
-        boundary_type: 'bbox',
+        boundary_type: 'polygon',
     });
     const geoB = await requestJson(`${topologyPrefix}/geometry`, {
         grid_type: gridType,
         code: code2,
-        boundary_type: 'bbox',
+        boundary_type: 'polygon',
     });
-    const [aMinLon, aMinLat, aMaxLon, aMaxLat] = geoA.geometry.bbox;
-    const [bMinLon, bMinLat, bMaxLon, bMaxLat] = geoB.geometry.bbox;
-    const contains = aMinLon <= bMinLon && aMinLat <= bMinLat && aMaxLon >= bMaxLon && aMaxLat >= bMaxLat;
-    const intersect = !(aMaxLon < bMinLon || aMinLon > bMaxLon || aMaxLat < bMinLat || aMinLat > bMaxLat);
+    const relation = evaluateGeometryRelation(geoA.geometry, geoB.geometry);
 
-    drawGeometryOnMap(map, bboxToPolygonGeometry(geoA.geometry.bbox), gridType, code1);
-    drawGeometryOnMap(map, bboxToPolygonGeometry(geoB.geometry.bbox), gridType, code2);
+    drawGeometryOnMap(map, geoA.geometry, gridType, code1);
+    drawGeometryOnMap(map, geoB.geometry, gridType, code2);
     fitMapIfHasLayer(map);
-    updateResultHtml('operationResults', [
+    const rows = [
         { label: '运算类型', value: opType },
         { label: '编码A', value: code1, code: true },
         { label: '编码B', value: code2, code: true },
-        { label: '结果', value: opType === 'contains' ? (contains ? '包含' : '不包含') : intersect ? '相交' : '不相交' },
-        { label: '说明', value: 'contains/intersect 基于 BBox 近似判定' },
-    ]);
+        {
+            label: '结果',
+            value: opType === 'contains'
+                ? (relation.contains ? '包含' : '不包含')
+                : (relation.intersect ? '相交' : '不相交'),
+        },
+        {
+            label: '判定方式',
+            value: relation.method,
+        },
+    ];
+    await appendConversionRows(rows, convertDir, { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix });
+    updateResultHtml('operationResults', [...baseRows, ...rows]);
+}
+
+function geometryToFeature(geometry) {
+    return { type: 'Feature', properties: {}, geometry };
+}
+
+function evaluateGeometryRelation(geometryA, geometryB) {
+    if (window.turf?.booleanContains && window.turf?.booleanIntersects) {
+        const featureA = geometryToFeature(geometryA);
+        const featureB = geometryToFeature(geometryB);
+        return {
+            contains: window.turf.booleanContains(featureA, featureB),
+            intersect: window.turf.booleanIntersects(featureA, featureB),
+            method: 'Polygon 精确判定',
+        };
+    }
+
+    const [aMinLon, aMinLat, aMaxLon, aMaxLat] = extractGeometryBounds(geometryA);
+    const [bMinLon, bMinLat, bMaxLon, bMaxLat] = extractGeometryBounds(geometryB);
+    const contains = aMinLon <= bMinLon && aMinLat <= bMinLat && aMaxLon >= bMaxLon && aMaxLat >= bMaxLat;
+    const intersect = !(aMaxLon < bMinLon || aMinLon > bMaxLon || aMaxLat < bMinLat || aMinLat > bMaxLat);
+    return {
+        contains,
+        intersect,
+        method: 'BBox 近似判定（turf 未加载）',
+    };
+}
+
+function extractGeometryBounds(geometry) {
+    const coords = [];
+    const walk = (node) => {
+        if (!Array.isArray(node)) return;
+        if (node.length >= 2 && typeof node[0] === 'number' && typeof node[1] === 'number') {
+            coords.push(node);
+            return;
+        }
+        node.forEach(walk);
+    };
+    walk(geometry.coordinates);
+    if (coords.length === 0) return [0, 0, 0, 0];
+    const lons = coords.map((p) => p[0]);
+    const lats = coords.map((p) => p[1]);
+    return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
+}
+
+async function appendConversionRows(rows, convertDir, ctx) {
+    const { code1, targetLevel, lat, lng, gridType, gridPrefix, topologyPrefix } = ctx;
+    if (convertDir === 'code2coord') {
+        const bboxResp = await requestJson(`${topologyPrefix}/geometry`, {
+            grid_type: gridType,
+            code: code1,
+            boundary_type: 'bbox',
+        });
+        const bbox = bboxResp.geometry.bbox;
+        const centerLon = (bbox[0] + bbox[2]) / 2;
+        const centerLat = (bbox[1] + bbox[3]) / 2;
+        rows.push({ label: '转换方向', value: '编码 -> 坐标' });
+        rows.push({ label: '转换结果', value: `${centerLat.toFixed(6)}, ${centerLon.toFixed(6)}` });
+        return;
+    }
+
+    const locateResp = await requestJson(`${gridPrefix}/locate`, {
+        grid_type: gridType,
+        level: targetLevel,
+        point: [lng, lat],
+    });
+    rows.push({ label: '转换方向', value: '坐标 -> 编码' });
+    rows.push({ label: '转换层级', value: String(targetLevel) });
+    rows.push({ label: '转换结果', value: locateResp.cell.space_code, code: true });
 }
 
 // 4. 光学遥感剖分演示

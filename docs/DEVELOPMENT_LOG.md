@@ -393,3 +393,19 @@ Track every development task with scope, decisions, changes, and validation resu
   - Result: passed.
 - Next:
   - Continue frontend ergonomics iteration (`TASK-0020`) on layer controls and result cap UI.
+
+## 2026-03-11 | TASK-0027 | Harden topology meta-operations in frontend
+- Goal: Restore and complete topology meta-operation usability after UI alignment.
+- Scope: frontend encoding page script + integration behavior.
+- Key Changes:
+  - Reworked `runGridOperations` to include conversion flow execution (`code->coord` and `coord->code`) using backend APIs.
+  - Upgraded `contains/intersect` from bbox-only approximation to polygon-based evaluation when `turf` is available, with bbox fallback.
+  - Added explicit result rows for conversion direction/level/output.
+  - Kept neighbors/parent/children batch geometry rendering and added conversion result integration to all operation branches.
+- Validation:
+  - `python -m pytest -q tests/test_demo_api.py tests/test_api.py`
+  - Result: 23 passed.
+  - `python -m pytest -q tests`
+  - Result: 72 passed.
+- Next:
+  - Continue frontend ergonomics iteration (`TASK-0020`) on layer controls and result cap UI.
