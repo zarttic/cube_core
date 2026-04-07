@@ -19,19 +19,20 @@ class MGRSEngine:
         self._converter = mgrs.MGRS()
 
     def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
-        precision = self._validate_level(level)
+        app_level = self._validate_level(level)
+        precision = self._to_precision(app_level)
         code = self._converter.toMGRS(lat, lon, MGRSPrecision=precision)
-        return self._build_cell(code=code, level=level)
+        return self._build_cell(code=code, level=app_level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
-        precision = self._validate_level(level)
+        app_level = self._validate_level(level)
         if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError("MGRS cover supports only intersect/contain/minimal mode in MVP")
 
         shp = to_shapely(geometry)
         seeds = self._seed_points(shp)
         seed_codes = {
-            self.locate_point(lon=lon, lat=lat, level=precision).space_code for lon, lat in seeds if -90.0 <= lat <= 90.0
+            self.locate_point(lon=lon, lat=lat, level=app_level).space_code for lon, lat in seeds if -90.0 <= lat <= 90.0
         }
         if not seed_codes:
             return []
@@ -64,7 +65,7 @@ class MGRSEngine:
         if cover_mode == CoverMode.MINIMAL.value:
             selected = self._coarsen_minimal(selected)
 
-        return [self._build_cell(code=code, level=self._precision_from_code(code)) for code in sorted(selected)]
+        return [self._build_cell(code=code, level=self._level_from_code(code)) for code in sorted(selected)]
 
     def code_to_geometry(self, code: str):
         return self._geometry_from_bbox(self.code_to_bbox(code))
@@ -125,19 +126,19 @@ class MGRSEngine:
         return tuple(sorted(neighbors))
 
     def parent(self, code: str):
-        precision = self._precision_from_code(code)
-        if precision <= 1:
+        level = self._level_from_code(code)
+        if level <= self._level_min():
             raise ValidationError("Root MGRS level has no parent")
         return code[:-2]
 
     def children(self, code: str, target_level: int):
-        target_precision = self._validate_level(target_level)
-        current_precision = self._precision_from_code(code)
-        if target_precision <= current_precision:
+        target_app_level = self._validate_level(target_level)
+        current_app_level = self._level_from_code(code)
+        if target_app_level <= current_app_level:
             raise ValidationError("target_level must be greater than current MGRS level")
 
         out = [code]
-        for _ in range(target_precision - current_precision):
+        for _ in range(target_app_level - current_app_level):
             out = [f"{prefix}{easting}{northing}" for prefix in out for easting in range(10) for northing in range(10)]
         return out
 
@@ -155,10 +156,30 @@ class MGRSEngine:
         )
 
     @staticmethod
-    def _validate_level(level: int) -> int:
-        if level < 1 or level > 5:
-            raise ValidationError("MGRS level must be in [1, 5] for MVP")
+    def _level_min() -> int:
+        return 1
+
+    @staticmethod
+    def _level_max() -> int:
+        # MGRSPrecision supports 0..5, we expose it as app level 1..6.
+        return 6
+
+    @classmethod
+    def _validate_level(cls, level: int) -> int:
+        if level < cls._level_min() or level > cls._level_max():
+            raise ValidationError(f"MGRS level must be in [{cls._level_min()}, {cls._level_max()}] for MVP")
         return level
+
+    @classmethod
+    def _to_precision(cls, level: int) -> int:
+        # app level 1..6 -> MGRSPrecision 0..5
+        return cls._validate_level(level) - 1
+
+    @classmethod
+    def _to_level(cls, precision: int) -> int:
+        if precision < 0 or precision > 5:
+            raise ValidationError("Invalid MGRS precision")
+        return precision + 1
 
     @staticmethod
     def _precision_from_code(code: str) -> int:
@@ -171,6 +192,10 @@ class MGRSEngine:
         if precision < 0 or precision > 5:
             raise ValidationError("Invalid MGRS precision")
         return precision
+
+    @classmethod
+    def _level_from_code(cls, code: str) -> int:
+        return cls._to_level(cls._precision_from_code(code))
 
     def _parse_utm(self, code: str) -> tuple[int, str, float, float]:
         try:
@@ -235,7 +260,7 @@ class MGRSEngine:
             grouped: dict[str, set[str]] = {}
             for code in out:
                 precision = self._precision_from_code(code)
-                if precision <= 1:
+                if precision <= 0:
                     continue
                 parent_code = code[:-2]
                 grouped.setdefault(parent_code, set()).add(code)
@@ -243,7 +268,7 @@ class MGRSEngine:
             for parent_code, child_codes in grouped.items():
                 if len(child_codes) != 100:
                     continue
-                child_level = self._precision_from_code(parent_code) + 1
+                child_level = self._level_from_code(parent_code) + 1
                 expected_children = set(self.children(parent_code, child_level))
                 if expected_children == child_codes:
                     out.difference_update(child_codes)

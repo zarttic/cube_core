@@ -39,7 +39,7 @@
 
 ```bash
 pip install -r requirements.txt
-uvicorn grid_core.app.main:app --reload
+uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 
 作为 Python SDK 使用：

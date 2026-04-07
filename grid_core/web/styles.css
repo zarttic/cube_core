@@ -156,6 +156,131 @@ body {
 }
 
 /* ========================================
+   门户顶部导航 - 统一 Header 样式
+   ======================================== */
+
+.portal-header {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: linear-gradient(90deg, #1758aa 0%, #1f72d4 45%, #2f91ea 100%);
+    color: #fff;
+    box-shadow: 0 6px 20px rgba(20, 78, 150, 0.18);
+}
+
+.portal-header-inner {
+    width: min(100%, 1920px);
+    margin: 0 auto;
+    padding: 0 32px;
+    min-height: 72px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 18px;
+}
+
+.portal-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.portal-logo {
+    width: 48px;
+    height: 48px;
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid rgba(255, 255, 255, 0.24);
+    color: #fff;
+    flex-shrink: 0;
+}
+
+.portal-logo svg {
+    width: 28px;
+    height: 28px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+}
+
+.portal-brand-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.portal-brand-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 1px;
+    line-height: 1.1;
+    white-space: nowrap;
+}
+
+.portal-brand-subtitle {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.82);
+    line-height: 1.1;
+    white-space: nowrap;
+    max-width: min(52vw, 620px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.portal-nav {
+    display: flex;
+    align-items: stretch;
+    justify-self: center;
+}
+
+.portal-nav a {
+    color: rgba(255, 255, 255, 0.9);
+    padding: 0 24px;
+    font-size: 15px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    min-height: 72px;
+    display: flex;
+    align-items: center;
+}
+
+.portal-nav a:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.portal-nav a.active {
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+}
+
+.portal-header-side {
+    display: flex;
+    justify-content: flex-end;
+    justify-self: end;
+}
+
+.user-chip {
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    min-height: 36px;
+    padding: 0 16px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ========================================
    Banner 区域
    ======================================== */
 
@@ -1950,4 +2075,89 @@ section {
 .h3-hexagon.neighbor {
     stroke: var(--success);
     fill: rgba(38, 162, 105, 0.3);
+}
+
+
+/* 任务备注样式 */
+.task-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: #fff8e6;
+    border: 1px solid #f5c211;
+    border-radius: var(--radius);
+    font-size: 12px;
+    color: #5c4803;
+    line-height: 1.5;
+}
+
+.task-note .note-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    stroke: #f5c211;
+}
+
+
+/* 开发中弹窗样式 */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+.modal-content {
+    background: #fff;
+    border-radius: 14px;
+    padding: 40px;
+    text-align: center;
+    max-width: 400px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+.modal-icon {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 20px;
+    color: var(--primary-light);
+}
+.modal-icon svg {
+    width: 100%;
+    height: 100%;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.5;
+}
+.modal-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--primary-dark);
+    margin-bottom: 12px;
+}
+.modal-desc {
+    font-size: 14px;
+    color: var(--gray);
+    margin-bottom: 24px;
+    line-height: 1.6;
+}
+.modal-btn {
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    padding: 12px 32px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.modal-btn:hover {
+    background: var(--primary-dark);
 }

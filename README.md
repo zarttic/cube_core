@@ -10,21 +10,21 @@ Geohash-first grid partition and space-time code engine with FastAPI + SDK layou
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn grid_core.app.main:app --reload
+uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 
 Open visual demo:
 
-- `http://127.0.0.1:8000/v1/demo/map`
+- `http://127.0.0.1:50012/v1/demo/map`
 
 ## API examples
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/grid/locate \
+curl -X POST http://127.0.0.1:50012/v1/grid/locate \
   -H 'Content-Type: application/json' \
   -d '{"grid_type":"geohash","level":7,"point":[116.391,39.907]}'
 
-curl -X POST http://127.0.0.1:8000/v1/code/st \
+curl -X POST http://127.0.0.1:50012/v1/code/st \
   -H 'Content-Type: application/json' \
   -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute","version":"v1"}'
 ```

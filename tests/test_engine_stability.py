@@ -30,8 +30,8 @@ def _expand_geohash(codes: set[str], target_level: int) -> set[str]:
 def _expand_mgrs(engine: MGRSEngine, codes: set[str], target_level: int) -> set[str]:
     out: set[str] = set()
     for code in codes:
-        precision = engine._precision_from_code(code)
-        if precision == target_level:
+        level = engine._level_from_code(code)
+        if level == target_level:
             out.add(code)
         else:
             out.update(engine.children(code, target_level))

@@ -30,3 +30,9 @@ async def handle_grid_core_error(_: Request, exc: GridCoreError):
     elif isinstance(exc, NotImplementedCapabilityError):
         status_code = 501
     return JSONResponse(status_code=status_code, content={"error": {"code": exc.code, "message": exc.message}})
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("grid_core.app.main:app", host=config.host, port=config.port)

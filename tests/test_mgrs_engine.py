@@ -8,8 +8,8 @@ from grid_core.app.engines.mgrs_engine import MGRSEngine
 def _expand_mgrs_to_level(engine: MGRSEngine, codes: set[str], target_level: int) -> set[str]:
     out: set[str] = set()
     for code in codes:
-        precision = engine._precision_from_code(code)
-        if precision == target_level:
+        level = engine._level_from_code(code)
+        if level == target_level:
             out.add(code)
         else:
             out.update(engine.children(code, target_level))
@@ -40,8 +40,14 @@ def test_mgrs_code_to_bbox_and_geometry():
 
 def test_mgrs_level_validation():
     engine = MGRSEngine()
+    cell = engine.locate_point(lon=116.391, lat=39.907, level=6)
+    assert cell.grid_type == "mgrs"
+
     with pytest.raises(ValidationError):
-        engine.locate_point(lon=116.391, lat=39.907, level=6)
+        engine.locate_point(lon=116.391, lat=39.907, level=7)
+
+    with pytest.raises(ValidationError):
+        engine.locate_point(lon=116.391, lat=39.907, level=0)
 
 
 def test_mgrs_cover_intersect_returns_cells():
@@ -98,7 +104,7 @@ def test_mgrs_neighbors_k1_non_empty():
 
     assert len(codes) > 0
     assert code not in codes
-    assert all(engine._precision_from_code(c) == 5 for c in codes)
+    assert all(engine._level_from_code(c) == 5 for c in codes)
 
 
 def test_mgrs_neighbors_k_validation():

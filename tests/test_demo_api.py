@@ -34,7 +34,7 @@ def test_demo_map_page_loads_html():
     resp = map_page()
     assert isinstance(resp, HTMLResponse)
     html = resp.body.decode("utf-8")
-    assert "全球离散格网与数据剖分系统" in html
+    assert "分析就绪数据剖分管理系统" in html
     assert "encoding.html" in html
     assert "partition.html" in html
 
@@ -42,8 +42,8 @@ def test_demo_map_page_loads_html():
 def test_demo_static_pages_and_assets_load():
     assert "格网模型与时空编码系统" in encoding_page().body.decode("utf-8")
     assert "分析就绪数据剖分系统" in partition_page().body.decode("utf-8")
-    assert "全球离散格网与数据剖分系统" in demo_home().body.decode("utf-8")
-    assert "全球离散格网与数据剖分系统" in demo_index_page().body.decode("utf-8")
+    assert "分析就绪数据剖分管理系统" in demo_home().body.decode("utf-8")
+    assert "分析就绪数据剖分管理系统" in demo_index_page().body.decode("utf-8")
     assert "document.addEventListener" in demo_script().body.decode("utf-8")
     assert ".site-header" in demo_styles().body.decode("utf-8")
     assert "格网模型与时空编码系统" in encoding_html_page().body.decode("utf-8")
