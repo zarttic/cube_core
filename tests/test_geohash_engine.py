@@ -1,21 +1,17 @@
+from s2sphere import CellId
+
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.utils.geometry import bbox_to_polygon
-from grid_core.app.utils import geohash_utils
 
 
-def _expand_geohash_to_level(codes: set[str], target_level: int) -> set[str]:
+def _expand_s2(engine: GeohashEngine, codes: set[str], target_level: int) -> set[str]:
     out: set[str] = set()
     for code in codes:
-        if len(code) == target_level:
+        cid = CellId.from_token(code)
+        if cid.level() == target_level:
             out.add(code)
             continue
-        frontier = [code]
-        while frontier:
-            cur = frontier.pop()
-            if len(cur) == target_level:
-                out.add(cur)
-            else:
-                frontier.extend(f"{cur}{ch}" for ch in geohash_utils.BASE32)
+        out.update(engine.children(code, target_level))
     return out
 
 
@@ -23,7 +19,9 @@ def test_locate_point_returns_valid_cell():
     engine = GeohashEngine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=7)
 
-    assert len(cell.space_code) == 7
+    cid = CellId.from_token(cell.space_code)
+    assert cid.is_valid()
+    assert cid.level() == 7
     assert cell.grid_type == "geohash"
     assert cell.level == 7
     assert len(cell.bbox) == 4
@@ -32,9 +30,10 @@ def test_locate_point_returns_valid_cell():
 
 def test_neighbors_k1_non_empty():
     engine = GeohashEngine()
-    codes = engine.neighbors("wtw3sjq", k=1)
+    code = engine.locate_point(lon=116.391, lat=39.907, level=7).space_code
+    codes = engine.neighbors(code, k=1)
     assert len(codes) > 0
-    assert "wtw3sjq" not in codes
+    assert code not in codes
 
 
 def test_cover_intersect_polygon_non_empty():
@@ -57,8 +56,8 @@ def test_cover_intersect_polygon_non_empty():
 
 def test_cover_contain_returns_only_fully_contained_cells():
     engine = GeohashEngine()
-    code = geohash_utils.encode(116.391, 39.907, precision=6)
-    min_lon, min_lat, max_lon, max_lat = geohash_utils.decode_bbox(code)
+    code = engine.locate_point(lon=116.391, lat=39.907, level=6).space_code
+    min_lon, min_lat, max_lon, max_lat = engine.code_to_bbox(code)
     polygon = {
         "type": "Polygon",
         "coordinates": [
@@ -95,7 +94,7 @@ def test_cover_minimal_expanded_is_subset_of_intersect():
     intersect_codes = {c.space_code for c in engine.cover_geometry(polygon, level=6, cover_mode="intersect")}
     minimal_cells = engine.cover_geometry(polygon, level=6, cover_mode="minimal")
     minimal_codes = {c.space_code for c in minimal_cells}
-    expanded_minimal = _expand_geohash_to_level(minimal_codes, target_level=6)
+    expanded_minimal = _expand_s2(engine, minimal_codes, target_level=6)
 
     assert expanded_minimal.issubset(intersect_codes)
     assert len(minimal_codes) > 0

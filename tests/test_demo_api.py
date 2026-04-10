@@ -1,4 +1,5 @@
 import h3
+from s2sphere import CellId
 from fastapi.responses import HTMLResponse
 
 from grid_core.app.api.demo import (
@@ -53,7 +54,7 @@ def test_demo_static_pages_and_assets_load():
 def test_demo_sdk_locate_geohash_works():
     resp = sdk_locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907]))
     assert resp.cell.grid_type == "geohash"
-    assert len(resp.cell.space_code) == 7
+    assert CellId.from_token(resp.cell.space_code).level() == 7
 
 
 def test_demo_sdk_cover_geohash_works():
@@ -98,9 +99,10 @@ def test_demo_sdk_topology_geohash_roundtrip():
     code = located.cell.space_code
 
     parent_resp = sdk_parent(ParentRequest(grid_type="geohash", code=code))
-    assert parent_resp.parent_code == code[:-1]
+    assert CellId.from_token(parent_resp.parent_code).level() == 6
 
     children_resp = sdk_children(ChildrenRequest(grid_type="geohash", code=parent_resp.parent_code, target_level=7))
+    assert len(children_resp.child_codes) == 4
     assert code in children_resp.child_codes
 
     neighbors_resp = sdk_neighbors(NeighborsRequest(grid_type="geohash", code=code, k=1))

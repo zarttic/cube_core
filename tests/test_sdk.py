@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 import h3
+from s2sphere import CellId
 
 from grid_core.sdk import CubeEncoderSDK
 
@@ -37,9 +38,10 @@ def test_sdk_topology_roundtrip():
     code = located.space_code
 
     parent_code = sdk.parent(grid_type="geohash", code=code)
-    assert parent_code == code[:-1]
+    assert CellId.from_token(parent_code).level() == 6
 
     child_codes = sdk.children(grid_type="geohash", code=parent_code, target_level=7)
+    assert len(child_codes) == 4
     assert code in child_codes
 
     neighbor_codes = sdk.neighbors(grid_type="geohash", code=code, k=1)
@@ -54,6 +56,8 @@ def test_sdk_topology_roundtrip():
 
 def test_sdk_st_code_generate_parse_batch():
     sdk = CubeEncoderSDK()
+    g1 = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907]).space_code
+    g2 = sdk.locate(grid_type="geohash", level=7, point=[116.392, 39.908]).space_code
     st = sdk.generate_st_code(
         grid_type="isea4h",
         level=7,
@@ -74,9 +78,9 @@ def test_sdk_st_code_generate_parse_batch():
         time_granularity="minute",
         version="v1",
         items=[
-            {"space_code": "wtw3sjq", "timestamp": datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)},
-            {"space_code": "wtw3sjr", "timestamp": datetime(2026, 3, 9, 15, 31, 0, tzinfo=timezone.utc)},
+            {"space_code": g1, "timestamp": datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)},
+            {"space_code": g2, "timestamp": datetime(2026, 3, 9, 15, 31, 0, tzinfo=timezone.utc)},
         ],
     )
     assert len(batch) == 2
-    assert batch[0] == "gh:7:wtw3sjq:202603091530:v1"
+    assert batch[0] == f"gh:7:{g1}:202603091530:v1"
