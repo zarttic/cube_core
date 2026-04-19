@@ -7,6 +7,7 @@ from shapely.geometry import Polygon
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils.geometry import to_shapely
 
@@ -20,6 +21,22 @@ class ISEA4HEngine:
         return self._build_cell(code, level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str) -> list[GridCell]:
+        compact_cells, boundary_cache = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return [
+            self._build_cell(cell.space_code, cell.level, boundary=boundary_cache.get(cell.space_code))
+            for cell in compact_cells
+        ]
+
+    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str) -> list[CompactGridCell]:
+        compact_cells, _ = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return compact_cells
+
+    def _cover_geometry_core(
+        self,
+        geometry: dict,
+        level: int,
+        cover_mode: str,
+    ) -> tuple[list[CompactGridCell], dict[str, list[list[float]]]]:
         self._validate_level(level)
         if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
@@ -38,9 +55,15 @@ class ISEA4HEngine:
                 selected.add(code)
         if cover_mode == CoverMode.MINIMAL.value:
             selected = self._coarsen_minimal(selected)
-        return [
-            self._build_cell(code, h3.get_resolution(code), boundary=boundary_cache.get(code)) for code in sorted(selected)
+        compact_cells = [
+            CompactGridCell(
+                space_code=code,
+                level=h3.get_resolution(code),
+                bbox=self._bbox_from_boundary(boundary_cache.get(code) or self._boundary_lnglat(code)),
+            )
+            for code in sorted(selected)
         ]
+        return compact_cells, boundary_cache
 
     def code_to_geometry(self, code: str) -> dict:
         self._validate_code(code)
@@ -113,6 +136,12 @@ class ISEA4HEngine:
 
     def _boundary_lnglat(self, code: str) -> list[list[float]]:
         return self._ring_to_list(self._boundary_cached(code))
+
+    @staticmethod
+    def _bbox_from_boundary(boundary: list[list[float]]) -> list[float]:
+        lons = [p[0] for p in boundary]
+        lats = [p[1] for p in boundary]
+        return [min(lons), min(lats), max(lons), max(lats)]
 
     @staticmethod
     def _validate_level(level: int) -> None:

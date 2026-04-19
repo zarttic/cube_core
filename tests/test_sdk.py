@@ -84,3 +84,38 @@ def test_sdk_st_code_generate_parse_batch():
     )
     assert len(batch) == 2
     assert batch[0] == f"gh:7:{g1}:202603091530:v1"
+
+
+def test_sdk_cover_compact_matches_full_cover_space_codes_and_bbox():
+    sdk = CubeEncoderSDK()
+    bbox = [116.385, 39.903, 116.397, 39.911]
+
+    full = sdk.cover(
+        grid_type="geohash",
+        level=6,
+        cover_mode="intersect",
+        boundary_type="bbox",
+        bbox=bbox,
+    )
+    compact = sdk.cover_compact(
+        grid_type="geohash",
+        level=6,
+        cover_mode="intersect",
+        bbox=bbox,
+    )
+
+    assert len(compact) == len(full)
+    assert {cell.space_code for cell in compact} == {cell.space_code for cell in full}
+    assert all(cell.level == 6 for cell in compact)
+    full_bbox_by_code = {cell.space_code: cell.bbox for cell in full}
+    assert {cell.space_code: cell.bbox for cell in compact} == full_bbox_by_code
+
+
+def test_sdk_code_to_bbox_matches_bbox_geometry_response():
+    sdk = CubeEncoderSDK()
+    code = sdk.locate(grid_type="geohash", level=6, point=[116.391, 39.907]).space_code
+
+    direct_bbox = sdk.code_to_bbox(grid_type="geohash", code=code)
+    geometry_bbox = sdk.code_to_geometry(grid_type="geohash", code=code, boundary_type="bbox")["bbox"]
+
+    assert direct_bbox == geometry_bbox

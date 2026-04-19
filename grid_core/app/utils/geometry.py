@@ -21,7 +21,12 @@ def to_shapely(geometry: dict):
 def point_from_coords(point: list[float]) -> Point:
     if len(point) != 2:
         raise ValidationError("Point must be [lon, lat]")
-    return Point(point[0], point[1])
+    lon, lat = point
+    if lon < -180.0 or lon > 180.0:
+        raise ValidationError("Point longitude must be in [-180, 180]")
+    if lat < -90.0 or lat > 90.0:
+        raise ValidationError("Point latitude must be in [-90, 90]")
+    return Point(lon, lat)
 
 
 def bbox_to_polygon(bbox: list[float]) -> Polygon | MultiPolygon:

@@ -109,3 +109,27 @@ def test_cover_intersect_dateline_crossing_bbox_polygon():
 
     assert len(cells) > 0
     assert all(-90.0 <= cell.center[1] <= 90.0 for cell in cells)
+
+
+def test_cover_geometry_compact_matches_full_cover():
+    engine = GeohashEngine()
+    polygon = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [116.38, 39.90],
+                [116.40, 39.90],
+                [116.40, 39.91],
+                [116.38, 39.91],
+                [116.38, 39.90],
+            ]
+        ],
+    }
+
+    full = engine.cover_geometry(polygon, level=6, cover_mode="intersect")
+    compact = engine.cover_geometry_compact(polygon, level=6, cover_mode="intersect")
+
+    assert {cell.space_code for cell in compact} == {cell.space_code for cell in full}
+    assert {cell.space_code: cell.bbox for cell in compact} == {
+        cell.space_code: cell.bbox for cell in full
+    }

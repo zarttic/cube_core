@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
 
 from s2sphere import Cell, CellId, LatLng, LatLngRect, RegionCoverer
 from shapely.geometry import Polygon
@@ -8,6 +9,7 @@ from shapely.prepared import prep
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils.geometry import to_shapely
 
@@ -22,6 +24,22 @@ class GeohashEngine:
         return self._build_cell(code, level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str) -> list[GridCell]:
+        compact_cells, boundary_cache = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return [
+            self._build_cell(cell.space_code, cell.level, boundary=boundary_cache.get(cell.space_code))
+            for cell in compact_cells
+        ]
+
+    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str) -> list[CompactGridCell]:
+        compact_cells, _ = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return compact_cells
+
+    def _cover_geometry_core(
+        self,
+        geometry: dict,
+        level: int,
+        cover_mode: str,
+    ) -> tuple[list[CompactGridCell], dict[str, list[list[float]]]]:
         self._validate_level(level)
         if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
@@ -59,7 +77,15 @@ class GeohashEngine:
         if cover_mode == CoverMode.MINIMAL.value:
             selected = self._coarsen_minimal(selected)
 
-        return [self._build_cell(code, self._cell_id_from_code(code).level(), boundary=boundary_cache.get(code)) for code in sorted(selected)]
+        compact_cells = [
+            CompactGridCell(
+                space_code=code,
+                level=self._cell_id_from_code(code).level(),
+                bbox=self._bbox_from_boundary(boundary_cache.get(code) or self._boundary_lnglat(code)),
+            )
+            for code in sorted(selected)
+        ]
+        return compact_cells, boundary_cache
 
     def code_to_geometry(self, code: str) -> dict:
         self._validate_code(code)
@@ -139,15 +165,25 @@ class GeohashEngine:
             metadata={"precision": level, "zone": None, "facet": "s2"},
         )
 
-    def _boundary_lnglat(self, code: str) -> list[list[float]]:
+    @lru_cache(maxsize=50000)
+    def _boundary_cached(self, code: str) -> tuple[tuple[float, float], ...]:
         cid = self._cell_id_from_code(code)
         cell = Cell(cid)
-        ring: list[list[float]] = []
+        ring: list[tuple[float, float]] = []
         for i in range(4):
             ll = LatLng.from_point(cell.get_vertex(i))
-            ring.append([ll.lng().degrees, ll.lat().degrees])
+            ring.append((ll.lng().degrees, ll.lat().degrees))
         ring.append(ring[0])
-        return ring
+        return tuple(ring)
+
+    def _boundary_lnglat(self, code: str) -> list[list[float]]:
+        return [[lon, lat] for lon, lat in self._boundary_cached(code)]
+
+    @staticmethod
+    def _bbox_from_boundary(boundary: list[list[float]]) -> list[float]:
+        lons = [p[0] for p in boundary]
+        lats = [p[1] for p in boundary]
+        return [min(lons), min(lats), max(lons), max(lats)]
 
     def _coarsen_minimal(self, codes: set[str]) -> set[str]:
         out = set(codes)
