@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from grid_core.app.core.enums import BoundaryType, CoverMode, GridType, TimeGranularity
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.models.st_code import STCode
 from grid_core.app.services.code_service import CodeService
@@ -53,6 +54,26 @@ class CubeEncoderSDK:
             crs=crs,
         )
 
+    def cover_compact(
+        self,
+        grid_type: str | GridType,
+        level: int,
+        cover_mode: str | CoverMode,
+        geometry: dict[str, Any] | None = None,
+        bbox: list[float] | None = None,
+        crs: str = "EPSG:4326",
+    ) -> list[CompactGridCell]:
+        parsed_grid_type = _parse_enum(grid_type, GridType)
+        parsed_cover_mode = _parse_enum(cover_mode, CoverMode)
+        return self._grid.cover_compact(
+            grid_type=parsed_grid_type,
+            level=level,
+            geometry=geometry,
+            bbox=bbox,
+            cover_mode=parsed_cover_mode.value,
+            crs=crs,
+        )
+
     def neighbors(self, grid_type: str | GridType, code: str, k: int = 1) -> list[str]:
         parsed_grid_type = _parse_enum(grid_type, GridType)
         return self._topology.neighbors(grid_type=parsed_grid_type, code=code, k=k)
@@ -77,6 +98,13 @@ class CubeEncoderSDK:
             grid_type=parsed_grid_type,
             code=code,
             boundary_type=parsed_boundary_type,
+        )
+
+    def code_to_bbox(self, grid_type: str | GridType, code: str) -> list[float]:
+        parsed_grid_type = _parse_enum(grid_type, GridType)
+        return self._topology.code_to_bbox(
+            grid_type=parsed_grid_type,
+            code=code,
         )
 
     def codes_to_geometries(

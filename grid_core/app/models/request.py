@@ -13,6 +13,15 @@ class LocateRequest(BaseModel):
     level: int = Field(ge=1, le=12)
     point: list[float] = Field(min_length=2, max_length=2)
 
+    @model_validator(mode="after")
+    def validate_point_range(self):
+        lon, lat = self.point
+        if lon < -180.0 or lon > 180.0:
+            raise ValueError("Point longitude must be in [-180, 180]")
+        if lat < -90.0 or lat > 90.0:
+            raise ValueError("Point latitude must be in [-90, 90]")
+        return self
+
 
 class CoverRequest(BaseModel):
     grid_type: GridType = GridType.GEOHASH

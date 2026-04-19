@@ -8,6 +8,7 @@ from shapely.geometry import box
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils.geometry import to_shapely
 
@@ -25,6 +26,10 @@ class MGRSEngine:
         return self._build_cell(code=code, level=app_level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
+        compact_cells = self.cover_geometry_compact(geometry=geometry, level=level, cover_mode=cover_mode)
+        return [self._build_cell(code=cell.space_code, level=cell.level) for cell in compact_cells]
+
+    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str) -> list[CompactGridCell]:
         app_level = self._validate_level(level)
         if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError("MGRS cover supports only intersect/contain/minimal mode in MVP")
@@ -65,7 +70,10 @@ class MGRSEngine:
         if cover_mode == CoverMode.MINIMAL.value:
             selected = self._coarsen_minimal(selected)
 
-        return [self._build_cell(code=code, level=self._level_from_code(code)) for code in sorted(selected)]
+        return [
+            CompactGridCell(space_code=code, level=self._level_from_code(code), bbox=self.code_to_bbox(code))
+            for code in sorted(selected)
+        ]
 
     def code_to_geometry(self, code: str):
         return self._geometry_from_bbox(self.code_to_bbox(code))

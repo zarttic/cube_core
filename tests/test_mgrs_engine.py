@@ -137,3 +137,19 @@ def test_mgrs_children_validation():
     code = engine.locate_point(lon=116.391, lat=39.907, level=3).space_code
     with pytest.raises(ValidationError):
         engine.children(code, target_level=3)
+
+
+def test_mgrs_cover_geometry_compact_matches_full_cover():
+    engine = MGRSEngine()
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[116.385, 39.903], [116.397, 39.903], [116.397, 39.911], [116.385, 39.911], [116.385, 39.903]]],
+    }
+
+    full = engine.cover_geometry(geometry, level=3, cover_mode="intersect")
+    compact = engine.cover_geometry_compact(geometry, level=3, cover_mode="intersect")
+
+    assert {cell.space_code for cell in compact} == {cell.space_code for cell in full}
+    assert {cell.space_code: cell.bbox for cell in compact} == {
+        cell.space_code: cell.bbox for cell in full
+    }

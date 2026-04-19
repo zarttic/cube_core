@@ -68,3 +68,19 @@ def test_isea4h_validation():
     with pytest.raises(ValidationError):
         root_code = engine.locate_point(lon=116.391, lat=39.907, level=1).space_code
         engine.parent(root_code)
+
+
+def test_isea4h_cover_geometry_compact_matches_full_cover():
+    engine = ISEA4HEngine()
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
+    }
+
+    full = engine.cover_geometry(geometry, level=6, cover_mode="intersect")
+    compact = engine.cover_geometry_compact(geometry, level=6, cover_mode="intersect")
+
+    assert {cell.space_code for cell in compact} == {cell.space_code for cell in full}
+    assert {cell.space_code: cell.bbox for cell in compact} == {
+        cell.space_code: cell.bbox for cell in full
+    }

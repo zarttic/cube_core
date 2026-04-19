@@ -11,6 +11,10 @@ class BaseGridEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str):
+        raise NotImplementedError
+
+    @abstractmethod
     def code_to_geometry(self, code: str):
         raise NotImplementedError
 

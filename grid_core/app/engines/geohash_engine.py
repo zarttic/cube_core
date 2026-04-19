@@ -1,118 +1,189 @@
 from __future__ import annotations
 
-from shapely.geometry import box
+from collections import deque
+from functools import lru_cache
+
+from s2sphere import Cell, CellId, LatLng, LatLngRect, RegionCoverer
+from shapely.geometry import Polygon
 from shapely.prepared import prep
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
-from grid_core.app.utils import geohash_utils
 from grid_core.app.utils.geometry import to_shapely
 
 
 class GeohashEngine:
+    # Keep the external grid_type string unchanged for API compatibility.
     grid_type = "geohash"
 
     def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
         self._validate_level(level)
-        code = geohash_utils.encode(lon, lat, precision=level)
+        code = CellId.from_lat_lng(LatLng.from_degrees(lat, lon)).parent(level).to_token()
         return self._build_cell(code, level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str) -> list[GridCell]:
+        compact_cells, boundary_cache = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return [
+            self._build_cell(cell.space_code, cell.level, boundary=boundary_cache.get(cell.space_code))
+            for cell in compact_cells
+        ]
+
+    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str) -> list[CompactGridCell]:
+        compact_cells, _ = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)
+        return compact_cells
+
+    def _cover_geometry_core(
+        self,
+        geometry: dict,
+        level: int,
+        cover_mode: str,
+    ) -> tuple[list[CompactGridCell], dict[str, list[list[float]]]]:
         self._validate_level(level)
         if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
 
         shp = to_shapely(geometry)
-        lon_step, lat_step = geohash_utils.cell_size(level)
-        lon_bits, lat_bits = geohash_utils.bits_for_precision(level)
-        lon_bins = 2**lon_bits
-        lat_bins = 2**lat_bits
-        shp_bounds = shp.bounds
         prepared_shp = prep(shp)
-
         geoms = list(shp.geoms) if hasattr(shp, "geoms") else [shp]
-        candidate_indices: set[tuple[int, int]] = set()
+
+        coverer = RegionCoverer()
+        coverer.min_level = level
+        coverer.max_level = level
+        coverer.max_cells = 1_000_000
+
+        candidate_codes: set[str] = set()
         for geom in geoms:
             min_lon, min_lat, max_lon, max_lat = geom.bounds
-            min_ix = max(0, int((min_lon + 180.0) // lon_step) - 1)
-            max_ix = min(lon_bins - 1, int((max_lon + 180.0) // lon_step) + 1)
-            min_iy = max(0, int((min_lat + 90.0) // lat_step) - 1)
-            max_iy = min(lat_bins - 1, int((max_lat + 90.0) // lat_step) + 1)
-            for ix in range(min_ix, max_ix + 1):
-                for iy in range(min_iy, max_iy + 1):
-                    candidate_indices.add((ix, iy))
+            rect = LatLngRect.from_point_pair(
+                LatLng.from_degrees(min_lat, min_lon),
+                LatLng.from_degrees(max_lat, max_lon),
+            )
+            for cid in coverer.get_covering(rect):
+                candidate_codes.add(cid.to_token())
 
-        selected_bboxes: dict[str, tuple[float, float, float, float]] = {}
-        for ix, iy in sorted(candidate_indices):
-            bbox = self._bbox_from_grid_index(ix, iy, lon_step, lat_step)
-            if self._bbox_disjoint(bbox, shp_bounds):
-                continue
-            cell_poly = box(*bbox)
-            code = geohash_utils.from_grid_index(ix, iy, level)
+        selected: set[str] = set()
+        boundary_cache: dict[str, list[list[float]]] = {}
+        for code in sorted(candidate_codes):
+            boundary = self._boundary_lnglat(code)
+            boundary_cache[code] = boundary
+            cell_poly = Polygon(boundary)
             if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} and prepared_shp.intersects(cell_poly):
-                selected_bboxes[code] = bbox
+                selected.add(code)
             elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
-                selected_bboxes[code] = bbox
+                selected.add(code)
 
         if cover_mode == CoverMode.MINIMAL.value:
-            minimal_codes = self._coarsen_minimal(set(selected_bboxes.keys()))
-            return [self._build_cell(code, len(code)) for code in sorted(minimal_codes, key=lambda c: (len(c), c))]
+            selected = self._coarsen_minimal(selected)
 
-        return [self._build_cell_with_bbox(code, level, bbox) for code, bbox in sorted(selected_bboxes.items())]
+        compact_cells = [
+            CompactGridCell(
+                space_code=code,
+                level=self._cell_id_from_code(code).level(),
+                bbox=self._bbox_from_boundary(boundary_cache.get(code) or self._boundary_lnglat(code)),
+            )
+            for code in sorted(selected)
+        ]
+        return compact_cells, boundary_cache
 
     def code_to_geometry(self, code: str) -> dict:
-        return geohash_utils.polygon_from_bbox(geohash_utils.decode_bbox(code))
+        self._validate_code(code)
+        return {"type": "Polygon", "coordinates": [self._boundary_lnglat(code)]}
 
     def code_to_center(self, code: str) -> list[float]:
-        lon, lat = geohash_utils.decode_center(code)
-        return [lon, lat]
+        cid = self._cell_id_from_code(code)
+        ll = LatLng.from_point(cid.to_point())
+        return [ll.lng().degrees, ll.lat().degrees]
 
     def code_to_bbox(self, code: str) -> list[float]:
-        return list(geohash_utils.decode_bbox(code))
+        ring = self._boundary_lnglat(code)
+        lons = [p[0] for p in ring]
+        lats = [p[1] for p in ring]
+        return [min(lons), min(lats), max(lons), max(lats)]
 
     def neighbors(self, code: str, k: int = 1) -> list[str]:
         if k < 1:
             raise ValidationError("k must be >= 1")
-        return geohash_utils.neighbors(code, k=k)
+
+        cid = self._cell_id_from_code(code)
+        level = cid.level()
+        visited = {cid.id()}
+        out: set[str] = set()
+        queue = deque([(cid, 0)])
+
+        while queue:
+            current, depth = queue.popleft()
+            if depth >= k:
+                continue
+            for nbr in current.get_edge_neighbors():
+                if nbr.id() in visited:
+                    continue
+                visited.add(nbr.id())
+                nbr_at_level = nbr.parent(level)
+                out.add(nbr_at_level.to_token())
+                queue.append((nbr_at_level, depth + 1))
+
+        out.discard(code)
+        return sorted(out)
 
     def parent(self, code: str) -> str:
-        if len(code) <= 1:
-            raise ValidationError("Root geohash has no parent")
-        return code[:-1]
+        cid = self._cell_id_from_code(code)
+        if cid.level() <= 1:
+            raise ValidationError("Root geohash level has no parent")
+        return cid.parent(cid.level() - 1).to_token()
 
     def children(self, code: str, target_level: int) -> list[str]:
-        current = len(code)
+        self._validate_level(target_level)
+        cid = self._cell_id_from_code(code)
+        current = cid.level()
         if target_level <= current:
-            raise ValidationError("target_level must be greater than code length")
-        out = [code]
-        for _ in range(target_level - current):
-            out = [prefix + ch for prefix in out for ch in geohash_utils.BASE32]
-        return out
+            raise ValidationError("target_level must be greater than current level")
 
-    def _build_cell(self, code: str, level: int) -> GridCell:
-        bbox = list(geohash_utils.decode_bbox(code))
-        center = list(geohash_utils.decode_center(code))
-        return self._build_cell_with_bbox(code, level, tuple(bbox), center)
+        frontier = [cid]
+        for lvl in range(current + 1, target_level + 1):
+            next_frontier: list[CellId] = []
+            for cur in frontier:
+                next_frontier.extend(cur.children(lvl))
+            frontier = next_frontier
+        return sorted(c.to_token() for c in frontier)
 
-    def _build_cell_with_bbox(
-        self,
-        code: str,
-        level: int,
-        bbox: tuple[float, float, float, float],
-        center: tuple[float, float] | list[float] | None = None,
-    ) -> GridCell:
-        center = list(center) if center is not None else self._center_from_bbox(bbox)
+    def _build_cell(self, code: str, level: int, boundary: list[list[float]] | None = None) -> GridCell:
+        boundary = boundary or self._boundary_lnglat(code)
+        lons = [p[0] for p in boundary]
+        lats = [p[1] for p in boundary]
+        bbox = [min(lons), min(lats), max(lons), max(lats)]
+        center = self.code_to_center(code)
         return GridCell(
             grid_type=self.grid_type,
             level=level,
             cell_id=code,
             space_code=code,
             center=center,
-            bbox=list(bbox),
-            geometry=geohash_utils.polygon_from_bbox(tuple(bbox)),
-            metadata={"precision": level, "zone": None, "facet": None},
+            bbox=bbox,
+            geometry={"type": "Polygon", "coordinates": [boundary]},
+            metadata={"precision": level, "zone": None, "facet": "s2"},
         )
+
+    @lru_cache(maxsize=50000)
+    def _boundary_cached(self, code: str) -> tuple[tuple[float, float], ...]:
+        cid = self._cell_id_from_code(code)
+        cell = Cell(cid)
+        ring: list[tuple[float, float]] = []
+        for i in range(4):
+            ll = LatLng.from_point(cell.get_vertex(i))
+            ring.append((ll.lng().degrees, ll.lat().degrees))
+        ring.append(ring[0])
+        return tuple(ring)
+
+    def _boundary_lnglat(self, code: str) -> list[list[float]]:
+        return [[lon, lat] for lon, lat in self._boundary_cached(code)]
+
+    @staticmethod
+    def _bbox_from_boundary(boundary: list[list[float]]) -> list[float]:
+        lons = [p[0] for p in boundary]
+        lats = [p[1] for p in boundary]
+        return [min(lons), min(lats), max(lons), max(lats)]
 
     def _coarsen_minimal(self, codes: set[str]) -> set[str]:
         out = set(codes)
@@ -121,13 +192,15 @@ class GeohashEngine:
             changed = False
             grouped: dict[str, set[str]] = {}
             for code in out:
-                if len(code) <= 1:
+                cid = self._cell_id_from_code(code)
+                if cid.level() <= 1:
                     continue
-                parent_code = code[:-1]
+                parent_code = cid.parent(cid.level() - 1).to_token()
                 grouped.setdefault(parent_code, set()).add(code)
 
             for parent_code, child_codes in grouped.items():
-                expected_children = {f"{parent_code}{ch}" for ch in geohash_utils.BASE32}
+                parent = self._cell_id_from_code(parent_code)
+                expected_children = {c.to_token() for c in parent.children(parent.level() + 1)}
                 if expected_children == child_codes:
                     out.difference_update(child_codes)
                     out.add(parent_code)
@@ -135,23 +208,18 @@ class GeohashEngine:
         return out
 
     @staticmethod
-    def _bbox_from_grid_index(ix: int, iy: int, lon_step: float, lat_step: float) -> tuple[float, float, float, float]:
-        min_lon = -180.0 + ix * lon_step
-        min_lat = -90.0 + iy * lat_step
-        return min_lon, min_lat, min_lon + lon_step, min_lat + lat_step
+    def _cell_id_from_code(code: str) -> CellId:
+        try:
+            cid = CellId.from_token(code)
+        except Exception as exc:
+            raise ValidationError("Invalid geohash space_code") from exc
+        if not cid.is_valid():
+            raise ValidationError("Invalid geohash space_code")
+        return cid
 
-    @staticmethod
-    def _bbox_disjoint(
-        bbox_a: tuple[float, float, float, float], bbox_b: tuple[float, float, float, float]
-    ) -> bool:
-        min_lon_a, min_lat_a, max_lon_a, max_lat_a = bbox_a
-        min_lon_b, min_lat_b, max_lon_b, max_lat_b = bbox_b
-        return max_lon_a < min_lon_b or min_lon_a > max_lon_b or max_lat_a < min_lat_b or min_lat_a > max_lat_b
-
-    @staticmethod
-    def _center_from_bbox(bbox: tuple[float, float, float, float]) -> list[float]:
-        min_lon, min_lat, max_lon, max_lat = bbox
-        return [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
+    @classmethod
+    def _validate_code(cls, code: str) -> None:
+        cls._cell_id_from_code(code)
 
     @staticmethod
     def _validate_level(level: int) -> None:

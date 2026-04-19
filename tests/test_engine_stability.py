@@ -3,27 +3,22 @@ from __future__ import annotations
 import random
 
 import h3
+from s2sphere import CellId
 
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
-from grid_core.app.utils import geohash_utils
 from grid_core.app.utils.geometry import bbox_to_polygon
 
 
 def _expand_geohash(codes: set[str], target_level: int) -> set[str]:
+    engine = GeohashEngine()
     out: set[str] = set()
     for code in codes:
-        if len(code) == target_level:
+        if CellId.from_token(code).level() == target_level:
             out.add(code)
             continue
-        frontier = [code]
-        while frontier:
-            cur = frontier.pop()
-            if len(cur) == target_level:
-                out.add(cur)
-            else:
-                frontier.extend(f"{cur}{ch}" for ch in geohash_utils.BASE32)
+        out.update(engine.children(code, target_level))
     return out
 
 

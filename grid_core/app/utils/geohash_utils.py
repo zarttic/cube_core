@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 BASE32_DECODE = {c: i for i, c in enumerate(BASE32)}
 BITS = [16, 8, 4, 2, 1]
@@ -9,6 +11,7 @@ class GeohashDecodeError(ValueError):
     pass
 
 
+@lru_cache(maxsize=1024)
 def bits_for_precision(precision: int) -> tuple[int, int]:
     total_bits = precision * 5
     lon_bits = (total_bits + 1) // 2
@@ -16,6 +19,7 @@ def bits_for_precision(precision: int) -> tuple[int, int]:
     return lon_bits, lat_bits
 
 
+@lru_cache(maxsize=1024)
 def cell_size(precision: int) -> tuple[float, float]:
     lon_bits, lat_bits = bits_for_precision(precision)
     lon_step = 360.0 / (2**lon_bits)
@@ -56,6 +60,7 @@ def encode(lon: float, lat: float, precision: int = 12) -> str:
     return "".join(geohash)
 
 
+@lru_cache(maxsize=200000)
 def decode_bbox(code: str) -> tuple[float, float, float, float]:
     lon_interval = [-180.0, 180.0]
     lat_interval = [-90.0, 90.0]
@@ -83,6 +88,7 @@ def decode_bbox(code: str) -> tuple[float, float, float, float]:
     return lon_interval[0], lat_interval[0], lon_interval[1], lat_interval[1]
 
 
+@lru_cache(maxsize=200000)
 def decode_center(code: str) -> tuple[float, float]:
     min_lon, min_lat, max_lon, max_lat = decode_bbox(code)
     return (min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0

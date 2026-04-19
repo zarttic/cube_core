@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 import h3
+from s2sphere import CellId
 
 from grid_core.app.api.code import batch_generate_st, generate_st, parse_st
 from grid_core.app.api.grid import cover, locate
@@ -29,7 +30,7 @@ def test_locate_endpoint_function():
     req = LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])
     resp = locate(req)
     assert resp.cell.grid_type == "geohash"
-    assert len(resp.cell.space_code) == 7
+    assert CellId.from_token(resp.cell.space_code).level() == 7
 
 
 def test_locate_endpoint_function_mgrs():
@@ -48,16 +49,17 @@ def test_locate_endpoint_function_isea4h():
 
 
 def test_st_code_functions():
+    code = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
     gen_req = STCodeGenerateRequest(
         grid_type="geohash",
         level=7,
-        space_code="wtw3sjq",
+        space_code=code,
         timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity="minute",
         version="v1",
     )
     gen_resp = generate_st(gen_req)
-    assert gen_resp.st_code == "gh:7:wtw3sjq:202603091530:v1"
+    assert gen_resp.st_code == f"gh:7:{code}:202603091530:v1"
 
     parse_resp = parse_st(STCodeParseRequest(st_code=gen_resp.st_code))
     assert parse_resp.grid_type == "geohash"
@@ -65,19 +67,21 @@ def test_st_code_functions():
 
 
 def test_st_code_batch_function():
+    c1 = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
+    c2 = locate(LocateRequest(grid_type="geohash", level=7, point=[116.392, 39.908])).cell.space_code
     req = STCodeBatchGenerateRequest(
         grid_type="geohash",
         level=7,
         time_granularity="minute",
         version="v1",
         items=[
-            {"space_code": "wtw3sjq", "timestamp": "2026-03-09T15:30:00Z"},
-            {"space_code": "wtw3sjr", "timestamp": "2026-03-09T15:31:00Z"},
+            {"space_code": c1, "timestamp": "2026-03-09T15:30:00Z"},
+            {"space_code": c2, "timestamp": "2026-03-09T15:31:00Z"},
         ],
     )
     resp = batch_generate_st(req)
     assert resp.statistics["count"] == 2
-    assert resp.st_codes[0] == "gh:7:wtw3sjq:202603091530:v1"
+    assert resp.st_codes[0] == f"gh:7:{c1}:202603091530:v1"
 
 
 def test_cover_with_bbox_input():
@@ -129,11 +133,13 @@ def test_cover_with_bbox_input_mgrs_minimal():
 
 
 def test_topology_parent_children_functions():
-    parent_resp = parent(ParentRequest(grid_type="geohash", code="wtw3sjq"))
-    assert parent_resp.parent_code == "wtw3sj"
+    code = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
+    parent_resp = parent(ParentRequest(grid_type="geohash", code=code))
+    assert CellId.from_token(parent_resp.parent_code).level() == 6
 
-    children_resp = children(ChildrenRequest(grid_type="geohash", code="wtw3sj", target_level=7))
-    assert len(children_resp.child_codes) == 32
+    children_resp = children(ChildrenRequest(grid_type="geohash", code=parent_resp.parent_code, target_level=7))
+    assert len(children_resp.child_codes) == 4
+    assert code in children_resp.child_codes
 
 
 def test_topology_code_to_geometry_function_mgrs():
