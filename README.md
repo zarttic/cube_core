@@ -65,6 +65,26 @@ pytest -q
 python -m grid_core.app.perf_smoke
 ```
 
+## Spark Logical Partition (COG)
+
+Run a complete local Spark flow (COG scan -> grid cover tasks -> on-demand COG window read -> space/time index -> parquet output):
+
+```bash
+scripts/run_spark_logical_partition.sh
+```
+
+Custom parameters:
+
+```bash
+GRID_TYPE=geohash GRID_LEVEL=5 COVER_MODE=intersect REPARTITION=4 MAX_CELLS_PER_ASSET=5000 scripts/run_spark_logical_partition.sh
+```
+
+Inspect output (`run_dir` is printed by job):
+
+```bash
+python grid_core/spark_jobs/inspect_partition_output.py --run-dir data/spark_output/logical_partition/run_YYYYMMDD_HHMMSS
+```
+
 ## Development Docs
 
 - Task log: `docs/DEVELOPMENT_LOG.md`

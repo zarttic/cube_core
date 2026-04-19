@@ -85,6 +85,26 @@ python -m pytest -q tests
 python -m grid_core.app.perf_smoke
 ```
 
+## Spark 并行化逻辑剖分（COG）
+
+执行本地端到端流程（COG 扫描 -> 按格网 cover 生成任务 -> 按需读取 COG window -> 时空索引 -> Parquet 输出）：
+
+```bash
+scripts/run_spark_logical_partition.sh
+```
+
+可选参数示例：
+
+```bash
+GRID_TYPE=geohash GRID_LEVEL=5 COVER_MODE=intersect REPARTITION=4 MAX_CELLS_PER_ASSET=5000 scripts/run_spark_logical_partition.sh
+```
+
+作业输出后（终端会打印 `run_dir`），可执行校验：
+
+```bash
+python grid_core/spark_jobs/inspect_partition_output.py --run-dir data/spark_output/logical_partition/run_YYYYMMDD_HHMMSS
+```
+
 ## 文档规范（开发过程记录）
 
 为满足可追溯开发管理，项目内置以下文档：
