@@ -8,15 +8,22 @@ from grid_core.ingest.ray_ingest_job import (
     build_raw_asset_records,
     ensure_tables,
     load_rows,
+    materialize_cog_assets,
     run_ingest,
 )
 
 
-def _sample_row(scene_id: str, acq_time: str, space_code: str = "wtw3", band: str = "b04") -> dict:
+def _sample_row(
+    scene_id: str,
+    acq_time: str,
+    space_code: str = "wtw3",
+    band: str = "b04",
+    asset_path: str | None = None,
+) -> dict:
     return {
         "scene_id": scene_id,
         "band": band,
-        "asset_path": f"/tmp/{scene_id}_{band}.TIF",
+        "asset_path": asset_path or f"/tmp/{scene_id}_{band}.TIF",
         "acq_time": acq_time,
         "grid_type": "geohash",
         "grid_level": 7,
@@ -53,6 +60,7 @@ def test_build_raw_asset_records_deduplicates_by_scene_band():
         sensor="L8",
         asset_version="v1",
         run_id="job-1",
+        asset_uri_map={row["asset_path"]: row["asset_path"] for row in rows},
     )
     assert len(records) == 2
     by_scene = {row.scene_id: row for row in records}
@@ -69,6 +77,7 @@ def test_build_cube_fact_records_resolves_conflict_with_latest_scene():
         cube_version="v1",
         run_id="job-1",
         quality_rule="best_quality_wins",
+        asset_uri_map={row["asset_path"]: row["asset_path"] for row in rows},
     )
     assert len(facts) == 1
     fact = facts[0]
@@ -82,10 +91,18 @@ def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):
     run_dir = tmp_path / "run_001"
     run_dir.mkdir(parents=True)
     rows_path = run_dir / "index_rows.jsonl"
+    source_dir = tmp_path / "source_assets"
+    source_dir.mkdir(parents=True)
+
+    s1_path = source_dir / "S1_b04.TIF"
+    s2_path = source_dir / "S2_b04.TIF"
+    s1_path.write_bytes(b"fake-cog-s1")
+    s2_path.write_bytes(b"fake-cog-s2")
+
     rows = [
-        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw3", band="b04"),
-        _sample_row("S2", "2026-04-21T05:00:00Z", space_code="wtw3", band="b04"),
-        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw4", band="b04"),
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw3", band="b04", asset_path=str(s1_path)),
+        _sample_row("S2", "2026-04-21T05:00:00Z", space_code="wtw3", band="b04", asset_path=str(s2_path)),
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw4", band="b04", asset_path=str(s1_path)),
     ]
     with rows_path.open("w", encoding="utf-8") as fh:
         for row in rows:
@@ -102,10 +119,13 @@ def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):
         asset_version="v1",
         cube_version="v1",
         quality_rule="best_quality_wins",
+        cog_output_root=str(tmp_path / "cog_store"),
+        cog_materialize_mode="copy",
     )
 
     stats = run_ingest(args)
     assert stats["input_rows"] == 3
+    assert stats["materialized_cog_assets"] == 2
     assert stats["raw_asset_rows"] == 2
     assert stats["cube_fact_rows"] == 2
 
@@ -114,12 +134,17 @@ def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):
         raw_count = conn.execute("SELECT COUNT(*) FROM rs_raw_scene_asset").fetchone()[0]
         cube_count = conn.execute("SELECT COUNT(*) FROM rs_cube_cell_fact").fetchone()[0]
         job = conn.execute("SELECT status FROM rs_ingest_job WHERE job_id = ?", ("job-001",)).fetchone()
+        cog_uri = conn.execute("SELECT raw_cog_uri FROM rs_raw_scene_asset ORDER BY raw_cog_uri LIMIT 1").fetchone()[0]
+        value_ref = conn.execute("SELECT value_ref_uri FROM rs_cube_cell_fact ORDER BY value_ref_uri LIMIT 1").fetchone()[0]
     finally:
         conn.close()
 
     assert raw_count == 2
     assert cube_count == 2
     assert job[0] == "succeeded"
+    assert "/cog_store/" in cog_uri
+    assert "#window=" in value_ref
+    assert "/cog_store/" in value_ref
 
 
 def test_load_rows_rejects_empty_file(tmp_path: Path):
@@ -150,3 +175,32 @@ def test_ensure_tables_is_idempotent(tmp_path: Path):
     finally:
         conn.close()
     assert {"rs_raw_scene_asset", "rs_cube_cell_fact", "rs_ingest_job"}.issubset(tables)
+
+
+def test_materialize_cog_assets_copies_to_standard_layout(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "A.TIF"
+    source.write_bytes(b"abc")
+    rows = [
+        _sample_row(
+            scene_id="SCENE_A",
+            acq_time="2026-04-21T00:00:00Z",
+            band="b04",
+            asset_path=str(source),
+        )
+    ]
+    mapping = materialize_cog_assets(
+        rows=rows,
+        dataset="landsat8",
+        sensor="L8",
+        asset_version="v1",
+        cog_output_root=tmp_path / "cog_store",
+        materialize_mode="copy",
+    )
+    assert str(source) in mapping
+    target = Path(mapping[str(source)])
+    assert target.exists()
+    assert target.read_bytes() == b"abc"
+    assert "dataset=landsat8" in str(target)
+    assert "scene_id=SCENE_A" in str(target)

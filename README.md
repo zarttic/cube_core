@@ -96,6 +96,7 @@ scripts/run_ray_ingest_e2e.sh
 Default output:
 
 - Ray run dir: `data/ray_output/e2e_ingest/run_*`
+- Materialized COG root: `data/cog/raw`
 - Ingest DB: `data/ingest/e2e_ingest.db`
 
 ## Development Docs

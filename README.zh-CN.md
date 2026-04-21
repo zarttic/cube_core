@@ -116,6 +116,7 @@ scripts/run_ray_ingest_e2e.sh
 默认输出：
 
 - Ray 运行目录：`data/ray_output/e2e_ingest/run_*`
+- COG 落盘根目录：`data/cog/raw`
 - 入库数据库：`data/ingest/e2e_ingest.db`
 
 ## 文档规范（开发过程记录）

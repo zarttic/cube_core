@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -51,6 +53,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor", default="unknown", help="Sensor name")
     parser.add_argument("--asset-version", default="v1", help="Raw asset version")
     parser.add_argument("--cube-version", default="v1", help="Cube fact version")
+    parser.add_argument(
+        "--cog-output-root",
+        default="data/cog/raw",
+        help="Root directory used to materialize/stage COG assets",
+    )
+    parser.add_argument(
+        "--cog-materialize-mode",
+        default="copy",
+        choices=["copy", "hardlink", "symlink"],
+        help="How to materialize COG assets into --cog-output-root",
+    )
     parser.add_argument(
         "--quality-rule",
         default="best_quality_wins",
@@ -132,9 +145,9 @@ def _choice_score(row: dict, quality_rule: str) -> tuple[float, str]:
     return (_time_score(row["acq_time"]), row["scene_id"])
 
 
-def _build_window_ref_uri(row: dict) -> str:
+def _build_window_ref_uri(asset_uri: str, row: dict) -> str:
     return (
-        f"{row['asset_path']}#window="
+        f"{asset_uri}#window="
         f"{row['window_col_off']},{row['window_row_off']},{row['window_width']},{row['window_height']}"
     )
 
@@ -152,12 +165,66 @@ def load_rows(rows_path: Path) -> list[dict]:
     return rows
 
 
+def _acq_date_path(acq_time: str) -> str:
+    dt = _parse_timestamp(acq_time)
+    return dt.strftime("%Y/%m/%d")
+
+
+def _materialize_one_asset(source: Path, target: Path, mode: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        return
+    if mode == "copy":
+        shutil.copy2(source, target)
+        return
+    if mode == "hardlink":
+        os.link(source, target)
+        return
+    if mode == "symlink":
+        os.symlink(source, target)
+        return
+    raise ValueError(f"Unsupported cog materialize mode: {mode}")
+
+
+def materialize_cog_assets(
+    rows: Iterable[dict],
+    dataset: str,
+    sensor: str,
+    asset_version: str,
+    cog_output_root: Path,
+    materialize_mode: str,
+) -> dict[str, str]:
+    source_to_target: dict[str, str] = {}
+    unique_assets: dict[str, dict] = {}
+    for row in rows:
+        unique_assets.setdefault(row["asset_path"], row)
+
+    for source_uri, sample_row in unique_assets.items():
+        source_path = Path(source_uri)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Asset file not found: {source_path}")
+        date_path = _acq_date_path(sample_row["acq_time"])
+        target_path = (
+            cog_output_root
+            / f"dataset={dataset}"
+            / f"sensor={sensor}"
+            / f"acq_date={date_path}"
+            / f"scene_id={sample_row['scene_id']}"
+            / f"version={asset_version}"
+            / source_path.name
+        )
+        _materialize_one_asset(source=source_path, target=target_path, mode=materialize_mode)
+        source_to_target[source_uri] = str(target_path.resolve())
+    return source_to_target
+
+
 def build_raw_asset_records(
     rows: Iterable[dict],
     dataset: str,
     sensor: str,
     asset_version: str,
     run_id: str,
+    asset_uri_map: dict[str, str],
 ) -> list[RawAssetRecord]:
     by_asset: dict[tuple[str, str], RawAssetRecord] = {}
     for row in rows:
@@ -170,7 +237,7 @@ def build_raw_asset_records(
                 scene_id=row["scene_id"],
                 band=row["band"],
                 acq_time=row["acq_time"],
-                raw_cog_uri=row["asset_path"],
+                raw_cog_uri=asset_uri_map[row["asset_path"]],
                 version=asset_version,
                 run_id=run_id,
             )
@@ -182,6 +249,7 @@ def build_cube_fact_records(
     cube_version: str,
     run_id: str,
     quality_rule: str,
+    asset_uri_map: dict[str, str],
 ) -> list[CubeFactRecord]:
     grouped: dict[tuple[str, int, str, str, str], list[dict]] = {}
     for row in rows:
@@ -202,6 +270,7 @@ def build_cube_fact_records(
             "candidate_scene_ids": sorted({row["scene_id"] for row in candidates}),
             "rule": quality_rule,
         }
+        winner_asset_uri = asset_uri_map[winner["asset_path"]]
         facts.append(
             CubeFactRecord(
                 grid_type=key[0],
@@ -214,7 +283,7 @@ def build_cube_fact_records(
                 cell_min_lat=float(winner["cell_min_lat"]),
                 cell_max_lon=float(winner["cell_max_lon"]),
                 cell_max_lat=float(winner["cell_max_lat"]),
-                value_ref_uri=_build_window_ref_uri(winner),
+                value_ref_uri=_build_window_ref_uri(winner_asset_uri, winner),
                 source_scene_count=len({row["scene_id"] for row in candidates}),
                 provenance_json=json.dumps(provenance, ensure_ascii=False),
                 quality_rule=quality_rule,
@@ -364,6 +433,8 @@ def run_ingest(args: argparse.Namespace) -> dict:
         "asset_version": args.asset_version,
         "cube_version": args.cube_version,
         "quality_rule": args.quality_rule,
+        "cog_output_root": str(Path(args.cog_output_root).resolve()),
+        "cog_materialize_mode": args.cog_materialize_mode,
     }
 
     conn = sqlite3.connect(str(db_path))
@@ -378,18 +449,28 @@ def run_ingest(args: argparse.Namespace) -> dict:
             started_at=started_at,
         )
         rows = load_rows(rows_path)
+        asset_uri_map = materialize_cog_assets(
+            rows=rows,
+            dataset=args.dataset,
+            sensor=args.sensor,
+            asset_version=args.asset_version,
+            cog_output_root=Path(args.cog_output_root),
+            materialize_mode=args.cog_materialize_mode,
+        )
         raw_records = build_raw_asset_records(
             rows=rows,
             dataset=args.dataset,
             sensor=args.sensor,
             asset_version=args.asset_version,
             run_id=args.job_id,
+            asset_uri_map=asset_uri_map,
         )
         cube_records = build_cube_fact_records(
             rows=rows,
             cube_version=args.cube_version,
             run_id=args.job_id,
             quality_rule=args.quality_rule,
+            asset_uri_map=asset_uri_map,
         )
         upsert_raw_assets(conn, raw_records)
         upsert_cube_facts(conn, cube_records)
@@ -397,6 +478,7 @@ def run_ingest(args: argparse.Namespace) -> dict:
         stats = {
             "run_dir": str(run_dir.resolve()),
             "input_rows": len(rows),
+            "materialized_cog_assets": len(asset_uri_map),
             "raw_asset_rows": len(raw_records),
             "cube_fact_rows": len(cube_records),
         }

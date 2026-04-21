@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INPUT_DIR="${1:-$ROOT_DIR/data/landsat8}"
 RAY_OUTPUT_DIR="${2:-$ROOT_DIR/data/ray_output/e2e_ingest}"
 DB_PATH="${3:-$ROOT_DIR/data/ingest/e2e_ingest.db}"
+COG_OUTPUT_ROOT="${4:-$ROOT_DIR/data/cog/raw}"
 JOB_ID="${JOB_ID:-e2e-$(date +%Y%m%d-%H%M%S)}"
 GRID_TYPE="${GRID_TYPE:-geohash}"
 GRID_LEVEL="${GRID_LEVEL:-7}"
@@ -37,10 +38,12 @@ python -m grid_core.ingest.ray_ingest_job \
   --sensor "$SENSOR" \
   --asset-version "$ASSET_VERSION" \
   --cube-version "$CUBE_VERSION" \
-  --quality-rule "$QUALITY_RULE"
+  --quality-rule "$QUALITY_RULE" \
+  --cog-output-root "$COG_OUTPUT_ROOT" \
+  --cog-materialize-mode copy
 
 echo "E2E completed"
 echo "run_dir=$LATEST_RUN_DIR"
 echo "db_path=$DB_PATH"
+echo "cog_output_root=$COG_OUTPUT_ROOT"
 echo "job_id=$JOB_ID"
-
