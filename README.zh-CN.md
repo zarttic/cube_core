@@ -105,6 +105,19 @@ GRID_TYPE=geohash GRID_LEVEL=5 COVER_MODE=intersect REPARTITION=4 MAX_CELLS_PER_
 python grid_core/spark_jobs/inspect_partition_output.py --run-dir data/spark_output/logical_partition/run_YYYYMMDD_HHMMSS
 ```
 
+## Ray 剖分 -> 入库端到端（SQLite）
+
+可一键执行 `Ray 逻辑剖分 + 入库`：
+
+```bash
+scripts/run_ray_ingest_e2e.sh
+```
+
+默认输出：
+
+- Ray 运行目录：`data/ray_output/e2e_ingest/run_*`
+- 入库数据库：`data/ingest/e2e_ingest.db`
+
 ## 文档规范（开发过程记录）
 
 为满足可追溯开发管理，项目内置以下文档：

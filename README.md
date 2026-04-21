@@ -85,6 +85,19 @@ Inspect output (`run_dir` is printed by job):
 python grid_core/spark_jobs/inspect_partition_output.py --run-dir data/spark_output/logical_partition/run_YYYYMMDD_HHMMSS
 ```
 
+## Ray Partition -> Ingest E2E (SQLite)
+
+Run one command for `Ray logical partition + ingest`:
+
+```bash
+scripts/run_ray_ingest_e2e.sh
+```
+
+Default output:
+
+- Ray run dir: `data/ray_output/e2e_ingest/run_*`
+- Ingest DB: `data/ingest/e2e_ingest.db`
+
 ## Development Docs
 
 - Task log: `docs/DEVELOPMENT_LOG.md`
