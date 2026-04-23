@@ -629,13 +629,11 @@ function createHexagonSVG() {
 }
 
 function apiPrefixes() {
-    const source = document.getElementById('source')?.value || 'api';
-    const query = new URLSearchParams(window.location.search);
-    const encoderBase = (query.get('encoderBase') || window.CUBE_ENCODER_BASE || 'http://127.0.0.1:50012').replace(/\/$/, '');
+    const base = window.location.origin;
     return {
-        gridPrefix: `${encoderBase}/v1/grid`,
-        topologyPrefix: `${encoderBase}/v1/topology`,
-        codePrefix: `${encoderBase}/v1/code`,
+        gridPrefix: `${base}/v1/grid`,
+        topologyPrefix: `${base}/v1/topology`,
+        codePrefix: `${base}/v1/code`,
     };
 }
 
@@ -895,8 +893,14 @@ function resetDemo() {
     });
 
     // 重置层级显示
+    const gridLevel = document.getElementById('gridLevel');
     const levelValue = document.getElementById('levelValue');
+    if (gridLevel) gridLevel.value = '6';
     if (levelValue) levelValue.textContent = '6级';
+    const topologyLevel = document.getElementById('topologyLevel');
+    const topologyLevelValue = document.getElementById('topologyLevelValue');
+    if (topologyLevel) topologyLevel.value = '6';
+    if (topologyLevelValue) topologyLevelValue.textContent = '6级';
 
     clearDivisionDrawings();
     clearTopologyDrawings();
@@ -914,7 +918,7 @@ async function runGridDivision() {
     const { gridPrefix } = apiPrefixes();
     const gridType = document.querySelector('input[name="gridType"]:checked')?.value || 'geohash';
     const inputType = document.getElementById('inputType')?.value || 'point';
-    const level = parseInt(document.getElementById('topologyLevel')?.value || 6, 10);
+    const level = parseInt(document.getElementById('gridLevel')?.value || 6, 10);
     const lat = parseFloat(document.getElementById('lat')?.value || 39.9042);
     const lng = parseFloat(document.getElementById('lng')?.value || 116.4074);
     const radius = parseFloat(document.getElementById('radius')?.value || 10);
