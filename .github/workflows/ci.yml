@@ -21,10 +21,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install build
+          cd cube_project/cube_encoder
+          python -m build
+          python -m pip install --force-reinstall dist/*.whl
+          cd ../..
+          pip install -r cube_project/cube_split/requirements.txt
+          pip install -r cube_project/cube_web/requirements.txt
 
       - name: Run tests
-        run: python -m pytest -q tests
+        run: |
+          python -m pytest -q cube_project/cube_encoder/tests
+          python -m pytest -q cube_project/cube_split/tests
+          python -m pytest -q cube_project/cube_web/tests
 
   perf-smoke:
     runs-on: ubuntu-latest
@@ -41,20 +50,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install build
+          cd cube_project/cube_encoder
+          python -m build
+          python -m pip install --force-reinstall dist/*.whl
 
       - name: Load perf thresholds
         run: cat .github/perf-thresholds.env >> "$GITHUB_ENV"
 
       - name: Run performance smoke check
         run: |
+          cd cube_project/cube_encoder
           PERF_SMOKE_JSON_PATH=artifacts/perf-smoke.json python -m grid_core.app.perf_smoke
 
       - name: Upload perf smoke artifact
         uses: actions/upload-artifact@v4
         with:
           name: perf-smoke-report
-          path: artifacts/perf-smoke.json
+          path: cube_project/cube_encoder/artifacts/perf-smoke.json
           if-no-files-found: error
 
   sdk-package-smoke:
@@ -73,14 +86,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install build
+          cd cube_project/cube_encoder
           python -m build
 
       - name: Wheel install smoke test
         run: |
-          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install --force-reinstall cube_project/cube_encoder/dist/*.whl
           python -c "from grid_core.sdk import CubeEncoderSDK; c=CubeEncoderSDK().locate('geohash',7,[116.391,39.907]); assert c.space_code"
 
       - name: SDist install smoke test
         run: |
-          python -m pip install --force-reinstall dist/*.tar.gz
+          python -m pip install --force-reinstall cube_project/cube_encoder/dist/*.tar.gz
           python -c "from grid_core.sdk import CubeEncoderSDK; c=CubeEncoderSDK().locate('mgrs',3,[116.391,39.907]); assert c.space_code"

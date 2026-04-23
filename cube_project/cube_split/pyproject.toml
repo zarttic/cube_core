@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cube-split"
+version = "0.1.0"
+description = "Partition and ingest workflows consuming cube_encoder SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cube-encoder",
+  "rasterio>=1.3.0",
+  "pyproj>=3.6.0",
+  "psycopg[binary]>=3.2.0",
+  "minio>=7.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cube_split*"]
