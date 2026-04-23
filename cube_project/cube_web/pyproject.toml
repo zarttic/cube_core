@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cube-web"
+version = "0.1.0"
+description = "Standalone web pages for cube visualization"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "cube-encoder",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cube_web*"]

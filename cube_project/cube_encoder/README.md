@@ -1,0 +1,94 @@
+# cube_encoder Core SDK
+
+Grid encoding core with FastAPI + Python SDK layout.
+
+中文介绍文档：`README.zh-CN.md`
+
+## Run
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
+```
+
+## API examples
+
+```bash
+curl -X POST http://127.0.0.1:50012/v1/grid/locate \
+  -H 'Content-Type: application/json' \
+  -d '{"grid_type":"geohash","level":7,"point":[116.391,39.907]}'
+
+curl -X POST http://127.0.0.1:50012/v1/code/st \
+  -H 'Content-Type: application/json' \
+  -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute","version":"v1"}'
+```
+
+## Python SDK usage
+
+```bash
+pip install -e .
+```
+
+Build/install as package:
+
+```bash
+scripts/build_package.sh
+pip install dist/cube_encoder-*.whl
+```
+
+```python
+from datetime import datetime, timezone
+
+from grid_core.sdk import CubeEncoderSDK
+
+sdk = CubeEncoderSDK()
+cell = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907])
+neighbors = sdk.neighbors(grid_type="geohash", code=cell.space_code, k=1)
+st_code = sdk.generate_st_code(
+    grid_type="geohash",
+    level=7,
+    space_code=cell.space_code,
+    timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
+    time_granularity="minute",
+    version="v1",
+).st_code
+```
+
+## Test
+
+```bash
+pytest -q
+```
+
+## Performance Smoke
+
+```bash
+python -m grid_core.app.perf_smoke
+```
+
+## Project Boundaries
+
+- `cube_encoder`: core grid, topology, and space-time coding capabilities
+- `cube_split`: partition, ingest, and AOI data-read workflows
+- `cube_web`: web pages and visualization
+
+## Development Docs
+
+- Task log: `docs/DEVELOPMENT_LOG.md`
+- Status & next plan: `docs/STATUS_AND_PLAN.md`
+- Bug log: `docs/BUG_LOG.md`
+- Process guideline: `docs/DOC_WORKFLOW.md`
+- SDK release policy: `docs/SDK_RELEASE.md`
+- Changelog: `CHANGELOG.md`
+
+## MVP limits
+
+- `geohash` supports locate/cover/topology base capabilities.
+- `mgrs` supports first-phase locate + geometry reverse (`code_to_bbox/code_to_geometry`), basic topology (`neighbors/parent/children`), and `cover_mode=intersect/contain/minimal`.
+- `isea4h` is now backed by Uber H3 for first-phase runnable capability (`locate/cover/topology`).
+- `cover_mode=intersect/contain/minimal` implemented.
+- `cover_mode=minimal` supports cross-level coarsening (response cells may include levels lower than request level).
+- Topology now supports batch geometry API (`/v1/topology/geometries`) for faster visualization.
+- CRS fixed to `EPSG:4326`.
