@@ -1,14 +1,28 @@
 # cube_web
 
-`cube_web` hosts the standalone web pages for cube demos and visualization.
+`cube_web` hosts the FastAPI web shell and static demo pages for cube visualization. It does not implement grid logic. Grid operations come from `cube_encoder` through the configured encoder backend.
 
-It does not implement grid logic itself. The pages call `cube_encoder` APIs directly. By default the frontend targets:
+Detailed web documentation: [docs/README.md](docs/README.md).
 
-- `http://127.0.0.1:50012`
+## Boundary
 
-You can override the encoder base at runtime with a query parameter:
+- `cube_web` owns HTTP hosting for pages, static assets, and visualization UX.
+- `cube_encoder` owns grid locate, cover, topology, and space-time code behavior.
+- `cube_split` owns partition, ingest, and AOI readback workflows.
 
-- `http://127.0.0.1:50040/encoding?encoderBase=http://127.0.0.1:50012`
+## Encoder Backend
+
+By default the frontend targets:
+
+```text
+http://127.0.0.1:50012
+```
+
+Override the encoder base at runtime:
+
+```text
+http://127.0.0.1:50040/encoding?encoderBase=http://127.0.0.1:50012
+```
 
 ## Run
 
@@ -23,3 +37,13 @@ cd ../cube_web
 pip install -r requirements.txt
 uvicorn cube_web.app:app --host 0.0.0.0 --port 50040 --reload
 ```
+
+## Tests
+
+From this package:
+
+```bash
+PYTHONPATH=../cube_encoder:. pytest tests
+```
+
+From the workspace root, run the cross-package pytest command in `AGENTS.md`.

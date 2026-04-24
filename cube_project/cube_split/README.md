@@ -1,9 +1,14 @@
 # cube_split
 
-`cube_split` hosts partition jobs, ingest pipeline, AOI readback utilities, test fixtures, and partition regression tests.
+`cube_split` owns partitioning, Ray ingest, AOI readback, and storage-facing workflows. It consumes grid capabilities from `cube_encoder` through `grid_core.sdk.CubeEncoderSDK`.
 
-It consumes grid capabilities from `cube_encoder` through the installed Python package (`grid_core.sdk.CubeEncoderSDK`).
-Before partitioning, each source band TIF is converted to COG, then grid/window partitioning is executed on COG inputs.
+Detailed workflow documentation: [docs/README.md](docs/README.md).
+
+## Boundary
+
+- `cube_split` handles scene-level input processing, COG conversion, grid/window partitioning, metadata writes, and AOI readback.
+- `cube_encoder` handles grid locate, cover, topology, and space-time code generation.
+- `cube_web` handles visualization and demo pages.
 
 ## Setup
 
@@ -18,7 +23,7 @@ cd ../cube_split
 python -m pip install -r requirements.txt
 ```
 
-## Run
+## Run Ingest E2E
 
 ```bash
 POSTGRES_DSN='postgresql://postgres:postgres@127.0.0.1:5432/cube' \
@@ -30,10 +35,11 @@ scripts/run_ray_ingest_e2e.sh
 ```
 
 Defaults:
+
 - Metadata backend: PostgreSQL (`METADATA_BACKEND=postgres`)
 - Asset backend: MinIO (`ASSET_STORAGE_BACKEND=minio`)
 
-Local fallback (for debugging only):
+Local fallback for debugging only:
 
 ```bash
 METADATA_BACKEND=sqlite \
@@ -42,8 +48,6 @@ scripts/run_ray_ingest_e2e.sh
 ```
 
 ## AOI Readback
-
-Use the AOI reader to resolve `space_code[]` through `cube_encoder`, query `rs_cube_cell_fact`, read COG windows from MinIO, and merge them into a multi-band GeoTIFF:
 
 ```bash
 python -m cube_split.read.aoi_reader \
@@ -58,22 +62,23 @@ python -m cube_split.read.aoi_reader \
 ## Distributed Ray Cluster
 
 Prerequisites:
-- All Ray nodes use the same Python env and code version.
-- Input/output paths are shared across nodes with identical absolute paths (for example NFS mount).
 
-1. Start head node:
+- All Ray nodes use the same Python environment and code version.
+- Input/output paths are shared across nodes with identical absolute paths.
+
+Start head node:
 
 ```bash
 scripts/start_ray_head.sh
 ```
 
-2. Join worker nodes (run on each worker):
+Join worker nodes:
 
 ```bash
 scripts/start_ray_worker.sh <HEAD_IP:6379>
 ```
 
-3. Run distributed partition test (run on head):
+Run distributed partition test:
 
 ```bash
 RAY_ADDRESS=<HEAD_IP:6379> \
@@ -82,7 +87,7 @@ TARGET_SEC=10 \
 scripts/run_distributed_partition_test.sh
 ```
 
-4. Stop Ray on any node:
+Stop Ray:
 
 ```bash
 scripts/stop_ray_cluster.sh
