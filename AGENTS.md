@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-Python monorepo under `cube_project/`.
+Python monorepo at the repository root.
 
-- `cube_project/cube_encoder/` contains the core grid SDK and API models in `grid_core/`, with tests in `tests/`.
-- `cube_project/cube_split/` contains partitioning, Ray ingest, AOI reading, and jobs in `cube_split/`, with tests in `tests/`.
-- `cube_project/cube_web/` contains the FastAPI host in `cube_web/app.py`, static assets in `cube_web/web/`, and tests in `tests/`.
+- `cube_encoder/` contains the core grid SDK and API models in `grid_core/`, with tests in `tests/`.
+- `cube_split/` contains partitioning, Ray ingest, AOI reading, and jobs in `cube_split/`, with tests in `tests/`.
+- `cube_web/` contains the FastAPI host in `cube_web/app.py`, static assets in `cube_web/web/`, and tests in `tests/`.
 - Docs live in each package’s `docs/` directory where present.
 
 `cube_encoder` is the SDK provider. Other packages must consume encoder capability through `grid_core.sdk.CubeEncoderSDK` or the web SDK backend, not duplicate grid logic.
@@ -14,19 +14,19 @@ Python monorepo under `cube_project/`.
 ## Build, Test, and Development Commands
 
 ```bash
-PYTHONPATH=cube_project/cube_encoder:cube_project/cube_split:cube_project/cube_web pytest cube_project/cube_encoder/tests cube_project/cube_split/tests cube_project/cube_web/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests cube_web/tests
 ```
 
 Runs all package tests.
 
 ```bash
-cd cube_project/cube_encoder && python -m build
+cd cube_encoder && python -m build
 ```
 
 Builds the `cube-encoder` distribution.
 
 ```bash
-PYTHONPATH=cube_project/cube_encoder:cube_project/cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 Runs the web UI with the in-repo SDK backend.
@@ -51,7 +51,7 @@ The project uses `pytest`. Add or update tests beside the package being changed.
 PYTHONPATH=../cube_encoder:. pytest tests
 ```
 
-from `cube_project/cube_web/`.
+from `cube_web/`.
 
 ## Commit & Pull Request Guidelines
 
