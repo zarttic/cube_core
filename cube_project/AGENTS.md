@@ -59,6 +59,8 @@ Recent history uses short imperative messages, sometimes with prefixes such as `
 
 Use `gh` CLI for GitHub publishing. Before every push, run the full cross-package pytest command and include the result in the PR or handoff. PRs should include a summary, affected paths, validation results, UI screenshots, and related issues or notes when available.
 
+If `gh` authentication or GitHub CLI access fails inside the sandbox, retry the same `gh` command outside the sandbox with escalation before concluding that authentication is invalid.
+
 ## Security & Configuration Tips
 
 Do not commit local data, caches, `.pytest_cache/`, `__pycache__/`, virtual environments, or large ingest inputs. Keep service endpoints configurable; avoid hard-coding machine-specific IPs.
