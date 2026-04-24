@@ -7,3 +7,10 @@ dist/
 .vscode/
 .codex
 *.egg-info/
+
+# Local remote-sensing samples and uploaded reference projects.
+cube_split/*.nc
+cube_split/*.nc4
+cube_split/*.h5
+cube_split/*.hdf
+cube_split/CarbonCube.gz

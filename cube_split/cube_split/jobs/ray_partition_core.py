@@ -29,6 +29,10 @@ class AssetRecord:
 
 def _parse_scene_id(path: Path) -> str:
     stem = path.stem
+    sentinel = re.match(r"^(T\d{2}[A-Z]{3})_(\d{8}T\d{6})_(B\d{2,3}A?)_(\d+m)$", stem, re.IGNORECASE)
+    if sentinel:
+        tile, acq_time, _, _ = sentinel.groups()
+        return f"S2_{tile.upper()}_{acq_time.upper()}"
     parts = stem.split("_")
     if len(parts) < 7:
         return stem
@@ -36,6 +40,9 @@ def _parse_scene_id(path: Path) -> str:
 
 
 def _parse_acq_time(path: Path) -> datetime:
+    sentinel = re.search(r"_(\d{8}T\d{6})_", path.stem, re.IGNORECASE)
+    if sentinel:
+        return datetime.strptime(sentinel.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
     m = re.search(r"_(\d{8})_", path.stem)
     if not m:
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -44,6 +51,10 @@ def _parse_acq_time(path: Path) -> datetime:
 
 def _parse_band(path: Path, scene_id: str) -> str:
     name = path.stem
+    sentinel = re.match(r"^T\d{2}[A-Z]{3}_\d{8}T\d{6}_(B\d{2,3}A?)_(\d+m)$", name, re.IGNORECASE)
+    if sentinel:
+        band, resolution = sentinel.groups()
+        return f"{band}_{resolution}".lower()
     if name.startswith(scene_id + "_"):
         suffix = name[len(scene_id) + 1 :]
         return suffix.lower()
@@ -52,7 +63,8 @@ def _parse_band(path: Path, scene_id: str) -> str:
 
 def build_manifest(input_dir: Path) -> list[AssetRecord]:
     records: list[AssetRecord] = []
-    for tif in sorted(input_dir.glob("*.TIF")):
+    tif_paths = sorted(path for path in input_dir.iterdir() if path.is_file() and path.suffix.lower() == ".tif")
+    for tif in tif_paths:
         scene_id = _parse_scene_id(tif)
         acq_time = _parse_acq_time(tif)
         band = _parse_band(tif, scene_id)
