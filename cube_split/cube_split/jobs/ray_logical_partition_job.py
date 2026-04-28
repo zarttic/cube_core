@@ -21,6 +21,11 @@ from cube_split.jobs.ray_partition_core import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ray logical partition job for COG assets")
     parser.add_argument("--input-dir", default="data/landsat8", help="Input directory containing COG .TIF files")
+    parser.add_argument(
+        "--product-family",
+        default="auto",
+        help="Optical product family for filename parsing: auto, landsat, or sentinel2",
+    )
     parser.add_argument("--output-dir", default="data/ray_output/logical_partition", help="Output directory")
     parser.add_argument(
         "--cog-input-dir",
@@ -134,7 +139,7 @@ def main() -> None:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    source_assets = build_manifest(input_dir)
+    source_assets = build_manifest(input_dir, product_family=args.product_family)
     if not source_assets:
         raise RuntimeError(f"No .TIF assets found under: {input_dir}")
     cog_start = time.perf_counter()
@@ -253,6 +258,7 @@ def main() -> None:
         "cog_input_dir": str(Path(args.cog_input_dir).resolve()),
         "source_asset_count": len(source_assets),
         "asset_count": len(assets),
+        "product_family": args.product_family,
         "grid_task_count": len(grid_tasks),
         "grid_type": args.grid_type,
         "grid_level": args.grid_level,

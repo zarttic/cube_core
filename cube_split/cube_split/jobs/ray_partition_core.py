@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import os
-import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
@@ -17,6 +16,7 @@ from rasterio.shutil import copy as rio_copy
 from rasterio.windows import Window
 
 from grid_core.sdk import CubeEncoderSDK
+from cube_split.partition.optical_products import parse_optical_asset
 
 
 @dataclass
@@ -25,55 +25,23 @@ class AssetRecord:
     band: str
     path: str
     acq_time: str
+    product_family: str = "unknown"
+    sensor: str = "unknown"
 
 
-def _parse_scene_id(path: Path) -> str:
-    stem = path.stem
-    sentinel = re.match(r"^(T\d{2}[A-Z]{3})_(\d{8}T\d{6})_(B\d{2,3}A?)_(\d+m)$", stem, re.IGNORECASE)
-    if sentinel:
-        tile, acq_time, _, _ = sentinel.groups()
-        return f"S2_{tile.upper()}_{acq_time.upper()}"
-    parts = stem.split("_")
-    if len(parts) < 7:
-        return stem
-    return "_".join(parts[:7])
-
-
-def _parse_acq_time(path: Path) -> datetime:
-    sentinel = re.search(r"_(\d{8}T\d{6})_", path.stem, re.IGNORECASE)
-    if sentinel:
-        return datetime.strptime(sentinel.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
-    m = re.search(r"_(\d{8})_", path.stem)
-    if not m:
-        return datetime(1970, 1, 1, tzinfo=timezone.utc)
-    return datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
-
-
-def _parse_band(path: Path, scene_id: str) -> str:
-    name = path.stem
-    sentinel = re.match(r"^T\d{2}[A-Z]{3}_\d{8}T\d{6}_(B\d{2,3}A?)_(\d+m)$", name, re.IGNORECASE)
-    if sentinel:
-        band, resolution = sentinel.groups()
-        return f"{band}_{resolution}".lower()
-    if name.startswith(scene_id + "_"):
-        suffix = name[len(scene_id) + 1 :]
-        return suffix.lower()
-    return name.lower()
-
-
-def build_manifest(input_dir: Path) -> list[AssetRecord]:
+def build_manifest(input_dir: Path, product_family: str = "auto") -> list[AssetRecord]:
     records: list[AssetRecord] = []
     tif_paths = sorted(path for path in input_dir.iterdir() if path.is_file() and path.suffix.lower() == ".tif")
     for tif in tif_paths:
-        scene_id = _parse_scene_id(tif)
-        acq_time = _parse_acq_time(tif)
-        band = _parse_band(tif, scene_id)
+        metadata = parse_optical_asset(tif, product_family=product_family)
         records.append(
             AssetRecord(
-                scene_id=scene_id,
-                band=band,
+                scene_id=metadata.scene_id,
+                band=metadata.band,
                 path=str(tif.resolve()),
-                acq_time=acq_time.isoformat().replace("+00:00", "Z"),
+                acq_time=metadata.acq_time.isoformat().replace("+00:00", "Z"),
+                product_family=metadata.product_family,
+                sensor=metadata.sensor,
             )
         )
     return records
@@ -128,6 +96,8 @@ def convert_assets_to_cog(
             band=asset.band,
             path=str(dst.resolve()),
             acq_time=asset.acq_time,
+            product_family=asset.product_family,
+            sensor=asset.sensor,
         )
 
     if worker_count == 1:

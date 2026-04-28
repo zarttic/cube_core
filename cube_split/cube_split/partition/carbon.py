@@ -6,15 +6,22 @@ import math
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+import warnings
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import repeat
 from pathlib import Path
 from typing import Any
 
 from grid_core.sdk import CubeEncoderSDK
 
 from cube_split.partition.base import PartitionResult
+from cube_split.partition.carbon_products import (
+    get_carbon_product_adapter,
+    normalize_carbon_product_type,
+    supported_carbon_product_types,
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,8 @@ class CarbonPartitionConfig:
     time_granularity: str = "day"
     product_type: str = "xco2"
     max_observations: int | None = None
+    partition_chunk_size: int = 1000
+    partition_backend: str = "process"
 
 
 @dataclass(frozen=True)
@@ -90,7 +99,7 @@ def partition_observation(
     return {
         "data_type": "carbon_satellite",
         "satellite": observation.satellite,
-        "product_type": config.product_type,
+        "product_type": normalize_carbon_product_type(config.product_type),
         "observation_id": observation.observation_id,
         "acq_time": observation.acq_time,
         "time_bucket": _time_bucket(observation.acq_time, config.time_granularity),
@@ -148,6 +157,17 @@ def load_observations(path: Path) -> list[CarbonSatelliteObservation]:
 def load_observations_from_file(
     path: Path,
     max_observations: int | None = None,
+    product_type: str = "xco2",
+) -> list[CarbonSatelliteObservation]:
+    adapter = get_carbon_product_adapter(product_type)
+    if not adapter.supports_file(path):
+        raise ValueError(f"Unsupported carbon {adapter.product_type} input file: {path}")
+    return adapter.load_observations(path, max_observations=max_observations)
+
+
+def _load_xco2_observations_from_file(
+    path: Path,
+    max_observations: int | None = None,
 ) -> list[CarbonSatelliteObservation]:
     observations: list[CarbonSatelliteObservation] = []
     if path.suffix.lower() == ".jsonl":
@@ -191,21 +211,28 @@ def _load_oco2_lite_with_netcdf4(
     max_observations: int | None,
 ) -> list[CarbonSatelliteObservation] | None:
     try:
-        from netCDF4 import Dataset  # type: ignore
-    except ModuleNotFoundError:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                message=r"numpy\.ndarray size changed.*",
+                category=RuntimeWarning,
+            )
+            from netCDF4 import Dataset  # type: ignore
+    except (ModuleNotFoundError, RuntimeWarning):
         return None
 
     observations: list[CarbonSatelliteObservation] = []
     with Dataset(path, "r") as ds:
-        sounding_ids = ds.variables["sounding_id"]
-        latitudes = ds.variables["latitude"]
-        longitudes = ds.variables["longitude"]
-        times = ds.variables["time"]
-        xco2_values = ds.variables["xco2"]
-        quality_flags = ds.variables["xco2_quality_flag"]
-        vertex_latitudes = ds.variables["vertex_latitude"]
-        vertex_longitudes = ds.variables["vertex_longitude"]
-        count = len(sounding_ids) if max_observations is None else min(max_observations, len(sounding_ids))
+        sounding_id_var = ds.variables["sounding_id"]
+        count = len(sounding_id_var) if max_observations is None else min(max_observations, len(sounding_id_var))
+        sounding_ids = sounding_id_var[:count]
+        latitudes = ds.variables["latitude"][:count]
+        longitudes = ds.variables["longitude"][:count]
+        times = ds.variables["time"][:count]
+        xco2_values = ds.variables["xco2"][:count]
+        quality_flags = ds.variables["xco2_quality_flag"][:count]
+        vertex_latitudes = ds.variables["vertex_latitude"][:count, :]
+        vertex_longitudes = ds.variables["vertex_longitude"][:count, :]
         for idx in range(count):
             lat = float(latitudes[idx])
             lon = float(longitudes[idx])
@@ -338,12 +365,124 @@ def _iter_input_files(input_dir: Path) -> list[Path]:
     return sorted(
         path
         for path in input_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf"}
+        if path.is_file()
+        and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf"}
+        and path.name != "carbon_observation_rows.jsonl"
     )
+
+
+def _chunk_observations(
+    observations: list[CarbonSatelliteObservation],
+    chunk_size: int,
+) -> list[list[CarbonSatelliteObservation]]:
+    if chunk_size <= 0:
+        raise ValueError("partition_chunk_size must be > 0")
+    return [observations[idx : idx + chunk_size] for idx in range(0, len(observations), chunk_size)]
+
+
+def _partition_observation_chunk(
+    observations: list[CarbonSatelliteObservation],
+    config: CarbonPartitionConfig,
+) -> list[dict[str, Any]]:
+    sdk = CubeEncoderSDK()
+    located = sdk.batch_locate_st_codes(
+        grid_type=config.grid_type,
+        level=config.grid_level,
+        items=[
+            {
+                "point": [obs.lon, obs.lat],
+                "timestamp": _parse_time(obs.acq_time),
+            }
+            for obs in observations
+        ],
+        time_granularity=config.time_granularity,
+        version="v1",
+    )
+    rows: list[dict[str, Any]] = []
+    for observation, cell in zip(observations, located, strict=True):
+        rows.append(
+            {
+                "data_type": "carbon_satellite",
+                "satellite": observation.satellite,
+                "product_type": normalize_carbon_product_type(config.product_type),
+                "observation_id": observation.observation_id,
+                "acq_time": observation.acq_time,
+                "time_bucket": cell["time_code"],
+                "grid_type": config.grid_type,
+                "grid_level": int(cell["grid_level"]),
+                "space_code": cell["space_code"],
+                "st_code": cell["st_code"],
+                "xco2": float(observation.xco2),
+                "quality_flag": observation.quality_flag,
+                "center_lon": float(observation.lon),
+                "center_lat": float(observation.lat),
+                "footprint_geojson": _footprint_geojson(observation),
+                "source_uri": observation.source_uri,
+                "source_index": observation.source_index,
+                "metadata_json": json.dumps(observation.metadata, ensure_ascii=False),
+            }
+        )
+    return rows
+
+
+def _load_observation_chunks(
+    files: list[Path],
+    config: CarbonPartitionConfig,
+    worker_count: int,
+) -> list[list[CarbonSatelliteObservation]]:
+    chunks: list[list[CarbonSatelliteObservation]] = []
+    normalized_product_type = normalize_carbon_product_type(config.product_type)
+
+    def load_one(path: Path, max_observations: int | None = None) -> list[CarbonSatelliteObservation]:
+        if normalized_product_type == "xco2":
+            return load_observations_from_file(path, max_observations=max_observations)
+        return load_observations_from_file(path, max_observations=max_observations, product_type=config.product_type)
+
+    if config.max_observations is None and worker_count > 1 and len(files) > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            for observations in pool.map(load_one, files):
+                chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
+        return chunks
+
+    remaining = config.max_observations
+    for path in files:
+        if remaining is not None and remaining <= 0:
+            break
+        observations = load_one(path, max_observations=remaining)
+        if remaining is not None:
+            observations = observations[:remaining]
+            remaining -= len(observations)
+        chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
+    return chunks
+
+
+def _partition_chunks(
+    chunks: list[list[CarbonSatelliteObservation]],
+    config: CarbonPartitionConfig,
+    worker_count: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if worker_count == 1 or len(chunks) <= 1:
+        for chunk in chunks:
+            rows.extend(_partition_observation_chunk(chunk, config))
+        return rows
+
+    if config.partition_backend == "process":
+        executor_cls = ProcessPoolExecutor
+    elif config.partition_backend == "thread":
+        executor_cls = ThreadPoolExecutor
+    else:
+        raise ValueError("partition_backend must be 'process' or 'thread'")
+
+    with executor_cls(max_workers=worker_count) as pool:
+        for part in pool.map(_partition_observation_chunk, chunks, repeat(config)):
+            rows.extend(part)
+    return rows
 
 
 class CarbonSatellitePartitionService:
     data_type = "carbon_satellite"
+    supported_product_types = supported_carbon_product_types()
 
     def run(
         self,
@@ -353,27 +492,14 @@ class CarbonSatellitePartitionService:
         workers: int = 1,
     ) -> PartitionResult:
         cfg = config or CarbonPartitionConfig()
+        normalize_carbon_product_type(cfg.product_type)
         files = _iter_input_files(input_dir)
         if not files:
             raise RuntimeError(f"No carbon observation .jsonl/.csv files found under: {input_dir}")
 
         worker_count = max(1, workers)
-        sdk = CubeEncoderSDK()
-
-        def process_file(path: Path) -> list[dict[str, Any]]:
-            return [
-                partition_observation(obs, cfg, sdk=sdk)
-                for obs in load_observations_from_file(path, max_observations=cfg.max_observations)
-            ]
-
-        rows: list[dict[str, Any]] = []
-        if worker_count == 1:
-            for path in files:
-                rows.extend(process_file(path))
-        else:
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                for part in pool.map(process_file, files):
-                    rows.extend(part)
+        chunks = _load_observation_chunks(files, cfg, worker_count)
+        rows = _partition_chunks(chunks, cfg, worker_count)
 
         output_dir.mkdir(parents=True, exist_ok=True)
         rows_path = output_dir / "carbon_observation_rows.jsonl"
