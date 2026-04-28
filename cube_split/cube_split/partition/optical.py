@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from cube_split.partition.optical_products import supported_optical_product_families
+
 
 @dataclass(frozen=True)
 class OpticalPartitionService:
@@ -15,7 +17,7 @@ class OpticalPartitionService:
     """
 
     data_type: str = "optical"
-    supported_families: tuple[str, ...] = ("landsat", "sentinel_optical")
+    supported_families: tuple[str, ...] = supported_optical_product_families()
 
     def job_module(self) -> str:
         return "cube_split.jobs.ray_logical_partition_job"

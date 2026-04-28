@@ -44,12 +44,16 @@
 - `optical`：光学遥感影像剖分，沿用现有 COG window 索引链路，核心任务仍在 `cube_split.jobs.ray_logical_partition_job`。
 - `carbon_satellite` / `carbon`：碳卫星观测剖分，输入是 OCO-2 Lite `.nc4` 或已经标准化的 JSONL/CSV 观测行，输出为 `carbon_observation_rows.jsonl`。
 
-当前 `optical` 服务支持的产品族：
+当前 `optical` 服务通过产品适配器解析不同光学产品族。规范产品族名：
 
 - `landsat`：Landsat Collection 命名的单波段 TIF，例如 `LC09_L2SP_123033_20240424_20240425_02_T1_SR_B4.TIF`。
-- `sentinel_optical`：Sentinel-2 MSI 已展开/已转换的单波段 TIF，例如 `T50TMK_20240424T030539_B08_10m.tif`。
+- `sentinel2`：Sentinel-2 MSI 已展开/已转换的单波段 TIF，例如 `T50TMK_20240424T030539_B08_10m.tif`。兼容别名包括 `sentinel_optical`、`sentinel_2` 和 `s2`。
 
-Sentinel-2 SAFE 压缩包/目录解析不是当前入口的一部分。上游需要先把波段资产落成光学服务可识别的 TIF；后续可以在 `optical` 服务内继续新增 SAFE reader，而不改变 COG window 剖分主链路。
+产品适配器负责文件发现后的元数据解析，包括 `scene_id`、`band`、`acq_time`、`product_family` 和 `sensor`。剖分主链路仍保持为公共的 COG window 索引流程。命令行默认 `--product-family auto`，会按文件名自动识别；批量任务也可以显式传入 `--product-family landsat` 或 `--product-family sentinel2`。自动识别遇到未知 TIF 命名时会保留历史通用兜底，标记为 `generic_tif`，避免打断已有合成或临时 GeoTIFF 测试数据。
+
+Sentinel-2 SAFE 压缩包/目录解析不是当前入口的一部分。上游需要先把波段资产落成光学服务可识别的 TIF；后续可以通过新增产品适配器或 SAFE reader 扩展输入解析，而不改变 COG window 剖分主链路。
+
+碳卫星同样通过产品适配器解析不同观测产品。当前规范产品类型为 `xco2`，兼容别名包括 `oco2_lite`、`oco2` 和 `tansat_xco2`。适配器负责把 `.jsonl`、`.csv`、OCO-2 Lite `.nc/.nc4/.h5/.hdf` 输入解析为统一 observation；后续接 TANSAT、GOSAT 或其他温室气体产品时，应新增产品适配器，而不改格网定位和 observation fact 输出主链路。
 
 碳卫星默认不重采样成 GeoTIFF。它把每个 sounding/footprint 组织为“观测事实行”：
 
@@ -70,11 +74,19 @@ from cube_split.partition import CarbonPartitionConfig, CarbonSatellitePartition
 result = CarbonSatellitePartitionService().run(
     input_dir=Path("data/carbon"),
     output_dir=Path("data/carbon_out"),
-    config=CarbonPartitionConfig(grid_type="geohash", grid_level=7, max_observations=1000),
+    config=CarbonPartitionConfig(
+        grid_type="geohash",
+        grid_level=7,
+        max_observations=1000,
+        partition_chunk_size=1000,
+        partition_backend="process",
+    ),
     workers=4,
 )
 print(result.rows_path, result.total_rows)
 ```
+
+碳卫星剖分按整个任务读取 observation/sounding，并以任务级 `max_observations` 控制总量。没有设置 `max_observations` 时，多个输入文件会使用 `workers` 做文件级并行读取，适合批量 OCO-2 Lite `.nc4` 文件；设置了全局上限时会按文件顺序读取，避免为了并行而过量解码大文件。读取结果按 `partition_chunk_size` 切成全局 chunk 队列，再通过 SDK 的批量轻量定位接口生成 `space_code + st_code`。默认 `partition_backend="process"` 使用进程池执行 CPU 型格网编码，绕开 Python GIL；如需测试 monkeypatch 或嵌入不适合 fork 的运行环境，可显式设为 `partition_backend="thread"`。
 
 OCO-2 Lite `.nc4` 读取优先使用 Python `netCDF4`；环境未安装时可回退到 `h5dump` CLI。`sounding_id` 用于派生采集时间，避免 HDF 工具低精度打印 `time` 变量导致秒级偏差。
 
@@ -98,6 +110,19 @@ OCO-2 Lite `.nc4` 读取优先使用 Python `netCDF4`；环境未安装时可回
 - `window_col_off`, `window_row_off`, `window_width`, `window_height`
 
 其中 `space_code` 是空间索引键，`time_bucket` 是时间索引键，`window_*` 是 COG 回源读取窗口。
+
+碳卫星观测使用独立入库命令，不进入 COG window 事实表：
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.carbon_ingest_job \
+  --run-dir data/carbon_out \
+  --job-id carbon-oco2-001 \
+  --cube-version v1 \
+  --metadata-backend postgres \
+  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:55432/cube
+```
+
+`--run-dir` 下应包含 `carbon_observation_rows.jsonl`。该命令写入 `rs_carbon_observation_fact`，并复用 `rs_ingest_job` 记录任务状态。
 
 ## 5. 表模型
 
@@ -125,6 +150,19 @@ grid_type + grid_level + space_code + time_bucket + band + cube_version
 - `provenance_json`
 
 `rs_ingest_job` 保存任务状态、参数、统计、失败原因和输出快照。
+
+`rs_carbon_observation_fact` 是碳卫星读取主表，业务唯一键：
+
+```text
+satellite + observation_id + product_type + cube_version
+```
+
+关键字段：
+
+- `satellite`, `product_type`, `observation_id`, `acq_time`
+- `grid_type`, `grid_level`, `space_code`, `st_code`, `time_bucket`
+- `xco2`, `quality_flag`, `center_lon`, `center_lat`
+- `footprint_geojson`, `source_uri`, `source_index`, `metadata_json`
 
 ## 6. value_ref_uri
 
@@ -171,6 +209,22 @@ python -m cube_split.read.aoi_reader \
 - 输出尺寸：`6714 x 3443`
 - 坐标系：`EPSG:32651`
 - 波段：`sr_b2 / sr_b3 / sr_b4`
+
+碳卫星查询按 AOI bbox 转换为格网集合，再按 `space_code + time_bucket + product_type + quality_flag` 提取观测事实：
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.read.carbon_query \
+  --metadata-backend postgres \
+  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:55432/cube \
+  --bbox -168.0 40.5 -166.5 42.0 \
+  --time-start 20201231 \
+  --time-end 20201231 \
+  --quality-flags 0 \
+  --grid-type geohash \
+  --grid-level 7
+```
+
+输出包含 XCO2 摘要和观测行；每条观测保留中心点、footprint GeoJSON、源文件 URI 和源文件行号。
 
 ## 8. 运行环境
 
