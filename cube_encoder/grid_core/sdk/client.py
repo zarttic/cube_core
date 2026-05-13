@@ -159,5 +159,37 @@ class CubeEncoderSDK:
             version=version,
         )
 
+    def batch_locate_st_codes(
+        self,
+        grid_type: str | GridType,
+        level: int,
+        items: list[dict[str, Any]],
+        time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
+        version: str = "v1",
+    ) -> list[dict[str, Any]]:
+        parsed_grid_type = _parse_enum(grid_type, GridType)
+        parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
+        located: list[dict[str, Any]] = []
+        for item in items:
+            cell = self._grid.locate(grid_type=parsed_grid_type, level=level, point=item["point"])
+            st_code = self._code.generate_st_code(
+                grid_type=parsed_grid_type,
+                level=level,
+                space_code=cell.space_code,
+                timestamp=item["timestamp"],
+                time_granularity=parsed_time_granularity,
+                version=version,
+            )
+            located.append(
+                {
+                    "grid_type": cell.grid_type,
+                    "grid_level": cell.level,
+                    "space_code": cell.space_code,
+                    "time_code": st_code.time_code,
+                    "st_code": st_code.st_code,
+                }
+            )
+        return located
+
     def parse_st_code(self, st_code: str) -> STCode:
         return self._code.parse_st_code(st_code=st_code)
