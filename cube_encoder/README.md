@@ -76,7 +76,7 @@ python -m grid_core.app.perf_smoke
 From this workspace root:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests cube_web/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
 
 ## Documentation

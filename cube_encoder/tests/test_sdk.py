@@ -86,6 +86,36 @@ def test_sdk_st_code_generate_parse_batch():
     assert batch[0] == f"gh:7:{g1}:202603091530:v1"
 
 
+def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
+    sdk = CubeEncoderSDK()
+    timestamp = datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)
+
+    batch = sdk.batch_locate_st_codes(
+        grid_type="geohash",
+        level=7,
+        time_granularity="day",
+        version="v1",
+        items=[
+            {"point": [116.391, 39.907], "timestamp": timestamp},
+            {"point": [116.392, 39.908], "timestamp": timestamp},
+        ],
+    )
+
+    expected_code = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907]).space_code
+    expected_st_code = sdk.generate_st_code(
+        grid_type="geohash",
+        level=7,
+        space_code=expected_code,
+        timestamp=timestamp,
+        time_granularity="day",
+        version="v1",
+    ).st_code
+    assert len(batch) == 2
+    assert batch[0]["space_code"] == expected_code
+    assert batch[0]["st_code"] == expected_st_code
+    assert batch[0]["grid_level"] == 7
+
+
 def test_sdk_cover_compact_matches_full_cover_space_codes_and_bbox():
     sdk = CubeEncoderSDK()
     bbox = [116.385, 39.903, 116.397, 39.911]

@@ -54,6 +54,53 @@ def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):
     assert records[0].sensor == "sentinel2_msi"
 
 
+def test_build_manifest_supports_landsat_l1tp_filenames(tmp_path: Path):
+    source = tmp_path / "LO81200292021293BJC00_B1.TIF"
+    _write_tif(source)
+
+    records = build_manifest(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].scene_id == "LO81200292021293BJC00"
+    assert records[0].band == "b1"
+    assert records[0].acq_time == "2021-10-20T00:00:00Z"
+    assert records[0].product_family == "landsat"
+    assert records[0].sensor == "landsat8_oli_tirs"
+
+
+def test_build_manifest_l1tp_band_qa(tmp_path: Path):
+    source = tmp_path / "LO81200292021293BJC00_BQA.TIF"
+    _write_tif(source)
+
+    records = build_manifest(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].scene_id == "LO81200292021293BJC00"
+    assert records[0].band == "bqa"
+
+
+def test_build_manifest_l1tp_various_sensor_prefixes(tmp_path: Path):
+    for prefix, expected_sensor in [
+        ("LC8", "landsat8_oli_tirs"),
+        ("LC9", "landsat9_oli_tirs"),
+        ("LE7", "landsat7_etm"),
+        ("LO9", "landsat9_oli_tirs"),
+        ("LT5", "landsat5_tm"),
+    ]:
+        source = tmp_path / f"{prefix}1190292020200BJC00_B1.TIF"
+        _write_tif(source)
+
+    records = build_manifest(tmp_path, product_family="landsat_l1tp")
+
+    assert len(records) == 5
+    # files are sorted alphabetically by path
+    assert records[0].sensor == "landsat8_oli_tirs"   # LC8
+    assert records[1].sensor == "landsat9_oli_tirs"   # LC9
+    assert records[2].sensor == "landsat7_etm"        # LE7
+    assert records[3].sensor == "landsat9_oli_tirs"   # LO9
+    assert records[4].sensor == "landsat5_tm"         # LT5
+
+
 def test_supported_optical_product_families_are_registered():
     assert supported_optical_product_families() == ("landsat", "sentinel2")
     assert get_optical_product_adapter("sentinel_optical").family == "sentinel2"

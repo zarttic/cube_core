@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from s2sphere import CellId
 
+import cube_web.app as web_app
 from cube_web.app import ENCODER_SDK_CLASS, app
 
 
@@ -44,3 +45,54 @@ def test_code_parse_sdk_endpoint():
     body = resp.json()
     assert body["grid_type"] == "geohash"
     assert body["level"] == 7
+
+
+def test_carbon_partition_demo_endpoint(monkeypatch):
+    def fake_run_carbon_partition_demo():
+        return {
+            "status": "completed",
+            "data_type": "carbon_satellite",
+            "rows": 12,
+            "distinct_space_codes": 5,
+            "elapsed_sec": 0.12,
+            "rows_per_sec": 100.0,
+            "grid_type": "geohash",
+            "grid_level": 7,
+            "workers": 2,
+            "partition_backend": "process",
+            "output_path": "/tmp/demo/carbon_observation_rows.jsonl",
+        }
+
+    monkeypatch.setattr("cube_web.app._run_carbon_partition_demo", fake_run_carbon_partition_demo)
+
+    body = web_app.partition_carbon_demo()
+
+    assert body["status"] == "completed"
+    assert body["rows"] == 12
+    assert body["distinct_space_codes"] == 5
+
+
+def test_optical_partition_demo_endpoint(monkeypatch):
+    def fake_run_optical_partition_demo():
+        return {
+            "status": "completed",
+            "data_type": "optical",
+            "asset_count": 2,
+            "grid_task_count": 16,
+            "rows": 16,
+            "cog_elapsed_sec": 0.1,
+            "partition_elapsed_sec": 0.2,
+            "total_elapsed_sec": 0.4,
+            "grid_type": "geohash",
+            "grid_level": 7,
+            "workers": 2,
+            "output_path": "/tmp/demo/index_rows.jsonl",
+        }
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    body = web_app.partition_optical_demo()
+
+    assert body["status"] == "completed"
+    assert body["asset_count"] == 2
+    assert body["rows"] == 16

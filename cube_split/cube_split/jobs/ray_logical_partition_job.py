@@ -128,6 +128,23 @@ def _load_ray():
     return ray
 
 
+def _ray_runtime_env_from_env() -> dict[str, Any] | None:
+    raw = os.environ.get("RAY_RUNTIME_ENV_JSON", "").strip()
+    if not raw:
+        return None
+    loaded = json.loads(raw)
+    if not isinstance(loaded, dict):
+        raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
+    return loaded
+
+
+def _ray_actor_options_from_env() -> dict[str, Any]:
+    node_resource = os.environ.get("RAY_ACTOR_NODE_RESOURCE", "").strip()
+    if not node_resource:
+        return {}
+    return {"resources": {node_resource: 0.001}}
+
+
 def main() -> None:
     args = parse_args()
     total_start = time.perf_counter()
@@ -191,16 +208,33 @@ def main() -> None:
     out_rows: list[dict] = []
     if backend == "ray":
         ray = _load_ray()
+        runtime_env = _ray_runtime_env_from_env()
         ray_init_start = time.perf_counter()
         if args.ray_address:
             try:
-                ray.init(address=args.ray_address, ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
+                ray.init(
+                    address=args.ray_address,
+                    ignore_reinit_error=True,
+                    include_dashboard=False,
+                    logging_level="ERROR",
+                    runtime_env=runtime_env,
+                )
             except Exception:
                 if args.ray_address != "auto":
                     raise
-                ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
+                ray.init(
+                    ignore_reinit_error=True,
+                    include_dashboard=False,
+                    logging_level="ERROR",
+                    runtime_env=runtime_env,
+                )
         else:
-            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
+            ray.init(
+                ignore_reinit_error=True,
+                include_dashboard=False,
+                logging_level="ERROR",
+                runtime_env=runtime_env,
+            )
         ray_init_elapsed = time.perf_counter() - ray_init_start
 
         @ray.remote
@@ -213,7 +247,8 @@ def main() -> None:
                     rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
                 return rows_out
 
-        actors = [AssetTaskProcessor.remote() for _ in range(parallelism)]
+        actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
+        actors = [actor_cls.remote() for _ in range(parallelism)]
         futures = [
             actors[idx % parallelism].process_groups.remote(chunk, args.time_granularity, include_sample_mean)
             for idx, chunk in enumerate(task_chunks)

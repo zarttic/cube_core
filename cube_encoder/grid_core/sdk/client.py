@@ -11,6 +11,7 @@ from grid_core.app.models.st_code import STCode
 from grid_core.app.services.code_service import CodeService
 from grid_core.app.services.grid_service import GridService
 from grid_core.app.services.topology_service import TopologyService
+from grid_core.app.utils.timecode import to_time_code
 
 
 def _parse_enum(value: str | Enum, enum_cls: type[Enum]) -> Enum:
@@ -158,6 +159,46 @@ class CubeEncoderSDK:
             time_granularity=parsed_time_granularity,
             version=version,
         )
+
+    def batch_locate_st_codes(
+        self,
+        grid_type: str | GridType,
+        level: int,
+        items: list[dict[str, Any]],
+        time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
+        version: str = "v1",
+    ) -> list[dict[str, Any]]:
+        parsed_grid_type = _parse_enum(grid_type, GridType)
+        parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
+        results: list[dict[str, Any]] = []
+        for item in items:
+            space_code = self._grid.locate_space_code(
+                grid_type=parsed_grid_type,
+                level=level,
+                point=item["point"],
+            )
+            time_code = self._code_time_code(item["timestamp"], parsed_time_granularity)
+            st_code = self._code.build_st_code(
+                grid_type=parsed_grid_type,
+                level=level,
+                space_code=space_code,
+                time_code=time_code,
+                version=version,
+            )
+            results.append(
+                {
+                    "grid_type": parsed_grid_type.value,
+                    "grid_level": level,
+                    "space_code": space_code,
+                    "time_code": time_code,
+                    "st_code": st_code.st_code,
+                }
+            )
+        return results
+
+    @staticmethod
+    def _code_time_code(timestamp: datetime, granularity: TimeGranularity) -> str:
+        return to_time_code(timestamp, granularity)
 
     def parse_st_code(self, st_code: str) -> STCode:
         return self._code.parse_st_code(st_code=st_code)

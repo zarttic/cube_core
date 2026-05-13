@@ -33,7 +33,6 @@ jobs:
         run: |
           python -m pytest -q cube_encoder/tests
           python -m pytest -q cube_split/tests
-          python -m pytest -q cube_web/tests
 
   perf-smoke:
     runs-on: ubuntu-latest

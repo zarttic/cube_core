@@ -21,9 +21,13 @@ class MGRSEngine:
 
     def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
         app_level = self._validate_level(level)
-        precision = self._to_precision(app_level)
-        code = self._converter.toMGRS(lat, lon, MGRSPrecision=precision)
+        code = self.locate_space_code(lon=lon, lat=lat, level=app_level)
         return self._build_cell(code=code, level=app_level)
+
+    def locate_space_code(self, lon: float, lat: float, level: int) -> str:
+        app_level = self._validate_level(level)
+        precision = self._to_precision(app_level)
+        return self._converter.toMGRS(lat, lon, MGRSPrecision=precision)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
         compact_cells = self.cover_geometry_compact(geometry=geometry, level=level, cover_mode=cover_mode)

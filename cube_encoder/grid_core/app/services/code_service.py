@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 import h3
@@ -41,6 +43,24 @@ class CodeService:
             raise ValidationError(f"Unsupported grid_type: {grid_type}")
         time_code = to_time_code(timestamp, time_granularity)
         self._validate_space_code_and_level(grid_type=grid_type, level=level, space_code=space_code)
+        return self.build_st_code(
+            grid_type=grid_type,
+            level=level,
+            space_code=space_code,
+            time_code=time_code,
+            version=version,
+        )
+
+    def build_st_code(
+        self,
+        grid_type: GridType,
+        level: int,
+        space_code: str,
+        time_code: str,
+        version: str,
+    ) -> STCode:
+        if grid_type not in PREFIX_MAP:
+            raise ValidationError(f"Unsupported grid_type: {grid_type}")
         prefix = PREFIX_MAP[grid_type]
         st_code = f"{prefix}:{level}:{space_code}:{time_code}:{version}"
         return STCode(

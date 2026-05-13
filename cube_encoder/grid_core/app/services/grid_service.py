@@ -18,6 +18,17 @@ class GridService:
         lon, lat = float(pt.x), float(pt.y)
         return engine.locate_point(lon=lon, lat=lat, level=level)
 
+    def locate_space_code(self, grid_type: GridType, level: int, point: list[float]) -> str:
+        engine = self._registry.get_engine(grid_type)
+        if len(point) != 2:
+            raise ValidationError("Point must be [lon, lat]")
+        lon, lat = float(point[0]), float(point[1])
+        if lon < -180.0 or lon > 180.0:
+            raise ValidationError("Point longitude must be in [-180, 180]")
+        if lat < -90.0 or lat > 90.0:
+            raise ValidationError("Point latitude must be in [-90, 90]")
+        return engine.locate_space_code(lon=lon, lat=lat, level=level)
+
     def cover(
         self,
         grid_type: GridType,

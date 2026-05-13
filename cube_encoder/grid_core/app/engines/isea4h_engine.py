@@ -17,8 +17,12 @@ class ISEA4HEngine:
 
     def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
         self._validate_level(level)
-        code = h3.latlng_to_cell(lat, lon, level)
+        code = self.locate_space_code(lon=lon, lat=lat, level=level)
         return self._build_cell(code, level)
+
+    def locate_space_code(self, lon: float, lat: float, level: int) -> str:
+        self._validate_level(level)
+        return h3.latlng_to_cell(lat, lon, level)
 
     def cover_geometry(self, geometry: dict, level: int, cover_mode: str) -> list[GridCell]:
         compact_cells, boundary_cache = self._cover_geometry_core(geometry=geometry, level=level, cover_mode=cover_mode)

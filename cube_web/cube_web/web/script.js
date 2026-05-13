@@ -22,6 +22,11 @@ document.addEventListener('DOMContentLoaded', () => {
 // 初始化模块标签切换
 function initModuleTabs() {
     const moduleTabs = document.querySelectorAll('.module-tab');
+    const activeTab = document.querySelector('.module-tab.active');
+    const activeModuleId = activeTab ? activeTab.getAttribute('data-module') : null;
+    if (activeModuleId) {
+        currentPage = activeModuleId;
+    }
 
     moduleTabs.forEach(tab => {
         tab.addEventListener('click', () => {
@@ -634,6 +639,7 @@ function apiPrefixes() {
         gridPrefix: `${base}/v1/grid`,
         topologyPrefix: `${base}/v1/topology`,
         codePrefix: `${base}/v1/code`,
+        partitionPrefix: `${base}/v1/partition`,
     };
 }
 
@@ -645,7 +651,7 @@ async function requestJson(url, payload) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-        throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        throw new Error(data?.error?.message || data?.detail || `HTTP ${response.status}`);
     }
     return data;
 }
@@ -750,6 +756,31 @@ function updateResultHtml(targetId, rows) {
         .join('');
 }
 
+function setPartitionLoading(targetId, title) {
+    updateResultHtml(targetId, [
+        { label: '剖分状态', value: `${title}处理中...` },
+        { label: '数据来源', value: '内置 demo 数据' },
+    ]);
+}
+
+function formatNumber(value) {
+    if (value === undefined || value === null) return '-';
+    return Number(value).toLocaleString('zh-CN');
+}
+
+function formatSeconds(value) {
+    if (value === undefined || value === null) return '-';
+    return `${Number(value).toFixed(3)} 秒`;
+}
+
+function stripArchiveSuffix(name) {
+    return String(name || '').replace(/\.(tar|tar\.gz|tgz|zip)$/i, '');
+}
+
+function optionalResultRows(rows) {
+    return rows.filter((row) => row.value !== undefined && row.value !== null && row.value !== '');
+}
+
 function clearDivisionDrawings() {
     if (drawItems) {
         drawItems.clearLayers();
@@ -790,10 +821,10 @@ async function runDemo() {
                 await runGridOperations();
                 break;
             case 'partition-optical':
-                runOpticalPartition();
+                await runOpticalPartition();
                 return;
             case 'partition-carbon':
-                runCarbonPartition();
+                await runCarbonPartition();
                 return;
             case 'partition-radar':
                 runRadarPartition();
@@ -1339,108 +1370,84 @@ async function appendConversionRows(rows, convertDir, ctx) {
 }
 
 // 4. 光学遥感剖分演示
-function runOpticalPartition() {
-    // 获取选中的数据批次
+async function runOpticalPartition() {
     const selectedItem = document.querySelector('#opticalDataQueue .queue-item.selected');
     const batchId = selectedItem ? selectedItem.getAttribute('data-batch-id') : 'B20240307001';
-    const batchName = selectedItem ? selectedItem.querySelector('.item-name').textContent : 'Landsat-8_OLI_20240307';
-
-    setTimeout(() => {
-        const resultsContainer = document.getElementById('opticalResults');
-        if (!resultsContainer) return;
-
-        resultsContainer.innerHTML = `
-            <div class="result-item">
-                <div class="result-label">剖分状态</div>
-                <div class="result-value" style="color:var(--success);">✓ 完成</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">数据源</div>
-                <div class="result-value">载入子系统</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">批次ID</div>
-                <div class="result-value code">${batchId}</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">数据名称</div>
-                <div class="result-value">${batchName}</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">生成数据块</div>
-                <div class="result-value">256 个</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">格网类型</div>
-                <div class="result-value">Geohash 逻辑剖分</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">输出格式</div>
-                <div class="result-value">COG (GeoTIFF)</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">总数据量</div>
-                <div class="result-value">2.4 GB</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">处理时间</div>
-                <div class="result-value">45.2 秒</div>
-            </div>
-        `;
+    const batchName = selectedItem ? selectedItem.querySelector('.item-name').textContent : 'LC08_L2SP_120030_20260204_20260217_02_T1';
+    const { partitionPrefix } = apiPrefixes();
+    setPartitionLoading('opticalResults', '光学 demo');
+    try {
+        const result = await requestJson(`${partitionPrefix}/optical/demo`, {});
+        updateResultHtml('opticalResults', optionalResultRows([
+            { label: '剖分状态', value: '完成' },
+            { label: '数据源', value: stripArchiveSuffix(result.demo_source) || '内置 demo 数据' },
+            { label: '批次ID', value: batchId, code: true },
+            { label: '数据名称', value: stripArchiveSuffix(result.demo_source) || batchName },
+            { label: '资产数量', value: `${formatNumber(result.asset_count)} 个` },
+            { label: '格网任务', value: `${formatNumber(result.grid_task_count)} 个` },
+            { label: '索引行数', value: `${formatNumber(result.rows)} 行` },
+            { label: '格网类型', value: `${result.grid_type} L${result.grid_level}` },
+            { label: '执行引擎', value: result.execution_engine || 'local' },
+            { label: 'Demo 任务ID', value: result.demo_task_id || '-', code: true },
+            { label: 'Ray 任务ID', value: result.ray_task_id, code: true },
+            { label: 'Ray 初始化', value: formatSeconds(result.ray_init_elapsed_sec) },
+            { label: 'COG 转换', value: formatSeconds(result.cog_elapsed_sec) },
+            { label: '剖分耗时', value: formatSeconds(result.partition_elapsed_sec) },
+            { label: '总耗时', value: formatSeconds(result.total_elapsed_sec) },
+            { label: '输出路径', value: result.output_path || '-', code: true },
+        ]));
+    } catch (error) {
+        updateResultHtml('opticalResults', [
+            { label: '剖分状态', value: '失败' },
+            { label: '错误信息', value: error.message || String(error) },
+        ]);
+    } finally {
         isProcessing = false;
-    }, 800);
+    }
 }
 
 // 5. 碳卫星剖分演示
-function runCarbonPartition() {
+async function runCarbonPartition() {
     const selectedItem = document.querySelector('#carbonDataQueue .queue-item.selected');
     const batchId = selectedItem ? selectedItem.getAttribute('data-batch-id') : 'C20240307001';
     const batchName = selectedItem ? selectedItem.querySelector('.item-name').textContent : 'OCO-2_XCO2_20240307';
-
-    setTimeout(() => {
-        const resultsContainer = document.getElementById('carbonResults');
-        if (!resultsContainer) return;
-
-        resultsContainer.innerHTML = `
-            <div class="result-item">
-                <div class="result-label">剖分状态</div>
-                <div class="result-value" style="color:var(--success);">✓ 完成</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">数据源</div>
-                <div class="result-value">载入子系统</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">批次ID</div>
-                <div class="result-value code">${batchId}</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">数据名称</div>
-                <div class="result-value">${batchName}</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">Footprint 映射</div>
-                <div class="result-value">✓ 完成</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">覆盖格网数</div>
-                <div class="result-value">89 个</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">有效数据比例</div>
-                <div class="result-value">86.5%</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">数据立方体</div>
-                <div class="result-value">XCO2 时间序列</div>
-            </div>
-            <div class="result-item">
-                <div class="result-label">输出格式</div>
-                <div class="result-value">NetCDF4</div>
-            </div>
-        `;
+    const { partitionPrefix } = apiPrefixes();
+    setPartitionLoading('carbonResults', '碳卫星 demo');
+    try {
+        const result = await requestJson(`${partitionPrefix}/carbon/demo`, {});
+        const qualityZero = result.quality_counts?.['0'] || 0;
+        const validRatio = result.rows ? `${((qualityZero / result.rows) * 100).toFixed(1)}%` : '-';
+        const footprintCount = document.getElementById('footprintCount');
+        const gridCoverageCount = document.getElementById('gridCoverageCount');
+        const validDataRatio = document.getElementById('validDataRatio');
+        if (footprintCount) footprintCount.textContent = formatNumber(result.rows);
+        if (gridCoverageCount) gridCoverageCount.textContent = formatNumber(result.distinct_space_codes);
+        if (validDataRatio) validDataRatio.textContent = validRatio;
+        updateResultHtml('carbonResults', optionalResultRows([
+            { label: '剖分状态', value: '完成' },
+            { label: '数据源', value: result.demo_source || '内置 demo 数据' },
+            { label: '批次ID', value: batchId, code: true },
+            { label: '数据名称', value: batchName },
+            { label: 'Observation 行数', value: `${formatNumber(result.rows)} 行` },
+            { label: '覆盖格网数', value: `${formatNumber(result.distinct_space_codes)} 个` },
+            { label: '有效数据比例', value: validRatio },
+            { label: '格网类型', value: `${result.grid_type} L${result.grid_level}` },
+            { label: '并行后端', value: `${result.partition_backend} / ${result.workers} workers` },
+            { label: '执行引擎', value: result.execution_engine || 'local-process' },
+            { label: 'Demo 任务ID', value: result.demo_task_id || '-', code: true },
+            { label: 'Ray 任务ID', value: result.ray_task_id, code: true },
+            { label: '剖分耗时', value: formatSeconds(result.elapsed_sec) },
+            { label: '处理吞吐', value: `${formatNumber(result.rows_per_sec)} rows/s` },
+            { label: '输出路径', value: result.output_path || '-', code: true },
+        ]));
+    } catch (error) {
+        updateResultHtml('carbonResults', [
+            { label: '剖分状态', value: '失败' },
+            { label: '错误信息', value: error.message || String(error) },
+        ]);
+    } finally {
         isProcessing = false;
-    }, 800);
+    }
 }
 
 // 6. 雷达剖分演示

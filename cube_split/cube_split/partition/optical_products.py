@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -107,7 +107,58 @@ class GenericTifAdapter:
         )
 
 
+class LandsatL1TPAdapter:
+    """Adapter for Landsat L1TP / WRS-2 scene IDs (old-style naming).
+
+    Old-style format: L[OCTE][5789][path 3d][row 3d][YYYYDDD][station]_[band]
+    Example: LO81200292021293BJC00_B1.TIF
+    """
+
+    family = "landsat"
+    aliases = ("landsat_l1tp", "landsat_wrs2", "l1tp")
+    sensor = "landsat_oli_tirs"
+    _SCENE_RE = re.compile(
+        r"^L[OCTE][5789]\d{3}\d{3}\d{7}[A-Z0-9]+_[A-Za-z0-9]+$", re.IGNORECASE
+    )
+
+    def match(self, path: Path) -> bool:
+        return bool(self._SCENE_RE.match(path.stem))
+
+    def parse(self, path: Path) -> OpticalAssetMetadata:
+        stem = path.stem
+        parts = stem.split("_")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid Landsat L1TP filename: {path.name}")
+        scene_id, band_raw = parts
+        band = band_raw.lower()
+        year_day = scene_id[9:16]  # YYYYDDD after L+sensor(3)+path(3)+row(3)
+        acq_time = (
+            datetime(int(year_day[:4]), 1, 1, tzinfo=timezone.utc)
+            + timedelta(days=int(year_day[4:7]) - 1)
+        )
+        return OpticalAssetMetadata(
+            scene_id=scene_id,
+            band=band,
+            acq_time=acq_time,
+            product_family=self.family,
+            sensor=self._sensor_from_prefix(scene_id[:3]),
+        )
+
+    def _sensor_from_prefix(self, prefix: str) -> str:
+        p = prefix.upper()
+        if p in ("LO8", "LC8"):
+            return "landsat8_oli_tirs"
+        if p in ("LO9", "LC9"):
+            return "landsat9_oli_tirs"
+        if p == "LE7":
+            return "landsat7_etm"
+        if p == "LT5":
+            return "landsat5_tm"
+        return self.sensor
+
+
 _ADAPTERS: tuple[OpticalProductAdapter, ...] = (
+    LandsatL1TPAdapter(),
     LandsatCollectionAdapter(),
     Sentinel2TifAdapter(),
 )
@@ -115,7 +166,13 @@ _GENERIC_TIF_ADAPTER = GenericTifAdapter()
 
 
 def supported_optical_product_families() -> tuple[str, ...]:
-    return tuple(adapter.family for adapter in _ADAPTERS)
+    seen: set[str] = set()
+    families: list[str] = []
+    for adapter in _ADAPTERS:
+        if adapter.family not in seen:
+            seen.add(adapter.family)
+            families.append(adapter.family)
+    return tuple(families)
 
 
 def get_optical_product_adapter(product_family: str) -> OpticalProductAdapter:
