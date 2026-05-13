@@ -11,6 +11,7 @@ from grid_core.app.models.st_code import STCode
 from grid_core.app.services.code_service import CodeService
 from grid_core.app.services.grid_service import GridService
 from grid_core.app.services.topology_service import TopologyService
+from grid_core.app.utils.timecode import to_time_code
 
 
 def _parse_enum(value: str | Enum, enum_cls: type[Enum]) -> Enum:
@@ -169,27 +170,35 @@ class CubeEncoderSDK:
     ) -> list[dict[str, Any]]:
         parsed_grid_type = _parse_enum(grid_type, GridType)
         parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
-        located: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         for item in items:
-            cell = self._grid.locate(grid_type=parsed_grid_type, level=level, point=item["point"])
-            st_code = self._code.generate_st_code(
+            space_code = self._grid.locate_space_code(
                 grid_type=parsed_grid_type,
                 level=level,
-                space_code=cell.space_code,
-                timestamp=item["timestamp"],
-                time_granularity=parsed_time_granularity,
+                point=item["point"],
+            )
+            time_code = self._code_time_code(item["timestamp"], parsed_time_granularity)
+            st_code = self._code.build_st_code(
+                grid_type=parsed_grid_type,
+                level=level,
+                space_code=space_code,
+                time_code=time_code,
                 version=version,
             )
-            located.append(
+            results.append(
                 {
-                    "grid_type": cell.grid_type,
-                    "grid_level": cell.level,
-                    "space_code": cell.space_code,
-                    "time_code": st_code.time_code,
+                    "grid_type": parsed_grid_type.value,
+                    "grid_level": level,
+                    "space_code": space_code,
+                    "time_code": time_code,
                     "st_code": st_code.st_code,
                 }
             )
-        return located
+        return results
+
+    @staticmethod
+    def _code_time_code(timestamp: datetime, granularity: TimeGranularity) -> str:
+        return to_time_code(timestamp, granularity)
 
     def parse_st_code(self, st_code: str) -> STCode:
         return self._code.parse_st_code(st_code=st_code)

@@ -14,3 +14,5 @@ cube_split/*.nc4
 cube_split/*.h5
 cube_split/*.hdf
 cube_split/CarbonCube.gz
+cube_split/data/
+.worktrees/

@@ -9,7 +9,7 @@ import subprocess
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from itertools import repeat
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,8 @@ from cube_split.partition.carbon_products import (
     normalize_carbon_product_type,
     supported_carbon_product_types,
 )
+
+UTC = timezone.utc
 
 
 @dataclass(frozen=True)
@@ -367,7 +369,7 @@ def _iter_input_files(input_dir: Path) -> list[Path]:
         for path in input_dir.rglob("*")
         if path.is_file()
         and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf"}
-        and path.name != "carbon_observation_rows.jsonl"
+        and path.name not in {"carbon_observation_rows.jsonl", "index_rows.jsonl"}
     )
 
 
