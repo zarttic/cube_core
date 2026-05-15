@@ -12,11 +12,14 @@ from typing import Any, Iterator, Optional
 
 import rasterio
 from pyproj import Transformer
+from rasterio.enums import Resampling
 from rasterio.shutil import copy as rio_copy
+from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 from grid_core.sdk import CubeEncoderSDK
 from cube_split.partition.optical_products import parse_optical_asset
+from cube_split.partition.product_products import parse_product_asset
 
 
 @dataclass
@@ -29,11 +32,14 @@ class AssetRecord:
     sensor: str = "unknown"
 
 
-def build_manifest(input_dir: Path, product_family: str = "auto") -> list[AssetRecord]:
+def build_manifest(input_dir: Path, product_family: str = "auto", data_type: str = "optical") -> list[AssetRecord]:
     records: list[AssetRecord] = []
-    tif_paths = sorted(path for path in input_dir.iterdir() if path.is_file() and path.suffix.lower() == ".tif")
+    tif_paths = sorted(path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".tif", ".tiff"})
     for tif in tif_paths:
-        metadata = parse_optical_asset(tif, product_family=product_family)
+        if data_type == "product":
+            metadata = parse_product_asset(tif)
+        else:
+            metadata = parse_optical_asset(tif, product_family=product_family)
         records.append(
             AssetRecord(
                 scene_id=metadata.scene_id,
@@ -57,6 +63,7 @@ def convert_assets_to_cog(
     level: int | None = None,
     overviews: str = "NONE",
     num_threads: str = "ALL_CPUS",
+    target_crs: str | None = None,
 ) -> list[AssetRecord]:
     if not assets:
         return []
@@ -85,12 +92,23 @@ def convert_assets_to_cog(
             dst.unlink()
         if not dst.exists():
             with rasterio.open(src) as ds:
-                rio_copy(
-                    ds,
-                    str(dst),
-                    driver="COG",
-                    **creation_options,
-                )
+                if target_crs and (ds.crs is None or ds.crs.to_string().upper() != target_crs.upper()):
+                    if ds.crs is None:
+                        raise ValueError(f"Cannot reproject asset without CRS: {src}")
+                    with WarpedVRT(ds, crs=target_crs, resampling=Resampling.nearest) as vrt:
+                        rio_copy(
+                            vrt,
+                            str(dst),
+                            driver="COG",
+                            **creation_options,
+                        )
+                else:
+                    rio_copy(
+                        ds,
+                        str(dst),
+                        driver="COG",
+                        **creation_options,
+                    )
         return AssetRecord(
             scene_id=asset.scene_id,
             band=asset.band,

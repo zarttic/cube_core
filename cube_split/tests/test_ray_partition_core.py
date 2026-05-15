@@ -102,7 +102,7 @@ def test_build_manifest_l1tp_various_sensor_prefixes(tmp_path: Path):
 
 
 def test_supported_optical_product_families_are_registered():
-    assert supported_optical_product_families() == ("landsat", "sentinel2")
+    assert supported_optical_product_families() == ("landsat", "sentinel2", "other")
     assert get_optical_product_adapter("sentinel_optical").family == "sentinel2"
 
 
@@ -136,6 +136,22 @@ def test_build_manifest_keeps_generic_tif_fallback_for_auto_detection(tmp_path: 
     assert records[0].band == "demo_scene_blue"
     assert records[0].acq_time == "1970-01-01T00:00:00Z"
     assert records[0].product_family == "generic_tif"
+
+
+def test_build_manifest_recurses_and_parses_shandong_mosaic_filenames(tmp_path: Path):
+    nested = tmp_path / "Shandong_mosaic_2020Q3_sr_band4_cut"
+    nested.mkdir()
+    source = nested / "Shandong_mosaic_2020Q3_sr_band4_cut.tif"
+    _write_tif(source)
+
+    records = build_manifest(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].scene_id == "Shandong_mosaic_2020Q3"
+    assert records[0].band == "sr_band4"
+    assert records[0].acq_time == "2020-07-01T00:00:00Z"
+    assert records[0].product_family == "other"
+    assert records[0].sensor == "optical_mosaic"
 
 
 def test_convert_assets_to_cog_creates_cog_files(tmp_path: Path):
@@ -177,3 +193,43 @@ def test_convert_assets_to_cog_creates_cog_files(tmp_path: Path):
     with rasterio.open(out_path) as ds:
         assert str(ds.profile.get("compress", "")).lower() == "lzw"
         assert ds.overviews(1) == []
+
+
+def test_convert_assets_to_cog_can_standardize_target_crs(tmp_path: Path):
+    with rasterio.Env() as env:
+        if "COG" not in env.drivers():
+            pytest.skip("COG driver unavailable in current GDAL build")
+
+    source = tmp_path / "Shandong_mosaic_2020Q3_sr_band4_cut.tif"
+    transform = from_origin(500000.0, 4100000.0, 30.0, 30.0)
+    data = np.ones((1, 16, 16), dtype=np.int16)
+    with rasterio.open(
+        source,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=16,
+        count=1,
+        dtype=data.dtype,
+        crs="EPSG:32650",
+        transform=transform,
+    ) as ds:
+        ds.write(data)
+
+    converted = convert_assets_to_cog(
+        [
+            AssetRecord(
+                scene_id="Shandong_mosaic_2020Q3",
+                band="sr_band4",
+                path=str(source),
+                acq_time="2020-07-01T00:00:00Z",
+            )
+        ],
+        cog_input_dir=tmp_path / "cog",
+        target_crs="EPSG:4326",
+    )
+
+    with rasterio.open(converted[0].path) as ds:
+        assert ds.crs.to_string() == "EPSG:4326"
+        assert ds.width > 0
+        assert ds.height > 0

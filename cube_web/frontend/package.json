@@ -1,0 +1,22 @@
+{
+  "name": "cube-web-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5178",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5179"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "element-plus": "^2.9.4",
+    "leaflet": "^1.9.4",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}

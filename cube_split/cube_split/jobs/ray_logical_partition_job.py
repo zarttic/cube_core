@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
         default="ALL_CPUS",
         help="COG encoder NUM_THREADS option (empty string disables)",
     )
+    parser.add_argument(
+        "--target-crs",
+        default="",
+        help="Optional target CRS for standardized COG assets, e.g. EPSG:4326. Empty keeps source CRS.",
+    )
     parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs", "isea4h"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
@@ -170,6 +175,7 @@ def main() -> None:
         level=(args.cog_level if args.cog_level > 0 else None),
         overviews="NONE",
         num_threads=(args.cog_num_threads or ""),
+        target_crs=(args.target_crs or None),
     )
     cog_elapsed = time.perf_counter() - cog_start
 
@@ -320,6 +326,7 @@ def main() -> None:
         "cog_predictor": args.cog_predictor,
         "cog_level": args.cog_level,
         "cog_num_threads": args.cog_num_threads,
+        "target_crs": args.target_crs,
         "cog_elapsed_sec": round(cog_elapsed, 3),
         "partition_elapsed_sec": round(elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),

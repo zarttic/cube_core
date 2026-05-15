@@ -26,7 +26,7 @@ def test_partition_registry_separates_optical_and_carbon_services():
 def test_optical_service_declares_landsat_and_sentinel2_families():
     service = OpticalPartitionService()
 
-    assert service.supported_families == ("landsat", "sentinel2")
+    assert service.supported_families == ("landsat", "sentinel2", "other")
 
 
 def test_carbon_observation_partition_outputs_observation_fact():

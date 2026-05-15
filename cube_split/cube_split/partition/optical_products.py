@@ -88,6 +88,40 @@ class Sentinel2TifAdapter:
         )
 
 
+class OtherOpticalMosaicAdapter:
+    family = "other"
+    aliases = ("generic_optical", "shandong", "shandong_optical", "optical_mosaic")
+    sensor = "optical_mosaic"
+    _NAME_RE = re.compile(
+        r"^(Shandong_mosaic)_(\d{4}(?:Q[1-4]|\d{2}))_(sr_band\d+)(?:_cut)?$",
+        re.IGNORECASE,
+    )
+
+    def match(self, path: Path) -> bool:
+        return bool(self._NAME_RE.match(path.stem))
+
+    def parse(self, path: Path) -> OpticalAssetMetadata:
+        match = self._NAME_RE.match(path.stem)
+        if not match:
+            raise ValueError(f"Invalid Shandong mosaic filename: {path.name}")
+        prefix, period, band = match.groups()
+        acq_time = self._parse_period_start(period)
+        return OpticalAssetMetadata(
+            scene_id=f"{prefix}_{period}",
+            band=band.lower(),
+            acq_time=acq_time,
+            product_family=self.family,
+            sensor=self.sensor,
+        )
+
+    def _parse_period_start(self, period: str) -> datetime:
+        if "Q" in period.upper():
+            year_text, quarter_text = period.upper().split("Q", maxsplit=1)
+            month = (int(quarter_text) - 1) * 3 + 1
+            return datetime(int(year_text), month, 1, tzinfo=timezone.utc)
+        return datetime.strptime(period, "%Y%m").replace(day=1, tzinfo=timezone.utc)
+
+
 class GenericTifAdapter:
     family = "generic_tif"
     aliases: tuple[str, ...] = ()
@@ -161,6 +195,7 @@ _ADAPTERS: tuple[OpticalProductAdapter, ...] = (
     LandsatL1TPAdapter(),
     LandsatCollectionAdapter(),
     Sentinel2TifAdapter(),
+    OtherOpticalMosaicAdapter(),
 )
 _GENERIC_TIF_ADAPTER = GenericTifAdapter()
 
