@@ -34,6 +34,33 @@ MINIO_BUCKET='cube' \
 scripts/run_ray_ingest_e2e.sh
 ```
 
+Use ingest-system manifest directly (recommended for standardized metadata handoff):
+
+```bash
+python -m cube_split.jobs.ray_logical_partition_job \
+  --input-dir data/optocal \
+  --manifest-path data/optocal/manifest.jsonl \
+  --output-dir data/ray_output/logical_partition
+```
+
+Recommended batch manifest shape (`manifest.json`):
+
+```json
+{
+  "batch_id": "optical_batch_xx",
+  "data_type": "optical",
+  "assets": [
+    {
+      "source_uri": "Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif",
+      "scene_id": "Shandong_mosaic_2020Q3",
+      "acq_time": "2020-07-01T00:00:00Z",
+      "band": "sr_band4",
+      "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]]
+    }
+  ]
+}
+```
+
 Defaults:
 
 - Metadata backend: PostgreSQL (`METADATA_BACKEND=postgres`)

@@ -154,6 +154,78 @@ def test_build_manifest_recurses_and_parses_shandong_mosaic_filenames(tmp_path: 
     assert records[0].sensor == "optical_mosaic"
 
 
+def test_build_manifest_supports_unified_manifest_jsonl(tmp_path: Path):
+    source = tmp_path / "Shandong_mosaic_2020Q3_sr_band4_cut.tif"
+    _write_tif(source)
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        (
+            '{"data_type":"optical","scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4",'
+            '"acq_time":"2020-07-01T00:00:00Z","source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif",'
+            '"sensor":"optical_mosaic","product_family":"other",'
+            '"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    records = build_manifest(tmp_path, manifest_path=manifest)
+
+    assert len(records) == 1
+    assert records[0].scene_id == "Shandong_mosaic_2020Q3"
+    assert records[0].band == "sr_band4"
+    assert records[0].path == str(source.resolve())
+    assert records[0].acq_time == "2020-07-01T00:00:00Z"
+    assert records[0].product_family == "other"
+    assert records[0].sensor == "optical_mosaic"
+    assert records[0].bbox == [117.0, 35.8, 117.2, 36.0]
+    assert records[0].corners == [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]]
+
+
+def test_build_manifest_manifest_jsonl_requires_required_fields(tmp_path: Path):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text('{"scene_id":"s1"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="required fields are source_uri, scene_id, acq_time"):
+        build_manifest(tmp_path, manifest_path=manifest)
+
+
+def test_build_manifest_supports_batch_manifest_json_with_assets(tmp_path: Path):
+    source = tmp_path / "Shandong_mosaic_2020Q3_sr_band4_cut.tif"
+    _write_tif(source)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        (
+            '{"batch_id":"optical_batch_xx","data_type":"optical","assets":['
+            '{"scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4","acq_time":"2020-07-01T00:00:00Z",'
+            '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","sensor":"optical_mosaic",'
+            '"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}'
+            ']}'
+        ),
+        encoding="utf-8",
+    )
+
+    records = build_manifest(tmp_path, manifest_path=manifest)
+    assert len(records) == 1
+    assert records[0].scene_id == "Shandong_mosaic_2020Q3"
+    assert records[0].bbox == [117.0, 35.8, 117.2, 36.0]
+
+
+def test_build_manifest_manifest_requires_four_corners(tmp_path: Path):
+    source = tmp_path / "Shandong_mosaic_2020Q3_sr_band4_cut.tif"
+    _write_tif(source)
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        (
+            '{"scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4","acq_time":"2020-07-01T00:00:00Z",'
+            '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","corners":[[117.0,36.0],[117.2,36.0]]}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="corners"):
+        build_manifest(tmp_path, manifest_path=manifest)
+
+
 def test_convert_assets_to_cog_creates_cog_files(tmp_path: Path):
     with rasterio.Env() as env:
         if "COG" not in env.drivers():

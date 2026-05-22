@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ray logical partition job for COG assets")
     parser.add_argument("--input-dir", default="data/landsat8", help="Input directory containing COG .TIF files")
     parser.add_argument(
+        "--manifest-path",
+        default="",
+        help="Optional manifest file (.jsonl/.json) from ingest system; when set, input assets come from manifest rows.",
+    )
+    parser.add_argument(
         "--product-family",
         default="auto",
         help="Optical product family for filename parsing: auto, landsat, or sentinel2",
@@ -150,8 +155,7 @@ def _ray_actor_options_from_env() -> dict[str, Any]:
     return {"resources": {node_resource: 0.001}}
 
 
-def main() -> None:
-    args = parse_args()
+def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     total_start = time.perf_counter()
     for key in ("SPARK_HOME", "SPARK_CONF_DIR", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(key, None)
@@ -161,7 +165,11 @@ def main() -> None:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    source_assets = build_manifest(input_dir, product_family=args.product_family)
+    source_assets = build_manifest(
+        input_dir,
+        product_family=args.product_family,
+        manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
+    )
     if not source_assets:
         raise RuntimeError(f"No .TIF assets found under: {input_dir}")
     cog_start = time.perf_counter()
@@ -246,6 +254,15 @@ def main() -> None:
         @ray.remote
         class AssetTaskProcessor:
             def process_groups(self, task_groups: list[list[dict]], time_granularity: str, include_sample_mean: bool) -> list[dict]:
+                import os
+                import sys
+
+                project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
+                for rel_path in ("cube_encoder", "cube_split", "cube_web"):
+                    package_path = os.path.join(project_root, rel_path)
+                    if package_path not in sys.path:
+                        sys.path.insert(0, package_path)
+
                 from cube_split.jobs.ray_partition_core import _process_local_task_group
 
                 rows_out: list[dict] = []
@@ -332,10 +349,15 @@ def main() -> None:
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("=== Ray logical partition job completed ===")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
     if backend == "ray":
         ray.shutdown()
+    return report
+
+
+def main() -> None:
+    report = run_logical_partition(parse_args())
+    print("=== Ray logical partition job completed ===")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

@@ -2737,6 +2737,95 @@ section {
     margin-top: 14px;
 }
 
+.batch-list {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.batch-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+}
+
+.batch-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+}
+
+.batch-name {
+    font-weight: 600;
+    color: var(--dark);
+}
+
+.batch-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.batch-id {
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.batch-expand-btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 6px;
+    padding: 3px 10px;
+    color: var(--primary);
+    cursor: pointer;
+}
+
+.batch-summary {
+    padding: 0 12px 10px;
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.batch-assets {
+    border-top: 1px solid var(--border);
+    max-height: 280px;
+    overflow: auto;
+}
+
+.asset-row {
+    padding: 8px 12px;
+    border-bottom: 1px solid #edf1f6;
+}
+
+.asset-row:last-child {
+    border-bottom: none;
+}
+
+.asset-main {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 12px;
+}
+
+.map-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.asset-source,
+.asset-corners {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--gray);
+    word-break: break-all;
+}
+
 .coord-inputs {
     display: flex;
     flex-direction: column;

@@ -108,6 +108,40 @@ def test_optical_partition_demo_endpoint(monkeypatch):
     assert body["rows"] == 16
 
 
+def test_optical_partition_test_endpoint(monkeypatch):
+    def fake_run_optical_partition_test(payload=None):
+        assert payload["input_dir"] == "/home/lyjdev/projects/cube_project/cube_split/data/optocal"
+        return {
+            "status": "completed",
+            "mode": "partition_test_no_ingest",
+            "data_type": "optical",
+            "input_dir": payload["input_dir"],
+            "run_dir": "/tmp/run",
+            "rows_path": "/tmp/run/index_rows.jsonl",
+            "rows": 147,
+            "grid_type": "geohash",
+            "grid_level": 5,
+            "ingest_enabled": False,
+            "quality_status": "PASS",
+            "quality_report_path": "/tmp/run/quality_report.json",
+            "quality_report": {"status": "PASS", "summary": {"index_rows": 147}},
+        }
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_test", fake_run_optical_partition_test)
+
+    resp = client.post(
+        "/v1/partition/optical/test",
+        json={"input_dir": "/home/lyjdev/projects/cube_project/cube_split/data/optocal"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["mode"] == "partition_test_no_ingest"
+    assert body["ingest_enabled"] is False
+    assert body["quality_status"] == "PASS"
+
+
 def test_optical_quality_endpoint(monkeypatch):
     def fake_run_quality_check(args):
         assert args.run_dir == "/tmp/run"

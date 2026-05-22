@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -30,9 +31,87 @@ class AssetRecord:
     acq_time: str
     product_family: str = "unknown"
     sensor: str = "unknown"
+    bbox: list[float] | None = None
+    corners: list[list[float]] | None = None
 
 
-def build_manifest(input_dir: Path, product_family: str = "auto", data_type: str = "optical") -> list[AssetRecord]:
+def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[AssetRecord]:
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+    suffix = manifest_path.suffix.lower()
+    if suffix == ".jsonl":
+        rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    elif suffix == ".json":
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, list):
+            rows = loaded
+        elif isinstance(loaded, dict):
+            rows = loaded.get("assets")
+            if not isinstance(rows, list):
+                raise ValueError("manifest.json object must contain an `assets` array")
+        else:
+            raise ValueError("manifest.json must contain a JSON array or object")
+    else:
+        raise ValueError("manifest file must be .jsonl or .json")
+
+    records: list[AssetRecord] = []
+    base_dir = manifest_path.parent
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"Invalid manifest row #{idx}: expected object")
+        source_uri = str(row.get("source_uri") or "").strip()
+        scene_id = str(row.get("scene_id") or "").strip()
+        acq_time = str(row.get("acq_time") or "").strip()
+        band = str(row.get("band") or row.get("variable") or row.get("polarization") or "").strip().lower()
+        corners = row.get("corners")
+        if not source_uri or not scene_id or not acq_time or not band:
+            raise ValueError(
+                f"Invalid manifest row #{idx}: required fields are source_uri, scene_id, acq_time, and one of band/variable/polarization"
+            )
+        if not isinstance(corners, list) or len(corners) != 4:
+            raise ValueError(f"Invalid manifest row #{idx}: `corners` must be a list of 4 [lon, lat] points")
+        parsed_corners: list[list[float]] = []
+        for point in corners:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError(f"Invalid manifest row #{idx}: each corner must be [lon, lat]")
+            lon = float(point[0])
+            lat = float(point[1])
+            if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+                raise ValueError(f"Invalid manifest row #{idx}: corner coordinate out of range")
+            parsed_corners.append([lon, lat])
+        lons = [p[0] for p in parsed_corners]
+        lats = [p[1] for p in parsed_corners]
+        bbox = [min(lons), min(lats), max(lons), max(lats)]
+        datetime.fromisoformat(acq_time.replace("Z", "+00:00"))
+        path = Path(source_uri)
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        data_type = str(row.get("data_type") or default_data_type).strip().lower()
+        if data_type not in {"optical", "product", "radar"}:
+            raise ValueError(f"Invalid manifest row #{idx}: unsupported data_type={data_type!r}")
+        records.append(
+            AssetRecord(
+                scene_id=scene_id,
+                band=band,
+                path=str(path),
+                acq_time=acq_time,
+                product_family=str(row.get("product_family") or row.get("product_type") or "manifest").strip().lower(),
+                sensor=str(row.get("sensor") or "unknown").strip().lower(),
+                bbox=bbox,
+                corners=parsed_corners,
+            )
+        )
+    return records
+
+
+def build_manifest(
+    input_dir: Path,
+    product_family: str = "auto",
+    data_type: str = "optical",
+    manifest_path: Path | None = None,
+) -> list[AssetRecord]:
+    if manifest_path is not None:
+        return _load_manifest_records(manifest_path, default_data_type=data_type)
     records: list[AssetRecord] = []
     tif_paths = sorted(path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".tif", ".tiff"})
     for tif in tif_paths:

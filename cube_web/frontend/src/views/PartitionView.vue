@@ -13,11 +13,18 @@ const dataSearch = ref('');
 const qualityHistorySearch = ref('');
 const qualityHistoryStatus = ref('');
 const selectedBatches = ref({
-  optical: 'B20240307001',
+  optical: 'OPTICAL_BATCH_20260522_135546',
   carbon: 'C20240307001',
   radar: 'R20240307001',
   product: 'P20240307001',
 });
+const selectedOpticalBatchIds = ref(['OPTICAL_BATCH_20260522_135546']);
+const expandedOpticalBatchId = ref('OPTICAL_BATCH_20260522_135546');
+const deselectedOpticalAssetKeys = ref({});
+const opticalGridType = ref('geohash');
+const opticalGridLevel = ref(5);
+const mapGridLoading = ref(false);
+const mapGridGeometries = ref([]);
 const resultLoading = ref(false);
 const resultRows = ref([]);
 const qualityLoading = ref(false);
@@ -30,11 +37,44 @@ const qualityTargetCrs = ref('EPSG:4326');
 const selectedQualityRunDir = ref('');
 const qualityDataType = ref('optical');
 
-const opticalRows = [
-  { id: 'B20240307001', name: 'LC08_L2SP_120030_20260204_20260217_02_T1', params: 'Landsat 8 | SR_B2/SR_B3/SR_B4', status: '就绪' },
-  { id: 'B20240307002', name: 'Sentinel-2_MSI_20240307', params: '10980x10980 像素 | 10m', status: '就绪' },
-  { id: 'B20240307003', name: '高分一号_PMS_20240306', params: '12000x12000 像素 | 2m', status: '就绪' },
+const opticalBatches = [
+  {
+    id: 'OPTICAL_BATCH_20260522_135546',
+    name: 'Shandong_mosaic_optocal',
+    status: '就绪',
+    assets: [
+      { source_uri: 'Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', band: 'sr_band2', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif', scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', band: 'sr_band2', corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+    ],
+  },
+  {
+    id: 'OPTICAL_BATCH_20260522_091000',
+    name: 'Shandong_mosaic_2020Q3_rgb_batch',
+    status: '就绪',
+    assets: [
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band2', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+    ],
+  },
+  {
+    id: 'OPTICAL_BATCH_20260521_181500',
+    name: 'Shandong_mosaic_2017Q3_batch',
+    status: '就绪',
+    assets: [
+      { source_uri: 'Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+    ],
+  },
 ];
+const opticalRows = opticalBatches.map((batch) => ({
+  id: batch.id,
+  name: batch.name,
+  params: `${batch.assets.length} 条资产`,
+  status: batch.status,
+}));
 
 const carbonRows = [
   { id: 'C20240307001', name: 'OCO-2_XCO2_20240307', params: '1,247 footprints', status: '就绪' },
@@ -71,6 +111,13 @@ const activeDataRows = computed(() => dataRowsByModule[activeModule.value] || []
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
 
 const selectedDataName = computed(() => {
+  if (activeModule.value === 'optical') {
+    if (!selectedOpticalBatchIds.value.length) return '未选择';
+    const names = opticalBatches
+      .filter((batch) => selectedOpticalBatchIds.value.includes(batch.id))
+      .map((batch) => batch.name);
+    return names.join('，');
+  }
   const rows = activeDataRows.value;
   const selectedId = selectedBatches.value[activeModule.value];
   return rows.find((row) => row.id === selectedId)?.name || '未选择';
@@ -101,10 +148,56 @@ const selectedQualityRecord = computed(() => {
   return qualityHistory.value.find((row) => row.run_dir === selectedQualityRunDir.value) || null;
 });
 
-const mapMarkers = [
-  { position: [39.9042, 116.4074], label: '北京样例区域' },
-  { position: [31.2304, 121.4737], label: '上海样例区域' },
-];
+const selectedOpticalAssets = computed(() => {
+  const selectedBatchSet = new Set(selectedOpticalBatchIds.value);
+  const rows = [];
+  opticalBatches.forEach((batch) => {
+    if (!selectedBatchSet.has(batch.id)) return;
+    batch.assets.forEach((asset) => {
+      if (isOpticalAssetSelected(batch.id, asset)) {
+        rows.push({ ...asset, batch_id: batch.id });
+      }
+    });
+  });
+  return rows;
+});
+
+function cornersToPolygon(corners) {
+  if (!Array.isArray(corners) || corners.length !== 4) return null;
+  return {
+    type: 'Polygon',
+    coordinates: [[
+      [corners[0][0], corners[0][1]],
+      [corners[1][0], corners[1][1]],
+      [corners[2][0], corners[2][1]],
+      [corners[3][0], corners[3][1]],
+      [corners[0][0], corners[0][1]],
+    ]],
+  };
+}
+
+function cornersToBbox(corners) {
+  const lons = corners.map((c) => Number(c[0]));
+  const lats = corners.map((c) => Number(c[1]));
+  return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
+}
+
+const mapBatchGeometries = computed(() => selectedOpticalAssets.value
+  .map((asset) => {
+    const geometry = cornersToPolygon(asset.corners);
+    if (!geometry) return null;
+    return {
+      geometry,
+      label: `${asset.scene_id} / ${asset.band}`,
+      color: '#2f91ea',
+      fillColor: '#2f91ea',
+      fillOpacity: 0.12,
+      weight: 2,
+    };
+  })
+  .filter(Boolean));
+
+const mapGeometries = computed(() => [...mapBatchGeometries.value, ...mapGridGeometries.value]);
 
 function openDataDrawer() {
   dataSearch.value = '';
@@ -122,9 +215,89 @@ function qualityHistoryRowClass({ row }) {
 }
 
 function selectData(row) {
+  if (activeModule.value === 'optical') return;
   if (!dataRowsByModule[activeModule.value]) return;
   selectedBatches.value[activeModule.value] = row.id;
   dataDrawerVisible.value = false;
+}
+
+function assetKey(asset) {
+  return `${asset.source_uri}|${asset.scene_id}|${asset.band}|${asset.acq_time}`;
+}
+
+function isOpticalAssetSelected(batchId, asset) {
+  const excluded = deselectedOpticalAssetKeys.value[batchId] || [];
+  return !excluded.includes(assetKey(asset));
+}
+
+function toggleOpticalBatchSelect(batchId) {
+  const exists = selectedOpticalBatchIds.value.includes(batchId);
+  if (exists) {
+    selectedOpticalBatchIds.value = selectedOpticalBatchIds.value.filter((id) => id !== batchId);
+  } else {
+    selectedOpticalBatchIds.value = [...selectedOpticalBatchIds.value, batchId];
+  }
+}
+
+function toggleOpticalBatchExpand(batchId) {
+  expandedOpticalBatchId.value = expandedOpticalBatchId.value === batchId ? '' : batchId;
+}
+
+function toggleOpticalAssetSelect(batchId, asset) {
+  const key = assetKey(asset);
+  const current = deselectedOpticalAssetKeys.value[batchId] || [];
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  deselectedOpticalAssetKeys.value = { ...deselectedOpticalAssetKeys.value, [batchId]: next };
+}
+
+function opticalBatchSummary(batch) {
+  const selectedCount = batch.assets.filter((asset) => isOpticalAssetSelected(batch.id, asset)).length;
+  return `${selectedCount}/${batch.assets.length} 条资产已选`;
+}
+
+async function loadMapGridForSelectedAssets() {
+  if (activeModule.value !== 'optical') return;
+  if (!selectedOpticalAssets.value.length) {
+    ElMessage.warning('请至少选择一条资产');
+    return;
+  }
+  mapGridLoading.value = true;
+  mapGridGeometries.value = [];
+  try {
+    const { gridPrefix } = apiPrefixes();
+    const requests = selectedOpticalAssets.value.slice(0, 30).map(async (asset) => {
+      const result = await requestJson(`${gridPrefix}/cover`, {
+        grid_type: opticalGridType.value,
+        level: Number(opticalGridLevel.value),
+        cover_mode: 'intersect',
+        boundary_type: 'polygon',
+        bbox: cornersToBbox(asset.corners),
+        crs: 'EPSG:4326',
+      });
+      return (result.cells || [])
+        .map((cell) => (cell.geometry ? {
+          geometry: cell.geometry,
+          label: cell.space_code,
+          color: '#e67e22',
+          fillColor: '#e67e22',
+          fillOpacity: 0.06,
+          weight: 1,
+        } : null))
+        .filter(Boolean);
+    });
+    const chunks = await Promise.all(requests);
+    mapGridGeometries.value = chunks.flat();
+    ElMessage.success(`已加载格网 ${mapGridGeometries.value.length} 个`);
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    mapGridLoading.value = false;
+  }
+}
+
+function clearMapGrid() {
+  mapGridGeometries.value = [];
 }
 
 function formatRows(result) {
@@ -361,7 +534,10 @@ async function runDemo() {
   try {
     const { partitionPrefix } = apiPrefixes();
     const endpoint = activeModule.value === 'carbon' ? 'carbon' : 'optical';
-    const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, {});
+    const payload = activeModule.value === 'optical'
+      ? { grid_type: opticalGridType.value, grid_level: Number(opticalGridLevel.value) }
+      : {};
+    const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, payload);
     resultRows.value = formatRows(result);
     ElMessage.success('剖分任务完成');
   } catch (error) {
@@ -382,6 +558,10 @@ watch(qualityDataType, () => {
     changeQualityDataType();
   }
 });
+
+watch([selectedOpticalBatchIds, deselectedOpticalAssetKeys, opticalGridType, opticalGridLevel], () => {
+  mapGridGeometries.value = [];
+}, { deep: true });
 
 onMounted(() => {
   if (activeModule.value === 'quality') {
@@ -438,7 +618,7 @@ onMounted(() => {
                   </div>
                   <div class="form-group">
                     <label>剖分格网</label>
-                    <el-select model-value="geohash" class="legacy-control">
+                    <el-select v-model="opticalGridType" class="legacy-control">
                       <el-option label="Geohash (逻辑剖分)" value="geohash" />
                       <el-option label="MGRS (逻辑剖分)" value="mgrs" />
                       <el-option label="ISEA4H (实体剖分)" value="isea4h" />
@@ -566,8 +746,13 @@ onMounted(() => {
               <div v-if="activeModule !== 'quality'" class="map-panel">
                 <div class="panel-header">
                   <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : '地图预览' }}</h3>
+                  <div v-if="activeModule === 'optical'" class="map-actions">
+                    <el-input-number v-model="opticalGridLevel" :min="1" :max="15" size="small" />
+                    <el-button size="small" :loading="mapGridLoading" @click="loadMapGridForSelectedAssets">加载格网</el-button>
+                    <el-button size="small" @click="clearMapGrid">清空格网</el-button>
+                  </div>
                 </div>
-                <LeafletMap :markers="mapMarkers" />
+                <LeafletMap :markers="[]" :geometries="activeModule === 'optical' ? mapGeometries : []" />
               </div>
               <div v-else class="quality-overview-panel">
                 <div class="panel-header">
@@ -683,7 +868,43 @@ onMounted(() => {
 
     <el-drawer v-model="dataDrawerVisible" :title="`已载入${activeDataLabel}`" size="680px" direction="rtl">
       <el-input v-model="dataSearch" :prefix-icon="Search" placeholder="按名称查询" clearable />
-      <el-table :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
+      <template v-if="activeModule === 'optical'">
+        <div class="batch-list">
+          <div
+            v-for="batch in opticalBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+            :key="batch.id"
+            class="batch-card"
+          >
+            <div class="batch-card-header">
+              <el-checkbox :model-value="selectedOpticalBatchIds.includes(batch.id)" @change="toggleOpticalBatchSelect(batch.id)">
+                <span class="batch-name">{{ batch.name }}</span>
+              </el-checkbox>
+              <div class="batch-meta">
+                <span class="batch-id">{{ batch.id }}</span>
+                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
+                <button type="button" class="batch-expand-btn" @click="toggleOpticalBatchExpand(batch.id)">
+                  {{ expandedOpticalBatchId === batch.id ? '收起' : '展开' }}
+                </button>
+              </div>
+            </div>
+            <div class="batch-summary">{{ opticalBatchSummary(batch) }}</div>
+            <div v-if="expandedOpticalBatchId === batch.id" class="batch-assets">
+              <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}-${asset.band}`" class="asset-row">
+                <div class="asset-main">
+                  <el-checkbox :model-value="isOpticalAssetSelected(batch.id, asset)" @change="toggleOpticalAssetSelect(batch.id, asset)" />
+                  <strong>{{ asset.scene_id }}</strong>
+                  <span>{{ asset.band }}</span>
+                  <span>{{ asset.acq_time }}</span>
+                </div>
+                <div class="asset-source">{{ asset.source_uri }}</div>
+                <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
+        <el-table-column prop="id" label="批次ID" min-width="190" />
         <el-table-column prop="name" label="名称" min-width="260" />
         <el-table-column prop="params" label="参数" min-width="180" />
         <el-table-column prop="status" label="状态" width="90">
