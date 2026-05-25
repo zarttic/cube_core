@@ -16,32 +16,20 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response
+from cube_web.routes.partition import create_partition_router
+from cube_web.routes.sdk import create_sdk_router
+from cube_web.schemas import (
+    PartitionDemoRequest,
+    PartitionRetryRequest,
+    QualityHistoryRequest,
+    QualityLatestRequest,
+    QualityReportRequest,
+    QualityRunRequest,
+    payload_from_model,
+)
+from cube_web.services.partition_service import PartitionService, build_partition_registry
 from grid_core.sdk import CubeEncoderSDK
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
-from grid_core.app.models.request import (
-    BatchCodeToGeometryRequest,
-    ChildrenRequest,
-    CodeToGeometryRequest,
-    CoverRequest,
-    LocateRequest,
-    NeighborsRequest,
-    ParentRequest,
-    STCodeBatchGenerateRequest,
-    STCodeGenerateRequest,
-    STCodeParseRequest,
-)
-from grid_core.app.models.response import (
-    BatchGeometryResponse,
-    ChildrenResponse,
-    CoverResponse,
-    GeometryResponse,
-    LocateResponse,
-    NeighborsResponse,
-    ParentResponse,
-    STCodeBatchGenerateResponse,
-    STCodeGenerateResponse,
-    STCodeParseResponse,
-)
 
 try:
     from cube_split.quality.optical_quality import run_quality_check as run_optical_quality_check
@@ -754,100 +742,6 @@ async def handle_grid_core_error(_: Request, exc: GridCoreError):
     return JSONResponse(status_code=status_code, content={"error": {"code": exc.code, "message": exc.message}})
 
 
-@api_router.post("/grid/locate", response_model=LocateResponse)
-def locate(req: LocateRequest) -> LocateResponse:
-    cell = sdk.locate(grid_type=req.grid_type, level=req.level, point=req.point)
-    return LocateResponse(cell=cell)
-
-
-@api_router.post("/grid/cover", response_model=CoverResponse)
-def cover(req: CoverRequest) -> CoverResponse:
-    cells = sdk.cover(
-        grid_type=req.grid_type,
-        level=req.level,
-        cover_mode=req.cover_mode,
-        boundary_type=req.boundary_type,
-        geometry=req.geometry,
-        bbox=req.bbox,
-        crs=req.crs,
-    )
-    return CoverResponse(
-        grid_type=req.grid_type.value,
-        level=req.level,
-        cover_mode=req.cover_mode.value,
-        cells=cells,
-        statistics={"cell_count": len(cells)},
-    )
-
-
-@api_router.post("/topology/neighbors", response_model=NeighborsResponse)
-def neighbors(req: NeighborsRequest) -> NeighborsResponse:
-    result_codes = sdk.neighbors(grid_type=req.grid_type, code=req.code, k=req.k)
-    return NeighborsResponse(result_codes=result_codes, statistics={"count": len(result_codes)})
-
-
-@api_router.post("/topology/geometry", response_model=GeometryResponse)
-def code_to_geometry(req: CodeToGeometryRequest) -> GeometryResponse:
-    geometry = sdk.code_to_geometry(grid_type=req.grid_type, code=req.code, boundary_type=req.boundary_type)
-    return GeometryResponse(geometry=geometry)
-
-
-@api_router.post("/topology/geometries", response_model=BatchGeometryResponse)
-def codes_to_geometries(req: BatchCodeToGeometryRequest) -> BatchGeometryResponse:
-    geometries = sdk.codes_to_geometries(grid_type=req.grid_type, codes=req.codes, boundary_type=req.boundary_type)
-    return BatchGeometryResponse(geometries=geometries, statistics={"count": len(geometries)})
-
-
-@api_router.post("/topology/parent", response_model=ParentResponse)
-def parent(req: ParentRequest) -> ParentResponse:
-    parent_code = sdk.parent(grid_type=req.grid_type, code=req.code)
-    return ParentResponse(parent_code=parent_code)
-
-
-@api_router.post("/topology/children", response_model=ChildrenResponse)
-def children(req: ChildrenRequest) -> ChildrenResponse:
-    child_codes = sdk.children(grid_type=req.grid_type, code=req.code, target_level=req.target_level)
-    return ChildrenResponse(child_codes=child_codes, statistics={"count": len(child_codes)})
-
-
-@api_router.post("/code/st", response_model=STCodeGenerateResponse)
-def generate_st(req: STCodeGenerateRequest) -> STCodeGenerateResponse:
-    result = sdk.generate_st_code(
-        grid_type=req.grid_type,
-        level=req.level,
-        space_code=req.space_code,
-        timestamp=req.timestamp,
-        time_granularity=req.time_granularity,
-        version=req.version,
-    )
-    return STCodeGenerateResponse(st_code=result.st_code)
-
-
-@api_router.post("/code/parse", response_model=STCodeParseResponse)
-def parse_st(req: STCodeParseRequest) -> STCodeParseResponse:
-    result = sdk.parse_st_code(req.st_code)
-    return STCodeParseResponse(
-        grid_type=result.grid_type,
-        level=result.level,
-        space_code=result.space_code,
-        time_code=result.time_code,
-        version=result.version,
-    )
-
-
-@api_router.post("/code/st/batch", response_model=STCodeBatchGenerateResponse)
-def batch_generate_st(req: STCodeBatchGenerateRequest) -> STCodeBatchGenerateResponse:
-    st_codes = sdk.batch_generate_st_codes(
-        grid_type=req.grid_type,
-        level=req.level,
-        items=[{"space_code": item.space_code, "timestamp": item.timestamp} for item in req.items],
-        time_granularity=req.time_granularity,
-        version=req.version,
-    )
-    return STCodeBatchGenerateResponse(st_codes=st_codes, statistics={"count": len(st_codes)})
-
-
-@api_router.post("/partition/carbon/demo")
 def partition_carbon_demo() -> dict:
     try:
         return _run_carbon_partition_demo()
@@ -855,66 +749,59 @@ def partition_carbon_demo() -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/carbon/retry")
-def partition_carbon_retry(payload: dict | None = None) -> dict:
+def partition_carbon_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
-        return _run_carbon_partition_retry(payload)
+        return _run_carbon_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/product/demo")
-def partition_product_demo(payload: dict | None = None) -> dict:
+def partition_product_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
-        return _run_product_partition_demo(payload)
+        return _run_product_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/product/retry")
-def partition_product_retry(payload: dict | None = None) -> dict:
+def partition_product_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
-        return _run_product_partition_retry(payload)
+        return _run_product_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/radar/demo")
-def partition_radar_demo(payload: dict | None = None) -> dict:
+def partition_radar_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     raise HTTPException(status_code=501, detail="Radar partition demo is not implemented")
 
 
-@api_router.post("/partition/radar/retry")
-def partition_radar_retry(payload: dict | None = None) -> dict:
+def partition_radar_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     raise HTTPException(status_code=501, detail="Radar partition retry is not implemented")
 
 
-@api_router.post("/partition/optical/demo")
-def partition_optical_demo(payload: dict | None = None) -> dict:
+def partition_optical_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
-        return _run_optical_partition_demo(payload)
+        return _run_optical_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/optical/test")
-def partition_optical_test(payload: dict | None = None) -> dict:
+def partition_optical_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
-        return _run_optical_partition_test(payload)
+        return _run_optical_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/optical/retry")
-def partition_optical_retry(payload: dict | None = None) -> dict:
+def partition_optical_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
-        return _run_optical_partition_retry(payload)
+        return _run_optical_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @api_router.post("/quality/optical/run")
-def quality_optical_run(payload: dict) -> dict:
+def quality_optical_run(payload: QualityRunRequest) -> dict:
+    payload = payload_from_model(payload)
     if run_optical_quality_check is None:
         raise HTTPException(status_code=500, detail="cube_split quality module is not available")
     run_dir = str(payload.get("run_dir", "")).strip()
@@ -928,8 +815,8 @@ def quality_optical_run(payload: dict) -> dict:
 
 
 @api_router.post("/quality/optical/latest")
-def quality_optical_latest(payload: dict | None = None) -> dict:
-    payload = payload or {}
+def quality_optical_latest(payload: QualityLatestRequest | None = None) -> dict:
+    payload = payload_from_model(payload)
     run_dir = _latest_optical_quality_run_dir()
     cached_report = _read_quality_report(Path(run_dir), data_type="optical")
     if cached_report is not None:
@@ -946,7 +833,8 @@ def quality_optical_latest(payload: dict | None = None) -> dict:
 
 
 @api_router.post("/quality/optical/report")
-def quality_optical_report(payload: dict) -> dict:
+def quality_optical_report(payload: QualityReportRequest) -> dict:
+    payload = payload_from_model(payload)
     run_dir_text = str(payload.get("run_dir", "")).strip()
     if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
@@ -958,14 +846,14 @@ def quality_optical_report(payload: dict) -> dict:
 
 
 @api_router.post("/quality/optical/report/pdf")
-def quality_optical_report_pdf(payload: dict) -> Response:
+def quality_optical_report_pdf(payload: QualityReportRequest) -> Response:
     report = quality_optical_report(payload)
     return _quality_report_pdf_response(report, data_type="optical")
 
 
 @api_router.post("/quality/optical/history")
-def quality_optical_history(payload: dict | None = None) -> dict:
-    payload = payload or {}
+def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
+    payload = payload_from_model(payload)
     try:
         limit = int(payload.get("limit", 20) or 20)
     except (TypeError, ValueError):
@@ -985,7 +873,8 @@ def quality_optical_history(payload: dict | None = None) -> dict:
 
 
 @api_router.post("/quality/product/run")
-def quality_product_run(payload: dict) -> dict:
+def quality_product_run(payload: QualityRunRequest) -> dict:
+    payload = payload_from_model(payload)
     if run_product_quality_check is None:
         raise HTTPException(status_code=500, detail="cube_split product quality module is not available")
     run_dir = str(payload.get("run_dir", "")).strip()
@@ -999,8 +888,8 @@ def quality_product_run(payload: dict) -> dict:
 
 
 @api_router.post("/quality/product/latest")
-def quality_product_latest(payload: dict | None = None) -> dict:
-    payload = payload or {}
+def quality_product_latest(payload: QualityLatestRequest | None = None) -> dict:
+    payload = payload_from_model(payload)
     run_dir = _latest_product_quality_run_dir()
     cached_report = _read_quality_report(Path(run_dir), data_type="product")
     if cached_report is not None:
@@ -1017,7 +906,8 @@ def quality_product_latest(payload: dict | None = None) -> dict:
 
 
 @api_router.post("/quality/product/report")
-def quality_product_report(payload: dict) -> dict:
+def quality_product_report(payload: QualityReportRequest) -> dict:
+    payload = payload_from_model(payload)
     run_dir_text = str(payload.get("run_dir", "")).strip()
     if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
@@ -1029,14 +919,14 @@ def quality_product_report(payload: dict) -> dict:
 
 
 @api_router.post("/quality/product/report/pdf")
-def quality_product_report_pdf(payload: dict) -> Response:
+def quality_product_report_pdf(payload: QualityReportRequest) -> Response:
     report = quality_product_report(payload)
     return _quality_report_pdf_response(report, data_type="product")
 
 
 @api_router.post("/quality/product/history")
-def quality_product_history(payload: dict | None = None) -> dict:
-    payload = payload or {}
+def quality_product_history(payload: QualityHistoryRequest | None = None) -> dict:
+    payload = payload_from_model(payload)
     try:
         limit = int(payload.get("limit", 20) or 20)
     except (TypeError, ValueError):
@@ -1055,6 +945,19 @@ def quality_product_history(payload: dict | None = None) -> dict:
     return {"records": records, "count": len(records)}
 
 
+partition_service = PartitionService(
+    build_partition_registry(
+        optical_demo=partition_optical_demo,
+        optical_test=partition_optical_test,
+        optical_retry=partition_optical_retry,
+        carbon_demo=lambda payload=None: partition_carbon_demo(),
+        carbon_retry=partition_carbon_retry,
+        product_demo=partition_product_demo,
+        product_retry=partition_product_retry,
+    )
+)
+api_router.include_router(create_sdk_router(sdk))
+api_router.include_router(create_partition_router(partition_service))
 app.include_router(api_router)
 
 

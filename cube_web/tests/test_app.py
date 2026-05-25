@@ -1,4 +1,5 @@
 import subprocess
+import time
 
 from fastapi.testclient import TestClient
 from s2sphere import CellId
@@ -68,6 +69,14 @@ def test_code_parse_sdk_endpoint():
     body = resp.json()
     assert body["grid_type"] == "geohash"
     assert body["level"] == 7
+
+
+def test_partition_openapi_exposes_contract_models():
+    schema = client.get("/openapi.json").json()
+
+    assert "PartitionDemoRequest" in schema["components"]["schemas"]
+    assert "PartitionRetryRequest" in schema["components"]["schemas"]
+    assert "PartitionTaskResponse" in schema["components"]["schemas"]
 
 
 def test_carbon_partition_demo_endpoint(monkeypatch):
@@ -173,6 +182,46 @@ def test_optical_partition_demo_endpoint_accepts_frontend_payload(monkeypatch):
     assert body["mode"] == "partition_demo"
     assert body["execution_engine"] == "ray"
     assert body["grid_level"] == 5
+
+
+def test_partition_demo_rejects_invalid_grid_level():
+    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 0})
+
+    assert resp.status_code == 422
+
+
+def test_partition_demo_can_run_as_async_task(monkeypatch):
+    def fake_run_product_partition_demo(payload=None):
+        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "product",
+            "rows": 20,
+        }
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+
+    submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "geohash", "grid_level": 5})
+
+    assert submit_resp.status_code == 202
+    submitted = submit_resp.json()
+    assert submitted["status"] in {"queued", "running", "completed"}
+    assert submitted["data_type"] == "product"
+    assert submitted["operation"] == "demo"
+
+    task_body = None
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{submitted['task_id']}")
+        assert task_resp.status_code == 200
+        task_body = task_resp.json()
+        if task_body["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    assert task_body is not None
+    assert task_body["status"] == "completed"
+    assert task_body["result"]["rows"] == 20
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
