@@ -5,9 +5,9 @@ import os
 import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import time
+from types import SimpleNamespace
 from uuid import uuid4
 from pathlib import Path
 from html import escape
@@ -70,11 +70,6 @@ sdk = CubeEncoderSDK()
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
-
-
-def _count_jsonl_rows(path: Path) -> int:
-    with path.open("r", encoding="utf-8") as fh:
-        return sum(1 for _ in fh)
 
 
 def _quality_run_dirs(data_type: str) -> list[Path]:
@@ -366,6 +361,141 @@ def _demo_task_metadata(execution_engine: str) -> dict[str, str | None]:
     }
 
 
+def _optical_demo_input_dir() -> Path:
+    return _repo_root() / "cube_split" / "data" / "optocal"
+
+
+def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
+    source_path = Path(str(source_uri or "").strip())
+    if not source_path:
+        raise ValueError("selected_assets[].source_uri is required")
+    if source_path.is_absolute():
+        resolved = source_path.resolve()
+    else:
+        resolved = (input_dir / source_path).resolve()
+    input_root = input_dir.resolve()
+    if input_root != resolved and input_root not in resolved.parents:
+        raise ValueError(f"Optical demo asset is outside input_dir: {source_uri}")
+    if not resolved.exists() or resolved.suffix.lower() not in {".tif", ".tiff"}:
+        raise FileNotFoundError(f"Optical demo asset not found: {resolved}")
+    return resolved
+
+
+def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[dict]:
+    selected_assets = payload.get("selected_assets") or []
+    if not selected_assets:
+        return []
+    if not isinstance(selected_assets, list):
+        raise ValueError("selected_assets must be an array")
+
+    manifest_assets: list[dict] = []
+    for idx, asset in enumerate(selected_assets, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"selected_assets[{idx}] must be an object")
+        source = _resolve_optical_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        manifest_assets.append(
+            {
+                "data_type": "optical",
+                "source_uri": str(source),
+                "scene_id": str(asset.get("scene_id") or source.stem),
+                "acq_time": str(asset.get("acq_time") or "1970-01-01T00:00:00Z"),
+                "bands": asset.get("bands") or ([asset["band"]] if asset.get("band") else [source.stem]),
+                "corners": asset.get("corners"),
+                "sensor": str(asset.get("sensor") or "optical_mosaic"),
+                "product_family": str(asset.get("product_family") or "other"),
+            }
+        )
+    return manifest_assets
+
+
+def _int_payload_value(payload: dict, key: str, default: int) -> int:
+    try:
+        return int(payload.get(key, default) or default)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be an integer") from None
+
+
+def _warn_checks_from_result(result: dict) -> list[dict]:
+    report = result.get("quality_report") if isinstance(result, dict) else None
+    if not isinstance(report, dict):
+        return []
+    checks = report.get("checks") or []
+    if not isinstance(checks, list):
+        return []
+    return [check for check in checks if isinstance(check, dict) and check.get("status") == "WARN"]
+
+
+def _warning_asset_paths(checks: list[dict]) -> set[str]:
+    paths: set[str] = set()
+    for check in checks:
+        metrics = check.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            continue
+        for item in metrics.get("zero_assets") or []:
+            if isinstance(item, dict) and item.get("path"):
+                paths.add(str(item["path"]))
+        for item in metrics.get("duplicates") or []:
+            if isinstance(item, dict):
+                paths.update(str(path) for path in item.get("asset_paths") or [] if path)
+    return paths
+
+
+def _asset_matches_warning_path(asset: dict, warning_path: str) -> bool:
+    source_uri = str(asset.get("source_uri") or "")
+    if not source_uri:
+        return False
+    warning = Path(warning_path)
+    source = Path(source_uri)
+    if source_uri == warning_path or source.name == warning.name:
+        return True
+    if warning.stem == f"{source.stem}_cog" and warning.suffix.lower() == source.suffix.lower():
+        return True
+    warning_parts = warning.parts
+    source_parts = source.parts
+    return len(source_parts) <= len(warning_parts) and tuple(warning_parts[-len(source_parts) :]) == tuple(source_parts)
+
+
+def _retry_payload_for_warning_assets(payload: dict, warning_paths: set[str]) -> tuple[dict, int]:
+    selected_assets = payload.get("selected_assets") or []
+    if not warning_paths or not isinstance(selected_assets, list) or not selected_assets:
+        return dict(payload), 0
+    retry_assets = [
+        asset
+        for asset in selected_assets
+        if isinstance(asset, dict) and any(_asset_matches_warning_path(asset, warning_path) for warning_path in warning_paths)
+    ]
+    if not retry_assets:
+        return dict(payload), 0
+    retry_payload = dict(payload)
+    retry_payload["selected_assets"] = retry_assets
+    return retry_payload, len(retry_assets)
+
+
+def _run_optical_partition_retry(payload: dict | None = None) -> dict:
+    payload = payload or {}
+    request = payload.get("request") or {}
+    if not isinstance(request, dict):
+        raise ValueError("request must be an object")
+    last_result = payload.get("last_result") or {}
+    if not isinstance(last_result, dict):
+        raise ValueError("last_result must be an object")
+
+    request_payload = request.get("payload") or {}
+    if not isinstance(request_payload, dict):
+        raise ValueError("request.payload must be an object")
+    warn_checks = _warn_checks_from_result(last_result)
+    warning_paths = _warning_asset_paths(warn_checks)
+    retry_payload, retried_asset_count = _retry_payload_for_warning_assets(request_payload, warning_paths)
+    result = _run_optical_partition_from_payload(retry_payload, mode="partition_retry")
+    result["retry"] = {
+        "strategy": "warning_assets" if retried_asset_count else "full_request",
+        "warning_check_names": [str(check.get("name")) for check in warn_checks],
+        "warning_asset_count": len(warning_paths),
+        "retried_asset_count": retried_asset_count,
+    }
+    return result
+
+
 def _run_carbon_partition_demo() -> dict:
     from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
 
@@ -415,107 +545,177 @@ def _run_carbon_partition_demo() -> dict:
     }
 
 
-def _run_optical_partition_demo() -> dict:
-    import ray
+def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
+    result = _run_carbon_partition_demo()
+    result["mode"] = "partition_retry"
+    result["retry"] = {
+        "strategy": "full_request",
+        "warning_check_names": [],
+        "warning_asset_count": 0,
+        "retried_asset_count": 0,
+    }
+    return result
 
-    from cube_split.jobs.ray_partition_core import (
-        _group_tasks_for_local_processing,
-        _prepare_task_rows_for_partitioning,
-        build_grid_tasks_driver,
-        build_manifest,
-        convert_assets_to_cog,
+
+def _run_product_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.product_partition_job import run_product_partition
+
+    payload = payload or {}
+    root = _demo_run_dir("product")
+    input_dir = Path(str(payload.get("input_dir") or (_repo_root() / "cube_split" / "data" / "product"))).expanduser().resolve()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Product demo input_dir not found: {input_dir}")
+
+    grid_type = str(payload.get("grid_type") or "geohash").lower()
+    if grid_type not in {"geohash", "mgrs", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    grid_level = _int_payload_value(payload, "grid_level", 5)
+    if grid_level <= 0:
+        raise ValueError("grid_level must be greater than 0")
+
+    args = SimpleNamespace(
+        input_dir=str(input_dir),
+        output_dir=str(root / "output"),
+        cog_input_dir=str(root / "cog"),
+        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_type=grid_type,
+        grid_level=grid_level,
+        cover_mode=str(payload.get("cover_mode") or "intersect"),
+        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
+        cog_overwrite=True,
+        cog_workers=_int_payload_value(payload, "cog_workers", 2),
+        partition_workers=_int_payload_value(payload, "partition_workers", 0),
+        sample_mean=bool(payload.get("sample_mean", False)),
     )
+    result = run_product_partition(args)
+    result["mode"] = mode
+    result["output_path"] = result.get("rows_path")
+    result["workers"] = args.partition_workers
+    result["execution_engine"] = "thread"
+    if run_product_quality_check is not None:
+        quality_args = _quality_args(str(result["run_dir"]), {"target_crs": args.target_crs})
+        quality_report = run_product_quality_check(quality_args)
+        result["quality_status"] = quality_report.get("status")
+        result["quality_report"] = quality_report
+        result["quality_report_path"] = str(Path(result["run_dir"]) / "quality_report.json")
+    return result
 
-    sample = _repo_root() / "cube_split" / "data" / "optical_demo" / "LC08_L2SP_120030_20260204_20260217_02_T1.tar"
-    if not sample.exists():
-        raise RuntimeError(f"Optical demo data not found: {sample}")
+
+def _run_product_partition_retry(payload: dict | None = None) -> dict:
+    request = (payload or {}).get("request") or {}
+    request_payload = request.get("payload") if isinstance(request, dict) else {}
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    result = _run_product_partition_demo(request_payload, mode="partition_retry")
+    result["retry"] = {
+        "strategy": "full_request",
+        "warning_check_names": [],
+        "warning_asset_count": 0,
+        "retried_asset_count": 0,
+    }
+    return result
+
+
+def _run_optical_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.ray_logical_partition_job import run_logical_partition
+
+    payload = payload or {}
+    input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Optical demo input_dir not found: {input_dir}")
 
     root = _demo_run_dir("optical")
-    input_dir = root / "input"
-    cog_dir = root / "cog"
-    output_dir = root / "output"
-    input_dir.mkdir(parents=True)
-    output_dir.mkdir(parents=True)
+    output_root = root / "output"
+    manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
+    manifest_assets = _selected_optical_manifest_assets(payload, input_dir)
+    if manifest_assets:
+        manifest_path = root / "selected_assets_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "batch_id": payload.get("batch_id") or "frontend-optical-demo",
+                    "batch_name": payload.get("batch_name") or "frontend optical demo",
+                    "data_type": "optical",
+                    "assets": manifest_assets,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    elif not str(manifest_path):
+        default_manifest = input_dir / "manifest.json"
+        manifest_path = default_manifest if default_manifest.exists() else Path("")
 
-    selected_suffixes = ("_SR_B2.TIF", "_SR_B3.TIF", "_SR_B4.TIF")
-    with tarfile.open(sample, "r") as archive:
-        for member in archive.getmembers():
-            name = Path(member.name).name
-            if not member.isfile() or not name.endswith(selected_suffixes):
-                continue
-            src = archive.extractfile(member)
-            if src is None:
-                continue
-            with (input_dir / name).open("wb") as dst:
-                shutil.copyfileobj(src, dst)
+    grid_type = str(payload.get("grid_type") or "geohash").lower()
+    if grid_type not in {"geohash", "mgrs", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    grid_level = _int_payload_value(payload, "grid_level", 5)
+    if grid_level <= 0:
+        raise ValueError("grid_level must be greater than 0")
 
-    total_start = time.perf_counter()
-    assets = build_manifest(input_dir)
-    if not assets:
-        raise RuntimeError(f"No optical TIF assets extracted from demo tar: {sample}")
-    cog_start = time.perf_counter()
-    cog_assets = convert_assets_to_cog(assets, cog_input_dir=cog_dir, overwrite=True, workers=2)
-    cog_elapsed = time.perf_counter() - cog_start
-    grid_tasks = build_grid_tasks_driver(
-        assets=cog_assets,
-        grid_type="geohash",
-        grid_level=9,
-        cover_mode="intersect",
-        max_cells_per_asset=20000,
+    args = SimpleNamespace(
+        input_dir=str(input_dir),
+        manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
+        product_family=str(payload.get("product_family") or "auto"),
+        output_dir=str(output_root),
+        cog_input_dir=str(root / "cog"),
+        cog_overwrite=True,
+        cog_workers=_int_payload_value(payload, "cog_workers", 2),
+        cog_compress=str(payload.get("cog_compress") or "LZW"),
+        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
+        cog_level=_int_payload_value(payload, "cog_level", 0),
+        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
+        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_type=grid_type,
+        grid_level=grid_level,
+        cover_mode=str(payload.get("cover_mode") or "intersect"),
+        time_granularity=str(payload.get("time_granularity") or "day"),
+        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
+        ray_address=str(payload.get("ray_address") or os.environ.get("CUBE_WEB_RAY_ADDRESS", "")),
+        chunk_size=_int_payload_value(payload, "chunk_size", 0),
+        partition_backend=str(payload.get("partition_backend") or "ray"),
+        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
+        timing_mode=False,
+        skip_verify=False,
+        sample_mean=bool(payload.get("sample_mean", False)),
     )
-    task_rows = _prepare_task_rows_for_partitioning(grid_tasks, partition_prefix_len=3, time_granularity="day")
-    grouped = _group_tasks_for_local_processing(task_rows)
-    partition_start = time.perf_counter()
-    rows: list[dict] = []
-    ray_init_start = time.perf_counter()
-    ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
-    ray_init_elapsed = time.perf_counter() - ray_init_start
-
-    @ray.remote
-    def process_group(group: list[dict]) -> list[dict]:
-        from cube_split.jobs.ray_partition_core import _process_local_task_group
-
-        return _process_local_task_group(group, "day", include_sample_mean=False)
-
-    futures = [process_group.remote(group) for group in grouped]
-    ray_task_ids = [str(future) for future in futures]
-    try:
-        for part in ray.get(futures):
-            rows.extend(part)
-    finally:
-        ray.shutdown()
-    partition_elapsed = time.perf_counter() - partition_start
-    rows_path = output_dir / "index_rows.jsonl"
-    with rows_path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    report = run_logical_partition(args)
+    run_dir = Path(report["run_dir"])
+    rows_path = run_dir / "index_rows.jsonl"
 
     response = {
         "status": "completed",
+        "mode": mode,
         "data_type": "optical",
-        **_demo_task_metadata("ray"),
-        "demo_source": sample.name,
-        "asset_count": len(cog_assets),
-        "grid_task_count": len(grid_tasks),
-        "rows": _count_jsonl_rows(rows_path),
-        "cog_elapsed_sec": round(cog_elapsed, 3),
-        "partition_elapsed_sec": round(partition_elapsed, 3),
-        "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
-        "grid_type": "geohash",
-        "grid_level": 9,
-        "workers": len(grouped),
-        "ray_init_elapsed_sec": round(ray_init_elapsed, 3),
-        "ray_task_id": ray_task_ids[0] if ray_task_ids else None,
-        "ray_task_ids": ray_task_ids,
+        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
+        "demo_source": str(input_dir),
+        "batch_id": payload.get("batch_id") or "",
+        "batch_name": payload.get("batch_name") or "",
+        "run_dir": str(run_dir),
+        "rows_path": str(rows_path),
         "output_path": str(rows_path),
+        "rows": int(report.get("total_index_rows", 0)),
+        "workers": report.get("ray_parallelism"),
+        **report,
     }
     if run_optical_quality_check is not None:
-        args = _quality_args(str(output_dir), {"target_crs": "EPSG:4326"})
-        quality_report = run_optical_quality_check(args)
+        quality_args = _quality_args(str(run_dir), {"target_crs": args.target_crs})
+        quality_report = run_optical_quality_check(quality_args)
         response["quality_status"] = quality_report.get("status")
         response["quality_report"] = quality_report
-        response["quality_report_path"] = str(Path(output_dir) / "quality_report.json")
+        response["quality_report_path"] = str(run_dir / "quality_report.json")
     return response
+
+
+def _run_optical_partition_demo(payload: dict | None = None) -> dict:
+    return _run_optical_partition_from_payload(payload, mode="partition_demo")
+
+
+def _run_optical_partition_test(payload: dict | None = None) -> dict:
+    return _run_optical_partition_from_payload(payload, mode="partition_test_no_ingest")
 
 
 def _resolve_web_file(path_name: str) -> Path:
@@ -655,10 +855,60 @@ def partition_carbon_demo() -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@api_router.post("/partition/optical/demo")
-def partition_optical_demo() -> dict:
+@api_router.post("/partition/carbon/retry")
+def partition_carbon_retry(payload: dict | None = None) -> dict:
     try:
-        return _run_optical_partition_demo()
+        return _run_carbon_partition_retry(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/partition/product/demo")
+def partition_product_demo(payload: dict | None = None) -> dict:
+    try:
+        return _run_product_partition_demo(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/partition/product/retry")
+def partition_product_retry(payload: dict | None = None) -> dict:
+    try:
+        return _run_product_partition_retry(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/partition/radar/demo")
+def partition_radar_demo(payload: dict | None = None) -> dict:
+    raise HTTPException(status_code=501, detail="Radar partition demo is not implemented")
+
+
+@api_router.post("/partition/radar/retry")
+def partition_radar_retry(payload: dict | None = None) -> dict:
+    raise HTTPException(status_code=501, detail="Radar partition retry is not implemented")
+
+
+@api_router.post("/partition/optical/demo")
+def partition_optical_demo(payload: dict | None = None) -> dict:
+    try:
+        return _run_optical_partition_demo(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/partition/optical/test")
+def partition_optical_test(payload: dict | None = None) -> dict:
+    try:
+        return _run_optical_partition_test(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/partition/optical/retry")
+def partition_optical_retry(payload: dict | None = None) -> dict:
+    try:
+        return _run_optical_partition_retry(payload)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

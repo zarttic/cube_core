@@ -18,6 +18,19 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert "{ label: '自动化质检'," not in nav_source
 
 
+def test_partition_view_uses_explicit_module_endpoint_mapping():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const partitionEndpointsByModule = {" in source
+    assert "optical: 'optical'" in source
+    assert "carbon: 'carbon'" in source
+    assert "radar: 'radar'" in source
+    assert "product: 'product'" in source
+    assert "activeModule.value === 'carbon' ? 'carbon' : 'optical'" not in source
+
+
 def test_home_page_serves_index():
     resp = client.get("/")
     assert resp.status_code == 200
@@ -83,7 +96,8 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
 
 
 def test_optical_partition_demo_endpoint(monkeypatch):
-    def fake_run_optical_partition_demo():
+    def fake_run_optical_partition_demo(payload=None):
+        assert payload is None
         return {
             "status": "completed",
             "data_type": "optical",
@@ -110,6 +124,55 @@ def test_optical_partition_demo_endpoint(monkeypatch):
     assert body["asset_count"] == 2
     assert body["rows"] == 16
     assert body["quality_status"] == "WARN"
+
+
+def test_optical_partition_demo_endpoint_accepts_frontend_payload(monkeypatch):
+    expected_payload = {
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "batch_id": "OPTICAL_BATCH_20260522_135546",
+        "batch_name": "Shandong_mosaic_optocal",
+        "selected_assets": [
+            {
+                "source_uri": "Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif",
+                "scene_id": "Shandong_mosaic_2020Q3",
+                "acq_time": "2020-07-01T00:00:00Z",
+                "bands": ["sr_band4"],
+                "corners": [
+                    [114.757377, 38.503521],
+                    [122.774914, 38.503521],
+                    [122.774914, 33.857041],
+                    [114.757377, 33.857041],
+                ],
+            }
+        ],
+    }
+
+    def fake_run_optical_partition_demo(payload=None):
+        assert payload == expected_payload
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "optical",
+            "asset_count": 1,
+            "grid_task_count": 12,
+            "rows": 12,
+            "grid_type": payload["grid_type"],
+            "grid_level": payload["grid_level"],
+            "execution_engine": "ray",
+            "output_path": "/tmp/demo/index_rows.jsonl",
+        }
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    resp = client.post("/v1/partition/optical/demo", json=expected_payload)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["mode"] == "partition_demo"
+    assert body["execution_engine"] == "ray"
+    assert body["grid_level"] == 5
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
@@ -144,6 +207,169 @@ def test_optical_partition_test_endpoint(monkeypatch):
     assert body["mode"] == "partition_test_no_ingest"
     assert body["ingest_enabled"] is False
     assert body["quality_status"] == "PASS"
+
+
+def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
+    original_payload = {
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [
+            {
+                "source_uri": "scene_a/asset_a.tif",
+                "scene_id": "scene_a",
+                "acq_time": "2020-07-01T00:00:00Z",
+                "bands": ["sr_band2"],
+                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
+            },
+            {
+                "source_uri": "scene_b/asset_b.tif",
+                "scene_id": "scene_b",
+                "acq_time": "2020-07-01T00:00:00Z",
+                "bands": ["sr_band3"],
+                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
+            },
+        ],
+    }
+    retry_request = {
+        "request": {"endpoint": "optical", "payload": original_payload},
+        "last_result": {
+            "quality_report": {
+                "status": "WARN",
+                "checks": [
+                    {
+                        "name": "pixel_sample",
+                        "status": "WARN",
+                        "metrics": {"zero_assets": [{"path": "/tmp/demo/cog/asset_b_cog.tif"}]},
+                    }
+                ],
+            }
+        },
+    }
+
+    def fake_run_optical_partition_from_payload(payload=None, mode="partition_demo"):
+        assert mode == "partition_retry"
+        assert [asset["source_uri"] for asset in payload["selected_assets"]] == ["scene_b/asset_b.tif"]
+        return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 3}
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
+
+    resp = client.post("/v1/partition/optical/retry", json=retry_request)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "partition_retry"
+    assert body["retry"]["strategy"] == "warning_assets"
+    assert body["retry"]["warning_check_names"] == ["pixel_sample"]
+    assert body["retry"]["retried_asset_count"] == 1
+
+
+def test_optical_partition_retry_endpoint_falls_back_to_full_request(monkeypatch):
+    original_payload = {
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [{"source_uri": "scene_a/asset_a.tif"}, {"source_uri": "scene_b/asset_b.tif"}],
+    }
+    retry_request = {
+        "request": {"endpoint": "optical", "payload": original_payload},
+        "last_result": {"quality_report": {"status": "WARN", "checks": [{"name": "logical_duplicates", "status": "WARN"}]}},
+    }
+
+    def fake_run_optical_partition_from_payload(payload=None, mode="partition_demo"):
+        assert mode == "partition_retry"
+        assert payload == original_payload
+        return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 5}
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
+
+    resp = client.post("/v1/partition/optical/retry", json=retry_request)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["retry"]["strategy"] == "full_request"
+    assert body["retry"]["warning_check_names"] == ["logical_duplicates"]
+    assert body["retry"]["retried_asset_count"] == 0
+
+
+def test_carbon_partition_retry_endpoint(monkeypatch):
+    def fake_run_carbon_partition_retry(payload=None):
+        assert payload == {"request": {"endpoint": "carbon", "payload": {}}, "last_result": {"status": "completed"}}
+        return {
+            "status": "completed",
+            "mode": "partition_retry",
+            "data_type": "carbon_satellite",
+            "rows": 10,
+            "retry": {"strategy": "full_request"},
+        }
+
+    monkeypatch.setattr("cube_web.app._run_carbon_partition_retry", fake_run_carbon_partition_retry)
+
+    resp = client.post(
+        "/v1/partition/carbon/retry",
+        json={"request": {"endpoint": "carbon", "payload": {}}, "last_result": {"status": "completed"}},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "partition_retry"
+    assert body["retry"]["strategy"] == "full_request"
+
+
+def test_product_partition_demo_endpoint(monkeypatch):
+    def fake_run_product_partition_demo(payload=None):
+        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "product",
+            "rows": 20,
+            "grid_type": "geohash",
+            "grid_level": 5,
+            "output_path": "/tmp/product/index_rows.jsonl",
+        }
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+
+    resp = client.post("/v1/partition/product/demo", json={"grid_type": "geohash", "grid_level": 5})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data_type"] == "product"
+    assert body["mode"] == "partition_demo"
+    assert body["rows"] == 20
+
+
+def test_product_partition_retry_endpoint(monkeypatch):
+    def fake_run_product_partition_retry(payload=None):
+        assert payload == {"request": {"endpoint": "product", "payload": {}}, "last_result": {"status": "completed"}}
+        return {
+            "status": "completed",
+            "mode": "partition_retry",
+            "data_type": "product",
+            "rows": 20,
+            "retry": {"strategy": "full_request"},
+        }
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_retry", fake_run_product_partition_retry)
+
+    resp = client.post(
+        "/v1/partition/product/retry",
+        json={"request": {"endpoint": "product", "payload": {}}, "last_result": {"status": "completed"}},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "partition_retry"
+    assert body["retry"]["strategy"] == "full_request"
+
+
+def test_radar_partition_endpoints_return_not_implemented():
+    demo_resp = client.post("/v1/partition/radar/demo", json={})
+    retry_resp = client.post("/v1/partition/radar/retry", json={})
+
+    assert demo_resp.status_code == 501
+    assert retry_resp.status_code == 501
+    assert "not implemented" in demo_resp.json()["detail"]
+    assert "not implemented" in retry_resp.json()["detail"]
 
 
 def test_optical_quality_endpoint(monkeypatch):
