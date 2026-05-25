@@ -27,6 +27,14 @@ const mapGridLoading = ref(false);
 const mapGridGeometries = ref([]);
 const resultLoading = ref(false);
 const resultRows = ref([]);
+const lastPartitionResult = ref(null);
+const lastPartitionRequest = ref(null);
+const partitionStages = ref([
+  { key: 'prepare', label: '准备任务', status: 'pending' },
+  { key: 'queue', label: '读取数据队列', status: 'pending' },
+  { key: 'partition', label: '执行剖分', status: 'pending' },
+  { key: 'persist', label: '写入结果', status: 'pending' },
+]);
 const qualityLoading = ref(false);
 const qualityHistoryLoading = ref(false);
 const qualityPdfLoading = ref(false);
@@ -43,10 +51,10 @@ const opticalBatches = [
     name: 'Shandong_mosaic_optocal',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', band: 'sr_band2', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif', scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', band: 'sr_band2', corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', bands: ['sr_band2'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif', scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', bands: ['sr_band2'], corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
   {
@@ -54,9 +62,9 @@ const opticalBatches = [
     name: 'Shandong_mosaic_2020Q3_rgb_batch',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band2', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band2'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
   {
@@ -64,8 +72,8 @@ const opticalBatches = [
     name: 'Shandong_mosaic_2017Q3_batch',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', band: 'sr_band3', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', band: 'sr_band4', corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: 'Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
 ];
@@ -182,13 +190,24 @@ function cornersToBbox(corners) {
   return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
 }
 
+function assetBands(asset) {
+  if (Array.isArray(asset?.bands) && asset.bands.length) return asset.bands;
+  if (asset?.band) return [asset.band];
+  return [];
+}
+
+function assetBandsText(asset) {
+  const bands = assetBands(asset);
+  return bands.length ? bands.join(', ') : '-';
+}
+
 const mapBatchGeometries = computed(() => selectedOpticalAssets.value
   .map((asset) => {
     const geometry = cornersToPolygon(asset.corners);
     if (!geometry) return null;
     return {
       geometry,
-      label: `${asset.scene_id} / ${asset.band}`,
+      label: `${asset.scene_id} / ${assetBandsText(asset)}`,
       color: '#2f91ea',
       fillColor: '#2f91ea',
       fillOpacity: 0.12,
@@ -198,6 +217,28 @@ const mapBatchGeometries = computed(() => selectedOpticalAssets.value
   .filter(Boolean));
 
 const mapGeometries = computed(() => [...mapBatchGeometries.value, ...mapGridGeometries.value]);
+
+const partitionMetricRows = computed(() => {
+  if (!lastPartitionResult.value) return [];
+  const result = lastPartitionResult.value;
+  return [
+    { label: '状态', value: result.status || '-' },
+    { label: '数据类型', value: result.data_type || '-' },
+    { label: '资产数', value: result.asset_count ?? '-' },
+    { label: '格网任务数', value: result.grid_task_count ?? '-' },
+    { label: '索引行数', value: result.rows ?? result.total_index_rows ?? '-' },
+    { label: 'COG耗时(s)', value: result.cog_elapsed_sec ?? '-' },
+    { label: '剖分耗时(s)', value: result.partition_elapsed_sec ?? '-' },
+    { label: '总耗时(s)', value: result.total_elapsed_sec ?? '-' },
+    { label: '输出路径', value: result.output_path || result.rows_path || '-' },
+    { label: '质检状态', value: result.quality_status || result.quality_report?.status || '-' },
+  ];
+});
+
+const partitionWarnNeedsRetry = computed(() => {
+  const status = lastPartitionResult.value?.quality_status || lastPartitionResult.value?.quality_report?.status;
+  return status === 'WARN';
+});
 
 function openDataDrawer() {
   dataSearch.value = '';
@@ -222,7 +263,7 @@ function selectData(row) {
 }
 
 function assetKey(asset) {
-  return `${asset.source_uri}|${asset.scene_id}|${asset.band}|${asset.acq_time}`;
+  return `${asset.source_uri}|${asset.scene_id}|${assetBandsText(asset)}|${asset.acq_time}`;
 }
 
 function isOpticalAssetSelected(batchId, asset) {
@@ -241,6 +282,16 @@ function toggleOpticalBatchSelect(batchId) {
 
 function toggleOpticalBatchExpand(batchId) {
   expandedOpticalBatchId.value = expandedOpticalBatchId.value === batchId ? '' : batchId;
+}
+
+function selectSingleOpticalBatch(batchId) {
+  selectedOpticalBatchIds.value = [batchId];
+}
+
+async function runDemoForBatch(batchId) {
+  selectSingleOpticalBatch(batchId);
+  dataDrawerVisible.value = false;
+  await runDemo();
 }
 
 function toggleOpticalAssetSelect(batchId, asset) {
@@ -305,6 +356,28 @@ function formatRows(result) {
     key,
     value: typeof value === 'object' ? JSON.stringify(value) : String(value),
   }));
+}
+
+function resetPartitionStages() {
+  partitionStages.value = partitionStages.value.map((item) => ({ ...item, status: 'pending' }));
+}
+
+function setPartitionStage(stageKey, status) {
+  partitionStages.value = partitionStages.value.map((item) => (item.key === stageKey ? { ...item, status } : item));
+}
+
+function stageTagType(status) {
+  if (status === 'done') return 'success';
+  if (status === 'running') return 'warning';
+  if (status === 'failed') return 'danger';
+  return 'info';
+}
+
+function stageText(status) {
+  if (status === 'done') return '完成';
+  if (status === 'running') return '进行中';
+  if (status === 'failed') return '失败';
+  return '待执行';
 }
 
 const qualityStatusType = computed(() => {
@@ -531,16 +604,77 @@ async function runDemo() {
   }
   resultLoading.value = true;
   resultRows.value = [];
+  lastPartitionResult.value = null;
+  resetPartitionStages();
+  setPartitionStage('prepare', 'done');
   try {
     const { partitionPrefix } = apiPrefixes();
     const endpoint = activeModule.value === 'carbon' ? 'carbon' : 'optical';
+    const selectedBatch = activeModule.value === 'optical'
+      ? opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id))
+      : null;
+    const selectedAssets = activeModule.value === 'optical'
+      ? selectedOpticalAssets.value
+      : [];
     const payload = activeModule.value === 'optical'
-      ? { grid_type: opticalGridType.value, grid_level: Number(opticalGridLevel.value) }
+      ? {
+          grid_type: opticalGridType.value,
+          grid_level: Number(opticalGridLevel.value),
+          batch_id: selectedBatch?.id || '',
+          batch_name: selectedBatch?.name || '',
+          selected_assets: selectedAssets,
+        }
       : {};
+    lastPartitionRequest.value = { endpoint, payload };
+    setPartitionStage('queue', 'running');
+    await Promise.resolve();
+    setPartitionStage('queue', 'done');
+    setPartitionStage('partition', 'running');
     const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, payload);
+    setPartitionStage('partition', 'done');
+    setPartitionStage('persist', 'running');
+    lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
+    setPartitionStage('persist', 'done');
     ElMessage.success('剖分任务完成');
   } catch (error) {
+    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
+    ElMessage.error(error.message);
+  } finally {
+    resultLoading.value = false;
+  }
+}
+
+async function retryLastPartitionTask() {
+  if (!lastPartitionRequest.value) {
+    ElMessage.warning('暂无可重试任务，请先执行一次剖分');
+    return;
+  }
+  if (activeModule.value === 'quality') {
+    ElMessage.warning('请切换到剖分模块后重试');
+    return;
+  }
+  resultLoading.value = true;
+  resultRows.value = [];
+  lastPartitionResult.value = null;
+  resetPartitionStages();
+  setPartitionStage('prepare', 'done');
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const { endpoint, payload } = lastPartitionRequest.value;
+    setPartitionStage('queue', 'running');
+    await Promise.resolve();
+    setPartitionStage('queue', 'done');
+    setPartitionStage('partition', 'running');
+    const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, payload || {});
+    setPartitionStage('partition', 'done');
+    setPartitionStage('persist', 'running');
+    lastPartitionResult.value = result;
+    resultRows.value = formatRows(result);
+    setPartitionStage('persist', 'done');
+    ElMessage.success('任务已重试完成');
+  } catch (error) {
+    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     ElMessage.error(error.message);
   } finally {
     resultLoading.value = false;
@@ -735,6 +869,14 @@ onMounted(() => {
 
                 <div class="form-group action-buttons">
                   <el-button>重置</el-button>
+                  <el-button
+                    v-if="activeModule !== 'quality'"
+                    :disabled="!lastPartitionRequest || resultLoading"
+                    :type="partitionWarnNeedsRetry ? 'warning' : 'default'"
+                    @click="retryLastPartitionTask"
+                  >
+                    {{ partitionWarnNeedsRetry ? '告警后重试任务' : '手动重试' }}
+                  </el-button>
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
                     {{ activeModule === 'quality' ? '刷新结果' : '开始剖分' }}
                   </el-button>
@@ -825,6 +967,31 @@ onMounted(() => {
                   </el-button>
                 </div>
                 <div class="results-content">
+                  <template v-if="activeModule !== 'quality'">
+                    <div class="partition-progress-panel">
+                      <div class="quality-section-title">剖分进程</div>
+                      <div class="partition-stage-list">
+                        <div v-for="stage in partitionStages" :key="stage.key" class="partition-stage-item">
+                          <span>{{ stage.label }}</span>
+                          <el-tag :type="stageTagType(stage.status)" size="small">{{ stageText(stage.status) }}</el-tag>
+                        </div>
+                      </div>
+                    </div>
+                    <el-alert
+                      v-if="partitionWarnNeedsRetry"
+                      type="warning"
+                      :closable="false"
+                      title="质检出现告警，建议点击“告警后重试任务”重新执行剖分。"
+                      class="partition-warn-alert"
+                    />
+                    <div v-if="partitionMetricRows.length" class="partition-metrics">
+                      <div class="quality-section-title">剖分结果</div>
+                      <div v-for="item in partitionMetricRows" :key="item.label" class="quality-kv">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                  </template>
                   <template v-if="activeModule === 'quality' && qualityReport">
                     <div class="quality-check-list">
                       <div v-for="check in qualityReport.checks" :key="check.name" class="quality-check-item" :class="check.status.toLowerCase()">
@@ -882,6 +1049,7 @@ onMounted(() => {
               <div class="batch-meta">
                 <span class="batch-id">{{ batch.id }}</span>
                 <el-tag size="small" type="success">{{ batch.status }}</el-tag>
+                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleOpticalBatchExpand(batch.id)">
                   {{ expandedOpticalBatchId === batch.id ? '收起' : '展开' }}
                 </button>
@@ -889,11 +1057,11 @@ onMounted(() => {
             </div>
             <div class="batch-summary">{{ opticalBatchSummary(batch) }}</div>
             <div v-if="expandedOpticalBatchId === batch.id" class="batch-assets">
-              <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}-${asset.band}`" class="asset-row">
+              <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}-${assetBandsText(asset)}`" class="asset-row">
                 <div class="asset-main">
                   <el-checkbox :model-value="isOpticalAssetSelected(batch.id, asset)" @change="toggleOpticalAssetSelect(batch.id, asset)" />
                   <strong>{{ asset.scene_id }}</strong>
-                  <span>{{ asset.band }}</span>
+                  <span>{{ assetBandsText(asset) }}</span>
                   <span>{{ asset.acq_time }}</span>
                 </div>
                 <div class="asset-source">{{ asset.source_uri }}</div>

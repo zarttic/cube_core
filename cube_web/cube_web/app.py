@@ -490,7 +490,7 @@ def _run_optical_partition_demo() -> dict:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    return {
+    response = {
         "status": "completed",
         "data_type": "optical",
         **_demo_task_metadata("ray"),
@@ -509,6 +509,13 @@ def _run_optical_partition_demo() -> dict:
         "ray_task_ids": ray_task_ids,
         "output_path": str(rows_path),
     }
+    if run_optical_quality_check is not None:
+        args = _quality_args(str(output_dir), {"target_crs": "EPSG:4326"})
+        quality_report = run_optical_quality_check(args)
+        response["quality_status"] = quality_report.get("status")
+        response["quality_report"] = quality_report
+        response["quality_report_path"] = str(Path(output_dir) / "quality_report.json")
+    return response
 
 
 def _resolve_web_file(path_name: str) -> Path:

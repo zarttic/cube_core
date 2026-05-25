@@ -97,6 +97,9 @@ def test_optical_partition_demo_endpoint(monkeypatch):
             "grid_level": 7,
             "workers": 2,
             "output_path": "/tmp/demo/index_rows.jsonl",
+            "quality_status": "WARN",
+            "quality_report_path": "/tmp/demo/quality_report.json",
+            "quality_report": {"status": "WARN", "checks": [{"name": "logical_duplicates", "status": "WARN"}]},
         }
 
     monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
@@ -106,6 +109,7 @@ def test_optical_partition_demo_endpoint(monkeypatch):
     assert body["status"] == "completed"
     assert body["asset_count"] == 2
     assert body["rows"] == 16
+    assert body["quality_status"] == "WARN"
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
