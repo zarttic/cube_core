@@ -62,11 +62,18 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
         source_uri = str(row.get("source_uri") or "").strip()
         scene_id = str(row.get("scene_id") or "").strip()
         acq_time = str(row.get("acq_time") or "").strip()
-        band = str(row.get("band") or row.get("variable") or row.get("polarization") or "").strip().lower()
+        bands_raw = row.get("bands")
+        bands: list[str] = []
+        if isinstance(bands_raw, list):
+            bands = [str(item).strip().lower() for item in bands_raw if str(item).strip()]
+        if not bands:
+            fallback_band = str(row.get("band") or row.get("variable") or row.get("polarization") or "").strip().lower()
+            if fallback_band:
+                bands = [fallback_band]
         corners = row.get("corners")
-        if not source_uri or not scene_id or not acq_time or not band:
+        if not source_uri or not scene_id or not acq_time or not bands:
             raise ValueError(
-                f"Invalid manifest row #{idx}: required fields are source_uri, scene_id, acq_time, and one of band/variable/polarization"
+                f"Invalid manifest row #{idx}: required fields are source_uri, scene_id, acq_time, and one of bands/band/variable/polarization"
             )
         if not isinstance(corners, list) or len(corners) != 4:
             raise ValueError(f"Invalid manifest row #{idx}: `corners` must be a list of 4 [lon, lat] points")
@@ -89,18 +96,19 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
         data_type = str(row.get("data_type") or default_data_type).strip().lower()
         if data_type not in {"optical", "product", "radar"}:
             raise ValueError(f"Invalid manifest row #{idx}: unsupported data_type={data_type!r}")
-        records.append(
-            AssetRecord(
-                scene_id=scene_id,
-                band=band,
-                path=str(path),
-                acq_time=acq_time,
-                product_family=str(row.get("product_family") or row.get("product_type") or "manifest").strip().lower(),
-                sensor=str(row.get("sensor") or "unknown").strip().lower(),
-                bbox=bbox,
-                corners=parsed_corners,
+        for band in bands:
+            records.append(
+                AssetRecord(
+                    scene_id=scene_id,
+                    band=band,
+                    path=str(path),
+                    acq_time=acq_time,
+                    product_family=str(row.get("product_family") or row.get("product_type") or "manifest").strip().lower(),
+                    sensor=str(row.get("sensor") or "unknown").strip().lower(),
+                    bbox=bbox,
+                    corners=parsed_corners,
+                )
             )
-        )
     return records
 
 
