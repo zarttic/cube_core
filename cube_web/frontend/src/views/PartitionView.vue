@@ -114,6 +114,13 @@ const dataLabelsByModule = {
   product: '信息产品数据',
 };
 
+const partitionEndpointsByModule = {
+  optical: 'optical',
+  carbon: 'carbon',
+  radar: 'radar',
+  product: 'product',
+};
+
 const activeDataRows = computed(() => dataRowsByModule[activeModule.value] || []);
 
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
@@ -609,7 +616,10 @@ async function runDemo() {
   setPartitionStage('prepare', 'done');
   try {
     const { partitionPrefix } = apiPrefixes();
-    const endpoint = activeModule.value === 'carbon' ? 'carbon' : 'optical';
+    const endpoint = partitionEndpointsByModule[activeModule.value];
+    if (!endpoint) {
+      throw new Error(`不支持的剖分模块: ${activeModule.value}`);
+    }
     const selectedBatch = activeModule.value === 'optical'
       ? opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id))
       : null;
@@ -656,17 +666,22 @@ async function retryLastPartitionTask() {
   }
   resultLoading.value = true;
   resultRows.value = [];
+  const retryRequest = lastPartitionRequest.value;
+  const retryResult = lastPartitionResult.value || {};
   lastPartitionResult.value = null;
   resetPartitionStages();
   setPartitionStage('prepare', 'done');
   try {
     const { partitionPrefix } = apiPrefixes();
-    const { endpoint, payload } = lastPartitionRequest.value;
+    const { endpoint } = retryRequest;
     setPartitionStage('queue', 'running');
     await Promise.resolve();
     setPartitionStage('queue', 'done');
     setPartitionStage('partition', 'running');
-    const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, payload || {});
+    const result = await requestJson(`${partitionPrefix}/${endpoint}/retry`, {
+      request: retryRequest,
+      last_result: retryResult,
+    });
     setPartitionStage('partition', 'done');
     setPartitionStage('persist', 'running');
     lastPartitionResult.value = result;
