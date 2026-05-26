@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from cube_web.routes.ingest import create_ingest_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
@@ -12,6 +13,7 @@ from cube_web.schemas import PartitionDemoRequest, PartitionRetryRequest, payloa
 from cube_web.services import partition_runners, quality_checks, quality_service
 from cube_web.services.partition_service import PartitionService, build_partition_registry
 from cube_web.services.quality_pdf import quality_report_pdf_response
+from cube_web.services.quality_report_store import get_quality_report_store
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
 from grid_core.sdk import CubeEncoderSDK
 
@@ -34,40 +36,7 @@ def _repo_root() -> Path:
     return quality_service.repo_root()
 
 
-# Compatibility wrappers for existing tests and direct module callers.
-def _quality_run_dirs(data_type: str) -> list[Path]:
-    return quality_service.quality_run_dirs(data_type)
-
-
-def _allowed_quality_roots() -> list[Path]:
-    return quality_service.allowed_quality_roots()
-
-
-def _resolve_quality_run_dir(run_dir_text: str) -> Path:
-    run_dir = Path(run_dir_text).expanduser().resolve()
-    for root in _allowed_quality_roots():
-        if run_dir == root or root in run_dir.parents:
-            return run_dir
-    roots = ", ".join(str(root) for root in _allowed_quality_roots())
-    raise HTTPException(status_code=403, detail=f"run_dir must be under one of: {roots}")
-
-
-def _optical_quality_run_dirs() -> list[Path]:
-    return quality_service.optical_quality_run_dirs()
-
-
-def _latest_optical_quality_run_dir() -> str:
-    return quality_service.latest_optical_quality_run_dir()
-
-
-def _latest_product_quality_run_dir() -> str:
-    return quality_service.latest_product_quality_run_dir()
-
-
 _quality_args = quality_service.quality_args
-_quality_history_record = quality_service.quality_history_record
-_read_quality_history_record = quality_service.read_quality_history_record
-_read_quality_report = quality_service.read_quality_report
 
 _demo_run_dir = partition_runners._demo_run_dir
 _demo_task_metadata = partition_runners._demo_task_metadata
@@ -242,28 +211,21 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
 
 
 def quality_optical_latest(payload: dict | None = None) -> dict:
-    payload = payload_from_model(payload)
-    run_dir = _latest_optical_quality_run_dir()
-    cached_report = _read_quality_report(Path(run_dir), data_type="optical")
-    if cached_report is not None:
-        return cached_report
-    if run_optical_quality_check is None:
-        raise HTTPException(status_code=500, detail="cube_split quality module is not available")
-    args = _quality_args(run_dir, payload)
-    report = run_optical_quality_check(args)
-    report["run_dir"] = run_dir
+    payload_from_model(payload)
+    report = get_quality_report_store().latest_report("optical")
+    if report is None:
+        raise HTTPException(status_code=404, detail="No optical quality report found")
     return report
 
 
 def quality_optical_report(payload: dict) -> dict:
     payload = payload_from_model(payload)
-    run_dir_text = str(payload.get("run_dir", "")).strip()
-    if not run_dir_text:
-        raise HTTPException(status_code=422, detail="run_dir is required")
-    run_dir = _resolve_quality_run_dir(run_dir_text)
-    report = _read_quality_report(run_dir, data_type="optical")
+    report_id = str(payload.get("report_id", "")).strip()
+    if not report_id:
+        raise HTTPException(status_code=422, detail="report_id is required")
+    report = get_quality_report_store().get_report("optical", report_id)
     if report is None:
-        raise HTTPException(status_code=404, detail=f"quality_report.json not found under run_dir: {run_dir}")
+        raise HTTPException(status_code=404, detail=f"Optical quality report not found: {report_id}")
     return report
 
 
@@ -274,28 +236,14 @@ def quality_optical_report_pdf(payload: dict) -> Response:
 def quality_optical_history(payload: dict | None = None) -> dict:
     payload = payload_from_model(payload)
     limit = _history_limit(payload)
-    records: list[dict] = []
-    for run_dir in _optical_quality_run_dirs():
-        record = _read_quality_history_record(run_dir, data_type="optical")
-        if record is None:
-            continue
-        records.append(record)
-        if len(records) >= limit:
-            break
+    records = get_quality_report_store().list_reports("optical", limit=limit)
     return {"records": records, "count": len(records)}
 
 
 def quality_product_history(payload: dict | None = None) -> dict:
     payload = payload_from_model(payload)
     limit = _history_limit(payload)
-    records: list[dict] = []
-    for run_dir in _quality_run_dirs("product"):
-        record = _read_quality_history_record(run_dir, data_type="product")
-        if record is None:
-            continue
-        records.append(record)
-        if len(records) >= limit:
-            break
+    records = get_quality_report_store().list_reports("product", limit=limit)
     return {"records": records, "count": len(records)}
 
 
@@ -322,6 +270,7 @@ partition_service = PartitionService(
 )
 api_router.include_router(create_sdk_router(sdk))
 api_router.include_router(create_quality_router())
+api_router.include_router(create_ingest_router())
 api_router.include_router(create_partition_router(partition_service))
 app.include_router(api_router)
 

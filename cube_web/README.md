@@ -21,6 +21,10 @@ From the repository root:
 PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
+Quality reports use PostgreSQL storage. Local development defaults to the
+Podman PostgreSQL service at `postgresql://postgres:postgres@127.0.0.1:55432/cube`;
+set `CUBE_WEB_POSTGRES_DSN` or `DATABASE_URL` to override it.
+
 For local frontend development:
 
 ```bash

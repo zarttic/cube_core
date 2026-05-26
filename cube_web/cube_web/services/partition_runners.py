@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from cube_web.services import quality_checks
+from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
 
@@ -259,9 +260,10 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["execution_engine"] = "thread"
     if quality_checks.run_product_quality_check is not None:
         quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": args.target_crs}))
+        quality_report = get_quality_report_store().upsert_report("product", result["run_dir"], quality_report)
         result["quality_status"] = quality_report.get("status")
         result["quality_report"] = quality_report
-        result["quality_report_path"] = str(Path(result["run_dir"]) / "quality_report.json")
+        result["quality_report_id"] = quality_report.get("report_id")
     return result
 
 
@@ -362,13 +364,15 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
         "workers": report.get("ray_parallelism"),
+        "ingest_enabled": mode != "partition_test_no_ingest",
         **report,
     }
     if quality_checks.run_optical_quality_check is not None:
         quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
         response["quality_status"] = quality_report.get("status")
         response["quality_report"] = quality_report
-        response["quality_report_path"] = str(run_dir / "quality_report.json")
+        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 

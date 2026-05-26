@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
@@ -14,6 +13,7 @@ from cube_web.schemas import (
 from cube_web.services import quality_checks
 from cube_web.services import quality_service
 from cube_web.services.quality_pdf import quality_report_pdf_response
+from cube_web.services.quality_report_store import get_quality_report_store
 
 
 def create_quality_router() -> APIRouter:
@@ -30,37 +30,28 @@ def create_quality_router() -> APIRouter:
         run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
         args = quality_service.quality_args(run_dir, payload)
         try:
-            return quality_checks.run_optical_quality_check(args)
+            report = quality_checks.run_optical_quality_check(args)
+            return get_quality_report_store().upsert_report("optical", run_dir, report)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/optical/latest")
     def quality_optical_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload = payload_from_model(payload)
-        run_dir = quality_service.latest_optical_quality_run_dir()
-        cached_report = quality_service.read_quality_report(Path(run_dir), data_type="optical")
-        if cached_report is not None:
-            return cached_report
-        if quality_checks.run_optical_quality_check is None:
-            raise HTTPException(status_code=500, detail="cube_split quality module is not available")
-        args = quality_service.quality_args(run_dir, payload)
-        try:
-            report = quality_checks.run_optical_quality_check(args)
-            report["run_dir"] = run_dir
-            return report
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload_from_model(payload)
+        report = get_quality_report_store().latest_report("optical")
+        if report is None:
+            raise HTTPException(status_code=404, detail="No optical quality report found")
+        return report
 
     @router.post("/optical/report")
     def quality_optical_report(payload: QualityReportRequest) -> dict:
         payload = payload_from_model(payload)
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = quality_service.resolve_quality_run_dir(run_dir_text)
-        report = quality_service.read_quality_report(run_dir, data_type="optical")
+        report_id = str(payload.get("report_id", "")).strip()
+        if not report_id:
+            raise HTTPException(status_code=422, detail="report_id is required")
+        report = get_quality_report_store().get_report("optical", report_id)
         if report is None:
-            raise HTTPException(status_code=404, detail=f"quality_report.json not found under run_dir: {run_dir}")
+            raise HTTPException(status_code=404, detail=f"Optical quality report not found: {report_id}")
         return report
 
     @router.post("/optical/report/pdf")
@@ -72,14 +63,7 @@ def create_quality_router() -> APIRouter:
     def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
         payload = payload_from_model(payload)
         limit = _history_limit(payload)
-        records: list[dict] = []
-        for run_dir in quality_service.optical_quality_run_dirs():
-            record = quality_service.read_quality_history_record(run_dir, data_type="optical")
-            if record is None:
-                continue
-            records.append(record)
-            if len(records) >= limit:
-                break
+        records = get_quality_report_store().list_reports("optical", limit=limit)
         return {"records": records, "count": len(records)}
 
     @router.post("/product/run")
@@ -93,37 +77,28 @@ def create_quality_router() -> APIRouter:
         run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
         args = quality_service.quality_args(run_dir, payload)
         try:
-            return quality_checks.run_product_quality_check(args)
+            report = quality_checks.run_product_quality_check(args)
+            return get_quality_report_store().upsert_report("product", run_dir, report)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/product/latest")
     def quality_product_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload = payload_from_model(payload)
-        run_dir = quality_service.latest_product_quality_run_dir()
-        cached_report = quality_service.read_quality_report(Path(run_dir), data_type="product")
-        if cached_report is not None:
-            return cached_report
-        if quality_checks.run_product_quality_check is None:
-            raise HTTPException(status_code=500, detail="cube_split product quality module is not available")
-        args = quality_service.quality_args(run_dir, payload)
-        try:
-            report = quality_checks.run_product_quality_check(args)
-            report["run_dir"] = run_dir
-            return report
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload_from_model(payload)
+        report = get_quality_report_store().latest_report("product")
+        if report is None:
+            raise HTTPException(status_code=404, detail="No product quality report found")
+        return report
 
     @router.post("/product/report")
     def quality_product_report(payload: QualityReportRequest) -> dict:
         payload = payload_from_model(payload)
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = quality_service.resolve_quality_run_dir(run_dir_text)
-        report = quality_service.read_quality_report(run_dir, data_type="product")
+        report_id = str(payload.get("report_id", "")).strip()
+        if not report_id:
+            raise HTTPException(status_code=422, detail="report_id is required")
+        report = get_quality_report_store().get_report("product", report_id)
         if report is None:
-            raise HTTPException(status_code=404, detail=f"quality_report.json not found under run_dir: {run_dir}")
+            raise HTTPException(status_code=404, detail=f"Product quality report not found: {report_id}")
         return report
 
     @router.post("/product/report/pdf")
@@ -135,14 +110,7 @@ def create_quality_router() -> APIRouter:
     def quality_product_history(payload: QualityHistoryRequest | None = None) -> dict:
         payload = payload_from_model(payload)
         limit = _history_limit(payload)
-        records: list[dict] = []
-        for run_dir in quality_service.quality_run_dirs("product"):
-            record = quality_service.read_quality_history_record(run_dir, data_type="product")
-            if record is None:
-                continue
-            records.append(record)
-            if len(records) >= limit:
-                break
+        records = get_quality_report_store().list_reports("product", limit=limit)
         return {"records": records, "count": len(records)}
 
     return router
