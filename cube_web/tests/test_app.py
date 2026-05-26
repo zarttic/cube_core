@@ -1,14 +1,77 @@
 import subprocess
 import time
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from s2sphere import CellId
 
 import cube_web.app as web_app
 from cube_web.app import ENCODER_SDK_CLASS, app
+from cube_web.services import quality_report_store as quality_report_store_module
+from cube_web.services.quality_report_store import set_quality_report_store
 
 
 client = TestClient(app)
+
+
+class FakeQualityReportStore:
+    def __init__(self):
+        self.reports = {}
+        self.history = {"optical": [], "product": []}
+
+    def ensure_schema(self):
+        return None
+
+    def upsert_report(self, data_type, run_dir, report):
+        report = dict(report)
+        report_id = str(report.get("report_id") or f"{data_type}-report-{len(self.reports) + 1}")
+        report.update(
+            {
+                "report_id": report_id,
+                "data_type": data_type,
+                "run_dir": str(run_dir),
+                "generated_at": report.get("generated_at") or "2026-05-15T01:02:03Z",
+            }
+        )
+        self.reports[(data_type, report_id)] = report
+        self.history.setdefault(data_type, [])
+        self.history[data_type] = [row for row in self.history[data_type] if row["report_id"] != report_id]
+        self.history[data_type].insert(
+            0,
+            {
+                "report_id": report_id,
+                "data_type": data_type,
+                "run_dir": str(run_dir),
+                "run_name": str(run_dir).rstrip("/").split("/")[-1],
+                "dataset": str(run_dir).rstrip("/").split("/")[-2],
+                "status": report.get("status", "UNKNOWN"),
+                "target_crs": report.get("target_crs"),
+                "generated_at": report["generated_at"],
+                "summary": report.get("summary", {}),
+            },
+        )
+        return report
+
+    def get_report(self, data_type, report_id):
+        return self.reports.get((data_type, report_id))
+
+    def latest_report(self, data_type):
+        rows = self.history.get(data_type, [])
+        if not rows:
+            return None
+        return self.get_report(data_type, rows[0]["report_id"])
+
+    def list_reports(self, data_type, limit=20):
+        return list(self.history.get(data_type, []))[:limit]
+
+
+@pytest.fixture(autouse=True)
+def quality_store():
+    store = FakeQualityReportStore()
+    set_quality_report_store(store)
+    yield store
+    set_quality_report_store(None)
 
 
 def test_header_navigation_does_not_expose_quality_as_top_level_item():
@@ -30,6 +93,29 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
     assert "activeModule.value === 'carbon' ? 'carbon' : 'optical'" not in source
+
+
+def test_quality_report_store_defaults_to_local_podman_postgres(monkeypatch):
+    captured = {}
+
+    class DummyPostgresQualityReportStore:
+        def __init__(self, dsn):
+            captured["dsn"] = dsn
+
+    monkeypatch.delenv("CUBE_WEB_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        quality_report_store_module,
+        "PostgresQualityReportStore",
+        DummyPostgresQualityReportStore,
+    )
+    quality_report_store_module.set_quality_report_store(None)
+
+    try:
+        quality_report_store_module.get_quality_report_store()
+        assert captured["dsn"] == "postgresql://postgres:postgres@127.0.0.1:55432/cube"
+    finally:
+        quality_report_store_module.set_quality_report_store(None)
 
 
 def test_home_page_serves_index():
@@ -121,8 +207,12 @@ def test_optical_partition_demo_endpoint(monkeypatch):
             "workers": 2,
             "output_path": "/tmp/demo/index_rows.jsonl",
             "quality_status": "WARN",
-            "quality_report_path": "/tmp/demo/quality_report.json",
-            "quality_report": {"status": "WARN", "checks": [{"name": "logical_duplicates", "status": "WARN"}]},
+            "quality_report_id": "optical-demo-report",
+            "quality_report": {
+                "report_id": "optical-demo-report",
+                "status": "WARN",
+                "checks": [{"name": "logical_duplicates", "status": "WARN"}],
+            },
         }
 
     monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
@@ -239,8 +329,8 @@ def test_optical_partition_test_endpoint(monkeypatch):
             "grid_level": 5,
             "ingest_enabled": False,
             "quality_status": "PASS",
-            "quality_report_path": "/tmp/run/quality_report.json",
-            "quality_report": {"status": "PASS", "summary": {"index_rows": 147}},
+            "quality_report_id": "optical-test-report",
+            "quality_report": {"report_id": "optical-test-report", "status": "PASS", "summary": {"index_rows": 147}},
         }
 
     monkeypatch.setattr("cube_web.app._run_optical_partition_test", fake_run_optical_partition_test)
@@ -256,6 +346,109 @@ def test_optical_partition_test_endpoint(monkeypatch):
     assert body["mode"] == "partition_test_no_ingest"
     assert body["ingest_enabled"] is False
     assert body["quality_status"] == "PASS"
+
+
+def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
+    run_dir = Path("/tmp/cube_web_partition_demo/test_app_ingest_preview")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    asset_path = run_dir / "asset_cog.tif"
+    row = {
+        "scene_id": "scene-1",
+        "band": "sr_band2",
+        "asset_path": str(asset_path),
+        "acq_time": "2020-07-01T00:00:00Z",
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "space_code": "wx4g0",
+        "st_code": "gh:5:wx4g0:20200701:v1",
+        "time_bucket": "20200701",
+        "cell_min_lon": 116.0,
+        "cell_min_lat": 39.9,
+        "cell_max_lon": 116.1,
+        "cell_max_lat": 40.0,
+        "window_col_off": 1,
+        "window_row_off": 2,
+        "window_width": 4,
+        "window_height": 5,
+    }
+    (run_dir / "index_rows.jsonl").write_text(__import__("json").dumps(row) + "\n", encoding="utf-8")
+    quality_store.upsert_report(
+        "optical",
+        str(run_dir),
+        {
+            "report_id": "optical-ingest-preview",
+            "status": "PASS",
+            "target_crs": "EPSG:4326",
+            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
+            "checks": [],
+            "assets": [],
+        },
+    )
+
+    def fail_if_called(args):
+        raise AssertionError("preview must not call run_ingest")
+
+    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fail_if_called)
+    monkeypatch.setattr(
+        "cube_web.services.ingest_service._existing_conflicts",
+        lambda raw_records, cube_records: {"raw_asset_rows": 0, "cube_fact_rows": 0},
+    )
+
+    resp = client.post("/v1/ingest/optical/preview", json={"report_id": "optical-ingest-preview"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "pre_ingest_preview"
+    assert body["would_write"] is False
+    assert body["input_rows"] == 1
+    assert body["raw_asset_rows"] == 1
+    assert body["cube_fact_rows"] == 1
+    assert body["cube_version"].startswith("demo-")
+
+
+def test_optical_ingest_confirm_uses_demo_versions_and_local_storage(monkeypatch, quality_store):
+    run_dir = "/tmp/cube_web_partition_demo/test_app_ingest_confirm"
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+    (Path(run_dir) / "index_rows.jsonl").write_text("", encoding="utf-8")
+    quality_store.upsert_report(
+        "optical",
+        run_dir,
+        {
+            "report_id": "optical-ingest-confirm",
+            "status": "PASS",
+            "target_crs": "EPSG:4326",
+            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
+            "checks": [],
+            "assets": [],
+        },
+    )
+    captured = {}
+
+    def fake_run_ingest(args):
+        captured.update(vars(args))
+        return {
+            "run_dir": args.run_dir,
+            "input_rows": 1,
+            "materialized_cog_assets": 1,
+            "raw_asset_rows": 1,
+            "cube_fact_rows": 1,
+            "metadata_backend": args.metadata_backend,
+            "asset_storage_backend": args.asset_storage_backend,
+        }
+
+    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fake_run_ingest)
+
+    resp = client.post("/v1/ingest/optical/confirm", json={"report_id": "optical-ingest-confirm"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "confirmed_ingest"
+    assert body["status"] == "succeeded"
+    assert body["cube_version"].startswith("demo-")
+    assert captured["metadata_backend"] == "postgres"
+    assert captured["asset_storage_backend"] == "local"
+    assert captured["cog_materialize_mode"] == "symlink"
+    assert captured["asset_version"].startswith("demo-")
 
 
 def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
@@ -440,31 +633,30 @@ def test_optical_quality_endpoint(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "PASS"
+    assert body["report_id"]
+    assert body["run_dir"] == run_dir
     assert body["summary"]["index_rows"] == 3
 
 
-def test_quality_report_rejects_run_dir_outside_allowed_roots():
-    resp = client.post("/v1/quality/optical/report", json={"run_dir": "/tmp/not-a-cube-web-run"})
+def test_quality_report_requires_report_id():
+    resp = client.post("/v1/quality/optical/report", json={})
 
-    assert resp.status_code == 403
-    assert "run_dir must be under" in resp.json()["detail"]
+    assert resp.status_code == 422
 
 
-def test_optical_quality_latest_endpoint(monkeypatch):
-    def fake_latest_run_dir():
-        return "/tmp/latest-run"
-
-    def fake_run_quality_check(args):
-        assert args.run_dir == "/tmp/latest-run"
-        assert args.target_crs == "EPSG:4326"
-        return {
+def test_optical_quality_latest_endpoint(quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/latest-run",
+        {
+            "report_id": "optical-latest",
             "status": "WARN",
+            "target_crs": "EPSG:4326",
             "summary": {"index_rows": 9, "failed_checks": 0, "warning_checks": 1},
             "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "duplicate"}],
-        }
-
-    monkeypatch.setattr("cube_web.services.quality_service.latest_optical_quality_run_dir", fake_latest_run_dir)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fake_run_quality_check)
+            "assets": [],
+        },
+    )
 
     resp = client.post("/v1/quality/optical/latest", json={})
 
@@ -475,96 +667,83 @@ def test_optical_quality_latest_endpoint(monkeypatch):
     assert body["summary"]["warning_checks"] == 1
 
 
-def test_optical_quality_latest_reads_existing_report_without_rerun(monkeypatch, tmp_path):
-    run_dir = tmp_path / "dataset_a" / "run_20260515_010203"
-    run_dir.mkdir(parents=True)
-    (run_dir / "index_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (run_dir / "quality_report.json").write_text(
-        """
+def test_optical_quality_latest_reads_database_without_rerun(monkeypatch, quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/dataset_a/run_20260515_010203",
         {
+          "report_id": "optical-existing",
           "status": "PASS",
-          "run_dir": "/old/path",
           "target_crs": "EPSG:4326",
           "generated_at": "2026-05-15T01:02:03Z",
           "summary": {"index_rows": 11, "failed_checks": 0, "warning_checks": 0},
           "checks": [{"name": "index_rows", "status": "PASS", "message": "cached"}],
           "assets": []
-        }
-        """,
-        encoding="utf-8",
+        },
     )
 
     def fail_if_called(args):
-        raise AssertionError("latest should read quality_report.json instead of re-running quality checks")
+        raise AssertionError("latest should read the database instead of re-running quality checks")
 
-    monkeypatch.setattr("cube_web.app._latest_optical_quality_run_dir", lambda: str(run_dir))
     monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
     body = web_app.quality_optical_latest({})
 
     assert body["status"] == "PASS"
-    assert body["run_dir"] == str(run_dir)
+    assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
     assert body["summary"]["index_rows"] == 11
     assert body["checks"][0]["message"] == "cached"
 
 
-def test_optical_quality_report_endpoint_reads_existing_report_without_rerun(monkeypatch, tmp_path):
-    run_dir = tmp_path / "dataset_a" / "run_20260515_010203"
-    run_dir.mkdir(parents=True)
-    (run_dir / "index_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (run_dir / "quality_report.json").write_text(
-        """
+def test_optical_quality_report_endpoint_reads_database_without_rerun(monkeypatch, quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/dataset_a/run_20260515_010203",
         {
+          "report_id": "optical-report",
           "status": "WARN",
           "target_crs": "EPSG:4326",
           "generated_at": "2026-05-15T01:02:03Z",
           "summary": {"index_rows": 7, "failed_checks": 0, "warning_checks": 1},
           "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "cached warn"}],
           "assets": []
-        }
-        """,
-        encoding="utf-8",
+        },
     )
 
     def fail_if_called(args):
         raise AssertionError("report viewing should not re-run quality checks")
 
     monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
-    monkeypatch.setattr("cube_web.app._allowed_quality_roots", lambda: [tmp_path.resolve()])
 
-    body = web_app.quality_optical_report({"run_dir": str(run_dir)})
+    body = web_app.quality_optical_report({"report_id": "optical-report"})
 
     assert body["status"] == "WARN"
-    assert body["run_dir"] == str(run_dir)
+    assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
     assert body["summary"]["index_rows"] == 7
     assert body["checks"][0]["message"] == "cached warn"
 
 
-def test_optical_quality_report_pdf_endpoint_reads_existing_report_without_rerun(monkeypatch, tmp_path):
-    run_dir = tmp_path / "dataset_a" / "run_20260515_010203"
-    run_dir.mkdir(parents=True)
-    (run_dir / "index_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (run_dir / "quality_report.json").write_text(
-        """
+def test_optical_quality_report_pdf_endpoint_reads_database_without_rerun(monkeypatch, tmp_path, quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/dataset_a/run_20260515_010203",
         {
+          "report_id": "optical-pdf",
           "status": "PASS",
           "target_crs": "EPSG:4326",
           "generated_at": "2026-05-15T01:02:03Z",
           "summary": {"index_rows": 7, "asset_count": 2, "failed_checks": 0, "warning_checks": 0},
           "checks": [{"name": "index_rows", "status": "PASS", "message": "cached"}],
           "assets": [{"path": "/data/a.tif", "crs": "EPSG:4326"}]
-        }
-        """,
-        encoding="utf-8",
+        },
     )
 
     def fail_if_called(args):
         raise AssertionError("PDF export should not re-run quality checks")
 
     monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
-    monkeypatch.setattr("cube_web.app._allowed_quality_roots", lambda: [tmp_path.resolve()])
 
-    response = web_app.quality_optical_report_pdf({"run_dir": str(run_dir)})
+    response = web_app.quality_optical_report_pdf({"report_id": "optical-pdf"})
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF-")
@@ -578,13 +757,12 @@ def test_optical_quality_report_pdf_endpoint_reads_existing_report_without_rerun
     assert "质检概要" in text
 
 
-def test_optical_quality_history_endpoint(monkeypatch, tmp_path):
-    run_dir = tmp_path / "dataset_a" / "run_20260515_010203"
-    run_dir.mkdir(parents=True)
-    (run_dir / "index_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (run_dir / "quality_report.json").write_text(
-        """
+def test_optical_quality_history_endpoint(quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/dataset_a/run_20260515_010203",
         {
+          "report_id": "optical-history",
           "status": "PASS",
           "target_crs": "EPSG:4326",
           "generated_at": "2026-05-15T01:02:03Z",
@@ -595,15 +773,8 @@ def test_optical_quality_history_endpoint(monkeypatch, tmp_path):
             "warning_checks": 0,
             "failed_checks": 0
           }
-        }
-        """,
-        encoding="utf-8",
+        },
     )
-
-    def fake_run_dirs():
-        return [run_dir]
-
-    monkeypatch.setattr("cube_web.app._optical_quality_run_dirs", fake_run_dirs)
 
     body = web_app.quality_optical_history({"target_crs": "EPSG:4326"})
 
@@ -615,13 +786,12 @@ def test_optical_quality_history_endpoint(monkeypatch, tmp_path):
     assert record["summary"]["index_rows"] == 1
 
 
-def test_product_quality_history_endpoint(monkeypatch, tmp_path):
-    run_dir = tmp_path / "product_epsg4326" / "run_20260515_010203"
-    run_dir.mkdir(parents=True)
-    (run_dir / "index_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (run_dir / "quality_report.json").write_text(
-        """
+def test_product_quality_history_endpoint(quality_store):
+    quality_store.upsert_report(
+        "product",
+        "/tmp/product_epsg4326/run_20260515_010203",
         {
+          "report_id": "product-history",
           "status": "PASS",
           "target_crs": "EPSG:4326",
           "generated_at": "2026-05-15T01:02:03Z",
@@ -633,12 +803,8 @@ def test_product_quality_history_endpoint(monkeypatch, tmp_path):
             "warning_checks": 0,
             "failed_checks": 0
           }
-        }
-        """,
-        encoding="utf-8",
+        },
     )
-
-    monkeypatch.setattr("cube_web.app._quality_run_dirs", lambda data_type: [run_dir])
 
     body = web_app.quality_product_history({"target_crs": "EPSG:4326"})
 

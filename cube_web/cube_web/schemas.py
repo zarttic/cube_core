@@ -74,16 +74,14 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
 class QualityRunRequest(CubeWebModel):
     run_dir: str = Field(min_length=1)
     target_crs: str | None = "EPSG:4326"
-    output: str | None = None
 
 
 class QualityLatestRequest(CubeWebModel):
-    target_crs: str | None = "EPSG:4326"
-    output: str | None = None
+    pass
 
 
 class QualityReportRequest(CubeWebModel):
-    run_dir: str = Field(min_length=1)
+    report_id: str = Field(min_length=1)
 
 
 class QualityHistoryRequest(CubeWebModel):
@@ -93,6 +91,17 @@ class QualityHistoryRequest(CubeWebModel):
 class QualityResponse(CubeWebModel):
     status: str | None = None
     run_dir: str | None = None
+
+
+class OpticalIngestRequest(CubeWebModel):
+    run_dir: str | None = None
+    report_id: str | None = None
+    dataset: str = "demo_optical"
+    sensor: str = "optical_mosaic"
+    asset_version: str | None = None
+    cube_version: str | None = None
+    quality_rule: Literal["best_quality_wins", "latest_wins"] = "best_quality_wins"
+    allow_failed_quality: bool = False
 
 
 def payload_from_model(value: BaseModel | dict[str, Any] | None) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { Search } from '@element-plus/icons-vue';
 
 import LeafletMap from '@/components/LeafletMap.vue';
@@ -29,11 +29,19 @@ const resultLoading = ref(false);
 const resultRows = ref([]);
 const lastPartitionResult = ref(null);
 const lastPartitionRequest = ref(null);
+const ingestLoading = ref(false);
+const ingestConfirmLoading = ref(false);
+const ingestPreview = ref(null);
+const ingestResult = ref(null);
+const partitionStartedAt = ref(null);
+const partitionFinishedAt = ref(null);
+const partitionElapsedSec = ref(0);
+let partitionTimer = null;
 const partitionStages = ref([
-  { key: 'prepare', label: '准备任务', status: 'pending' },
-  { key: 'queue', label: '读取数据队列', status: 'pending' },
-  { key: 'partition', label: '执行剖分', status: 'pending' },
-  { key: 'persist', label: '写入结果', status: 'pending' },
+  { key: 'prepare', label: '准备任务', detail: '等待选择数据批次与剖分参数。', status: 'pending' },
+  { key: 'queue', label: '读取数据队列', detail: '解析已载入资产、批次、波段与时间信息。', status: 'pending' },
+  { key: 'partition', label: '执行剖分', detail: '生成 COG、按格网覆盖切分窗口并输出索引行。', status: 'pending' },
+  { key: 'persist', label: '质检入库', detail: '执行自动质检并保存质检报告，正式入库需人工确认。', status: 'pending' },
 ]);
 const qualityLoading = ref(false);
 const qualityHistoryLoading = ref(false);
@@ -42,7 +50,7 @@ const qualityReport = ref(null);
 const qualityHistory = ref([]);
 const qualityError = ref('');
 const qualityTargetCrs = ref('EPSG:4326');
-const selectedQualityRunDir = ref('');
+const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
 
 const opticalBatches = [
@@ -150,7 +158,7 @@ const filteredQualityHistory = computed(() => {
   return qualityHistory.value.filter((row) => {
     const matchesKeyword =
       !keyword ||
-      [row.dataset, row.run_name, row.run_dir]
+      [row.dataset, row.run_name, row.run_dir, row.report_id]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(keyword));
     const matchesStatus = !qualityHistoryStatus.value || row.status === qualityHistoryStatus.value;
@@ -159,8 +167,8 @@ const filteredQualityHistory = computed(() => {
 });
 
 const selectedQualityRecord = computed(() => {
-  if (!selectedQualityRunDir.value) return null;
-  return qualityHistory.value.find((row) => row.run_dir === selectedQualityRunDir.value) || null;
+  if (!selectedQualityReportId.value) return null;
+  return qualityHistory.value.find((row) => row.report_id === selectedQualityReportId.value) || null;
 });
 
 const selectedOpticalAssets = computed(() => {
@@ -230,6 +238,7 @@ const partitionMetricRows = computed(() => {
   const result = lastPartitionResult.value;
   return [
     { label: '状态', value: result.status || '-' },
+    { label: '模式', value: result.mode || '-' },
     { label: '数据类型', value: result.data_type || '-' },
     { label: '资产数', value: result.asset_count ?? '-' },
     { label: '格网任务数', value: result.grid_task_count ?? '-' },
@@ -239,12 +248,104 @@ const partitionMetricRows = computed(() => {
     { label: '总耗时(s)', value: result.total_elapsed_sec ?? '-' },
     { label: '输出路径', value: result.output_path || result.rows_path || '-' },
     { label: '质检状态', value: result.quality_status || result.quality_report?.status || '-' },
+    { label: '正式入库', value: result.ingest_enabled === false ? '否' : '待确认' },
+  ];
+});
+
+const selectedOpticalBandsText = computed(() => {
+  const bands = new Set();
+  selectedOpticalAssets.value.forEach((asset) => assetBands(asset).forEach((band) => bands.add(band)));
+  return bands.size ? Array.from(bands).sort().join(', ') : '-';
+});
+
+const selectedOpticalTimeRange = computed(() => {
+  const values = selectedOpticalAssets.value
+    .map((asset) => String(asset.acq_time || '').slice(0, 10))
+    .filter(Boolean)
+    .sort();
+  if (!values.length) return '-';
+  if (values[0] === values[values.length - 1]) return values[0];
+  return `${values[0]} 至 ${values[values.length - 1]}`;
+});
+
+const partitionContextRows = computed(() => {
+  if (activeModule.value === 'quality') return [];
+  const request = lastPartitionRequest.value || {};
+  const payload = request.payload || {};
+  const result = lastPartitionResult.value || {};
+  const operation = request.operation || (activeModule.value === 'optical' ? 'test' : 'demo');
+  const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
+  const status = resultLoading.value ? '执行中' : lastPartitionResult.value ? '已完成' : '待执行';
+  const rows = [
+    { label: '运行状态', value: status },
+    { label: '执行接口', value: `/v1/partition/${endpoint}/${operation}` },
+    { label: '开始时间', value: partitionStartedAt.value ? formatQualityTime(partitionStartedAt.value) : '-' },
+    { label: '已耗时', value: `${partitionElapsedSec.value.toFixed(1)} s` },
+    { label: '数据批次', value: selectedDataName.value },
+    { label: '输出目录', value: result.run_dir || '-' },
+  ];
+  if (activeModule.value === 'optical') {
+    rows.splice(
+      5,
+      0,
+      { label: '剖分格网', value: `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级` },
+      { label: '选择资产', value: `${selectedOpticalAssets.value.length} 条` },
+      { label: '波段', value: selectedOpticalBandsText.value },
+      { label: '时间范围', value: selectedOpticalTimeRange.value },
+      { label: '安全模式', value: '剖分测试不写正式库' },
+    );
+  }
+  return rows;
+});
+
+const partitionResultDetailRows = computed(() => {
+  const result = lastPartitionResult.value;
+  if (!result) return [];
+  return [
+    { label: '执行引擎', value: result.execution_engine || result.partition_backend || '-' },
+    { label: '演示任务 ID', value: result.demo_task_id || '-' },
+    { label: 'Ray 任务 ID', value: result.ray_task_id || '-' },
+    { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
+    { label: '索引文件', value: result.rows_path || result.output_path || '-' },
+    { label: 'COG 输出', value: result.cog_output_dir || result.cog_input_dir || '-' },
   ];
 });
 
 const partitionWarnNeedsRetry = computed(() => {
   const status = lastPartitionResult.value?.quality_status || lastPartitionResult.value?.quality_report?.status;
   return status === 'WARN';
+});
+
+const opticalIngestReady = computed(() => activeModule.value === 'optical' && Boolean(
+  lastPartitionResult.value?.quality_report_id || lastPartitionResult.value?.quality_report?.report_id || lastPartitionResult.value?.run_dir,
+));
+
+const ingestPreviewRows = computed(() => {
+  if (!ingestPreview.value) return [];
+  const preview = ingestPreview.value;
+  return [
+    { label: '入库模式', value: preview.mode === 'pre_ingest_preview' ? '预入库校验' : preview.mode },
+    { label: '质检状态', value: preview.quality_status || '-' },
+    { label: '资产版本', value: preview.asset_version || '-' },
+    { label: '立方体版本', value: preview.cube_version || '-' },
+    { label: '索引行数', value: preview.input_rows ?? '-' },
+    { label: '资产记录', value: `${preview.raw_asset_rows ?? 0} 条，已有 ${preview.existing_raw_asset_rows ?? 0} 条` },
+    { label: '格网事实', value: `${preview.cube_fact_rows ?? 0} 条，已有 ${preview.existing_cube_fact_rows ?? 0} 条` },
+  ];
+});
+
+const ingestResultRows = computed(() => {
+  if (!ingestResult.value) return [];
+  const result = ingestResult.value;
+  return [
+    { label: '入库状态', value: result.status || '-' },
+    { label: '任务 ID', value: result.job_id || '-' },
+    { label: '资产版本', value: result.asset_version || '-' },
+    { label: '立方体版本', value: result.cube_version || '-' },
+    { label: '资产记录', value: result.raw_asset_rows ?? '-' },
+    { label: '格网事实', value: result.cube_fact_rows ?? '-' },
+    { label: '元数据后端', value: result.metadata_backend || '-' },
+  ];
 });
 
 function openDataDrawer() {
@@ -259,7 +360,7 @@ function openQualityHistoryDrawer() {
 }
 
 function qualityHistoryRowClass({ row }) {
-  return row.run_dir === selectedQualityRunDir.value ? 'selected-quality-history-row' : '';
+  return row.report_id === selectedQualityReportId.value ? 'selected-quality-history-row' : '';
 }
 
 function selectData(row) {
@@ -369,8 +470,10 @@ function resetPartitionStages() {
   partitionStages.value = partitionStages.value.map((item) => ({ ...item, status: 'pending' }));
 }
 
-function setPartitionStage(stageKey, status) {
-  partitionStages.value = partitionStages.value.map((item) => (item.key === stageKey ? { ...item, status } : item));
+function setPartitionStage(stageKey, status, detail = '') {
+  partitionStages.value = partitionStages.value.map((item) => (
+    item.key === stageKey ? { ...item, status, detail: detail || item.detail } : item
+  ));
 }
 
 function stageTagType(status) {
@@ -385,6 +488,28 @@ function stageText(status) {
   if (status === 'running') return '进行中';
   if (status === 'failed') return '失败';
   return '待执行';
+}
+
+function startPartitionTimer() {
+  stopPartitionTimer();
+  partitionStartedAt.value = new Date().toISOString();
+  partitionFinishedAt.value = null;
+  partitionElapsedSec.value = 0;
+  const started = Date.now();
+  partitionTimer = window.setInterval(() => {
+    partitionElapsedSec.value = (Date.now() - started) / 1000;
+  }, 200);
+}
+
+function stopPartitionTimer() {
+  if (partitionTimer) {
+    window.clearInterval(partitionTimer);
+    partitionTimer = null;
+  }
+  if (partitionStartedAt.value && !partitionFinishedAt.value) {
+    partitionFinishedAt.value = new Date().toISOString();
+    partitionElapsedSec.value = (new Date(partitionFinishedAt.value).getTime() - new Date(partitionStartedAt.value).getTime()) / 1000;
+  }
 }
 
 const qualityStatusType = computed(() => {
@@ -520,18 +645,15 @@ async function loadQualityHistory() {
   }
 }
 
-async function runQualityCheck(runDir = '') {
+async function runQualityCheck(reportId = '') {
   qualityLoading.value = true;
   qualityError.value = '';
   try {
     const { qualityPrefix } = apiPrefixes();
-    const endpoint = runDir ? `${qualityPrefix}/${qualityDataType.value}/report` : `${qualityPrefix}/${qualityDataType.value}/latest`;
-    const payload = {
-      target_crs: qualityTargetCrs.value,
-    };
-    if (runDir) payload.run_dir = runDir;
+    const endpoint = reportId ? `${qualityPrefix}/${qualityDataType.value}/report` : `${qualityPrefix}/${qualityDataType.value}/latest`;
+    const payload = reportId ? { report_id: reportId } : {};
     qualityReport.value = await requestJson(endpoint, payload);
-    selectedQualityRunDir.value = qualityReport.value.run_dir || runDir;
+    selectedQualityReportId.value = qualityReport.value.report_id || reportId;
     const message = qualityReport.value.status === 'FAIL' ? '质检结果存在失败项' : '质检结果已加载';
     ElMessage[qualityReport.value.status === 'FAIL' ? 'warning' : 'success'](message);
   } catch (error) {
@@ -551,12 +673,12 @@ async function selectQualityRecord(row) {
   if (row.data_type && row.data_type !== qualityDataType.value) {
     qualityDataType.value = row.data_type;
   }
-  await runQualityCheck(row.run_dir);
+  await runQualityCheck(row.report_id);
   qualityHistoryDrawerVisible.value = false;
 }
 
 async function exportQualityPdf() {
-  if (!qualityReport.value?.run_dir) {
+  if (!qualityReport.value?.report_id) {
     ElMessage.warning('请先加载质检结果');
     return;
   }
@@ -566,7 +688,7 @@ async function exportQualityPdf() {
     const response = await fetch(`${qualityPrefix}/${qualityDataType.value}/report/pdf`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ run_dir: qualityReport.value.run_dir }),
+      body: JSON.stringify({ report_id: qualityReport.value.report_id }),
     });
     if (!response.ok) {
       const text = await response.text();
@@ -582,7 +704,7 @@ async function exportQualityPdf() {
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const runName = qualityReport.value.run_dir.split('/').filter(Boolean).pop() || 'run';
+    const runName = qualityReport.value.run_name || qualityReport.value.run_dir?.split('/').filter(Boolean).pop() || 'run';
     link.href = url;
     link.download = `quality-report-${qualityDataType.value}-${runName}.pdf`;
     document.body.appendChild(link);
@@ -600,7 +722,7 @@ async function exportQualityPdf() {
 async function changeQualityDataType() {
   qualityReport.value = null;
   qualityHistory.value = [];
-  selectedQualityRunDir.value = '';
+  selectedQualityReportId.value = '';
   await refreshQuality();
 }
 
@@ -612,8 +734,11 @@ async function runDemo() {
   resultLoading.value = true;
   resultRows.value = [];
   lastPartitionResult.value = null;
+  ingestPreview.value = null;
+  ingestResult.value = null;
+  startPartitionTimer();
   resetPartitionStages();
-  setPartitionStage('prepare', 'done');
+  setPartitionStage('prepare', 'done', '已锁定当前参数与数据选择。');
   try {
     const { partitionPrefix } = apiPrefixes();
     const endpoint = partitionEndpointsByModule[activeModule.value];
@@ -635,23 +760,100 @@ async function runDemo() {
           selected_assets: selectedAssets,
         }
       : {};
-    lastPartitionRequest.value = { endpoint, payload };
-    setPartitionStage('queue', 'running');
+    const operation = activeModule.value === 'optical' ? 'test' : 'demo';
+    lastPartitionRequest.value = { endpoint, payload, operation };
+    setPartitionStage('queue', 'running', activeModule.value === 'optical' ? `准备读取 ${selectedAssets.length} 条影像资产。` : '准备读取当前队列中的数据。');
     await Promise.resolve();
-    setPartitionStage('queue', 'done');
-    setPartitionStage('partition', 'running');
-    const result = await requestJson(`${partitionPrefix}/${endpoint}/demo`, payload);
-    setPartitionStage('partition', 'done');
-    setPartitionStage('persist', 'running');
+    setPartitionStage('queue', 'done', '数据队列已提交到后端。');
+    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/${operation} 执行剖分。`);
+    const result = await requestJson(`${partitionPrefix}/${endpoint}/${operation}`, payload);
+    setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+    setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
-    setPartitionStage('persist', 'done');
-    ElMessage.success('剖分任务完成');
+    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+    ElMessage.success(activeModule.value === 'optical' ? '剖分测试完成，未写入正式库' : '剖分任务完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     ElMessage.error(error.message);
   } finally {
+    stopPartitionTimer();
     resultLoading.value = false;
+  }
+}
+
+function currentIngestPayload() {
+  const result = lastPartitionResult.value || {};
+  const reportId = result.quality_report_id || result.quality_report?.report_id || '';
+  const payload = {
+    dataset: 'demo_optical',
+    sensor: 'optical_mosaic',
+    quality_rule: 'best_quality_wins',
+  };
+  if (reportId) {
+    payload.report_id = reportId;
+  } else if (result.run_dir) {
+    payload.run_dir = result.run_dir;
+  }
+  return payload;
+}
+
+async function previewOpticalIngest() {
+  if (!opticalIngestReady.value) {
+    ElMessage.warning('请先完成一次光学剖分测试');
+    return;
+  }
+  ingestLoading.value = true;
+  ingestPreview.value = null;
+  ingestResult.value = null;
+  try {
+    const { ingestPrefix } = apiPrefixes();
+    ingestPreview.value = await requestJson(`${ingestPrefix}/optical/preview`, currentIngestPayload());
+    ElMessage.success('预入库校验完成');
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    ingestLoading.value = false;
+  }
+}
+
+async function confirmOpticalIngest() {
+  if (!opticalIngestReady.value) {
+    ElMessage.warning('请先完成一次光学剖分测试');
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      '确认后会将当前剖分结果写入演示版本，重复执行会按唯一键覆盖同版本记录。',
+      '确认入库',
+      { confirmButtonText: '确认入库', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  ingestConfirmLoading.value = true;
+  ingestResult.value = null;
+  try {
+    const { ingestPrefix } = apiPrefixes();
+    ingestResult.value = await requestJson(`${ingestPrefix}/optical/confirm`, currentIngestPayload());
+    ElMessage.success('演示版本入库完成');
+    if (!ingestPreview.value) {
+      ingestPreview.value = {
+        mode: 'pre_ingest_preview',
+        quality_status: ingestResult.value.quality_status,
+        asset_version: ingestResult.value.asset_version,
+        cube_version: ingestResult.value.cube_version,
+        input_rows: ingestResult.value.input_rows,
+        raw_asset_rows: ingestResult.value.raw_asset_rows,
+        cube_fact_rows: ingestResult.value.cube_fact_rows,
+        existing_raw_asset_rows: 0,
+        existing_cube_fact_rows: 0,
+      };
+    }
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    ingestConfirmLoading.value = false;
   }
 }
 
@@ -660,38 +862,44 @@ async function retryLastPartitionTask() {
     ElMessage.warning('暂无可重试任务，请先执行一次剖分');
     return;
   }
-  if (activeModule.value === 'quality') {
-    ElMessage.warning('请切换到剖分模块后重试');
-    return;
-  }
   resultLoading.value = true;
   resultRows.value = [];
   const retryRequest = lastPartitionRequest.value;
   const retryResult = lastPartitionResult.value || {};
   lastPartitionResult.value = null;
+  ingestPreview.value = null;
+  ingestResult.value = null;
+  startPartitionTimer();
   resetPartitionStages();
-  setPartitionStage('prepare', 'done');
+  setPartitionStage('prepare', 'done', '已使用上一次请求参数准备重试。');
   try {
     const { partitionPrefix } = apiPrefixes();
     const { endpoint } = retryRequest;
-    setPartitionStage('queue', 'running');
+    setPartitionStage('queue', 'running', '重试请求已进入后端队列。');
     await Promise.resolve();
-    setPartitionStage('queue', 'done');
-    setPartitionStage('partition', 'running');
+    setPartitionStage('queue', 'done', '后端已接收重试请求。');
+    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/retry 执行重试。`);
     const result = await requestJson(`${partitionPrefix}/${endpoint}/retry`, {
       request: retryRequest,
       last_result: retryResult,
     });
-    setPartitionStage('partition', 'done');
-    setPartitionStage('persist', 'running');
+    setPartitionStage('partition', 'done', `重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+    setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
-    setPartitionStage('persist', 'done');
+    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+    if (activeModule.value === 'quality' && result.quality_report) {
+      qualityDataType.value = retryRequest.endpoint === 'product' ? 'product' : 'optical';
+      qualityReport.value = result.quality_report;
+      selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+      await loadQualityHistory();
+    }
     ElMessage.success('任务已重试完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     ElMessage.error(error.message);
   } finally {
+    stopPartitionTimer();
     resultLoading.value = false;
   }
 }
@@ -716,6 +924,10 @@ onMounted(() => {
   if (activeModule.value === 'quality') {
     refreshQuality();
   }
+});
+
+onUnmounted(() => {
+  stopPartitionTimer();
 });
 </script>
 
@@ -885,7 +1097,7 @@ onMounted(() => {
                 <div class="form-group action-buttons">
                   <el-button>重置</el-button>
                   <el-button
-                    v-if="activeModule !== 'quality'"
+                    v-if="activeModule === 'quality'"
                     :disabled="!lastPartitionRequest || resultLoading"
                     :type="partitionWarnNeedsRetry ? 'warning' : 'default'"
                     @click="retryLastPartitionTask"
@@ -893,7 +1105,24 @@ onMounted(() => {
                     {{ partitionWarnNeedsRetry ? '告警后重试任务' : '手动重试' }}
                   </el-button>
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
-                    {{ activeModule === 'quality' ? '刷新结果' : '开始剖分' }}
+                    {{ activeModule === 'quality' ? '刷新结果' : activeModule === 'optical' ? '剖分测试' : '开始剖分' }}
+                  </el-button>
+                  <el-button
+                    v-if="activeModule === 'optical'"
+                    :loading="ingestLoading"
+                    :disabled="!opticalIngestReady || resultLoading"
+                    @click="previewOpticalIngest"
+                  >
+                    预入库校验
+                  </el-button>
+                  <el-button
+                    v-if="activeModule === 'optical'"
+                    type="success"
+                    :loading="ingestConfirmLoading"
+                    :disabled="!opticalIngestReady || !ingestPreview || resultLoading || ingestLoading"
+                    @click="confirmOpticalIngest"
+                  >
+                    确认入库
                   </el-button>
                 </div>
               </div>
@@ -932,8 +1161,8 @@ onMounted(() => {
                   <div class="quality-band-table">
                     <div class="quality-section-title">当前批次</div>
                     <div class="quality-kv">
-                      <span>run_dir</span>
-                      <strong>{{ qualityReport.run_dir?.split('/').slice(-2).join('/') }}</strong>
+                      <span>报告 ID</span>
+                      <strong>{{ qualityReport.report_id }}</strong>
                     </div>
                     <div class="quality-kv">
                       <span>来源</span>
@@ -985,9 +1214,18 @@ onMounted(() => {
                   <template v-if="activeModule !== 'quality'">
                     <div class="partition-progress-panel">
                       <div class="quality-section-title">剖分进程</div>
+                      <div class="partition-context-grid">
+                        <div v-for="item in partitionContextRows" :key="item.label" class="partition-context-item">
+                          <span>{{ item.label }}</span>
+                          <strong>{{ item.value }}</strong>
+                        </div>
+                      </div>
                       <div class="partition-stage-list">
                         <div v-for="stage in partitionStages" :key="stage.key" class="partition-stage-item">
-                          <span>{{ stage.label }}</span>
+                          <div class="partition-stage-main">
+                            <strong>{{ stage.label }}</strong>
+                            <span>{{ stage.detail }}</span>
+                          </div>
                           <el-tag :type="stageTagType(stage.status)" size="small">{{ stageText(stage.status) }}</el-tag>
                         </div>
                       </div>
@@ -1002,6 +1240,27 @@ onMounted(() => {
                     <div v-if="partitionMetricRows.length" class="partition-metrics">
                       <div class="quality-section-title">剖分结果</div>
                       <div v-for="item in partitionMetricRows" :key="item.label" class="quality-kv">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                    <div v-if="partitionResultDetailRows.length" class="partition-metrics">
+                      <div class="quality-section-title">执行明细</div>
+                      <div v-for="item in partitionResultDetailRows" :key="item.label" class="quality-kv">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                    <div v-if="activeModule === 'optical' && ingestPreviewRows.length" class="partition-metrics">
+                      <div class="quality-section-title">预入库校验</div>
+                      <div v-for="item in ingestPreviewRows" :key="item.label" class="quality-kv">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                    <div v-if="activeModule === 'optical' && ingestResultRows.length" class="partition-metrics">
+                      <div class="quality-section-title">确认入库结果</div>
+                      <div v-for="item in ingestResultRows" :key="item.label" class="quality-kv">
                         <span>{{ item.label }}</span>
                         <strong>{{ item.value }}</strong>
                       </div>
