@@ -4,9 +4,16 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { Search } from '@element-plus/icons-vue';
 
 import LeafletMap from '@/components/LeafletMap.vue';
+import ConfigView from '@/views/ConfigView.vue';
 import { apiPrefixes, requestJson } from '@/api/client';
 
-const activeModule = ref(window.location.pathname === '/quality' ? 'quality' : 'optical');
+function initialModule() {
+  if (window.location.pathname === '/quality') return 'quality';
+  if (window.location.pathname === '/config' || window.location.pathname === '/config.html') return 'config';
+  return 'optical';
+}
+
+const activeModule = ref(initialModule());
 const dataDrawerVisible = ref(false);
 const qualityHistoryDrawerVisible = ref(false);
 const dataSearch = ref('');
@@ -50,8 +57,15 @@ const qualityReport = ref(null);
 const qualityHistory = ref([]);
 const qualityError = ref('');
 const qualityTargetCrs = ref('EPSG:4326');
+const qualityHistoryLimit = ref(30);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
+const ingestDefaults = ref({
+  dataset: 'demo_optical',
+  sensor: 'optical_mosaic',
+  quality_rule: 'best_quality_wins',
+  allow_failed_quality: false,
+});
 
 const opticalBatches = [
   {
@@ -634,7 +648,7 @@ async function loadQualityHistory() {
     const { qualityPrefix } = apiPrefixes();
     const result = await requestJson(`${qualityPrefix}/${qualityDataType.value}/history`, {
       target_crs: qualityTargetCrs.value,
-      limit: 30,
+      limit: qualityHistoryLimit.value,
     });
     qualityHistory.value = result.records || [];
   } catch (error) {
@@ -785,17 +799,31 @@ async function runDemo() {
 function currentIngestPayload() {
   const result = lastPartitionResult.value || {};
   const reportId = result.quality_report_id || result.quality_report?.report_id || '';
-  const payload = {
-    dataset: 'demo_optical',
-    sensor: 'optical_mosaic',
-    quality_rule: 'best_quality_wins',
-  };
+  const payload = { ...ingestDefaults.value };
   if (reportId) {
     payload.report_id = reportId;
   } else if (result.run_dir) {
     payload.run_dir = result.run_dir;
   }
   return payload;
+}
+
+async function loadManagedConfig() {
+  try {
+    const { configPrefix } = apiPrefixes();
+    const response = await requestJson(`${configPrefix}/get`, {});
+    const config = response.config || {};
+    const optical = config.partition?.optical || {};
+    const quality = config.quality?.optical || {};
+    const ingest = config.ingest?.optical || {};
+    opticalGridType.value = optical.grid_type || opticalGridType.value;
+    opticalGridLevel.value = Number(optical.grid_level || opticalGridLevel.value);
+    qualityTargetCrs.value = quality.target_crs || qualityTargetCrs.value;
+    qualityHistoryLimit.value = Number(quality.history_limit || qualityHistoryLimit.value);
+    ingestDefaults.value = { ...ingestDefaults.value, ...ingest };
+  } catch (error) {
+    ElMessage.warning(`配置加载失败，使用页面默认值：${error.message}`);
+  }
 }
 
 async function previewOpticalIngest() {
@@ -920,7 +948,8 @@ watch([selectedOpticalBatchIds, deselectedOpticalAssetKeys, opticalGridType, opt
   mapGridGeometries.value = [];
 }, { deep: true });
 
-onMounted(() => {
+onMounted(async () => {
+  await loadManagedConfig();
   if (activeModule.value === 'quality') {
     refreshQuality();
   }
@@ -941,6 +970,7 @@ onUnmounted(() => {
           <button class="module-tab" :class="{ active: activeModule === 'radar' }" @click="activeModule = 'radar'">雷达遥感</button>
           <button class="module-tab" :class="{ active: activeModule === 'product' }" @click="activeModule = 'product'">信息产品</button>
           <button class="module-tab" :class="{ active: activeModule === 'quality' }" @click="activeModule = 'quality'">自动化质检</button>
+          <button class="module-tab" :class="{ active: activeModule === 'config' }" @click="activeModule = 'config'">配置管理</button>
         </div>
       </div>
     </section>
@@ -948,7 +978,8 @@ onUnmounted(() => {
     <main class="main-content-area">
       <div class="container">
         <div class="module-content active">
-          <div class="workspace">
+          <ConfigView v-if="activeModule === 'config'" />
+          <div v-else class="workspace">
             <div class="workspace-sidebar">
               <div class="config-panel">
                 <h3>{{ activeModule === 'optical' ? '数据配置' : '参数配置' }}</h3>

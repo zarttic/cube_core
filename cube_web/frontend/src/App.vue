@@ -12,6 +12,7 @@ const pageMap = {
   '/partition': PartitionView,
   '/quality': PartitionView,
   '/encoding': EncodingView,
+  '/config': PartitionView,
 };
 
 const currentView = computed(() => pageMap[currentPath.value] || HomeView);
@@ -24,6 +25,11 @@ function goInternal(path) {
 
 function handlePopState() {
   currentPath.value = normalizePath(window.location.pathname);
+}
+
+function isNavActive(item) {
+  if (item.path === currentPath.value) return true;
+  return item.path === '/partition' && currentPath.value === '/config';
 }
 
 onMounted(() => window.addEventListener('popstate', handlePopState));
@@ -52,7 +58,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
             <a
               v-if="item.kind === 'internal'"
               href="#"
-              :class="{ active: currentPath === item.path }"
+              :class="{ active: isNavActive(item) }"
               @click.prevent="goInternal(item.path)"
             >
               {{ item.label }}

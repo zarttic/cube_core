@@ -1972,6 +1972,186 @@ section {
 }
 
 /* ========================================
+   配置管理页面
+   ======================================== */
+
+.config-page {
+    width: min(100%, 1600px);
+    margin: 0 auto;
+    padding: 20px 32px 32px;
+}
+
+.config-toolbar {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 16px;
+}
+
+.config-eyebrow {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--primary);
+    margin-bottom: 4px;
+}
+
+.config-toolbar h1 {
+    font-size: 22px;
+    line-height: 1.25;
+    color: var(--dark);
+    margin: 0 0 5px;
+}
+
+.config-toolbar p {
+    font-size: 13px;
+    color: var(--gray);
+    margin: 0;
+}
+
+.config-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.config-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: 16px;
+    align-items: start;
+}
+
+.config-main-panel,
+.config-side-panel {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+}
+
+.config-main-panel {
+    padding: 0 18px 20px;
+    min-width: 0;
+}
+
+.config-form {
+    padding-top: 14px;
+}
+
+.config-form-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(180px, 1fr));
+    gap: 14px 18px;
+}
+
+.config-form .el-input-number,
+.config-form .el-select,
+.config-form .el-input {
+    width: 100%;
+}
+
+.config-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--dark);
+    padding: 18px 0 10px;
+    margin-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.config-side-panel {
+    padding: 16px;
+    display: grid;
+    gap: 12px;
+    position: sticky;
+    top: 92px;
+}
+
+.config-status-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fbfcfe;
+    padding: 13px;
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+}
+
+.status-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    background: var(--primary-bg);
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.status-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.config-status-card span,
+.config-status-card small,
+.config-kv span {
+    display: block;
+    font-size: 12px;
+    color: var(--gray);
+}
+
+.config-status-card strong {
+    display: block;
+    font-size: 14px;
+    color: var(--dark);
+    line-height: 1.35;
+    margin: 2px 0;
+    overflow-wrap: anywhere;
+}
+
+.config-status-card small {
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+}
+
+.config-kv-list {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.config-kv {
+    padding: 11px 12px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+}
+
+.config-kv:last-child {
+    border-bottom: none;
+}
+
+.config-kv strong {
+    min-width: 0;
+    text-align: right;
+    font-size: 13px;
+    color: var(--dark);
+    overflow-wrap: anywhere;
+}
+
+/* ========================================
    编码结构可视化
    ======================================== */
 
