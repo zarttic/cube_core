@@ -17,7 +17,11 @@ Python monorepo at the repository root.
 PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
 
-Runs the default package tests. The currently hanging `cube_web/tests` suite is excluded from the default test plan until its static-file response issue is fixed.
+Runs the default encoder and split package tests. For web changes, also run:
+
+```bash
+cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+```
 
 ```bash
 cd cube_encoder && python -m build
@@ -26,10 +30,10 @@ cd cube_encoder && python -m build
 Builds the `cube-encoder` distribution.
 
 ```bash
-PYTHONPATH=cube_encoder:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-Runs the web UI with the in-repo SDK backend.
+Runs the web UI with the in-repo SDK and partition backends.
 
 ## Coding Style & Naming Conventions
 
@@ -75,23 +79,23 @@ Do not commit local data, caches, `.pytest_cache/`, `__pycache__/`, virtual envi
 
 | 节点 | IP | 主机名 | MinIO API | Console | 认证 |
 |------|-----|--------|-----------|---------|------|
-| .13 | 10.136.1.13 | slave01 | :9000 | :9001 | admin/minio123456 |
-| .14 | 10.136.1.14 | slave02 | :19010 | :19011 | admin/minio123456 |
-| .15 | 10.136.1.15 | slave03 | :9000 | :9001 | admin/minio123456 |
-| .20 | 10.136.1.20 | inspur-NF5280M4 | :9000 | :9001 | admin/minio123456 |
+| .13 | 10.136.1.13 | slave01 | :9000 | :9001 | 使用本地密钥管理 |
+| .14 | 10.136.1.14 | slave02 | :19010 | :19011 | 使用本地密钥管理 |
+| .15 | 10.136.1.15 | slave03 | :9000 | :9001 | 使用本地密钥管理 |
+| .20 | 10.136.1.20 | inspur-NF5280M4 | :9000 | :9001 | 使用本地密钥管理 |
 
 - **Console 入口**: `http://10.136.1.14:9001`（Nginx LB 在 .14）
 - **Nginx LB**: .14 上，API 端口 9000，Console 端口 9001
 - **环境变量**: 各节点 `/etc/default/minio` 已配置 `MINIO_PROMETHEUS_AUTH_TYPE=public`
 - **数据盘**: .13/.14/.15 为 39T/39T/31T，.20 为 2.6T（/data1）
-- **SSH 认证**: .13/.14/.15 使用 root/10qpalzm，.20 使用 inspur/admin1,（需 sudo）
+- **SSH 认证**: 使用本地密钥管理或运维侧凭据，不在仓库记录口令。
 
 ### 监控栈（Prometheus + Grafana）
 
 | 组件 | 节点 | 端口 | 访问地址 |
 |------|------|------|----------|
 | Prometheus | .13 | 9090 | `http://10.136.1.13:9090` |
-| Grafana | .13 (Docker) | 3000 | `http://10.136.1.13:3000` (admin/admin) |
+| Grafana | .13 (Docker) | 3000 | `http://10.136.1.13:3000` |
 | Node Exporter | .13/.15/.20 | 9100 | - |
 | Node Exporter | .14 | 19100 | - |
 

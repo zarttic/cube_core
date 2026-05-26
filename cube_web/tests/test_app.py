@@ -422,8 +422,10 @@ def test_radar_partition_endpoints_return_not_implemented():
 
 
 def test_optical_quality_endpoint(monkeypatch):
+    run_dir = "/tmp/cube_web_partition_demo/quality/run"
+
     def fake_run_quality_check(args):
-        assert args.run_dir == "/tmp/run"
+        assert args.run_dir == run_dir
         assert args.target_crs == "EPSG:4326"
         return {
             "status": "PASS",
@@ -433,12 +435,19 @@ def test_optical_quality_endpoint(monkeypatch):
 
     monkeypatch.setattr("cube_web.app.run_optical_quality_check", fake_run_quality_check)
 
-    resp = client.post("/v1/quality/optical/run", json={"run_dir": "/tmp/run", "target_crs": "EPSG:4326"})
+    resp = client.post("/v1/quality/optical/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "PASS"
     assert body["summary"]["index_rows"] == 3
+
+
+def test_quality_report_rejects_run_dir_outside_allowed_roots():
+    resp = client.post("/v1/quality/optical/report", json={"run_dir": "/tmp/not-a-cube-web-run"})
+
+    assert resp.status_code == 403
+    assert "run_dir must be under" in resp.json()["detail"]
 
 
 def test_optical_quality_latest_endpoint(monkeypatch):
@@ -521,6 +530,7 @@ def test_optical_quality_report_endpoint_reads_existing_report_without_rerun(mon
         raise AssertionError("report viewing should not re-run quality checks")
 
     monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.app._allowed_quality_roots", lambda: [tmp_path.resolve()])
 
     body = web_app.quality_optical_report({"run_dir": str(run_dir)})
 
@@ -552,6 +562,7 @@ def test_optical_quality_report_pdf_endpoint_reads_existing_report_without_rerun
         raise AssertionError("PDF export should not re-run quality checks")
 
     monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.app._allowed_quality_roots", lambda: [tmp_path.resolve()])
 
     response = web_app.quality_optical_report_pdf({"run_dir": str(run_dir)})
 

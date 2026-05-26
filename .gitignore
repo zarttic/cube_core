@@ -8,6 +8,7 @@ node_modules/
 dist/
 .vscode/
 .codex
+.codegraph/
 *.egg-info/
 
 # Local remote-sensing samples and uploaded reference projects.
