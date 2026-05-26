@@ -1,29 +1,38 @@
 # cube_split
 
-`cube_split` owns partitioning, Ray ingest, AOI readback, and storage-facing workflows. It consumes grid capabilities from `cube_encoder` through `grid_core.sdk.CubeEncoderSDK`.
+`cube_split` owns partitioning, ingest, quality checks, and AOI readback. It
+does not implement grid algorithms; it consumes `cube_encoder` through
+`grid_core.sdk.CubeEncoderSDK`.
 
-Detailed workflow documentation: [docs/README.md](docs/README.md).
+Current workflow documentation: [docs/README.md](docs/README.md).
 
 ## Boundary
 
-- `cube_split` handles scene-level input processing, COG conversion, grid/window partitioning, metadata writes, and AOI readback.
-- `cube_encoder` handles grid locate, cover, topology, and space-time code generation.
-- `cube_web` handles visualization and demo pages.
+- `cube_split`: input parsing, COG conversion, grid/window partition rows,
+  metadata writes, quality checks, and AOI readback.
+- `cube_encoder`: grid locate, cover, topology, and space-time code generation.
+- `cube_web`: visualization, demo APIs, and web-hosted quality reports.
 
-## Setup
+## Common Commands
+
+Run optical logical partition:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-cd ../cube_encoder
-python -m pip install --upgrade pip build
-python -m build
-python -m pip install --force-reinstall dist/*.whl
-cd ../cube_split
-python -m pip install -r requirements.txt
+PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.ray_logical_partition_job \
+  --input-dir data/optocal \
+  --manifest-path data/optocal/manifest.jsonl \
+  --output-dir data/ray_output/logical_partition
 ```
 
-## Run Ingest E2E
+Run product partition:
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.product_partition_job \
+  --input-dir data/product \
+  --output-dir data/ray_output/product
+```
+
+Run optical ingest E2E:
 
 ```bash
 POSTGRES_DSN='postgresql://postgres:postgres@127.0.0.1:5432/cube' \
@@ -34,50 +43,10 @@ MINIO_BUCKET='cube' \
 scripts/run_ray_ingest_e2e.sh
 ```
 
-Use ingest-system manifest directly (recommended for standardized metadata handoff):
+Run AOI readback:
 
 ```bash
-python -m cube_split.jobs.ray_logical_partition_job \
-  --input-dir data/optocal \
-  --manifest-path data/optocal/manifest.jsonl \
-  --output-dir data/ray_output/logical_partition
-```
-
-Recommended batch manifest shape (`manifest.json`):
-
-```json
-{
-  "batch_id": "optical_batch_xx",
-  "data_type": "optical",
-  "assets": [
-    {
-      "source_uri": "Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif",
-      "scene_id": "Shandong_mosaic_2020Q3",
-      "acq_time": "2020-07-01T00:00:00Z",
-      "band": "sr_band4",
-      "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]]
-    }
-  ]
-}
-```
-
-Defaults:
-
-- Metadata backend: PostgreSQL (`METADATA_BACKEND=postgres`)
-- Asset backend: MinIO (`ASSET_STORAGE_BACKEND=minio`)
-
-Local fallback for debugging only:
-
-```bash
-METADATA_BACKEND=sqlite \
-ASSET_STORAGE_BACKEND=local \
-scripts/run_ray_ingest_e2e.sh
-```
-
-## AOI Readback
-
-```bash
-python -m cube_split.read.aoi_reader \
+PYTHONPATH=../cube_encoder:. python -m cube_split.read.aoi_reader \
   --bbox 120.8 44.0 122.2 44.6 \
   --time-bucket 20260204 \
   --bands sr_b2 sr_b3 sr_b4 \
@@ -86,42 +55,16 @@ python -m cube_split.read.aoi_reader \
   --minio-endpoint 127.0.0.1:59000
 ```
 
-## Distributed Ray Cluster
-
-Prerequisites:
-
-- All Ray nodes use the same Python environment and code version.
-- Input/output paths are shared across nodes with identical absolute paths.
-
-Start head node:
-
-```bash
-scripts/start_ray_head.sh
-```
-
-Join worker nodes:
-
-```bash
-scripts/start_ray_worker.sh <HEAD_IP:6379>
-```
-
-Run distributed partition test:
-
-```bash
-RAY_ADDRESS=<HEAD_IP:6379> \
-REPEAT=3 \
-TARGET_SEC=10 \
-scripts/run_distributed_partition_test.sh
-```
-
-Stop Ray:
-
-```bash
-scripts/stop_ray_cluster.sh
-```
-
 ## Tests
 
+From this package:
+
 ```bash
-pytest -q tests
+PYTHONPATH=../cube_encoder:. pytest tests
+```
+
+From the repository root:
+
+```bash
+PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
