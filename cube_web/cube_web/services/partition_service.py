@@ -4,21 +4,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from threading import Lock
-from typing import Callable
+from typing import Callable, Dict, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import HTTPException
 
 
-PartitionRunner = Callable[[dict | None], dict]
+PartitionRunner = Callable[[Optional[dict]], dict]
 
 
 @dataclass(frozen=True)
 class PartitionBackend:
     data_type: str
-    demo: PartitionRunner | None = None
-    retry: PartitionRunner | None = None
-    test: PartitionRunner | None = None
+    demo: Optional[PartitionRunner] = None
+    retry: Optional[PartitionRunner] = None
+    test: Optional[PartitionRunner] = None
     implemented: bool = True
 
 
@@ -30,8 +30,8 @@ class PartitionTask:
     operation: str
     created_at: float
     updated_at: float
-    result: dict | None = None
-    error: str | None = None
+    result: Optional[dict] = None
+    error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -39,7 +39,7 @@ class PartitionTask:
 
 class PartitionTaskStore:
     def __init__(self, max_workers: int = 4) -> None:
-        self._tasks: dict[str, PartitionTask] = {}
+        self._tasks: Dict[str, PartitionTask] = {}
         self._lock = Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cube-web-partition")
 
@@ -58,7 +58,7 @@ class PartitionTaskStore:
         self._executor.submit(self._run, task.task_id, runner)
         return task
 
-    def get(self, task_id: str) -> PartitionTask | None:
+    def get(self, task_id: str) -> Optional[PartitionTask]:
         with self._lock:
             return self._tasks.get(task_id)
 
@@ -80,20 +80,20 @@ class PartitionTaskStore:
 
 
 class PartitionService:
-    def __init__(self, registry: dict[str, PartitionBackend], task_store: PartitionTaskStore | None = None) -> None:
+    def __init__(self, registry: Dict[str, PartitionBackend], task_store: Optional[PartitionTaskStore] = None) -> None:
         self.registry = registry
         self.task_store = task_store or PartitionTaskStore()
 
-    def demo(self, data_type: str, payload: dict | None = None) -> dict:
+    def demo(self, data_type: str, payload: Optional[dict] = None) -> dict:
         return self._run(data_type, "demo", payload)
 
-    def retry(self, data_type: str, payload: dict | None = None) -> dict:
+    def retry(self, data_type: str, payload: Optional[dict] = None) -> dict:
         return self._run(data_type, "retry", payload)
 
-    def test(self, data_type: str, payload: dict | None = None) -> dict:
+    def test(self, data_type: str, payload: Optional[dict] = None) -> dict:
         return self._run(data_type, "test", payload)
 
-    def submit(self, data_type: str, operation: str, payload: dict | None = None) -> PartitionTask:
+    def submit(self, data_type: str, operation: str, payload: Optional[dict] = None) -> PartitionTask:
         backend, runner = self._resolve(data_type, operation)
         return self.task_store.submit(backend.data_type, operation, lambda: runner(payload))
 
@@ -103,7 +103,7 @@ class PartitionService:
             raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
         return task
 
-    def _run(self, data_type: str, operation: str, payload: dict | None) -> dict:
+    def _run(self, data_type: str, operation: str, payload: Optional[dict]) -> dict:
         _, runner = self._resolve(data_type, operation)
         try:
             return runner(payload)
@@ -112,7 +112,7 @@ class PartitionService:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    def _resolve(self, data_type: str, operation: str) -> tuple[PartitionBackend, PartitionRunner]:
+    def _resolve(self, data_type: str, operation: str) -> Tuple[PartitionBackend, PartitionRunner]:
         backend = self.registry.get(data_type)
         if backend is None:
             raise HTTPException(status_code=404, detail=f"Unknown partition data_type: {data_type}")
@@ -133,7 +133,7 @@ def build_partition_registry(
     carbon_retry: PartitionRunner,
     product_demo: PartitionRunner,
     product_retry: PartitionRunner,
-) -> dict[str, PartitionBackend]:
+) -> Dict[str, PartitionBackend]:
     return {
         "optical": PartitionBackend(
             data_type="optical",
