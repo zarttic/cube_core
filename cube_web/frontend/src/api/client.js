@@ -23,5 +23,6 @@ export function apiPrefixes() {
     partitionPrefix: '/v1/partition',
     qualityPrefix: '/v1/quality',
     ingestPrefix: '/v1/ingest',
+    configPrefix: '/v1/config',
   };
 }

@@ -9,10 +9,12 @@ from uuid import uuid4
 
 from cube_split.ingest import ray_ingest_job
 from cube_web.services import quality_service
+from cube_web.services.config_store import optical_ingest_defaults
 from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN, get_quality_report_store
 
 
 def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _payload_with_defaults(payload, optical_ingest_defaults())
     run_dir, quality_report = _resolve_run(payload)
     versions = _resolve_versions(payload)
     rows_path = run_dir / "index_rows.jsonl"
@@ -60,6 +62,7 @@ def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _payload_with_defaults(payload, optical_ingest_defaults())
     run_dir, quality_report = _resolve_run(payload)
     quality_status = str(quality_report.get("status", "UNKNOWN"))
     if quality_status == "FAIL" and not bool(payload.get("allow_failed_quality", False)):
@@ -136,6 +139,14 @@ def _payload_text(payload: dict[str, Any], key: str, default: str) -> str:
     if not value:
         raise ValueError(f"{key} must not be empty")
     return value
+
+
+def _payload_with_defaults(payload: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    result = dict(defaults)
+    for key, value in payload.items():
+        if value is not None and value != "":
+            result[key] = value
+    return result
 
 
 def _preview_run_id(report: dict[str, Any]) -> str:

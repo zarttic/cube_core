@@ -104,6 +104,25 @@ class OpticalIngestRequest(CubeWebModel):
     allow_failed_quality: bool = False
 
 
+class ConfigGetRequest(CubeWebModel):
+    pass
+
+
+class ConfigUpdateRequest(CubeWebModel):
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConfigResetRequest(CubeWebModel):
+    pass
+
+
+class ConfigResponse(CubeWebModel):
+    config: dict[str, Any]
+    defaults: dict[str, Any]
+    runtime: dict[str, Any]
+    updated_at: str | None = None
+
+
 def payload_from_model(value: BaseModel | dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         return {}

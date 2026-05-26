@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from cube_web.routes.config import create_config_router
 from cube_web.routes.ingest import create_ingest_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
@@ -105,7 +106,7 @@ def _resolve_web_file(path_name: str) -> Path:
         if index_candidate.exists() and index_candidate.is_file():
             return index_candidate
 
-    if path_name in {"partition.html", "quality.html", "encoding.html", "门户首页.html"}:
+    if path_name in {"partition.html", "quality.html", "encoding.html", "config.html", "门户首页.html"}:
         index_candidate = WEB_DIR / "index.html"
         if index_candidate.exists() and index_candidate.is_file():
             return index_candidate
@@ -271,6 +272,7 @@ partition_service = PartitionService(
 api_router.include_router(create_sdk_router(sdk))
 api_router.include_router(create_quality_router())
 api_router.include_router(create_ingest_router())
+api_router.include_router(create_config_router())
 api_router.include_router(create_partition_router(partition_service))
 app.include_router(api_router)
 

@@ -7,8 +7,11 @@ from fastapi.testclient import TestClient
 from s2sphere import CellId
 
 import cube_web.app as web_app
+from cube_web.services import partition_runners
 from cube_web.app import ENCODER_SDK_CLASS, app
+from cube_web.services import config_store as config_store_module
 from cube_web.services import quality_report_store as quality_report_store_module
+from cube_web.services.config_store import set_config_store
 from cube_web.services.quality_report_store import set_quality_report_store
 
 
@@ -66,12 +69,37 @@ class FakeQualityReportStore:
         return list(self.history.get(data_type, []))[:limit]
 
 
+class FakeConfigStore:
+    def __init__(self):
+        self.config = config_store_module.default_config()
+        self.updated_at = None
+
+    def ensure_schema(self):
+        return None
+
+    def get_config_record(self):
+        return {"config": config_store_module.normalized_config(self.config), "updated_at": self.updated_at}
+
+    def update_config(self, config):
+        self.config = config_store_module.normalized_config(config)
+        self.updated_at = "2026-05-26T08:00:00+00:00"
+        return self.get_config_record()
+
+    def reset_config(self):
+        self.config = config_store_module.default_config()
+        self.updated_at = "2026-05-26T08:00:00+00:00"
+        return self.get_config_record()
+
+
 @pytest.fixture(autouse=True)
 def quality_store():
     store = FakeQualityReportStore()
     set_quality_report_store(store)
+    config_store = FakeConfigStore()
+    set_config_store(config_store)
     yield store
     set_quality_report_store(None)
+    set_config_store(None)
 
 
 def test_header_navigation_does_not_expose_quality_as_top_level_item():
@@ -136,6 +164,12 @@ def test_legacy_encoding_html_serves_vue_app():
     assert "分析就绪数据剖分管理系统" in resp.text
 
 
+def test_config_page_serves_vue_app():
+    resp = client.get("/config")
+    assert resp.status_code == 200
+    assert "分析就绪数据剖分管理系统" in resp.text
+
+
 def test_cube_web_imports_encoder_package():
     assert ENCODER_SDK_CLASS.__name__ == "CubeEncoderSDK"
 
@@ -163,6 +197,48 @@ def test_partition_openapi_exposes_contract_models():
     assert "PartitionDemoRequest" in schema["components"]["schemas"]
     assert "PartitionRetryRequest" in schema["components"]["schemas"]
     assert "PartitionTaskResponse" in schema["components"]["schemas"]
+    assert "ConfigResponse" in schema["components"]["schemas"]
+
+
+def test_config_get_returns_defaults():
+    resp = client.post("/v1/config/get", json={})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["config"]["partition"]["optical"]["grid_type"] == "geohash"
+    assert body["config"]["partition"]["optical"]["grid_level"] == 5
+    assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@127.0.0.1:55432/cube"
+
+
+def test_config_update_persists_normalized_values():
+    resp = client.post(
+        "/v1/config/update",
+        json={
+            "config": {
+                "partition": {"optical": {"grid_type": "mgrs", "grid_level": 8, "ray_parallelism": 0}},
+                "ingest": {"optical": {"dataset": "customer_demo", "sensor": "landsat", "quality_rule": "latest_wins"}},
+                "quality": {"optical": {"history_limit": 50}},
+            }
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+    assert body["config"]["partition"]["optical"]["grid_level"] == 8
+    assert body["config"]["partition"]["optical"]["ray_parallelism"] == 0
+    assert body["config"]["ingest"]["optical"]["dataset"] == "customer_demo"
+    assert body["config"]["quality"]["optical"]["history_limit"] == 50
+
+    get_resp = client.post("/v1/config/get", json={})
+    assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+
+
+def test_config_update_rejects_invalid_values():
+    resp = client.post("/v1/config/update", json={"config": {"partition": {"optical": {"grid_level": 0}}}})
+
+    assert resp.status_code == 422
+    assert "grid_level" in resp.json()["detail"]
 
 
 def test_carbon_partition_demo_endpoint(monkeypatch):
@@ -272,6 +348,51 @@ def test_optical_partition_demo_endpoint_accepts_frontend_payload(monkeypatch):
     assert body["mode"] == "partition_demo"
     assert body["execution_engine"] == "ray"
     assert body["grid_level"] == 5
+
+
+def test_optical_partition_runner_uses_config_defaults_without_overriding_payload(monkeypatch, tmp_path):
+    config_store = FakeConfigStore()
+    config_store.update_config(
+        {
+            "partition": {
+                "optical": {
+                    "grid_type": "mgrs",
+                    "grid_level": 9,
+                    "target_crs": "EPSG:3857",
+                    "partition_backend": "thread",
+                    "ray_parallelism": 0,
+                }
+            }
+        }
+    )
+    set_config_store(config_store)
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        return {
+            "run_dir": str(run_dir),
+            "execution_engine": args.partition_backend,
+            "total_index_rows": 0,
+            "ray_parallelism": args.ray_parallelism,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_optical_partition_from_payload(
+        {"input_dir": str(tmp_path), "grid_level": 4},
+        mode="partition_test_no_ingest",
+    )
+
+    assert result["status"] == "completed"
+    assert captured["grid_type"] == "mgrs"
+    assert captured["grid_level"] == 4
+    assert captured["target_crs"] == "EPSG:3857"
+    assert captured["partition_backend"] == "thread"
+    assert captured["ray_parallelism"] == 0
 
 
 def test_partition_demo_rejects_invalid_grid_level():

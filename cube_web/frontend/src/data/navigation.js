@@ -13,6 +13,7 @@ export function normalizePath(pathname) {
   if (pathname === '/partition.html') return '/partition';
   if (pathname === '/quality.html') return '/quality';
   if (pathname === '/encoding.html') return '/encoding';
+  if (pathname === '/config' || pathname === '/config.html') return '/partition';
   if (pathname === '/门户首页.html') return '/';
   return pathname || '/';
 }

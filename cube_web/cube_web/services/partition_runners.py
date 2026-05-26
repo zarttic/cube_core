@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from cube_web.services import quality_checks
+from cube_web.services.config_store import optical_partition_defaults
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
@@ -74,10 +75,21 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
 
 
 def _int_payload_value(payload: dict, key: str, default: int) -> int:
+    value = payload.get(key, default)
+    if value is None or value == "":
+        value = default
     try:
-        return int(payload.get(key, default) or default)
+        return int(value)
     except (TypeError, ValueError):
         raise ValueError(f"{key} must be an integer") from None
+
+
+def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
+    result = dict(defaults)
+    for key, value in (payload or {}).items():
+        if value is not None and value != "":
+            result[key] = value
+    return result
 
 
 def _warn_checks_from_result(result: dict) -> list[dict]:
@@ -285,7 +297,7 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
 def _run_optical_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
-    payload = payload or {}
+    payload = _payload_with_defaults(payload, optical_partition_defaults())
     input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
         raise FileNotFoundError(f"Optical demo input_dir not found: {input_dir}")
