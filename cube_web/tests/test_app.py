@@ -433,7 +433,7 @@ def test_optical_quality_endpoint(monkeypatch):
             "checks": [{"name": "index_rows", "status": "PASS", "message": "ok"}],
         }
 
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fake_run_quality_check)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fake_run_quality_check)
 
     resp = client.post("/v1/quality/optical/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
 
@@ -463,8 +463,8 @@ def test_optical_quality_latest_endpoint(monkeypatch):
             "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "duplicate"}],
         }
 
-    monkeypatch.setattr("cube_web.app._latest_optical_quality_run_dir", fake_latest_run_dir)
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fake_run_quality_check)
+    monkeypatch.setattr("cube_web.services.quality_service.latest_optical_quality_run_dir", fake_latest_run_dir)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fake_run_quality_check)
 
     resp = client.post("/v1/quality/optical/latest", json={})
 
@@ -498,7 +498,7 @@ def test_optical_quality_latest_reads_existing_report_without_rerun(monkeypatch,
         raise AssertionError("latest should read quality_report.json instead of re-running quality checks")
 
     monkeypatch.setattr("cube_web.app._latest_optical_quality_run_dir", lambda: str(run_dir))
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
     body = web_app.quality_optical_latest({})
 
@@ -529,7 +529,7 @@ def test_optical_quality_report_endpoint_reads_existing_report_without_rerun(mon
     def fail_if_called(args):
         raise AssertionError("report viewing should not re-run quality checks")
 
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
     monkeypatch.setattr("cube_web.app._allowed_quality_roots", lambda: [tmp_path.resolve()])
 
     body = web_app.quality_optical_report({"run_dir": str(run_dir)})
