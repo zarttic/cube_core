@@ -76,6 +76,22 @@ def _quality_run_dirs(data_type: str) -> list[Path]:
     return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
+def _allowed_quality_roots() -> list[Path]:
+    return [
+        (_repo_root() / "cube_split" / "data" / "ray_output").resolve(),
+        (Path("/tmp") / "cube_web_partition_demo").resolve(),
+    ]
+
+
+def _resolve_quality_run_dir(run_dir_text: str) -> Path:
+    run_dir = Path(run_dir_text).expanduser().resolve()
+    for root in _allowed_quality_roots():
+        if run_dir == root or root in run_dir.parents:
+            return run_dir
+    roots = ", ".join(str(root) for root in _allowed_quality_roots())
+    raise HTTPException(status_code=403, detail=f"run_dir must be under one of: {roots}")
+
+
 def _optical_quality_run_dirs() -> list[Path]:
     return _quality_run_dirs("optical")
 
@@ -804,9 +820,10 @@ def quality_optical_run(payload: QualityRunRequest) -> dict:
     payload = payload_from_model(payload)
     if run_optical_quality_check is None:
         raise HTTPException(status_code=500, detail="cube_split quality module is not available")
-    run_dir = str(payload.get("run_dir", "")).strip()
-    if not run_dir:
+    run_dir_text = str(payload.get("run_dir", "")).strip()
+    if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
+    run_dir = str(_resolve_quality_run_dir(run_dir_text))
     args = _quality_args(run_dir, payload)
     try:
         return run_optical_quality_check(args)
@@ -838,7 +855,7 @@ def quality_optical_report(payload: QualityReportRequest) -> dict:
     run_dir_text = str(payload.get("run_dir", "")).strip()
     if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
-    run_dir = Path(run_dir_text)
+    run_dir = _resolve_quality_run_dir(run_dir_text)
     report = _read_quality_report(run_dir, data_type="optical")
     if report is None:
         raise HTTPException(status_code=404, detail=f"quality_report.json not found under run_dir: {run_dir}")
@@ -877,9 +894,10 @@ def quality_product_run(payload: QualityRunRequest) -> dict:
     payload = payload_from_model(payload)
     if run_product_quality_check is None:
         raise HTTPException(status_code=500, detail="cube_split product quality module is not available")
-    run_dir = str(payload.get("run_dir", "")).strip()
-    if not run_dir:
+    run_dir_text = str(payload.get("run_dir", "")).strip()
+    if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
+    run_dir = str(_resolve_quality_run_dir(run_dir_text))
     args = _quality_args(run_dir, payload)
     try:
         return run_product_quality_check(args)
@@ -911,7 +929,7 @@ def quality_product_report(payload: QualityReportRequest) -> dict:
     run_dir_text = str(payload.get("run_dir", "")).strip()
     if not run_dir_text:
         raise HTTPException(status_code=422, detail="run_dir is required")
-    run_dir = Path(run_dir_text)
+    run_dir = _resolve_quality_run_dir(run_dir_text)
     report = _read_quality_report(run_dir, data_type="product")
     if report is None:
         raise HTTPException(status_code=404, detail=f"quality_report.json not found under run_dir: {run_dir}")

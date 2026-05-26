@@ -9,10 +9,10 @@ COG_OUTPUT_ROOT="${4:-$ROOT_DIR/data/cog/raw}"
 COG_INPUT_DIR="${COG_INPUT_DIR:-$ROOT_DIR/data/cog/partition_input}"
 METADATA_BACKEND="${METADATA_BACKEND:-postgres}"
 ASSET_STORAGE_BACKEND="${ASSET_STORAGE_BACKEND:-minio}"
-POSTGRES_DSN="${POSTGRES_DSN:-postgresql://postgres:postgres@127.0.0.1:5432/cube}"
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-127.0.0.1:9000}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
+POSTGRES_DSN="${POSTGRES_DSN:-}"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
 MINIO_BUCKET="${MINIO_BUCKET:-cube}"
 MINIO_PREFIX="${MINIO_PREFIX:-cube/raw}"
 MINIO_UPLOAD_WORKERS="${MINIO_UPLOAD_WORKERS:-8}"
@@ -35,6 +35,20 @@ SENSOR="${SENSOR:-L8}"
 ASSET_VERSION="${ASSET_VERSION:-v1}"
 CUBE_VERSION="${CUBE_VERSION:-v1}"
 QUALITY_RULE="${QUALITY_RULE:-best_quality_wins}"
+
+if [[ "$METADATA_BACKEND" == "postgres" && -z "$POSTGRES_DSN" ]]; then
+  echo "POSTGRES_DSN is required when METADATA_BACKEND=postgres" >&2
+  exit 2
+fi
+
+if [[ "$ASSET_STORAGE_BACKEND" == "minio" ]]; then
+  for required_var in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY; do
+    if [[ -z "${!required_var}" ]]; then
+      echo "$required_var is required when ASSET_STORAGE_BACKEND=minio" >&2
+      exit 2
+    fi
+  done
+fi
 
 cd "$ROOT_DIR"
 
@@ -84,7 +98,6 @@ echo "E2E completed"
 echo "run_dir=$LATEST_RUN_DIR"
 echo "metadata_backend=$METADATA_BACKEND"
 echo "asset_storage_backend=$ASSET_STORAGE_BACKEND"
-echo "postgres_dsn=$POSTGRES_DSN"
 echo "minio_endpoint=$MINIO_ENDPOINT"
 echo "minio_bucket=$MINIO_BUCKET"
 echo "db_path=$DB_PATH"

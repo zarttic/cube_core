@@ -18,7 +18,7 @@ Detailed web documentation: [docs/README.md](docs/README.md).
 From the repository root:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 For local frontend development:
@@ -50,7 +50,7 @@ All API routes are under `/v1`:
 From this package:
 
 ```bash
-PYTHONPATH=../cube_encoder:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
 ```
 
 From the workspace root, run the cross-package pytest command in `AGENTS.md`.

@@ -19,7 +19,9 @@ def test_resolve_ray_parallelism_caps_by_task_count():
     assert _resolve_ray_parallelism(task_group_count=4, requested_parallelism=2) == 2
 
 
-def test_resolve_ray_parallelism_auto_uses_task_count_ceiling():
+def test_resolve_ray_parallelism_auto_uses_task_count_ceiling(monkeypatch):
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.os.cpu_count", lambda: 64)
+
     assert _resolve_ray_parallelism(task_group_count=8, requested_parallelism=0) == 8
 
 

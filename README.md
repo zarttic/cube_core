@@ -33,25 +33,33 @@ Default cross-package tests from the repository root:
 PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
 
-The `cube_web/tests` suite is intentionally excluded from the default command
-until its static-file response issue is fixed. For narrow web changes, run:
+Run web tests after web/API changes:
 
 ```bash
 cd cube_web
-PYTHONPATH=../cube_encoder:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
 ```
 
-Build the encoder package:
+Build Python packages:
 
 ```bash
-cd cube_encoder
-python -m build
+cd cube_encoder && python -m build
+cd ../cube_split && python -m build
+cd ../cube_web && python -m build
+```
+
+Build the frontend:
+
+```bash
+cd cube_web/frontend
+npm ci
+npm run build
 ```
 
 Run the web UI with the in-repo SDK backend:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 ## Current Workflow Snapshot

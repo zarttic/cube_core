@@ -128,11 +128,11 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.ray_ingest_job \
   --run-dir data/ray_output/logical_partition/run_YYYYMMDD_HHMMSS \
   --job-id optical-job-001 \
   --metadata-backend postgres \
-  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:5432/cube \
+  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
   --asset-storage-backend minio \
-  --minio-endpoint 127.0.0.1:9000 \
-  --minio-access-key minioadmin \
-  --minio-secret-key minioadmin \
+  --minio-endpoint HOST:9000 \
+  --minio-access-key ACCESS_KEY \
+  --minio-secret-key SECRET_KEY \
   --minio-bucket cube
 ```
 
@@ -143,11 +143,11 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.product_ingest_job \
   --run-dir data/ray_output/product/run_YYYYMMDD_HHMMSS \
   --job-id product-job-001 \
   --metadata-backend postgres \
-  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:5432/cube \
+  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
   --asset-storage-backend minio \
-  --minio-endpoint 127.0.0.1:9000 \
-  --minio-access-key minioadmin \
-  --minio-secret-key minioadmin \
+  --minio-endpoint HOST:9000 \
+  --minio-access-key ACCESS_KEY \
+  --minio-secret-key SECRET_KEY \
   --minio-bucket cube
 ```
 
@@ -159,7 +159,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.carbon_ingest_job \
   --job-id carbon-oco2-001 \
   --cube-version v1 \
   --metadata-backend postgres \
-  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:5432/cube
+  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube
 ```
 
 本地调试可使用：
@@ -220,8 +220,10 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.read.aoi_reader \
   --time-bucket 20260204 \
   --bands sr_b2 sr_b3 sr_b4 \
   --output .tmp/aoi_rgb.tif \
-  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:5432/cube \
-  --minio-endpoint 127.0.0.1:9000
+  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
+  --minio-endpoint HOST:9000 \
+  --minio-access-key ACCESS_KEY \
+  --minio-secret-key SECRET_KEY
 ```
 
 碳卫星查询：
@@ -229,7 +231,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.read.aoi_reader \
 ```bash
 PYTHONPATH=../cube_encoder:. python -m cube_split.read.carbon_query \
   --metadata-backend postgres \
-  --postgres-dsn postgresql://postgres:postgres@127.0.0.1:5432/cube \
+  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
   --bbox -168.0 40.5 -166.5 42.0 \
   --time-start 20201231 \
   --time-end 20201231 \
