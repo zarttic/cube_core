@@ -90,7 +90,20 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.product_partition_job \
   --grid-level 5
 ```
 
-碳卫星剖分通过 `CarbonSatellitePartitionService` 使用 `CarbonPartitionConfig`。默认 `partition_backend="process"`，适合 CPU 型批量编码；测试 monkeypatch 或不适合 fork 的环境可改为 `thread`。
+碳卫星剖分按观测事实组织，默认使用 `ISEA4H level=5`，不复用光学影像的窗口剖分格网：
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
+  --input-dir data/carbon \
+  --output-dir data/ray_output/carbon \
+  --grid-type isea4h \
+  --grid-level 5 \
+  --partition-backend ray \
+  --ray-address auto \
+  --ray-parallelism 4
+```
+
+底层通过 `CarbonSatellitePartitionService` 使用 `CarbonPartitionConfig`。`--partition-backend ray` 按观测 chunk 分发到 Ray actor；`auto` 在设置 `--ray-address` 时使用 Ray，否则回退到本地 `process`。测试 monkeypatch 或不适合 fork 的环境可改为 `thread`。
 
 ## 5. 输出文件
 
@@ -108,9 +121,10 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.product_partition_job \
 - `window_col_off`, `window_row_off`, `window_width`, `window_height`
 - `cell_min_lon`, `cell_min_lat`, `cell_max_lon`, `cell_max_lat`
 
-碳卫星剖分生成：
+碳卫星剖分在 `data/ray_output/carbon/run_*` 目录中生成：
 
 - `carbon_observation_rows.jsonl`
+- `job_report.json`
 
 核心字段：
 
@@ -236,8 +250,8 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.read.carbon_query \
   --time-start 20201231 \
   --time-end 20201231 \
   --quality-flags 0 \
-  --grid-type geohash \
-  --grid-level 7
+  --grid-type isea4h \
+  --grid-level 5
 ```
 
 ## 10. 历史说明

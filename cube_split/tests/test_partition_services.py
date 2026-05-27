@@ -50,16 +50,17 @@ def test_carbon_observation_partition_outputs_observation_fact():
         metadata={"orbit": 42},
     )
 
-    row = partition_observation(observation, CarbonPartitionConfig(grid_type="geohash", grid_level=7))
+    row = partition_observation(observation, CarbonPartitionConfig())
 
     assert row["data_type"] == "carbon_satellite"
     assert row["satellite"] == "OCO2"
     assert row["observation_id"] == "snd-1"
     assert row["xco2"] == 421.25
     assert row["time_bucket"] == "20260424"
-    assert row["grid_type"] == "geohash"
-    assert row["grid_level"] == 7
+    assert row["grid_type"] == "isea4h"
+    assert row["grid_level"] == 5
     assert row["space_code"]
+    assert row["st_code"].startswith("hx:5:")
     assert row["footprint_geojson"]["type"] == "Polygon"
     assert row["source_uri"] == "s3://bucket/oco2.nc4"
     assert row["source_index"] == 7
@@ -450,6 +451,99 @@ def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
 
     assert len(rows) == 2
     assert executor_calls == [2]
+
+
+def test_carbon_partition_can_use_ray_backend(monkeypatch):
+    remote_calls: list[str] = []
+    processed_chunks: list[int] = []
+
+    class FakeRemoteMethod:
+        def __init__(self, fn):
+            self._fn = fn
+
+        def remote(self, *args, **kwargs):
+            return self._fn(*args, **kwargs)
+
+    class FakeActorHandle:
+        def __init__(self, cls):
+            self._instance = cls()
+
+        @property
+        def process_chunk(self):
+            return FakeRemoteMethod(self._instance.process_chunk)
+
+    class FakeActorClass:
+        def __init__(self, cls):
+            self._cls = cls
+
+        def options(self, **kwargs):
+            return self
+
+        def remote(self):
+            remote_calls.append("actor")
+            return FakeActorHandle(self._cls)
+
+    class FakeRay:
+        def remote(self, cls):
+            return FakeActorClass(cls)
+
+        def init(self, **kwargs):
+            remote_calls.append("init")
+
+        def get(self, futures):
+            return futures
+
+        def shutdown(self):
+            remote_calls.append("shutdown")
+
+    def fake_partition_observation_chunk(chunk, config):
+        processed_chunks.append(len(chunk))
+        return [
+            {
+                "data_type": "carbon_satellite",
+                "satellite": observation.satellite,
+                "observation_id": observation.observation_id,
+                "grid_type": config.grid_type,
+                "grid_level": config.grid_level,
+                "space_code": observation.observation_id,
+            }
+            for observation in chunk
+        ]
+
+    monkeypatch.setattr("cube_split.partition.carbon._load_ray", lambda: FakeRay())
+    monkeypatch.setattr("cube_split.partition.carbon._partition_observation_chunk", fake_partition_observation_chunk)
+    chunks = [
+        [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-a",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.391,
+                lat=39.907,
+                xco2=420.5,
+            )
+        ],
+        [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-b",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.392,
+                lat=39.908,
+                xco2=421.5,
+            )
+        ],
+    ]
+
+    rows = _partition_chunks(
+        chunks,
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        worker_count=2,
+    )
+
+    assert [row["observation_id"] for row in rows] == ["snd-a", "snd-b"]
+    assert processed_chunks == [1, 1]
+    assert remote_calls == ["init", "actor", "actor", "shutdown"]
 
 
 def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):

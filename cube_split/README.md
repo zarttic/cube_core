@@ -32,6 +32,18 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.product_partition_job \
   --output-dir data/ray_output/product
 ```
 
+Run carbon satellite partition with ISEA4H and Ray:
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
+  --input-dir data/carbon \
+  --output-dir data/ray_output/carbon \
+  --grid-type isea4h \
+  --grid-level 5 \
+  --partition-backend ray \
+  --ray-address auto
+```
+
 Run optical ingest E2E:
 
 ```bash
