@@ -156,7 +156,8 @@ def _validate_assets(rows: list[dict[str, Any]], target_crs: str) -> tuple[list[
                         "bounds": [float(ds.bounds.left), float(ds.bounds.bottom), float(ds.bounds.right), float(ds.bounds.top)],
                     }
                 )
-                if crs_text != target_crs:
+                asset_is_entity_tile = any(row.get("partition_type") == "entity" for row in asset_index_rows)
+                if crs_text != target_crs and not asset_is_entity_tile:
                     crs_mismatches.append({"path": asset_path, "crs": crs_text})
 
                 sample = ds.read(1, masked=True, out_shape=(1, min(ds.height, 512), min(ds.width, 512)))
@@ -243,6 +244,8 @@ def _validate_duplicates(rows: list[dict[str, Any]]) -> dict[str, Any]:
     asset_keys = Counter((row["scene_id"], row["band"], row["asset_path"]) for row in rows)
     logical_keys: dict[tuple[Any, Any], set[str]] = defaultdict(set)
     for row in rows:
+        if row.get("partition_type") == "entity":
+            continue
         logical_keys[(row["scene_id"], row["band"])].add(str(row["asset_path"]))
     duplicate_logical = [
         {"scene_id": scene_id, "band": band, "asset_paths": sorted(paths)}

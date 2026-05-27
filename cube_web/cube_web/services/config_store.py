@@ -14,6 +14,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "optical": {
             "grid_type": "geohash",
             "grid_level": 5,
+            "grid_level_mode": "auto",
+            "target_pixels_per_hex_edge": 768,
             "target_crs": "EPSG:4326",
             "cover_mode": "intersect",
             "time_granularity": "day",
@@ -166,6 +168,12 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     optical = merged["partition"]["optical"]
     optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "mgrs", "isea4h"}, "grid_type")
     optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=1)
+    optical["grid_level_mode"] = _choice(optical.get("grid_level_mode"), {"auto", "manual"}, "grid_level_mode")
+    optical["target_pixels_per_hex_edge"] = _int_value(
+        optical.get("target_pixels_per_hex_edge"),
+        "target_pixels_per_hex_edge",
+        minimum=1,
+    )
     optical["target_crs"] = _text_value(optical.get("target_crs"), "target_crs")
     optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
     optical["time_granularity"] = _choice(optical.get("time_granularity"), {"hour", "day", "month", "year"}, "time_granularity")

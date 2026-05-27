@@ -595,6 +595,88 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
     assert captured["ray_parallelism"] == 0
 
 
+def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "local",
+            "partition_type": "entity",
+            "grid_type": "isea4h",
+            "grid_level": 5,
+            "inferred_grid_level": 5,
+            "total_index_rows": 0,
+            "ray_parallelism": 0,
+        }
+
+    def fail_logical_partition(_args):
+        raise AssertionError("isea4h optical partition should use entity partition")
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fail_logical_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "isea4h",
+            "grid_level": 9,
+            "target_pixels_per_hex_edge": 512,
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert result["status"] == "completed"
+    assert result["partition_type"] == "entity"
+    assert result["output_path"].endswith("entity_index_rows.jsonl")
+    assert captured["grid_type"] == "isea4h"
+    assert captured["grid_level"] == 0
+    assert captured["target_pixels_per_hex_edge"] == 512
+
+
+def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "local",
+            "partition_type": "entity",
+            "grid_type": "isea4h",
+            "grid_level": args.grid_level,
+            "total_index_rows": 0,
+            "ray_parallelism": 0,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "isea4h",
+            "grid_level": 7,
+            "grid_level_mode": "manual",
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert captured["grid_level"] == 7
+
+
 def test_partition_demo_rejects_invalid_grid_level():
     resp = client.post("/v1/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 0})
 

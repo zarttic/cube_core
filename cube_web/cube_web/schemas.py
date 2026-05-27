@@ -26,6 +26,8 @@ class OpticalAssetSelection(CubeWebModel):
 class PartitionDemoRequest(CubeWebModel):
     grid_type: GridType | None = None
     grid_level: int | None = Field(default=None, ge=1)
+    grid_level_mode: Literal["auto", "manual"] | None = None
+    target_pixels_per_hex_edge: int | None = Field(default=None, ge=1)
     input_dir: str | None = None
     manifest_path: str | None = None
     batch_id: str | None = None

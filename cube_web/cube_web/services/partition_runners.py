@@ -448,8 +448,10 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_optical_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
+    raw_payload = payload or {}
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
@@ -484,6 +486,10 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     grid_level = _int_payload_value(payload, "grid_level", 5)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
+    grid_level_mode = str(payload.get("grid_level_mode") or "auto").lower()
+    if grid_level_mode not in {"auto", "manual"}:
+        raise ValueError("grid_level_mode must be one of: auto, manual")
+    entity_grid_level = grid_level if grid_level_mode == "manual" and "grid_level" in raw_payload else 0
 
     args = SimpleNamespace(
         input_dir=str(input_dir),
@@ -499,7 +505,8 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
         grid_type=grid_type,
-        grid_level=grid_level,
+        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
@@ -512,9 +519,9 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         skip_verify=False,
         sample_mean=bool(payload.get("sample_mean", False)),
     )
-    report = run_logical_partition(args)
+    report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])
-    rows_path = run_dir / "index_rows.jsonl"
+    rows_path = Path(str(report.get("rows_path") or run_dir / "index_rows.jsonl"))
 
     response = {
         "status": "completed",
@@ -528,7 +535,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "rows_path": str(rows_path),
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
-        "workers": report.get("ray_parallelism"),
+        "workers": report.get("ray_parallelism", 0),
         "ingest_enabled": mode != "partition_test_no_ingest",
         **report,
     }

@@ -60,6 +60,56 @@ def test_quality_check_passes_valid_partition_rows(tmp_path: Path):
     assert report["summary"]["failed_checks"] == 0
 
 
+def test_quality_check_allows_entity_tiles_for_same_scene_band(tmp_path: Path):
+    asset_a = tmp_path / "tile_a.tif"
+    asset_b = tmp_path / "tile_b.tif"
+    _write_tif(asset_a)
+    _write_tif(asset_b, crs="EPSG:3857")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    base_row = {
+        "partition_type": "entity",
+        "scene_id": "scene-1",
+        "band": "sr_band2",
+        "acq_time": "2020-07-01T00:00:00Z",
+        "grid_type": "isea4h",
+        "grid_level": 5,
+        "time_bucket": "20200701",
+        "cell_min_lon": 116.0,
+        "cell_min_lat": 39.9,
+        "cell_max_lon": 116.1,
+        "cell_max_lat": 40.0,
+        "window_col_off": 0,
+        "window_row_off": 0,
+        "window_width": 10,
+        "window_height": 10,
+    }
+    rows = [
+        {
+            **base_row,
+            "asset_path": str(asset_a),
+            "space_code": "85283473fffffff",
+            "st_code": "hx:5:85283473fffffff:20200701:v1",
+        },
+        {
+            **base_row,
+            "asset_path": str(asset_b),
+            "space_code": "85283477fffffff",
+            "st_code": "hx:5:85283477fffffff:20200701:v1",
+        },
+    ]
+    (run_dir / "index_rows.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326"))
+
+    duplicate_check = next(check for check in report["checks"] if check["name"] == "logical_duplicates")
+    assert duplicate_check["status"] == "PASS"
+    assert report["summary"]["index_rows"] == 2
+
+
 def test_quality_check_fails_invalid_window_and_crs(tmp_path: Path):
     asset = tmp_path / "asset_cog.tif"
     _write_tif(asset, crs="EPSG:3857")
