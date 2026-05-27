@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from cube_web.services import quality_checks
-from cube_web.services.config_store import optical_partition_defaults
+from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
+from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
@@ -167,6 +168,14 @@ def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
         if value is not None and value != "":
             result[key] = value
     return result
+
+
+def _env_text(name: str, default: str = "") -> str:
+    return str(os.environ.get(name, default) or "")
+
+
+def _postgres_dsn() -> str:
+    return _env_text("CUBE_WEB_POSTGRES_DSN") or _env_text("DATABASE_URL") or DEFAULT_POSTGRES_DSN
 
 
 def _warn_checks_from_result(result: dict) -> list[dict]:
@@ -453,6 +462,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
 
     raw_payload = payload or {}
     payload = _payload_with_defaults(payload, optical_partition_defaults())
+    ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
     input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
         raise FileNotFoundError(f"Optical demo input_dir not found: {input_dir}")
@@ -518,6 +528,24 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         timing_mode=False,
         skip_verify=False,
         sample_mean=bool(payload.get("sample_mean", False)),
+        job_id=str(payload.get("job_id") or payload.get("batch_id") or ""),
+        dataset=str(ingest_payload.get("dataset") or "demo_optical"),
+        sensor=str(ingest_payload.get("sensor") or "optical_mosaic"),
+        asset_version=str(ingest_payload.get("asset_version") or "v1"),
+        metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
+        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
+        minio_endpoint=str(
+            payload.get("minio_endpoint")
+            or ingest_payload.get("minio_endpoint")
+            or _env_text("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
+        ),
+        minio_access_key=str(payload.get("minio_access_key") or _env_text("CUBE_WEB_MINIO_ACCESS_KEY")),
+        minio_secret_key=str(payload.get("minio_secret_key") or _env_text("CUBE_WEB_MINIO_SECRET_KEY")),
+        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET")),
+        minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
+        minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
+        minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
     )
     report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])

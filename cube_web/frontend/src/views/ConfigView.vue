@@ -45,6 +45,13 @@ function emptyConfig() {
         sensor: 'optical_mosaic',
         quality_rule: 'best_quality_wins',
         allow_failed_quality: false,
+        metadata_backend: 'none',
+        asset_storage_backend: 'local',
+        minio_endpoint: '',
+        minio_bucket: '',
+        minio_prefix: 'cube/entity',
+        minio_secure: false,
+        minio_upload_workers: 8,
       },
     },
     quality: {
@@ -277,6 +284,33 @@ onMounted(loadConfig);
                 </el-form-item>
                 <el-form-item label="允许失败质检入库">
                   <el-switch v-model="ingest.allow_failed_quality" />
+                </el-form-item>
+                <el-form-item label="实体元数据">
+                  <el-select v-model="ingest.metadata_backend">
+                    <el-option label="不写入" value="none" />
+                    <el-option label="PostgreSQL" value="postgres" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="实体瓦片存储">
+                  <el-select v-model="ingest.asset_storage_backend">
+                    <el-option label="本地目录" value="local" />
+                    <el-option label="MinIO" value="minio" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="MinIO Endpoint">
+                  <el-input v-model="ingest.minio_endpoint" placeholder="10.136.1.14:9000" />
+                </el-form-item>
+                <el-form-item label="MinIO Bucket">
+                  <el-input v-model="ingest.minio_bucket" />
+                </el-form-item>
+                <el-form-item label="MinIO Prefix">
+                  <el-input v-model="ingest.minio_prefix" />
+                </el-form-item>
+                <el-form-item label="MinIO 上传线程">
+                  <el-input-number v-model="ingest.minio_upload_workers" :min="1" :max="128" />
+                </el-form-item>
+                <el-form-item label="MinIO TLS">
+                  <el-switch v-model="ingest.minio_secure" />
                 </el-form-item>
               </div>
             </el-form>

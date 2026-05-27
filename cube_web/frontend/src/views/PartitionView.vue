@@ -534,6 +534,10 @@ const partitionResultDetailRows = computed(() => {
     { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
     { label: '索引文件', value: result.rows_path || result.output_path || '-' },
     { label: 'COG 输出', value: result.cog_output_dir || result.cog_input_dir || '-' },
+    { label: '瓦片存储', value: result.asset_storage_backend || '-' },
+    { label: '元数据后端', value: result.metadata_backend || '-' },
+    { label: '上传瓦片', value: result.uploaded_tile_count ?? '-' },
+    { label: '元数据行数', value: result.metadata_rows ?? '-' },
   ];
 });
 

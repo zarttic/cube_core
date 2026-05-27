@@ -39,6 +39,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "sensor": "optical_mosaic",
             "quality_rule": "best_quality_wins",
             "allow_failed_quality": False,
+            "metadata_backend": "none",
+            "asset_storage_backend": "local",
+            "minio_endpoint": "",
+            "minio_bucket": "",
+            "minio_prefix": "cube/entity",
+            "minio_secure": False,
+            "minio_upload_workers": 8,
         }
     },
     "quality": {
@@ -193,8 +200,17 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     ingest = merged["ingest"]["optical"]
     ingest["dataset"] = _text_value(ingest.get("dataset"), "dataset")
     ingest["sensor"] = _text_value(ingest.get("sensor"), "sensor")
+    if "asset_version" in ingest:
+        ingest["asset_version"] = _text_value(ingest.get("asset_version"), "asset_version")
     ingest["quality_rule"] = _choice(ingest.get("quality_rule"), {"best_quality_wins", "latest_wins"}, "quality_rule")
     ingest["allow_failed_quality"] = bool(ingest.get("allow_failed_quality", False))
+    ingest["metadata_backend"] = _choice(ingest.get("metadata_backend"), {"none", "local", "postgres"}, "metadata_backend")
+    ingest["asset_storage_backend"] = _choice(ingest.get("asset_storage_backend"), {"local", "minio"}, "asset_storage_backend")
+    ingest["minio_endpoint"] = str(ingest.get("minio_endpoint") or "").strip()
+    ingest["minio_bucket"] = str(ingest.get("minio_bucket") or "").strip()
+    ingest["minio_prefix"] = _text_value(ingest.get("minio_prefix"), "minio_prefix")
+    ingest["minio_secure"] = bool(ingest.get("minio_secure", False))
+    ingest["minio_upload_workers"] = _int_value(ingest.get("minio_upload_workers"), "minio_upload_workers", minimum=1)
 
     quality = merged["quality"]["optical"]
     quality["target_crs"] = _text_value(quality.get("target_crs"), "quality.target_crs")

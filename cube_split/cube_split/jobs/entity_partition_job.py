@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,14 @@ from cube_split.jobs.ray_partition_core import (
     _dataset_bounds_wgs84,
     build_grid_tasks_driver,
     build_manifest,
+)
+from cube_split.jobs.ray_logical_partition_job import (
+    _chunk_tasks_for_ray,
+    _load_ray,
+    _ray_actor_options_from_env,
+    _ray_runtime_env_from_env,
+    _resolve_ray_chunk_size,
+    _resolve_ray_parallelism,
 )
 
 
@@ -252,8 +262,361 @@ def _write_entity_tiles(
     return rows
 
 
+def _group_tasks_for_parallel_processing(tasks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    return [[task] for task in sorted(tasks, key=lambda row: (str(row["asset_path"]), str(row["space_code"])))]
+
+
+def _flatten_task_groups(task_groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [task for group in task_groups for task in group]
+
+
+def _resolve_backend(requested_backend: str, ray_address: str) -> str:
+    if requested_backend == "auto":
+        return "ray" if ray_address else "thread"
+    if requested_backend in {"local", "thread", "process"}:
+        return "thread"
+    return requested_backend
+
+
+def _write_entity_tile_chunks_thread(
+    task_chunks: list[list[list[dict[str, Any]]]],
+    run_dir: Path,
+    time_granularity: str,
+    partition_prefix_len: int,
+    workers: int,
+) -> list[dict[str, Any]]:
+    def process_chunk(chunk: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return _write_entity_tiles(_flatten_task_groups(chunk), run_dir, time_granularity, partition_prefix_len)
+
+    rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for chunk_rows in pool.map(process_chunk, task_chunks):
+            rows.extend(chunk_rows)
+    return rows
+
+
+def _write_entity_tile_chunks_ray(
+    task_chunks: list[list[list[dict[str, Any]]]],
+    run_dir: Path,
+    time_granularity: str,
+    partition_prefix_len: int,
+    parallelism: int,
+    ray_address: str,
+) -> tuple[list[dict[str, Any]], float]:
+    ray = _load_ray()
+    runtime_env = _ray_runtime_env_from_env()
+    ray_init_start = time.perf_counter()
+    if ray_address:
+        try:
+            ray.init(
+                address=ray_address,
+                ignore_reinit_error=True,
+                include_dashboard=False,
+                logging_level="ERROR",
+                runtime_env=runtime_env,
+            )
+        except Exception:
+            if ray_address != "auto":
+                raise
+            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+    else:
+        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+    ray_init_elapsed = time.perf_counter() - ray_init_start
+
+    @ray.remote
+    class EntityTileProcessor:
+        def process_groups(
+            self,
+            task_groups: list[list[dict[str, Any]]],
+            run_dir_text: str,
+            time_granularity_text: str,
+            prefix_len: int,
+        ) -> list[dict[str, Any]]:
+            import os
+            import sys
+            from pathlib import Path
+
+            project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
+            for rel_path in ("cube_encoder", "cube_split", "cube_web"):
+                package_path = os.path.join(project_root, rel_path)
+                if package_path not in sys.path:
+                    sys.path.insert(0, package_path)
+
+            from cube_split.jobs.entity_partition_job import _write_entity_tiles
+
+            flat_tasks = [task for group in task_groups for task in group]
+            return _write_entity_tiles(
+                flat_tasks,
+                run_dir=Path(run_dir_text),
+                time_granularity=time_granularity_text,
+                partition_prefix_len=prefix_len,
+                )
+
+    actor_cls = EntityTileProcessor.options(**_ray_actor_options_from_env())
+    actors = [actor_cls.remote() for _ in range(parallelism)]
+    futures = [
+        actors[idx % parallelism].process_groups.remote(
+            chunk,
+            str(run_dir),
+            time_granularity,
+            partition_prefix_len,
+        )
+        for idx, chunk in enumerate(task_chunks)
+    ]
+
+    rows: list[dict[str, Any]] = []
+    try:
+        for chunk_rows in ray.get(futures):
+            rows.extend(chunk_rows)
+    finally:
+        ray.shutdown()
+    return rows, ray_init_elapsed
+
+
+def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, str]:
+    from cube_split.ingest.ray_ingest_job import upload_assets_to_minio
+
+    return upload_assets_to_minio(
+        rows=rows,
+        dataset=str(getattr(args, "dataset", "demo_optical")),
+        sensor=str(getattr(args, "sensor", "optical_mosaic")),
+        asset_version=str(getattr(args, "asset_version", getattr(args, "tile_version", "v1"))),
+        endpoint=str(getattr(args, "minio_endpoint", "")),
+        access_key=str(getattr(args, "minio_access_key", "")),
+        secret_key=str(getattr(args, "minio_secret_key", "")),
+        bucket=str(getattr(args, "minio_bucket", "")),
+        prefix=str(getattr(args, "minio_prefix", "cube/entity")),
+        secure=bool(getattr(args, "minio_secure", False)),
+        workers=max(1, int(getattr(args, "minio_upload_workers", 8) or 8)),
+    )
+
+
+def _rows_with_asset_uris(rows: list[dict[str, Any]], asset_uri_map: dict[str, str]) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for row in rows:
+        next_row = dict(row)
+        local_path = str(row["asset_path"])
+        tile_uri = asset_uri_map.get(local_path, local_path)
+        next_row["local_asset_path"] = local_path
+        next_row["entity_tile_uri"] = tile_uri
+        next_row["asset_path"] = tile_uri
+        next_row["output_path"] = tile_uri
+        updated.append(next_row)
+    return updated
+
+
+def _ensure_entity_tables_postgres(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rs_entity_tile_asset (
+              id BIGSERIAL PRIMARY KEY,
+              dataset TEXT NOT NULL,
+              sensor TEXT NOT NULL,
+              scene_id TEXT NOT NULL,
+              band TEXT NOT NULL,
+              acq_time TIMESTAMPTZ NOT NULL,
+              grid_type TEXT NOT NULL,
+              grid_level INTEGER NOT NULL,
+              space_code TEXT NOT NULL,
+              space_code_prefix TEXT NOT NULL,
+              st_code TEXT NOT NULL,
+              time_bucket TEXT NOT NULL,
+              tile_uri TEXT NOT NULL,
+              local_tile_path TEXT,
+              source_asset_path TEXT NOT NULL,
+              tile_version TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              cover_mode TEXT NOT NULL,
+              cell_min_lon DOUBLE PRECISION NOT NULL,
+              cell_min_lat DOUBLE PRECISION NOT NULL,
+              cell_max_lon DOUBLE PRECISION NOT NULL,
+              cell_max_lat DOUBLE PRECISION NOT NULL,
+              window_width INTEGER NOT NULL,
+              window_height INTEGER NOT NULL,
+              nodata DOUBLE PRECISION,
+              valid_pixel_ratio DOUBLE PRECISION NOT NULL,
+              metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ingest_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              UNIQUE (dataset, scene_id, band, grid_type, grid_level, space_code, time_bucket, tile_version)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rs_ingest_job (
+              job_id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              params_json JSONB NOT NULL,
+              stats_json JSONB NOT NULL,
+              error_msg TEXT,
+              retry_count INTEGER NOT NULL DEFAULT 0,
+              started_at TIMESTAMPTZ,
+              finished_at TIMESTAMPTZ,
+              output_snapshot TEXT,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+    conn.commit()
+
+
+def _upsert_entity_tiles_postgres(
+    conn: Any,
+    rows: list[dict[str, Any]],
+    dataset: str,
+    sensor: str,
+    tile_version: str,
+    run_id: str,
+) -> None:
+    from cube_split.ingest.ray_ingest_job import _parse_timestamp
+
+    sql = """
+        INSERT INTO rs_entity_tile_asset (
+          dataset, sensor, scene_id, band, acq_time, grid_type, grid_level, space_code,
+          space_code_prefix, st_code, time_bucket, tile_uri, local_tile_path, source_asset_path,
+          tile_version, run_id, cover_mode, cell_min_lon, cell_min_lat, cell_max_lon, cell_max_lat,
+          window_width, window_height, nodata, valid_pixel_ratio, metadata_json
+        ) VALUES (
+          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+        )
+        ON CONFLICT(dataset, scene_id, band, grid_type, grid_level, space_code, time_bucket, tile_version)
+        DO UPDATE SET
+          sensor=excluded.sensor,
+          acq_time=excluded.acq_time,
+          space_code_prefix=excluded.space_code_prefix,
+          st_code=excluded.st_code,
+          tile_uri=excluded.tile_uri,
+          local_tile_path=excluded.local_tile_path,
+          source_asset_path=excluded.source_asset_path,
+          run_id=excluded.run_id,
+          cover_mode=excluded.cover_mode,
+          cell_min_lon=excluded.cell_min_lon,
+          cell_min_lat=excluded.cell_min_lat,
+          cell_max_lon=excluded.cell_max_lon,
+          cell_max_lat=excluded.cell_max_lat,
+          window_width=excluded.window_width,
+          window_height=excluded.window_height,
+          nodata=excluded.nodata,
+          valid_pixel_ratio=excluded.valid_pixel_ratio,
+          metadata_json=excluded.metadata_json,
+          ingest_time=NOW()
+    """
+    values = []
+    for row in rows:
+        metadata = {
+            "partition_type": row.get("partition_type"),
+            "source_asset_path": row.get("source_asset_path"),
+            "window_col_off": row.get("window_col_off"),
+            "window_row_off": row.get("window_row_off"),
+        }
+        values.append(
+            (
+                dataset,
+                sensor,
+                row["scene_id"],
+                row["band"],
+                _parse_timestamp(row["acq_time"]),
+                row["grid_type"],
+                int(row["grid_level"]),
+                row["space_code"],
+                row["space_code_prefix"],
+                row["st_code"],
+                row["time_bucket"],
+                row.get("entity_tile_uri") or row["asset_path"],
+                row.get("local_asset_path"),
+                row["source_asset_path"],
+                tile_version,
+                run_id,
+                row["cover_mode"],
+                float(row["cell_min_lon"]),
+                float(row["cell_min_lat"]),
+                float(row["cell_max_lon"]),
+                float(row["cell_max_lat"]),
+                int(row["window_width"]),
+                int(row["window_height"]),
+                None if row.get("nodata") is None else float(row["nodata"]),
+                float(row["valid_pixel_ratio"]),
+                json.dumps(metadata, ensure_ascii=False),
+            )
+        )
+    with conn.cursor() as cur:
+        cur.executemany(sql, values)
+
+
+def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
+    from cube_split.ingest.ray_ingest_job import _upsert_job_status_postgres
+
+    try:
+        import psycopg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Postgres backend requires `psycopg` package") from exc
+
+    dsn = str(getattr(args, "postgres_dsn", ""))
+    if not dsn:
+        raise ValueError("postgres_dsn is required when metadata_backend=postgres")
+
+    dataset = str(getattr(args, "dataset", "demo_optical"))
+    sensor = str(getattr(args, "sensor", "optical_mosaic"))
+    tile_version = str(getattr(args, "asset_version", getattr(args, "tile_version", "v1")))
+    run_id = str(getattr(args, "job_id", "")) or run_dir.name
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    params = {
+        "run_dir": str(run_dir.resolve()),
+        "dataset": dataset,
+        "sensor": sensor,
+        "tile_version": tile_version,
+        "metadata_backend": "postgres",
+        "asset_storage_backend": str(getattr(args, "asset_storage_backend", "local")),
+    }
+    stats = {
+        "entity_tile_rows": len(rows),
+        "dataset": dataset,
+        "sensor": sensor,
+        "tile_version": tile_version,
+        "run_id": run_id,
+    }
+
+    with psycopg.connect(dsn) as conn:
+        try:
+            _ensure_entity_tables_postgres(conn)
+            _upsert_job_status_postgres(conn, run_id, "running", params, started_at=started_at)
+            _upsert_entity_tiles_postgres(conn, rows, dataset, sensor, tile_version, run_id)
+            finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            _upsert_job_status_postgres(
+                conn,
+                run_id,
+                "succeeded",
+                params,
+                stats_json=stats,
+                output_snapshot=f"entity_tiles={len(rows)},run_id={run_id}",
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            conn.commit()
+        except Exception as exc:
+            finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            _upsert_job_status_postgres(
+                conn,
+                run_id,
+                "failed",
+                params,
+                error_msg=str(exc),
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            conn.commit()
+            raise
+    return stats
+
+
 def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     total_start = time.perf_counter()
+    for key in ("SPARK_HOME", "SPARK_CONF_DIR", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
+        os.environ.pop(key, None)
+
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
@@ -288,12 +651,69 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    rows = _write_entity_tiles(
-        grid_tasks,
-        run_dir=run_dir,
-        time_granularity=args.time_granularity,
-        partition_prefix_len=args.partition_prefix_len,
+
+    backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
+    ray_address = str(getattr(args, "ray_address", "") or "")
+    backend = _resolve_backend(backend_requested, ray_address)
+    if backend not in {"ray", "thread"}:
+        raise ValueError("partition_backend must be one of: auto, ray, thread, local, process")
+
+    grouped_tasks = _group_tasks_for_parallel_processing(grid_tasks)
+    parallelism = _resolve_ray_parallelism(
+        len(grouped_tasks),
+        int(getattr(args, "ray_parallelism", 0) or 0),
     )
+    chunk_size = _resolve_ray_chunk_size(
+        len(grouped_tasks),
+        parallelism,
+        int(getattr(args, "chunk_size", 0) or 0),
+    )
+    task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
+
+    ray_init_elapsed = 0.0
+    partition_start = time.perf_counter()
+    if backend == "ray":
+        rows, ray_init_elapsed = _write_entity_tile_chunks_ray(
+            task_chunks=task_chunks,
+            run_dir=run_dir,
+            time_granularity=args.time_granularity,
+            partition_prefix_len=args.partition_prefix_len,
+            parallelism=parallelism,
+            ray_address=ray_address,
+        )
+    else:
+        rows = _write_entity_tile_chunks_thread(
+            task_chunks=task_chunks,
+            run_dir=run_dir,
+            time_granularity=args.time_granularity,
+            partition_prefix_len=args.partition_prefix_len,
+            workers=parallelism,
+        )
+    partition_elapsed = time.perf_counter() - partition_start
+
+    upload_elapsed = 0.0
+    metadata_elapsed = 0.0
+    uploaded_tile_count = 0
+    metadata_rows = 0
+    asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
+    metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
+    asset_uri_map: dict[str, str] = {}
+    if asset_storage_backend == "minio":
+        upload_start = time.perf_counter()
+        asset_uri_map = _upload_entity_tiles_to_minio(rows, args)
+        upload_elapsed = time.perf_counter() - upload_start
+        uploaded_tile_count = len(asset_uri_map)
+        rows = _rows_with_asset_uris(rows, asset_uri_map)
+    elif asset_storage_backend != "local":
+        raise ValueError("asset_storage_backend must be one of: local, minio")
+
+    if metadata_backend == "postgres":
+        metadata_start = time.perf_counter()
+        metadata_stats = _write_entity_metadata_postgres(rows, args, run_dir)
+        metadata_elapsed = time.perf_counter() - metadata_start
+        metadata_rows = int(metadata_stats["entity_tile_rows"])
+    elif metadata_backend not in {"none", "local"}:
+        raise ValueError("metadata_backend must be one of: none, local, postgres")
 
     entity_rows_path = run_dir / "entity_index_rows.jsonl"
     index_rows_path = run_dir / "index_rows.jsonl"
@@ -323,9 +743,9 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "requested_grid_level": requested_level or None,
         "target_pixels_per_hex_edge": target_pixels,
         "cover_mode": args.cover_mode,
-        "execution_engine": "local",
-        "partition_backend_requested": getattr(args, "partition_backend", "local"),
-        "partition_backend_used": "local",
+        "execution_engine": backend,
+        "partition_backend_requested": backend_requested,
+        "partition_backend_used": backend,
         "time_granularity": args.time_granularity,
         "partition_prefix_len": max(1, int(args.partition_prefix_len)),
         "total_index_rows": len(rows),
@@ -333,10 +753,24 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "distinct_space_codes": len({row["space_code"] for row in rows}),
         "distinct_st_codes": len({row["st_code"] for row in rows}),
         "rows_by_band": rows_by_band,
-        "ray_parallelism": 0,
-        "ray_address": "",
+        "ray_parallelism": parallelism if backend == "ray" else 0,
+        "ray_address": ray_address if backend == "ray" else "",
+        "ray_init_elapsed_sec": round(ray_init_elapsed, 3),
+        "chunk_size": chunk_size,
+        "task_group_count": len(grouped_tasks),
+        "asset_storage_backend": asset_storage_backend,
+        "metadata_backend": metadata_backend,
+        "uploaded_tile_count": uploaded_tile_count,
+        "metadata_rows": metadata_rows,
+        "dataset": str(getattr(args, "dataset", "demo_optical")),
+        "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+        "asset_version": str(getattr(args, "asset_version", getattr(args, "tile_version", "v1"))),
+        "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
+        "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
         "cog_elapsed_sec": 0.0,
-        "partition_elapsed_sec": round(time.perf_counter() - total_start, 3),
+        "partition_elapsed_sec": round(partition_elapsed, 3),
+        "upload_elapsed_sec": round(upload_elapsed, 3),
+        "metadata_elapsed_sec": round(metadata_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
     }
     (run_dir / "job_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -363,6 +797,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"])
     parser.add_argument("--max-cells-per-asset", type=int, default=20000)
     parser.add_argument("--partition-prefix-len", type=int, default=3)
+    parser.add_argument("--ray-parallelism", type=int, default=0)
+    parser.add_argument("--ray-address", default="")
+    parser.add_argument("--chunk-size", type=int, default=0)
+    parser.add_argument("--partition-backend", default="thread", choices=["auto", "ray", "thread", "local", "process"])
+    parser.add_argument("--job-id", default="")
+    parser.add_argument("--dataset", default="demo_optical")
+    parser.add_argument("--sensor", default="optical_mosaic")
+    parser.add_argument("--asset-version", default="v1")
+    parser.add_argument("--metadata-backend", default="none", choices=["none", "local", "postgres"])
+    parser.add_argument("--postgres-dsn", default="")
+    parser.add_argument("--asset-storage-backend", default="local", choices=["local", "minio"])
+    parser.add_argument("--minio-endpoint", default="")
+    parser.add_argument("--minio-access-key", default="")
+    parser.add_argument("--minio-secret-key", default="")
+    parser.add_argument("--minio-bucket", default="")
+    parser.add_argument("--minio-prefix", default="cube/entity")
+    parser.add_argument("--minio-secure", action="store_true")
+    parser.add_argument("--minio-upload-workers", type=int, default=8)
     return parser.parse_args()
 
 
