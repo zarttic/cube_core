@@ -130,6 +130,7 @@ def build_partition_registry(
     optical_test: PartitionRunner,
     optical_retry: PartitionRunner,
     carbon_demo: PartitionRunner,
+    carbon_test: PartitionRunner,
     carbon_retry: PartitionRunner,
     product_demo: PartitionRunner,
     product_retry: PartitionRunner,
@@ -144,6 +145,7 @@ def build_partition_registry(
         "carbon": PartitionBackend(
             data_type="carbon",
             demo=carbon_demo,
+            test=carbon_test,
             retry=carbon_retry,
         ),
         "product": PartitionBackend(

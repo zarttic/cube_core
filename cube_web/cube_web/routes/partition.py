@@ -24,9 +24,9 @@ def create_partition_router(service: PartitionService) -> APIRouter:
     def partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
         return service.retry(data_type, payload_from_model(payload))
 
-    @router.post("/optical/test", response_model=PartitionResult)
-    def partition_optical_test(payload: PartitionDemoRequest | None = None) -> dict:
-        return service.test("optical", payload_from_model(payload))
+    @router.post("/{data_type}/test", response_model=PartitionResult)
+    def partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+        return service.test(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/tasks/demo", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:

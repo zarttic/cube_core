@@ -120,6 +120,8 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "carbon: 'carbon'" in source
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
+    assert "const testModules = new Set(['optical', 'carbon']);" in source
+    assert "const operation = testModules.has(activeModule.value) ? 'test' : 'demo';" in source
     assert "activeModule.value === 'carbon' ? 'carbon' : 'optical'" not in source
 
 
@@ -273,6 +275,7 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
     def fake_run_carbon_partition_demo():
         return {
             "status": "completed",
+            "mode": "partition_demo",
             "data_type": "carbon_satellite",
             "rows": 12,
             "distinct_space_codes": 5,
@@ -292,6 +295,62 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
     assert body["status"] == "completed"
     assert body["rows"] == 12
     assert body["distinct_space_codes"] == 5
+
+
+def test_carbon_partition_test_endpoint(monkeypatch):
+    expected_payload = {"grid_type": "isea4h", "grid_level": 5}
+
+    def fake_run_carbon_partition_test(payload=None):
+        assert payload == expected_payload
+        return {
+            "status": "completed",
+            "mode": "partition_test_no_ingest",
+            "data_type": "carbon_satellite",
+            "rows": 12,
+            "distinct_space_codes": 5,
+            "elapsed_sec": 0.12,
+            "rows_per_sec": 100.0,
+            "grid_type": "isea4h",
+            "grid_level": 5,
+            "workers": 2,
+            "partition_backend": "ray",
+            "execution_engine": "ray",
+            "ingest_enabled": False,
+            "output_path": "/tmp/demo/carbon_observation_rows.jsonl",
+        }
+
+    monkeypatch.setattr("cube_web.app._run_carbon_partition_test", fake_run_carbon_partition_test)
+
+    resp = client.post("/v1/partition/carbon/test", json=expected_payload)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["mode"] == "partition_test_no_ingest"
+    assert body["data_type"] == "carbon_satellite"
+    assert body["ingest_enabled"] is False
+    assert body["rows"] == 12
+
+
+def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
+    captured = {}
+
+    def fake_run_carbon_partition_demo(mode="partition_demo"):
+        captured["mode"] = mode
+        return {
+            "status": "completed",
+            "mode": mode,
+            "data_type": "carbon_satellite",
+            "ingest_enabled": mode != "partition_test_no_ingest",
+        }
+
+    monkeypatch.setattr(partition_runners, "_run_carbon_partition_demo", fake_run_carbon_partition_demo)
+
+    result = partition_runners._run_carbon_partition_test({})
+
+    assert captured["mode"] == "partition_test_no_ingest"
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["ingest_enabled"] is False
 
 
 def test_optical_partition_demo_endpoint(monkeypatch):

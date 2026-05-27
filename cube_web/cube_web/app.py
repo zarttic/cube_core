@@ -58,6 +58,10 @@ def _run_carbon_partition_demo() -> dict:
     return partition_runners._run_carbon_partition_demo()
 
 
+def _run_carbon_partition_test(payload: dict | None = None) -> dict:
+    return partition_runners._run_carbon_partition_test(payload)
+
+
 def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
     return partition_runners._run_carbon_partition_retry(payload)
 
@@ -132,6 +136,13 @@ async def handle_grid_core_error(_: Request, exc: GridCoreError):
 def partition_carbon_demo() -> dict:
     try:
         return _run_carbon_partition_demo()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def partition_carbon_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    try:
+        return _run_carbon_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -264,6 +275,7 @@ partition_service = PartitionService(
         optical_test=partition_optical_test,
         optical_retry=partition_optical_retry,
         carbon_demo=lambda payload=None: partition_carbon_demo(),
+        carbon_test=partition_carbon_test,
         carbon_retry=partition_carbon_retry,
         product_demo=partition_product_demo,
         product_retry=partition_product_retry,

@@ -173,7 +173,7 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
-def _run_carbon_partition_demo() -> dict:
+def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
@@ -214,6 +214,7 @@ def _run_carbon_partition_demo() -> dict:
             quality_counts[quality] = quality_counts.get(quality, 0) + 1
     return {
         "status": "completed",
+        "mode": mode,
         "data_type": "carbon_satellite",
         **_demo_task_metadata(str(result["execution_engine"])),
         "demo_source": sample.name,
@@ -229,8 +230,13 @@ def _run_carbon_partition_demo() -> dict:
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
         "ray_address": result["ray_address"],
+        "ingest_enabled": mode != "partition_test_no_ingest",
         "output_path": str(rows_path),
     }
+
+
+def _run_carbon_partition_test(payload: dict | None = None) -> dict:
+    return _run_carbon_partition_demo(mode="partition_test_no_ingest")
 
 
 def _run_carbon_partition_retry(payload: dict | None = None) -> dict:

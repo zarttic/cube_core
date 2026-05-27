@@ -143,6 +143,8 @@ const partitionEndpointsByModule = {
   product: 'product',
 };
 
+const testModules = new Set(['optical', 'carbon']);
+
 const activeDataRows = computed(() => dataRowsByModule[activeModule.value] || []);
 
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
@@ -287,7 +289,7 @@ const partitionContextRows = computed(() => {
   const request = lastPartitionRequest.value || {};
   const payload = request.payload || {};
   const result = lastPartitionResult.value || {};
-  const operation = request.operation || (activeModule.value === 'optical' ? 'test' : 'demo');
+  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'demo');
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
   const status = resultLoading.value ? '执行中' : lastPartitionResult.value ? '已完成' : '待执行';
   const rows = [
@@ -298,14 +300,18 @@ const partitionContextRows = computed(() => {
     { label: '数据批次', value: selectedDataName.value },
     { label: '输出目录', value: result.run_dir || '-' },
   ];
-  if (activeModule.value === 'optical') {
+  if (testModules.has(activeModule.value)) {
     rows.splice(
       5,
       0,
-      { label: '剖分格网', value: `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级` },
-      { label: '选择资产', value: `${selectedOpticalAssets.value.length} 条` },
-      { label: '波段', value: selectedOpticalBandsText.value },
-      { label: '时间范围', value: selectedOpticalTimeRange.value },
+      { label: '剖分格网', value: activeModule.value === 'optical' ? `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级` : 'isea4h / 5 级' },
+      ...(activeModule.value === 'optical'
+        ? [
+            { label: '选择资产', value: `${selectedOpticalAssets.value.length} 条` },
+            { label: '波段', value: selectedOpticalBandsText.value },
+            { label: '时间范围', value: selectedOpticalTimeRange.value },
+          ]
+        : []),
       { label: '安全模式', value: '剖分测试不写正式库' },
     );
   }
@@ -774,7 +780,7 @@ async function runDemo() {
           selected_assets: selectedAssets,
         }
       : {};
-    const operation = activeModule.value === 'optical' ? 'test' : 'demo';
+    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
     lastPartitionRequest.value = { endpoint, payload, operation };
     setPartitionStage('queue', 'running', activeModule.value === 'optical' ? `准备读取 ${selectedAssets.length} 条影像资产。` : '准备读取当前队列中的数据。');
     await Promise.resolve();
@@ -786,7 +792,7 @@ async function runDemo() {
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
     setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
-    ElMessage.success(activeModule.value === 'optical' ? '剖分测试完成，未写入正式库' : '剖分任务完成');
+    ElMessage.success(testModules.has(activeModule.value) ? '剖分测试完成，未写入正式库' : '剖分任务完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     ElMessage.error(error.message);
@@ -1136,7 +1142,7 @@ onUnmounted(() => {
                     {{ partitionWarnNeedsRetry ? '告警后重试任务' : '手动重试' }}
                   </el-button>
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
-                    {{ activeModule === 'quality' ? '刷新结果' : activeModule === 'optical' ? '剖分测试' : '开始剖分' }}
+                    {{ activeModule === 'quality' ? '刷新结果' : testModules.has(activeModule) ? '剖分测试' : '开始剖分' }}
                   </el-button>
                   <el-button
                     v-if="activeModule === 'optical'"
