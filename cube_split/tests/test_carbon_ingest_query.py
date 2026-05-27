@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cube_split.ingest.carbon_ingest_job import run_carbon_ingest
-from cube_split.read.carbon_query import summarize_xco2
+from cube_split.read.carbon_query import _parse_args, summarize_xco2
 
 
 def _carbon_row(observation_id: str) -> dict:
@@ -15,10 +15,10 @@ def _carbon_row(observation_id: str) -> dict:
         "observation_id": observation_id,
         "acq_time": "2020-12-31T00:01:06.700000Z",
         "time_bucket": "20201231",
-        "grid_type": "geohash",
-        "grid_level": 7,
-        "space_code": "7d9bc",
-        "st_code": "gh:7:7d9bc:20201231:v1",
+        "grid_type": "isea4h",
+        "grid_level": 5,
+        "space_code": "85230a2ffffffff",
+        "st_code": "hx:5:85230a2ffffffff:20201231:v1",
         "xco2": 417.384,
         "quality_flag": "1",
         "center_lon": -167.413,
@@ -118,3 +118,27 @@ def test_summarize_xco2_reports_count_and_range():
         "xco2_max": 418.0,
         "xco2_avg": 417.0,
     }
+
+
+def test_carbon_query_defaults_match_carbon_partition_grid(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "carbon_query",
+            "--bbox",
+            "-168.0",
+            "40.5",
+            "-166.5",
+            "42.0",
+            "--time-start",
+            "20201231",
+            "--time-end",
+            "20201231",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.grid_type == "isea4h"
+    assert args.grid_level == 5

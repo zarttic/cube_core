@@ -16,8 +16,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--time-end", required=True, help="End time bucket such as 20201231")
     parser.add_argument("--quality-flags", nargs="*", default=None, help="Quality flags to include")
     parser.add_argument("--product-type", default="xco2", help="Product type")
-    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs", "isea4h"])
-    parser.add_argument("--grid-level", type=int, default=7)
+    parser.add_argument("--grid-type", default="isea4h", choices=["geohash", "mgrs", "isea4h"])
+    parser.add_argument("--grid-level", type=int, default=5)
     parser.add_argument("--cube-version", default="v1")
     parser.add_argument("--limit", type=int, default=10000)
     return parser.parse_args()
@@ -51,8 +51,8 @@ def query_carbon_observations(
     time_end: str,
     quality_flags: list[str] | None = None,
     product_type: str = "xco2",
-    grid_type: str = "geohash",
-    grid_level: int = 7,
+    grid_type: str = "isea4h",
+    grid_level: int = 5,
     cube_version: str = "v1",
     limit: int = 10000,
 ) -> list[dict[str, Any]]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -28,13 +29,14 @@ UTC = timezone.utc
 
 @dataclass(frozen=True)
 class CarbonPartitionConfig:
-    grid_type: str = "geohash"
-    grid_level: int = 7
+    grid_type: str = "isea4h"
+    grid_level: int = 5
     time_granularity: str = "day"
     product_type: str = "xco2"
     max_observations: int | None = None
     partition_chunk_size: int = 1000
     partition_backend: str = "process"
+    ray_address: str = ""
 
 
 @dataclass(frozen=True)
@@ -463,6 +465,11 @@ def _partition_chunks(
     config: CarbonPartitionConfig,
     worker_count: int,
 ) -> list[dict[str, Any]]:
+    if not chunks:
+        return []
+    if config.partition_backend == "ray":
+        return _partition_chunks_with_ray(chunks, config, worker_count)
+
     rows: list[dict[str, Any]] = []
     if worker_count == 1 or len(chunks) <= 1:
         for chunk in chunks:
@@ -474,11 +481,99 @@ def _partition_chunks(
     elif config.partition_backend == "thread":
         executor_cls = ThreadPoolExecutor
     else:
-        raise ValueError("partition_backend must be 'process' or 'thread'")
+        raise ValueError("partition_backend must be 'process', 'thread', or 'ray'")
 
     with executor_cls(max_workers=worker_count) as pool:
         for part in pool.map(_partition_observation_chunk, chunks, repeat(config)):
             rows.extend(part)
+    return rows
+
+
+def _load_ray():
+    try:
+        import ray  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Ray is not installed. Install `ray` before running carbon partition with Ray.") from exc
+    return ray
+
+
+def _ray_runtime_env_from_env() -> dict[str, Any] | None:
+    raw = os.environ.get("RAY_RUNTIME_ENV_JSON", "").strip()
+    if not raw:
+        return None
+    loaded = json.loads(raw)
+    if not isinstance(loaded, dict):
+        raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
+    return loaded
+
+
+def _ray_actor_options_from_env() -> dict[str, Any]:
+    node_resource = os.environ.get("RAY_ACTOR_NODE_RESOURCE", "").strip()
+    if not node_resource:
+        return {}
+    return {"resources": {node_resource: 0.001}}
+
+
+def _init_ray(ray: Any, ray_address: str) -> None:
+    runtime_env = _ray_runtime_env_from_env()
+    init_kwargs = {
+        "ignore_reinit_error": True,
+        "include_dashboard": False,
+        "logging_level": "ERROR",
+        "runtime_env": runtime_env,
+    }
+    if ray_address:
+        try:
+            ray.init(address=ray_address, **init_kwargs)
+        except Exception:
+            if ray_address != "auto":
+                raise
+            ray.init(**init_kwargs)
+    else:
+        ray.init(**init_kwargs)
+
+
+def _partition_chunks_with_ray(
+    chunks: list[list[CarbonSatelliteObservation]],
+    config: CarbonPartitionConfig,
+    worker_count: int,
+) -> list[dict[str, Any]]:
+    ray = _load_ray()
+    _init_ray(ray, config.ray_address)
+    parallelism = max(1, min(worker_count, len(chunks)))
+
+    @ray.remote
+    class CarbonChunkProcessor:
+        def process_chunk(
+            self,
+            chunk: list[CarbonSatelliteObservation],
+            cfg: CarbonPartitionConfig,
+        ) -> list[dict[str, Any]]:
+            import os
+            import sys
+
+            project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
+            for rel_path in ("cube_encoder", "cube_split", "cube_web"):
+                package_path = os.path.join(project_root, rel_path)
+                if package_path not in sys.path:
+                    sys.path.insert(0, package_path)
+
+            from cube_split.partition.carbon import _partition_observation_chunk
+
+            return _partition_observation_chunk(chunk, cfg)
+
+    rows: list[dict[str, Any]] = []
+    try:
+        actor_cls = CarbonChunkProcessor.options(**_ray_actor_options_from_env())
+        actors = [actor_cls.remote() for _ in range(parallelism)]
+        futures = [
+            actors[idx % parallelism].process_chunk.remote(chunk, config)
+            for idx, chunk in enumerate(chunks)
+        ]
+        for part in ray.get(futures):
+            rows.extend(part)
+    finally:
+        ray.shutdown()
     return rows
 
 

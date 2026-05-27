@@ -174,7 +174,7 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_carbon_partition_demo() -> dict:
-    from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
+    from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
     if not sample.exists():
@@ -186,19 +186,27 @@ def _run_carbon_partition_demo() -> dict:
     input_dir.mkdir(parents=True)
     (input_dir / sample.name).symlink_to(sample)
     workers = 4
-    config = CarbonPartitionConfig(
-        grid_type="geohash",
-        grid_level=7,
+    args = SimpleNamespace(
+        input_dir=str(input_dir),
+        output_dir=str(output_dir),
+        grid_type="isea4h",
+        grid_level=5,
+        time_granularity="day",
+        product_type="xco2",
         max_observations=1000,
         partition_chunk_size=250,
-        partition_backend="process",
+        partition_workers=workers,
+        partition_backend=str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
+        ray_address=str(os.environ.get("CUBE_WEB_RAY_ADDRESS", "")),
+        ray_parallelism=workers,
     )
     start = time.perf_counter()
-    result = CarbonSatellitePartitionService().run(input_dir=input_dir, output_dir=output_dir, config=config, workers=workers)
+    result = run_carbon_partition(args)
     elapsed = time.perf_counter() - start
+    rows_path = Path(result["rows_path"])
     space_codes: set[str] = set()
     quality_counts: dict[str, int] = {}
-    with result.rows_path.open("r", encoding="utf-8") as fh:
+    with rows_path.open("r", encoding="utf-8") as fh:
         for line in fh:
             row = json.loads(line)
             space_codes.add(row["space_code"])
@@ -207,18 +215,21 @@ def _run_carbon_partition_demo() -> dict:
     return {
         "status": "completed",
         "data_type": "carbon_satellite",
-        **_demo_task_metadata("local-process"),
+        **_demo_task_metadata(str(result["execution_engine"])),
         "demo_source": sample.name,
-        "rows": result.total_rows,
+        "run_dir": result["run_dir"],
+        "rows": result["rows"],
         "distinct_space_codes": len(space_codes),
         "quality_counts": quality_counts,
         "elapsed_sec": round(elapsed, 3),
-        "rows_per_sec": round(result.total_rows / elapsed, 1) if elapsed > 0 else 0,
-        "grid_type": config.grid_type,
-        "grid_level": config.grid_level,
+        "rows_per_sec": round(int(result["rows"]) / elapsed, 1) if elapsed > 0 else 0,
+        "grid_type": result["grid_type"],
+        "grid_level": result["grid_level"],
         "workers": workers,
-        "partition_backend": config.partition_backend,
-        "output_path": str(result.rows_path),
+        "partition_backend": result["partition_backend_used"],
+        "execution_engine": result["execution_engine"],
+        "ray_address": result["ray_address"],
+        "output_path": str(rows_path),
     }
 
 
