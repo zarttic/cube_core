@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -120,9 +121,31 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "carbon: 'carbon'" in source
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
-    assert "const testModules = new Set(['optical', 'carbon']);" in source
+    assert "const testModules = new Set(['optical', 'carbon', 'product']);" in source
     assert "const operation = testModules.has(activeModule.value) ? 'test' : 'demo';" in source
+    assert "const carbonObservationSchema = [" in source
+    assert "const selectedCarbonObservations = computed(() => {" in source
+    assert "selected_observations: selectedObservations" in source
+    assert "const productAssetSchema = [" in source
+    assert "const dianzhongProductBbox = [100.644783, 23.28638, 104.829333, 27.061367];" in source
+    assert "{ field: 'bbox', type: 'float[4]'" in source
+    assert "{ field: 'corners', type: 'float[4][2]'" in source
+    assert "bbox: dianzhongProductBbox, corners: dianzhongProductCorners" in source
+    assert "const selectedProductAssets = computed(() => {" in source
+    assert "const productMapGeometries = computed(() => selectedProductAssets.value" in source
+    assert "const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));" in source
+    assert "activeModule.value === 'product' ? productGridType.value : opticalGridType.value" in source
+    assert "activeModule === 'product' ? '产品范围地图预览'" in source
+    assert "selected_assets: selectedAssets" in source
+    assert "PRODUCT_BATCH_DIANZHONG_1980_2020" in source
+    assert '<el-option label="碳卫星" value="carbon" />' in source
+    assert "carbon_rows: '观测行文件读取'" in source
+    assert "function qualitySourceText()" in source
+    assert "schema-grid" in source
     assert "activeModule.value === 'carbon' ? 'carbon' : 'optical'" not in source
+    assert "观测足迹匹配" not in source
+    assert "面积加权" not in source
+    assert "最近邻" not in source
 
 
 def test_quality_report_store_defaults_to_local_podman_postgres(monkeypatch):
@@ -335,8 +358,9 @@ def test_carbon_partition_test_endpoint(monkeypatch):
 def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
     captured = {}
 
-    def fake_run_carbon_partition_demo(mode="partition_demo"):
+    def fake_run_carbon_partition_demo(mode="partition_demo", payload=None):
         captured["mode"] = mode
+        captured["payload"] = payload
         return {
             "status": "completed",
             "mode": mode,
@@ -346,11 +370,26 @@ def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
 
     monkeypatch.setattr(partition_runners, "_run_carbon_partition_demo", fake_run_carbon_partition_demo)
 
-    result = partition_runners._run_carbon_partition_test({})
+    result = partition_runners._run_carbon_partition_test({"selected_observations": [{"source_index": 3}]})
 
     assert captured["mode"] == "partition_test_no_ingest"
+    assert captured["payload"]["selected_observations"][0]["source_index"] == 3
     assert result["mode"] == "partition_test_no_ingest"
     assert result["ingest_enabled"] is False
+
+
+def test_carbon_selected_source_indexes_are_normalized():
+    payload = {
+        "selected_observations": [
+            {"source_index": "3"},
+            {"source_index": 1},
+            {"source_index": 3},
+            {"source_index": None},
+            {"source_index": "bad"},
+        ]
+    }
+
+    assert partition_runners._carbon_selected_source_indexes(payload) == (1, 3)
 
 
 def test_optical_partition_demo_endpoint(monkeypatch):
@@ -788,6 +827,102 @@ def test_product_partition_demo_endpoint(monkeypatch):
     assert body["rows"] == 20
 
 
+def test_product_partition_test_endpoint(monkeypatch):
+    expected_payload = {
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [{"source_uri": "product_1980.tif", "product_year": 1980}],
+    }
+
+    def fake_run_product_partition_test(payload=None):
+        assert payload == expected_payload
+        return {
+            "status": "completed",
+            "mode": "partition_test_no_ingest",
+            "data_type": "product",
+            "rows": 8,
+            "ingest_enabled": False,
+        }
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_test", fake_run_product_partition_test)
+
+    resp = client.post("/v1/partition/product/test", json=expected_payload)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data_type"] == "product"
+    assert body["mode"] == "partition_test_no_ingest"
+    assert body["ingest_enabled"] is False
+    assert body["rows"] == 8
+
+
+def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    selected = source_dir / "product_1980.tif"
+    ignored = source_dir / "product_1990.tif"
+    selected.write_text("selected", encoding="utf-8")
+    ignored.write_text("ignored", encoding="utf-8")
+    captured = {}
+
+    def fake_demo_run_dir(name):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir()
+        return run_dir
+
+    def fake_run_product_partition(args):
+        captured["input_dir"] = Path(args.input_dir)
+        captured["manifest_path"] = Path(args.manifest_path)
+        captured["files"] = sorted(path.name for path in Path(args.input_dir).iterdir())
+        run_dir = tmp_path / "run-root" / "output" / "run"
+        run_dir.mkdir(parents=True)
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "product",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "thread",
+        }
+
+    monkeypatch.setattr(partition_runners, "_demo_run_dir", fake_demo_run_dir)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
+
+    result = partition_runners._run_product_partition_test(
+        {
+            "input_dir": str(source_dir),
+            "selected_assets": [
+                {
+                    "source_uri": "product_1980.tif",
+                    "product_name": "测试产品",
+                    "product_year": 1980,
+                    "band": "product_value",
+                    "acq_time": "1980-01-01T00:00:00Z",
+                    "bbox": [100.0, 23.0, 105.0, 27.0],
+                    "corners": [[100.0, 27.0], [105.0, 27.0], [105.0, 23.0], [100.0, 23.0]],
+                }
+            ],
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["ingest_enabled"] is False
+    assert result["selected_asset_count"] == 1
+    assert captured["files"] == ["product_1980.tif"]
+    assert captured["input_dir"].name == "input"
+    manifest = json.loads(captured["manifest_path"].read_text(encoding="utf-8"))
+    assert manifest["data_type"] == "product"
+    assert manifest["assets"][0]["source_uri"] == str(captured["input_dir"] / "product_1980.tif")
+    assert manifest["assets"][0]["product_year"] == 1980
+    assert manifest["assets"][0]["bbox"] == [100.0, 23.0, 105.0, 27.0]
+    assert manifest["assets"][0]["corners"] == [[100.0, 27.0], [105.0, 27.0], [105.0, 23.0], [100.0, 23.0]]
+
+
 def test_product_partition_retry_endpoint(monkeypatch):
     def fake_run_product_partition_retry(payload=None):
         assert payload == {"request": {"endpoint": "product", "payload": {}}, "last_result": {"status": "completed"}}
@@ -844,6 +979,32 @@ def test_optical_quality_endpoint(monkeypatch):
     assert body["report_id"]
     assert body["run_dir"] == run_dir
     assert body["summary"]["index_rows"] == 3
+
+
+def test_carbon_quality_endpoint(monkeypatch):
+    run_dir = "/tmp/cube_web_partition_demo/carbon/run"
+
+    def fake_run_quality_check(args):
+        assert args.run_dir == run_dir
+        assert args.target_crs == "EPSG:4326"
+        return {
+            "status": "PASS",
+            "summary": {"index_rows": 2, "observation_rows": 2, "quality_counts": {"1": 2}, "failed_checks": 0, "warning_checks": 0},
+            "checks": [{"name": "carbon_rows", "status": "PASS", "message": "ok"}],
+            "assets": [],
+        }
+
+    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", fake_run_quality_check)
+
+    resp = client.post("/v1/quality/carbon/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "PASS"
+    assert body["data_type"] == "carbon"
+    assert body["report_id"]
+    assert body["run_dir"] == run_dir
+    assert body["summary"]["observation_rows"] == 2
 
 
 def test_quality_report_requires_report_id():
@@ -1021,3 +1182,32 @@ def test_product_quality_history_endpoint(quality_store):
     assert record["data_type"] == "product"
     assert record["dataset"] == "product_epsg4326"
     assert record["summary"]["index_rows"] == 5
+
+
+def test_carbon_quality_history_endpoint(quality_store):
+    quality_store.upsert_report(
+        "carbon",
+        "/tmp/carbon/run_20260515_010203",
+        {
+          "report_id": "carbon-history",
+          "status": "PASS",
+          "target_crs": "EPSG:4326",
+          "generated_at": "2026-05-15T01:02:03Z",
+          "summary": {
+            "index_rows": 2,
+            "observation_rows": 2,
+            "quality_counts": {"1": 2},
+            "passed_checks": 7,
+            "warning_checks": 0,
+            "failed_checks": 0
+          }
+        },
+    )
+
+    body = web_app.quality_carbon_history({"target_crs": "EPSG:4326"})
+
+    assert body["count"] == 1
+    record = body["records"][0]
+    assert record["data_type"] == "carbon"
+    assert record["dataset"] == "carbon"
+    assert record["summary"]["observation_rows"] == 2

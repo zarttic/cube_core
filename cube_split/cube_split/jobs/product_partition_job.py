@@ -32,6 +32,7 @@ def _prepare_product_task_rows(tasks: list[dict], partition_prefix_len: int) -> 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Partition raster product TIF data into cube index rows")
     parser.add_argument("--input-dir", default="data/product", help="Input directory containing product TIF files")
+    parser.add_argument("--manifest-path", default="", help="Optional selected product asset manifest")
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
     parser.add_argument("--cog-input-dir", default="data/cog/product_epsg4326", help="Directory for standardized product COGs")
     parser.add_argument("--target-crs", default="EPSG:4326", help="Target CRS for standardized COG assets")
@@ -54,7 +55,13 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     total_start = time.perf_counter()
-    source_assets = build_manifest(input_dir, data_type="product")
+    manifest_path_raw = str(getattr(args, "manifest_path", "") or "").strip()
+    manifest_path = Path(manifest_path_raw).expanduser() if manifest_path_raw else None
+    source_assets = build_manifest(
+        input_dir,
+        data_type="product",
+        manifest_path=manifest_path,
+    )
     if not source_assets:
         raise RuntimeError(f"No product TIF assets found under: {input_dir}")
 
@@ -65,7 +72,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         overwrite=bool(args.cog_overwrite),
         workers=int(args.cog_workers),
         compress="LZW",
-        predictor=2,
+        predictor=0,
         overviews="NONE",
         num_threads="ALL_CPUS",
         target_crs=args.target_crs,

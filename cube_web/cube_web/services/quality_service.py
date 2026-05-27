@@ -33,6 +33,7 @@ def quality_args(run_dir: str, payload: dict | None = None):
         {
             "run_dir": run_dir,
             "target_crs": str(payload.get("target_crs", "EPSG:4326") or "EPSG:4326"),
+            "expected_years": payload.get("expected_years", ""),
             "output": "",
         },
     )()

@@ -8,7 +8,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from cube_split.ingest.product_ingest_job import run_product_ingest
-from cube_split.jobs.product_partition_job import _prepare_product_task_rows
+from cube_split.jobs.product_partition_job import _prepare_product_task_rows, run_product_partition
 from cube_split.partition.product_products import parse_product_asset
 from cube_split.quality.product_quality import run_quality_check
 
@@ -88,6 +88,70 @@ def test_prepare_product_task_rows_keeps_year_bucket_and_day_st_code_input():
     assert rows[0]["st_time_granularity"] == "day"
 
 
+def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    cog_dir = tmp_path / "cog"
+    input_dir.mkdir()
+    tif = input_dir / "1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif"
+    _write_product_tif(tif)
+    captured = {}
+
+    def fake_convert_assets_to_cog(assets, **kwargs):
+        captured["predictor"] = kwargs["predictor"]
+        return assets
+
+    def fake_build_grid_tasks_driver(**kwargs):
+        return [
+            {
+                "scene_id": "dianzhong_ecological_security_1980",
+                "band": "product_value",
+                "asset_path": str(tif),
+                "acq_time": "1980-01-01T00:00:00Z",
+                "grid_type": "geohash",
+                "grid_level": 5,
+                "space_code": "wm6n0",
+                "st_code": "gh:5:wm6n0:19800101:v1",
+                "cell_min_lon": 100.0,
+                "cell_min_lat": 24.9,
+                "cell_max_lon": 100.1,
+                "cell_max_lat": 25.0,
+                "window_col_off": 0,
+                "window_row_off": 0,
+                "window_width": 8,
+                "window_height": 8,
+            }
+        ]
+
+    def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
+        return group
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.convert_assets_to_cog", fake_convert_assets_to_cog)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", fake_build_grid_tasks_driver)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._process_local_task_group", fake_process_local_task_group)
+
+    result = run_product_partition(
+        Namespace(
+            input_dir=str(input_dir),
+            output_dir=str(output_dir),
+            cog_input_dir=str(cog_dir),
+            target_crs="EPSG:4326",
+            grid_type="geohash",
+            grid_level=5,
+            cover_mode="intersect",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            cog_overwrite=True,
+            cog_workers=1,
+            partition_workers=1,
+            sample_mean=False,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["predictor"] == 0
+
+
 def test_product_quality_passes_complete_years(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -108,7 +172,7 @@ def test_product_quality_passes_complete_years(tmp_path: Path):
     assert report["summary"]["product_years"] == [1980, 1990, 2000, 2010, 2020]
 
 
-def test_product_quality_warns_missing_expected_year(tmp_path: Path):
+def test_product_quality_passes_selected_single_year_by_default(tmp_path: Path):
     asset = tmp_path / "product_1980_cog.tif"
     _write_product_tif(asset)
     run_dir = tmp_path / "run"
@@ -116,6 +180,21 @@ def test_product_quality_warns_missing_expected_year(tmp_path: Path):
     (run_dir / "index_rows.jsonl").write_text(json.dumps(_product_row(asset, 1980)) + "\n", encoding="utf-8")
 
     report = run_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326"))
+
+    assert report["status"] == "PASS"
+    year_check = next(check for check in report["checks"] if check["name"] == "product_years")
+    assert year_check["status"] == "PASS"
+    assert year_check["metrics"]["present_years"] == [1980]
+
+
+def test_product_quality_warns_missing_explicit_expected_year(tmp_path: Path):
+    asset = tmp_path / "product_1980_cog.tif"
+    _write_product_tif(asset)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "index_rows.jsonl").write_text(json.dumps(_product_row(asset, 1980)) + "\n", encoding="utf-8")
+
+    report = run_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326", expected_years="1980,1990,2000,2010,2020"))
 
     assert report["status"] == "WARN"
     year_check = next(check for check in report["checks"] if check["name"] == "product_years")

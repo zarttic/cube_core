@@ -65,6 +65,7 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
         time_granularity=args.time_granularity,
         product_type=args.product_type,
         max_observations=(None if int(args.max_observations) <= 0 else int(args.max_observations)),
+        selected_source_indexes=getattr(args, "selected_source_indexes", None),
         partition_chunk_size=int(args.partition_chunk_size),
         partition_backend=backend,
         ray_address=args.ray_address,

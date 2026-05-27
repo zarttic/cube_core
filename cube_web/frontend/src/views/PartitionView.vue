@@ -21,15 +21,23 @@ const qualityHistorySearch = ref('');
 const qualityHistoryStatus = ref('');
 const selectedBatches = ref({
   optical: 'OPTICAL_BATCH_20260522_135546',
-  carbon: 'C20240307001',
+  carbon: 'CARBON_BATCH_20201231_A',
   radar: 'R20240307001',
   product: 'P20240307001',
 });
 const selectedOpticalBatchIds = ref(['OPTICAL_BATCH_20260522_135546']);
 const expandedOpticalBatchId = ref('OPTICAL_BATCH_20260522_135546');
 const deselectedOpticalAssetKeys = ref({});
+const selectedCarbonBatchIds = ref(['CARBON_BATCH_20201231_A']);
+const expandedCarbonBatchId = ref('CARBON_BATCH_20201231_A');
+const deselectedCarbonObservationKeys = ref({});
+const selectedProductBatchIds = ref(['PRODUCT_BATCH_DIANZHONG_1980_2020']);
+const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
+const deselectedProductAssetKeys = ref({});
 const opticalGridType = ref('geohash');
 const opticalGridLevel = ref(5);
+const productGridType = ref('geohash');
+const productGridLevel = ref(5);
 const mapGridLoading = ref(false);
 const mapGridGeometries = ref([]);
 const resultLoading = ref(false);
@@ -106,21 +114,106 @@ const opticalRows = opticalBatches.map((batch) => ({
   status: batch.status,
 }));
 
-const carbonRows = [
-  { id: 'C20240307001', name: 'OCO-2_XCO2_20240307', params: '1,247 footprints', status: '就绪' },
-  { id: 'C20240307002', name: 'GOSAT_CH4_20240306', params: '684 footprints', status: '就绪' },
+const carbonObservationSchema = [
+  { field: 'sounding_id / observation_id', type: 'string', meaning: '观测唯一标识' },
+  { field: 'time', type: 'datetime', meaning: '观测时间' },
+  { field: 'longitude / latitude', type: 'float', meaning: '观测中心点' },
+  { field: 'xco2', type: 'float', meaning: '柱平均 CO2 浓度' },
+  { field: 'xco2_quality_flag', type: 'int', meaning: '质量标记' },
+  { field: 'vertex_longitude / vertex_latitude', type: 'float[4]', meaning: '观测足迹四角点' },
 ];
+
+const carbonBatches = [
+  {
+    id: 'CARBON_BATCH_20201231_A',
+    name: 'OCO-2_XCO2_20201231_sample',
+    status: '就绪',
+    product_type: 'xco2',
+    source_uri: 'oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4',
+    schema: carbonObservationSchema,
+    observations: [
+      { source_index: 0, observation_id: '2020123100010671', acq_time: '2020-12-31T00:01:06.700Z', lon: -167.413, lat: 41.1686, xco2: 417.384, quality_flag: '1' },
+      { source_index: 1, observation_id: '2020123100010673', acq_time: '2020-12-31T00:01:06.700Z', lon: -167.384, lat: 41.1405, xco2: 418.669, quality_flag: '1' },
+      { source_index: 2, observation_id: '2020123100040904', acq_time: '2020-12-31T00:04:09Z', lon: -172.399, lat: 50.5473, xco2: 414.811, quality_flag: '1' },
+      { source_index: 3, observation_id: '2020123100041037', acq_time: '2020-12-31T00:04:10.300Z', lon: -172.381, lat: 50.5635, xco2: 413.485, quality_flag: '1' },
+    ],
+  },
+  {
+    id: 'CARBON_BATCH_20201231_B',
+    name: 'OCO-2_XCO2_20201231_high_latitude',
+    status: '就绪',
+    product_type: 'xco2',
+    source_uri: 'oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4',
+    schema: carbonObservationSchema,
+    observations: [
+      { source_index: 4, observation_id: '2020123100041077', acq_time: '2020-12-31T00:04:10.700Z', lon: -172.392, lat: 50.581, xco2: 413.266, quality_flag: '1' },
+      { source_index: 5, observation_id: '2020123100041078', acq_time: '2020-12-31T00:04:10.700Z', lon: -172.372, lat: 50.5631, xco2: 414.058, quality_flag: '1' },
+      { source_index: 6, observation_id: '2020123100041108', acq_time: '2020-12-31T00:04:11Z', lon: -172.383, lat: 50.5802, xco2: 415.684, quality_flag: '1' },
+      { source_index: 7, observation_id: '2020123100041138', acq_time: '2020-12-31T00:04:11.300Z', lon: -172.393, lat: 50.5973, xco2: 414.073, quality_flag: '1' },
+    ],
+  },
+];
+const carbonRows = carbonBatches.map((batch) => ({
+  id: batch.id,
+  name: batch.name,
+  params: `${batch.observations.length} 条观测 | ${batch.product_type}`,
+  status: batch.status,
+}));
 
 const radarRows = [
   { id: 'R20240307001', name: 'Sentinel-1A_GRD_20240307', params: 'VV/VH | 10m', status: '就绪' },
   { id: 'R20240307002', name: 'GF3_SAR_20240306', params: 'HH/HV | 8m', status: '就绪' },
 ];
 
-const productRows = [
-  { id: 'P20240307001', name: 'LandCover_GLC_2023', params: '30m | 分类产品', status: '就绪' },
-  { id: 'P20240307002', name: 'NDVI_MODIS_202403', params: '250m | 月度产品', status: '就绪' },
-  { id: 'P20240307003', name: 'DEM_SRTM_90m', params: '90m | 高程产品', status: '就绪' },
+const dianzhongProductCorners = [
+  [100.644783, 27.061367],
+  [104.829333, 27.061367],
+  [104.829333, 23.28638],
+  [100.644783, 23.28638],
 ];
+const dianzhongProductBbox = [100.644783, 23.28638, 104.829333, 27.061367];
+
+const productAssetSchema = [
+  { field: 'source_uri', type: 'string', meaning: '产品栅格文件路径' },
+  { field: 'product_name', type: 'string', meaning: '信息产品名称' },
+  { field: 'product_year', type: 'int', meaning: '产品年份' },
+  { field: 'product_family', type: 'string', meaning: '产品族' },
+  { field: 'sensor', type: 'string', meaning: '数据来源/产品传感器' },
+  { field: 'band', type: 'string', meaning: '产品值波段' },
+  { field: 'acq_time', type: 'datetime', meaning: '产品时间' },
+  { field: 'target_crs', type: 'string', meaning: '标准化目标参考系统' },
+  { field: 'bbox', type: 'float[4]', meaning: '产品覆盖范围 bbox（WGS84: min_lon, min_lat, max_lon, max_lat）' },
+  { field: 'corners', type: 'float[4][2]', meaning: '产品覆盖范围四角点（WGS84 lon/lat）' },
+  { field: 'grid_type / grid_level', type: 'string / int', meaning: '剖分格网参数' },
+  { field: 'asset_path', type: 'string', meaning: '标准化 COG 输出路径' },
+  { field: 'window_*', type: 'int', meaning: '格网窗口偏移与尺寸' },
+  { field: 'st_code', type: 'string', meaning: '时空编码' },
+];
+
+const productBatches = [
+  {
+    id: 'PRODUCT_BATCH_DIANZHONG_1980_2020',
+    name: '滇中生态安全评价_1980_2020',
+    status: '就绪',
+    product_family: 'product',
+    sensor: 'data_product',
+    target_crs: 'EPSG:4326',
+    schema: productAssetSchema,
+    assets: [
+      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1980, band: 'product_value', acq_time: '1980-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_1990年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1990, band: 'product_value', acq_time: '1990-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2000年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2000, band: 'product_value', acq_time: '2000-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2010年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2010, band: 'product_value', acq_time: '2010-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2020年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2020, band: 'product_value', acq_time: '2020-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+    ],
+  },
+];
+const productRows = productBatches.map((batch) => ({
+  id: batch.id,
+  name: batch.name,
+  params: `${batch.assets.length} 个年份 | ${batch.target_crs}`,
+  status: batch.status,
+}));
 
 const dataRowsByModule = {
   optical: opticalRows,
@@ -143,7 +236,7 @@ const partitionEndpointsByModule = {
   product: 'product',
 };
 
-const testModules = new Set(['optical', 'carbon']);
+const testModules = new Set(['optical', 'carbon', 'product']);
 
 const activeDataRows = computed(() => dataRowsByModule[activeModule.value] || []);
 
@@ -157,6 +250,20 @@ const selectedDataName = computed(() => {
       .map((batch) => batch.name);
     return names.join('，');
   }
+  if (activeModule.value === 'carbon') {
+    if (!selectedCarbonBatchIds.value.length) return '未选择';
+    const names = carbonBatches
+      .filter((batch) => selectedCarbonBatchIds.value.includes(batch.id))
+      .map((batch) => batch.name);
+    return names.join('，');
+  }
+  if (activeModule.value === 'product') {
+    if (!selectedProductBatchIds.value.length) return '未选择';
+    const names = productBatches
+      .filter((batch) => selectedProductBatchIds.value.includes(batch.id))
+      .map((batch) => batch.name);
+    return names.join('，');
+  }
   const rows = activeDataRows.value;
   const selectedId = selectedBatches.value[activeModule.value];
   return rows.find((row) => row.id === selectedId)?.name || '未选择';
@@ -166,7 +273,7 @@ const filteredDataRows = computed(() => {
   const keyword = dataSearch.value.trim().toLowerCase();
   const rows = activeDataRows.value;
   if (!keyword) return rows;
-  return rows.filter((row) => row.name.toLowerCase().includes(keyword));
+  return rows.filter((row) => row.name.toLowerCase().includes(keyword) || row.id.toLowerCase().includes(keyword));
 });
 
 const filteredQualityHistory = computed(() => {
@@ -195,6 +302,47 @@ const selectedOpticalAssets = computed(() => {
     batch.assets.forEach((asset) => {
       if (isOpticalAssetSelected(batch.id, asset)) {
         rows.push({ ...asset, batch_id: batch.id });
+      }
+    });
+  });
+  return rows;
+});
+
+const selectedCarbonObservations = computed(() => {
+  const selectedBatchSet = new Set(selectedCarbonBatchIds.value);
+  const rows = [];
+  carbonBatches.forEach((batch) => {
+    if (!selectedBatchSet.has(batch.id)) return;
+    batch.observations.forEach((observation) => {
+      if (isCarbonObservationSelected(batch.id, observation)) {
+        rows.push({
+          ...observation,
+          batch_id: batch.id,
+          batch_name: batch.name,
+          product_type: batch.product_type,
+          source_uri: batch.source_uri,
+        });
+      }
+    });
+  });
+  return rows;
+});
+
+const selectedProductAssets = computed(() => {
+  const selectedBatchSet = new Set(selectedProductBatchIds.value);
+  const rows = [];
+  productBatches.forEach((batch) => {
+    if (!selectedBatchSet.has(batch.id)) return;
+    batch.assets.forEach((asset) => {
+      if (isProductAssetSelected(batch.id, asset)) {
+        rows.push({
+          ...asset,
+          batch_id: batch.id,
+          batch_name: batch.name,
+          product_family: batch.product_family,
+          sensor: batch.sensor,
+          target_crs: batch.target_crs,
+        });
       }
     });
   });
@@ -247,7 +395,26 @@ const mapBatchGeometries = computed(() => selectedOpticalAssets.value
   })
   .filter(Boolean));
 
-const mapGeometries = computed(() => [...mapBatchGeometries.value, ...mapGridGeometries.value]);
+const productMapGeometries = computed(() => selectedProductAssets.value
+  .map((asset) => {
+    const geometry = cornersToPolygon(asset.corners);
+    if (!geometry) return null;
+    return {
+      geometry,
+      label: `${asset.product_year} / ${asset.product_name}`,
+      color: '#3f7f5f',
+      fillColor: '#3f7f5f',
+      fillOpacity: 0.12,
+      weight: 2,
+    };
+  })
+  .filter(Boolean));
+
+const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));
+const selectedMapGridType = computed(() => (activeModule.value === 'product' ? productGridType.value : opticalGridType.value));
+const selectedMapGridLevel = computed(() => (activeModule.value === 'product' ? productGridLevel.value : opticalGridLevel.value));
+const mapPreviewGeometries = computed(() => (activeModule.value === 'product' ? productMapGeometries.value : mapBatchGeometries.value));
+const mapGeometries = computed(() => [...mapPreviewGeometries.value, ...mapGridGeometries.value]);
 
 const partitionMetricRows = computed(() => {
   if (!lastPartitionResult.value) return [];
@@ -284,6 +451,30 @@ const selectedOpticalTimeRange = computed(() => {
   return `${values[0]} 至 ${values[values.length - 1]}`;
 });
 
+const selectedCarbonProductTypesText = computed(() => {
+  const productTypes = new Set();
+  selectedCarbonObservations.value.forEach((observation) => productTypes.add(observation.product_type));
+  return productTypes.size ? Array.from(productTypes).sort().join(', ') : '-';
+});
+
+const selectedCarbonTimeRange = computed(() => {
+  const values = selectedCarbonObservations.value
+    .map((observation) => String(observation.acq_time || '').slice(0, 10))
+    .filter(Boolean)
+    .sort();
+  if (!values.length) return '-';
+  if (values[0] === values[values.length - 1]) return values[0];
+  return `${values[0]} 至 ${values[values.length - 1]}`;
+});
+
+const selectedProductYearsText = computed(() => {
+  const years = selectedProductAssets.value
+    .map((asset) => Number(asset.product_year))
+    .filter((year) => Number.isFinite(year))
+    .sort((a, b) => a - b);
+  return years.length ? years.join(', ') : '-';
+});
+
 const partitionContextRows = computed(() => {
   if (activeModule.value === 'quality') return [];
   const request = lastPartitionRequest.value || {};
@@ -301,16 +492,31 @@ const partitionContextRows = computed(() => {
     { label: '输出目录', value: result.run_dir || '-' },
   ];
   if (testModules.has(activeModule.value)) {
+    const gridText = activeModule.value === 'carbon'
+      ? 'isea4h / 5 级'
+      : `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级`;
     rows.splice(
       5,
       0,
-      { label: '剖分格网', value: activeModule.value === 'optical' ? `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级` : 'isea4h / 5 级' },
+      { label: '剖分格网', value: gridText },
       ...(activeModule.value === 'optical'
         ? [
             { label: '选择资产', value: `${selectedOpticalAssets.value.length} 条` },
             { label: '波段', value: selectedOpticalBandsText.value },
             { label: '时间范围', value: selectedOpticalTimeRange.value },
           ]
+        : activeModule.value === 'carbon'
+          ? [
+              { label: '选择观测', value: `${selectedCarbonObservations.value.length} 条` },
+              { label: '产品类型', value: selectedCarbonProductTypesText.value },
+              { label: '时间范围', value: selectedCarbonTimeRange.value },
+            ]
+          : activeModule.value === 'product'
+            ? [
+                { label: '选择产品', value: `${selectedProductAssets.value.length} 个年份` },
+                { label: '产品年份', value: selectedProductYearsText.value },
+                { label: '目标参考系统', value: payload.target_crs || 'EPSG:4326' },
+              ]
         : []),
       { label: '安全模式', value: '剖分测试不写正式库' },
     );
@@ -394,9 +600,27 @@ function assetKey(asset) {
   return `${asset.source_uri}|${asset.scene_id}|${assetBandsText(asset)}|${asset.acq_time}`;
 }
 
+function observationKey(observation) {
+  return `${observation.source_uri}|${observation.source_index}|${observation.observation_id}`;
+}
+
+function productAssetKey(asset) {
+  return `${asset.source_uri}|${asset.product_year}|${asset.band}`;
+}
+
 function isOpticalAssetSelected(batchId, asset) {
   const excluded = deselectedOpticalAssetKeys.value[batchId] || [];
   return !excluded.includes(assetKey(asset));
+}
+
+function isCarbonObservationSelected(batchId, observation) {
+  const excluded = deselectedCarbonObservationKeys.value[batchId] || [];
+  return !excluded.includes(observationKey(observation));
+}
+
+function isProductAssetSelected(batchId, asset) {
+  const excluded = deselectedProductAssetKeys.value[batchId] || [];
+  return !excluded.includes(productAssetKey(asset));
 }
 
 function toggleOpticalBatchSelect(batchId) {
@@ -412,12 +636,52 @@ function toggleOpticalBatchExpand(batchId) {
   expandedOpticalBatchId.value = expandedOpticalBatchId.value === batchId ? '' : batchId;
 }
 
+function toggleCarbonBatchSelect(batchId) {
+  const exists = selectedCarbonBatchIds.value.includes(batchId);
+  if (exists) {
+    selectedCarbonBatchIds.value = selectedCarbonBatchIds.value.filter((id) => id !== batchId);
+  } else {
+    selectedCarbonBatchIds.value = [...selectedCarbonBatchIds.value, batchId];
+  }
+}
+
+function toggleCarbonBatchExpand(batchId) {
+  expandedCarbonBatchId.value = expandedCarbonBatchId.value === batchId ? '' : batchId;
+}
+
+function toggleProductBatchSelect(batchId) {
+  const exists = selectedProductBatchIds.value.includes(batchId);
+  if (exists) {
+    selectedProductBatchIds.value = selectedProductBatchIds.value.filter((id) => id !== batchId);
+  } else {
+    selectedProductBatchIds.value = [...selectedProductBatchIds.value, batchId];
+  }
+}
+
+function toggleProductBatchExpand(batchId) {
+  expandedProductBatchId.value = expandedProductBatchId.value === batchId ? '' : batchId;
+}
+
 function selectSingleOpticalBatch(batchId) {
   selectedOpticalBatchIds.value = [batchId];
 }
 
+function selectSingleCarbonBatch(batchId) {
+  selectedCarbonBatchIds.value = [batchId];
+}
+
+function selectSingleProductBatch(batchId) {
+  selectedProductBatchIds.value = [batchId];
+}
+
 async function runDemoForBatch(batchId) {
-  selectSingleOpticalBatch(batchId);
+  if (activeModule.value === 'carbon') {
+    selectSingleCarbonBatch(batchId);
+  } else if (activeModule.value === 'product') {
+    selectSingleProductBatch(batchId);
+  } else {
+    selectSingleOpticalBatch(batchId);
+  }
   dataDrawerVisible.value = false;
   await runDemo();
 }
@@ -430,25 +694,100 @@ function toggleOpticalAssetSelect(batchId, asset) {
   deselectedOpticalAssetKeys.value = { ...deselectedOpticalAssetKeys.value, [batchId]: next };
 }
 
+function toggleCarbonObservationSelect(batchId, observation) {
+  const key = observationKey(observation);
+  const current = deselectedCarbonObservationKeys.value[batchId] || [];
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  deselectedCarbonObservationKeys.value = { ...deselectedCarbonObservationKeys.value, [batchId]: next };
+}
+
+function toggleProductAssetSelect(batchId, asset) {
+  const key = productAssetKey(asset);
+  const current = deselectedProductAssetKeys.value[batchId] || [];
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  deselectedProductAssetKeys.value = { ...deselectedProductAssetKeys.value, [batchId]: next };
+}
+
 function opticalBatchSummary(batch) {
   const selectedCount = batch.assets.filter((asset) => isOpticalAssetSelected(batch.id, asset)).length;
   return `${selectedCount}/${batch.assets.length} 条资产已选`;
 }
 
+function carbonBatchSummary(batch) {
+  const selectedCount = batch.observations.filter((observation) => isCarbonObservationSelected(batch.id, observation)).length;
+  return `${selectedCount}/${batch.observations.length} 条观测已选 | schema ${batch.schema.length} 字段`;
+}
+
+function productBatchSummary(batch) {
+  const selectedCount = batch.assets.filter((asset) => isProductAssetSelected(batch.id, asset)).length;
+  return `${selectedCount}/${batch.assets.length} 个年份已选 | schema ${batch.schema.length} 字段`;
+}
+
+function partitionPayloadForActiveModule() {
+  if (activeModule.value === 'optical') {
+    const selectedBatch = opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id));
+    const selectedAssets = selectedOpticalAssets.value;
+    return {
+      payload: {
+        grid_type: opticalGridType.value,
+        grid_level: Number(opticalGridLevel.value),
+        batch_id: selectedBatch?.id || '',
+        batch_name: selectedBatch?.name || '',
+        selected_assets: selectedAssets,
+      },
+      selectedCount: selectedAssets.length,
+    };
+  }
+  if (activeModule.value === 'carbon') {
+    const selectedBatch = carbonBatches.find((batch) => selectedCarbonBatchIds.value.includes(batch.id));
+    const selectedObservations = selectedCarbonObservations.value;
+    return {
+      payload: {
+        grid_type: 'isea4h',
+        grid_level: 5,
+        batch_id: selectedBatch?.id || '',
+        batch_name: selectedBatch?.name || '',
+        product_type: selectedBatch?.product_type || 'xco2',
+        selected_observations: selectedObservations,
+      },
+      selectedCount: selectedObservations.length,
+    };
+  }
+  if (activeModule.value === 'product') {
+    const selectedBatch = productBatches.find((batch) => selectedProductBatchIds.value.includes(batch.id));
+    const selectedAssets = selectedProductAssets.value;
+    return {
+      payload: {
+        grid_type: productGridType.value,
+        grid_level: Number(productGridLevel.value),
+        target_crs: selectedBatch?.target_crs || 'EPSG:4326',
+        batch_id: selectedBatch?.id || '',
+        batch_name: selectedBatch?.name || '',
+        selected_assets: selectedAssets,
+      },
+      selectedCount: selectedAssets.length,
+    };
+  }
+  return { payload: {}, selectedCount: 0 };
+}
+
 async function loadMapGridForSelectedAssets() {
-  if (activeModule.value !== 'optical') return;
-  if (!selectedOpticalAssets.value.length) {
-    ElMessage.warning('请至少选择一条资产');
+  if (!['optical', 'product'].includes(activeModule.value)) return;
+  const selectedAssets = selectedMapAssets.value;
+  if (!selectedAssets.length) {
+    ElMessage.warning(activeModule.value === 'product' ? '请至少选择一个产品年份' : '请至少选择一条资产');
     return;
   }
   mapGridLoading.value = true;
   mapGridGeometries.value = [];
   try {
     const { gridPrefix } = apiPrefixes();
-    const requests = selectedOpticalAssets.value.slice(0, 30).map(async (asset) => {
+    const requests = selectedAssets.slice(0, 30).map(async (asset) => {
       const result = await requestJson(`${gridPrefix}/cover`, {
-        grid_type: opticalGridType.value,
-        level: Number(opticalGridLevel.value),
+        grid_type: selectedMapGridType.value,
+        level: Number(selectedMapGridLevel.value),
         cover_mode: 'intersect',
         boundary_type: 'polygon',
         bbox: cornersToBbox(asset.corners),
@@ -542,6 +881,17 @@ const qualityStatusType = computed(() => {
 
 const qualitySummaryRows = computed(() => {
   const summary = qualityReport.value?.summary || {};
+  if (qualityDataType.value === 'carbon') {
+    return [
+      { label: '观测行数', value: summary.observation_rows ?? summary.index_rows ?? '-' },
+      { label: '观测 ID 数', value: summary.distinct_observations ?? '-' },
+      { label: '空间格网数', value: summary.distinct_space_codes ?? '-' },
+      { label: '时空编码数', value: summary.distinct_st_codes ?? '-' },
+      { label: '平均 XCO2', value: summary.avg_xco2 != null ? Number(summary.avg_xco2).toFixed(3) : '-' },
+      { label: '告警项', value: summary.warning_checks ?? '-' },
+      { label: '失败项', value: summary.failed_checks ?? '-' },
+    ];
+  }
   return [
     { label: '索引行数', value: summary.index_rows ?? '-' },
     { label: '资产数', value: summary.asset_count ?? '-' },
@@ -575,6 +925,13 @@ function checkNameText(name) {
     cell_bbox: '格网范围合法性',
     logical_duplicates: '逻辑资产重复',
     product_years: '产品年份完整性',
+    carbon_rows: '观测行文件读取',
+    carbon_schema: '观测字段完整性',
+    carbon_coordinates: '观测坐标合法性',
+    xco2_range: 'XCO2 数值范围',
+    carbon_quality_flag: '质量标记分布',
+    carbon_duplicates: '观测 ID 重复',
+    carbon_footprint: '足迹几何合法性',
     asset_readability: '资产可读性',
     cog_crs: '参考系统一致性',
     window_bounds: '窗口边界合法性',
@@ -590,7 +947,14 @@ function checkMessageText(check) {
     time_bucket: '时间分桶与采集时间一致。',
     cell_bbox: '格网经纬度范围合法。',
     logical_duplicates: check.status === 'WARN' ? '存在同一场景同一波段对应多个资产的情况，入库前需要关注合并关系。' : '未发现逻辑资产重复。',
-    product_years: check.status === 'WARN' ? '产品年份不完整或存在非预期年份。' : '产品年份覆盖完整。',
+    product_years: check.status === 'WARN' ? '产品年份与显式期望年份不一致。' : '产品年份元数据与本次输出一致。',
+    carbon_rows: '已读取碳卫星观测行文件。',
+    carbon_schema: '观测行字段满足碳卫星入库要求。',
+    carbon_coordinates: '观测中心点经纬度范围合法。',
+    xco2_range: 'XCO2 浓度值在预期范围内。',
+    carbon_quality_flag: '质量标记值符合碳卫星标准标记范围。',
+    carbon_duplicates: check.status === 'WARN' ? '存在重复观测 ID，入库前需要确认是否为重复观测。' : '未发现重复观测 ID。',
+    carbon_footprint: check.status === 'WARN' ? '部分观测足迹不是标准 Polygon/MultiPolygon。' : '观测足迹几何合法。',
     asset_readability: '索引引用的资产均可读取。',
     cog_crs: `资产参考系统已统一为 ${qualityReport.value?.target_crs || qualityTargetCrs.value}。`,
     window_bounds: '索引窗口未超出资产尺寸。',
@@ -638,7 +1002,77 @@ function checkDetailRows(check) {
       },
     ];
   }
+  if (check.name === 'carbon_schema') {
+    return (metrics.missing_rows || []).map((item) => ({
+      title: `观测行 ${item.line_no}`,
+      lines: [`缺失字段：${(item.missing || []).join(', ')}`],
+    }));
+  }
+  if (check.name === 'carbon_coordinates') {
+    return (metrics.invalid_rows || []).map((item) => ({
+      title: `观测行 ${item.line_no}`,
+      lines: [`原因：${item.reason}`, `坐标：${item.center_lon ?? '-'}, ${item.center_lat ?? '-'}`],
+    }));
+  }
+  if (check.name === 'xco2_range') {
+    const invalidRows = (metrics.invalid_rows || []).map((item) => ({
+      title: `观测行 ${item.line_no}`,
+      lines: [`原因：${item.reason}`, `XCO2：${item.xco2 ?? '-'}`],
+    }));
+    if (invalidRows.length) return invalidRows;
+    return [
+      {
+        title: 'XCO2 统计',
+        lines: [`最小值：${metrics.min_xco2 ?? '-'}`, `最大值：${metrics.max_xco2 ?? '-'}`, `平均值：${metrics.avg_xco2 ?? '-'}`],
+      },
+    ];
+  }
+  if (check.name === 'carbon_quality_flag') {
+    return [
+      {
+        title: '质量标记分布',
+        lines: Object.entries(metrics.quality_counts || {}).map(([flag, count]) => `Q${flag || '-'}：${count}`),
+      },
+    ];
+  }
+  if (check.name === 'carbon_duplicates') {
+    return (metrics.duplicates || []).map((item) => ({
+      title: item.observation_id,
+      lines: [`重复次数：${item.count}`],
+    }));
+  }
+  if (check.name === 'carbon_footprint') {
+    return (metrics.invalid_rows || []).map((item) => ({
+      title: `观测行 ${item.line_no}`,
+      lines: [`几何类型：${item.type || '-'}`],
+    }));
+  }
   return [];
+}
+
+function qualitySourceText() {
+  if (qualityDataType.value === 'product') return '数据产品自动质检';
+  if (qualityDataType.value === 'carbon') return '碳卫星自动质检';
+  return '光学遥感自动质检';
+}
+
+function qualityBreakdownTitle() {
+  if (qualityDataType.value === 'product') return '年份行数';
+  if (qualityDataType.value === 'carbon') return '质量标记分布';
+  return '波段行数';
+}
+
+function qualityBreakdownRows() {
+  const summary = qualityReport.value?.summary || {};
+  if (qualityDataType.value === 'product') return summary.rows_by_year || {};
+  if (qualityDataType.value === 'carbon') return summary.quality_counts || {};
+  return summary.rows_by_band || {};
+}
+
+function qualityDataTypeForEndpoint(endpoint) {
+  if (endpoint === 'product') return 'product';
+  if (endpoint === 'carbon') return 'carbon';
+  return 'optical';
 }
 
 function formatQualityTime(value) {
@@ -765,24 +1199,29 @@ async function runDemo() {
     if (!endpoint) {
       throw new Error(`不支持的剖分模块: ${activeModule.value}`);
     }
-    const selectedBatch = activeModule.value === 'optical'
-      ? opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id))
-      : null;
-    const selectedAssets = activeModule.value === 'optical'
-      ? selectedOpticalAssets.value
-      : [];
-    const payload = activeModule.value === 'optical'
-      ? {
-          grid_type: opticalGridType.value,
-          grid_level: Number(opticalGridLevel.value),
-          batch_id: selectedBatch?.id || '',
-          batch_name: selectedBatch?.name || '',
-          selected_assets: selectedAssets,
-        }
-      : {};
-    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
-    lastPartitionRequest.value = { endpoint, payload, operation };
-    setPartitionStage('queue', 'running', activeModule.value === 'optical' ? `准备读取 ${selectedAssets.length} 条影像资产。` : '准备读取当前队列中的数据。');
+    const { payload, selectedCount } = partitionPayloadForActiveModule();
+    if (activeModule.value === 'optical' && selectedCount <= 0) {
+      throw new Error('请至少选择一条影像资产');
+    }
+	    if (activeModule.value === 'carbon' && selectedCount <= 0) {
+	      throw new Error('请至少选择一条碳卫星观测');
+	    }
+	    if (activeModule.value === 'product' && selectedCount <= 0) {
+	      throw new Error('请至少选择一个信息产品年份');
+	    }
+	    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
+	    lastPartitionRequest.value = { endpoint, payload, operation };
+	    setPartitionStage(
+	      'queue',
+	      'running',
+	      activeModule.value === 'optical'
+	        ? `准备读取 ${selectedCount} 条影像资产。`
+	        : activeModule.value === 'carbon'
+	          ? `准备读取 ${selectedCount} 条碳卫星观测。`
+	          : activeModule.value === 'product'
+	            ? `准备读取 ${selectedCount} 个信息产品年份。`
+	            : '准备读取当前队列中的数据。',
+	    );
     await Promise.resolve();
     setPartitionStage('queue', 'done', '数据队列已提交到后端。');
     setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/${operation} 执行剖分。`);
@@ -791,8 +1230,13 @@ async function runDemo() {
     setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
-    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
-    ElMessage.success(testModules.has(activeModule.value) ? '剖分测试完成，未写入正式库' : '剖分任务完成');
+	    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+	    if (result.quality_report) {
+	      qualityDataType.value = qualityDataTypeForEndpoint(endpoint);
+	      qualityReport.value = result.quality_report;
+	      selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+	    }
+	    ElMessage.success(testModules.has(activeModule.value) ? '剖分测试完成，未写入正式库' : '剖分任务完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     ElMessage.error(error.message);
@@ -921,10 +1365,10 @@ async function retryLastPartitionTask() {
     setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
-    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
-    if (activeModule.value === 'quality' && result.quality_report) {
-      qualityDataType.value = retryRequest.endpoint === 'product' ? 'product' : 'optical';
-      qualityReport.value = result.quality_report;
+	    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+	    if (activeModule.value === 'quality' && result.quality_report) {
+	      qualityDataType.value = qualityDataTypeForEndpoint(retryRequest.endpoint);
+	      qualityReport.value = result.quality_report;
       selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
       await loadQualityHistory();
     }
@@ -950,7 +1394,16 @@ watch(qualityDataType, () => {
   }
 });
 
-watch([selectedOpticalBatchIds, deselectedOpticalAssetKeys, opticalGridType, opticalGridLevel], () => {
+watch([
+  selectedOpticalBatchIds,
+  deselectedOpticalAssetKeys,
+  opticalGridType,
+  opticalGridLevel,
+  selectedProductBatchIds,
+  deselectedProductAssetKeys,
+  productGridType,
+  productGridLevel,
+], () => {
   mapGridGeometries.value = [];
 }, { deep: true });
 
@@ -1041,14 +1494,6 @@ onUnmounted(() => {
                       <div class="queue-selected-summary">当前选择：<span>{{ selectedDataName }}</span></div>
                     </div>
                   </div>
-                  <div class="form-group">
-                    <label>观测足迹匹配</label>
-                    <el-select model-value="centroid" class="legacy-control">
-                      <el-option label="重心落入" value="centroid" />
-                      <el-option label="面积加权" value="weighted" />
-                      <el-option label="最近邻" value="nearest" />
-                    </el-select>
-                  </div>
                 </template>
 
                 <template v-else-if="activeModule === 'radar'">
@@ -1091,27 +1536,38 @@ onUnmounted(() => {
 
                 <template v-else>
                   <div class="form-group">
-                    <label>质检数据类型</label>
-                    <el-select v-model="qualityDataType" class="legacy-control">
-                      <el-option label="光学遥感" value="optical" />
-                      <el-option label="数据产品" value="product" />
-                    </el-select>
-                  </div>
+	                    <label>质检数据类型</label>
+	                    <el-select v-model="qualityDataType" class="legacy-control">
+	                      <el-option label="光学遥感" value="optical" />
+	                      <el-option label="数据产品" value="product" />
+	                      <el-option label="碳卫星" value="carbon" />
+	                    </el-select>
+	                  </div>
                   <div class="form-group">
                     <label>目标参考系统</label>
                     <el-select v-model="qualityTargetCrs" class="legacy-control" @change="refreshQuality">
                       <el-option label="EPSG:4326" value="EPSG:4326" />
                     </el-select>
                   </div>
-                  <div class="form-group">
-                    <div class="quality-rule-list">
-                      <div>索引字段完整性</div>
-                      <div>COG 可读性与 CRS</div>
-                      <div>window 越界检查</div>
-                      <div>像元抽样有效性</div>
-                      <div v-if="qualityDataType === 'product'">产品年份完整性</div>
-                    </div>
-                  </div>
+	                  <div class="form-group">
+	                    <div class="quality-rule-list">
+	                      <template v-if="qualityDataType === 'carbon'">
+	                        <div>观测行文件读取</div>
+	                        <div>观测字段完整性</div>
+	                        <div>观测坐标合法性</div>
+	                        <div>XCO2 数值范围</div>
+	                        <div>质量标记分布</div>
+	                        <div>观测 ID 重复检查</div>
+	                      </template>
+	                      <template v-else>
+	                        <div>索引字段完整性</div>
+	                        <div>COG 可读性与 CRS</div>
+	                        <div>window 越界检查</div>
+	                        <div>像元抽样有效性</div>
+	                        <div v-if="qualityDataType === 'product'">产品年份完整性</div>
+	                      </template>
+	                    </div>
+	                  </div>
                   <div class="form-group">
                     <label>历史质检记录</label>
                     <button type="button" class="quality-history-drawer-toggle" @click="openQualityHistoryDrawer">
@@ -1168,14 +1624,15 @@ onUnmounted(() => {
             <div class="workspace-main">
               <div v-if="activeModule !== 'quality'" class="map-panel">
                 <div class="panel-header">
-                  <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : '地图预览' }}</h3>
-                  <div v-if="activeModule === 'optical'" class="map-actions">
-                    <el-input-number v-model="opticalGridLevel" :min="1" :max="15" size="small" />
+                  <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : activeModule === 'product' ? '产品范围地图预览' : '地图预览' }}</h3>
+                  <div v-if="['optical', 'product'].includes(activeModule)" class="map-actions">
+                    <el-input-number v-if="activeModule === 'optical'" v-model="opticalGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-else v-model="productGridLevel" :min="1" :max="15" size="small" />
                     <el-button size="small" :loading="mapGridLoading" @click="loadMapGridForSelectedAssets">加载格网</el-button>
                     <el-button size="small" @click="clearMapGrid">清空格网</el-button>
                   </div>
                 </div>
-                <LeafletMap :markers="[]" :geometries="activeModule === 'optical' ? mapGeometries : []" />
+                <LeafletMap :markers="[]" :geometries="['optical', 'product'].includes(activeModule) ? mapGeometries : []" />
               </div>
               <div v-else class="quality-overview-panel">
                 <div class="panel-header">
@@ -1201,17 +1658,17 @@ onUnmounted(() => {
                       <span>报告 ID</span>
                       <strong>{{ qualityReport.report_id }}</strong>
                     </div>
-                    <div class="quality-kv">
-                      <span>来源</span>
-                      <strong>{{ qualityDataType === 'product' ? '数据产品自动质检' : '光学遥感自动质检' }}</strong>
-                    </div>
-                  </div>
-                  <div class="quality-band-table">
-                    <div class="quality-section-title">{{ qualityDataType === 'product' ? '年份行数' : '波段行数' }}</div>
-                    <div
-                      v-for="(value, band) in (qualityDataType === 'product' ? qualityReport.summary.rows_by_year : qualityReport.summary.rows_by_band)"
-                      :key="band"
-                      class="quality-kv"
+	                    <div class="quality-kv">
+	                      <span>来源</span>
+	                      <strong>{{ qualitySourceText() }}</strong>
+	                    </div>
+	                  </div>
+	                  <div class="quality-band-table">
+	                    <div class="quality-section-title">{{ qualityBreakdownTitle() }}</div>
+	                    <div
+	                      v-for="(value, band) in qualityBreakdownRows()"
+	                      :key="band"
+	                      class="quality-kv"
                     >
                       <span>{{ band }}</span>
                       <strong>{{ value }}</strong>
@@ -1382,7 +1839,97 @@ onUnmounted(() => {
           </div>
         </div>
       </template>
-      <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
+      <template v-else-if="activeModule === 'carbon'">
+        <div class="batch-list">
+          <div
+            v-for="batch in carbonBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+            :key="batch.id"
+            class="batch-card"
+          >
+            <div class="batch-card-header">
+              <el-checkbox :model-value="selectedCarbonBatchIds.includes(batch.id)" @change="toggleCarbonBatchSelect(batch.id)">
+                <span class="batch-name">{{ batch.name }}</span>
+              </el-checkbox>
+              <div class="batch-meta">
+                <span class="batch-id">{{ batch.id }}</span>
+                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
+                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
+                <button type="button" class="batch-expand-btn" @click="toggleCarbonBatchExpand(batch.id)">
+                  {{ expandedCarbonBatchId === batch.id ? '收起' : '展开' }}
+                </button>
+              </div>
+            </div>
+            <div class="batch-summary">{{ carbonBatchSummary(batch) }}</div>
+            <div v-if="expandedCarbonBatchId === batch.id" class="batch-assets">
+              <div class="schema-grid">
+                <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
+                  <strong>{{ field.field }}</strong>
+                  <span>{{ field.type }}</span>
+                  <small>{{ field.meaning }}</small>
+                </div>
+              </div>
+              <div v-for="observation in batch.observations" :key="`${batch.id}-${observation.source_index}`" class="asset-row">
+                <div class="asset-main">
+                  <el-checkbox :model-value="isCarbonObservationSelected(batch.id, observation)" @change="toggleCarbonObservationSelect(batch.id, observation)" />
+                  <strong>{{ observation.observation_id }}</strong>
+                  <span>{{ observation.acq_time }}</span>
+                  <span>xco2 {{ observation.xco2 }}</span>
+                  <span>Q{{ observation.quality_flag }}</span>
+                </div>
+                <div class="asset-source">{{ batch.source_uri }} #{{ observation.source_index }}</div>
+                <div class="asset-corners">center: [{{ observation.lon }}, {{ observation.lat }}]</div>
+              </div>
+            </div>
+          </div>
+        </div>
+	      </template>
+	      <template v-else-if="activeModule === 'product'">
+	        <div class="batch-list">
+	          <div
+	            v-for="batch in productBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+	            :key="batch.id"
+	            class="batch-card"
+	          >
+	            <div class="batch-card-header">
+	              <el-checkbox :model-value="selectedProductBatchIds.includes(batch.id)" @change="toggleProductBatchSelect(batch.id)">
+	                <span class="batch-name">{{ batch.name }}</span>
+	              </el-checkbox>
+	              <div class="batch-meta">
+	                <span class="batch-id">{{ batch.id }}</span>
+	                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
+	                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
+	                <button type="button" class="batch-expand-btn" @click="toggleProductBatchExpand(batch.id)">
+	                  {{ expandedProductBatchId === batch.id ? '收起' : '展开' }}
+	                </button>
+	              </div>
+	            </div>
+	            <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
+	            <div v-if="expandedProductBatchId === batch.id" class="batch-assets">
+	              <div class="schema-grid">
+	                <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
+	                  <strong>{{ field.field }}</strong>
+	                  <span>{{ field.type }}</span>
+	                  <small>{{ field.meaning }}</small>
+	                </div>
+	              </div>
+	              <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
+	                <div class="asset-main">
+	                  <el-checkbox :model-value="isProductAssetSelected(batch.id, asset)" @change="toggleProductAssetSelect(batch.id, asset)" />
+	                  <strong>{{ asset.product_year }} 年</strong>
+	                  <span>{{ asset.band }}</span>
+	                  <span>{{ asset.resolution }}</span>
+	                  <span>{{ asset.acq_time }}</span>
+	                </div>
+		                <div class="asset-source">{{ asset.source_uri }}</div>
+		                <div class="asset-corners">product: {{ asset.product_name }} | {{ batch.target_crs }}</div>
+		                <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
+		                <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+		              </div>
+	            </div>
+	          </div>
+	        </div>
+	      </template>
+	      <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
         <el-table-column prop="id" label="批次ID" min-width="190" />
         <el-table-column prop="name" label="名称" min-width="260" />
         <el-table-column prop="params" label="参数" min-width="180" />
@@ -1413,9 +1960,14 @@ onUnmounted(() => {
       >
         <el-table-column label="数据集" prop="dataset" min-width="130" />
         <el-table-column label="批次" prop="run_name" min-width="170" />
-        <el-table-column v-if="qualityDataType === 'product'" label="年份" min-width="150">
-          <template #default="{ row }">{{ row.summary?.product_years?.join(', ') || '-' }}</template>
-        </el-table-column>
+	        <el-table-column v-if="qualityDataType === 'product'" label="年份" min-width="150">
+	          <template #default="{ row }">{{ row.summary?.product_years?.join(', ') || '-' }}</template>
+	        </el-table-column>
+	        <el-table-column v-if="qualityDataType === 'carbon'" label="质量标记" min-width="150">
+	          <template #default="{ row }">
+	            {{ Object.entries(row.summary?.quality_counts || {}).map(([flag, count]) => `Q${flag}: ${count}`).join(', ') || '-' }}
+	          </template>
+	        </el-table-column>
         <el-table-column label="状态" width="86">
           <template #default="{ row }">
             <el-tag :type="checkStatusType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>

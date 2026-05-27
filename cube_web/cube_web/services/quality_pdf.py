@@ -30,7 +30,12 @@ def _wrap_pdf_line(text: str, width: int = 96) -> list[str]:
 
 def _quality_report_pdf_lines(report: dict, data_type: str) -> list[str]:
     summary = report.get("summary", {}) or {}
-    data_type_text = "数据产品" if data_type == "product" else "光学遥感"
+    data_type_texts = {
+        "product": "数据产品",
+        "carbon": "碳卫星",
+        "carbon_satellite": "碳卫星",
+    }
+    data_type_text = data_type_texts.get(data_type, "光学遥感")
     lines = [
         "质检报告",
         "",
@@ -55,12 +60,24 @@ def _quality_report_pdf_lines(report: dict, data_type: str) -> list[str]:
 
     rows_by_band = summary.get("rows_by_band") or {}
     rows_by_year = summary.get("rows_by_year") or {}
+    rows_by_satellite = summary.get("rows_by_satellite") or {}
+    rows_by_product_type = summary.get("rows_by_product_type") or {}
+    quality_counts = summary.get("quality_counts") or {}
     if rows_by_band:
         lines.extend(["", "波段行数"])
         lines.extend(f"- {band}: {value}" for band, value in sorted(rows_by_band.items()))
     if rows_by_year:
         lines.extend(["", "年份行数"])
         lines.extend(f"- {year}: {value}" for year, value in sorted(rows_by_year.items()))
+    if rows_by_satellite:
+        lines.extend(["", "卫星行数"])
+        lines.extend(f"- {satellite}: {value}" for satellite, value in sorted(rows_by_satellite.items()))
+    if rows_by_product_type:
+        lines.extend(["", "产品类型行数"])
+        lines.extend(f"- {product_type}: {value}" for product_type, value in sorted(rows_by_product_type.items()))
+    if quality_counts:
+        lines.extend(["", "质量标记分布"])
+        lines.extend(f"- {flag}: {value}" for flag, value in sorted(quality_counts.items()))
 
     lines.extend(["", "检查项"])
     for check in report.get("checks", []) or []:
@@ -86,7 +103,7 @@ def _quality_report_html(lines: list[str]) -> str:
             body_parts.append("<div class='spacer'></div>")
         elif line == "质检报告":
             body_parts.append(f"<div class='title'>{escape(line)}</div>")
-        elif line in {"质检概要", "波段行数", "年份行数", "检查项", "资产抽查"}:
+        elif line in {"质检概要", "波段行数", "年份行数", "卫星行数", "产品类型行数", "质量标记分布", "检查项", "资产抽查"}:
             body_parts.append(f"<h2>{escape(line)}</h2>")
         else:
             body_parts.append(f"<p>{escape(line)}</p>")

@@ -203,6 +203,8 @@ def convert_assets_to_cog(
             acq_time=asset.acq_time,
             product_family=asset.product_family,
             sensor=asset.sensor,
+            bbox=asset.bbox,
+            corners=asset.corners,
         )
 
     if worker_count == 1:
@@ -336,8 +338,11 @@ def build_grid_tasks_driver(
     tasks: list[dict] = []
 
     for asset in assets:
-        with rasterio.open(asset.path) as ds:
-            min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
+        if asset.bbox is not None:
+            min_lon, min_lat, max_lon, max_lat = map(float, asset.bbox)
+        else:
+            with rasterio.open(asset.path) as ds:
+                min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
 
         scene_cover_key = (asset.scene_id, float(min_lon), float(min_lat), float(max_lon), float(max_lat))
         cells = scene_cover_cache.get(scene_cover_key)

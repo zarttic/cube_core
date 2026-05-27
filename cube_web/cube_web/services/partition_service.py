@@ -133,6 +133,7 @@ def build_partition_registry(
     carbon_test: PartitionRunner,
     carbon_retry: PartitionRunner,
     product_demo: PartitionRunner,
+    product_test: PartitionRunner,
     product_retry: PartitionRunner,
 ) -> Dict[str, PartitionBackend]:
     return {
@@ -151,6 +152,7 @@ def build_partition_registry(
         "product": PartitionBackend(
             data_type="product",
             demo=product_demo,
+            test=product_test,
             retry=product_retry,
         ),
         "radar": PartitionBackend(data_type="radar", implemented=False),

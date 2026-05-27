@@ -31,6 +31,10 @@ def _optical_demo_input_dir() -> Path:
     return repo_root() / "cube_split" / "data" / "optocal"
 
 
+def _product_demo_input_dir() -> Path:
+    return repo_root() / "cube_split" / "data" / "product"
+
+
 def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
     source_path = Path(str(source_uri or "").strip())
     if not source_path:
@@ -44,6 +48,22 @@ def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
         raise ValueError(f"Optical demo asset is outside input_dir: {source_uri}")
     if not resolved.exists() or resolved.suffix.lower() not in {".tif", ".tiff"}:
         raise FileNotFoundError(f"Optical demo asset not found: {resolved}")
+    return resolved
+
+
+def _resolve_product_demo_source(source_uri: str, input_dir: Path) -> Path:
+    source_path = Path(str(source_uri or "").strip())
+    if not source_path:
+        raise ValueError("selected_assets[].source_uri is required")
+    if source_path.is_absolute():
+        resolved = source_path.resolve()
+    else:
+        resolved = (input_dir / source_path).resolve()
+    input_root = input_dir.resolve()
+    if input_root != resolved and input_root not in resolved.parents:
+        raise ValueError(f"Product demo asset is outside input_dir: {source_uri}")
+    if not resolved.exists() or resolved.suffix.lower() not in {".tif", ".tiff"}:
+        raise FileNotFoundError(f"Product demo asset not found: {resolved}")
     return resolved
 
 
@@ -69,6 +89,63 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
                 "corners": asset.get("corners"),
                 "sensor": str(asset.get("sensor") or "optical_mosaic"),
                 "product_family": str(asset.get("product_family") or "other"),
+            }
+        )
+    return manifest_assets
+
+
+def _selected_product_input_dir(payload: dict, input_dir: Path, root: Path) -> Path:
+    selected_assets = payload.get("selected_assets") or []
+    if not selected_assets:
+        return input_dir
+    if not isinstance(selected_assets, list):
+        raise ValueError("selected_assets must be an array")
+
+    selected_input_dir = root / "input"
+    selected_input_dir.mkdir(parents=True, exist_ok=True)
+    for idx, asset in enumerate(selected_assets, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"selected_assets[{idx}] must be an object")
+        source = _resolve_product_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        target = selected_input_dir / source.name
+        if not target.exists():
+            target.symlink_to(source)
+    return selected_input_dir
+
+
+def _selected_product_manifest_assets(payload: dict, input_dir: Path, run_input_dir: Path) -> list[dict]:
+    selected_assets = payload.get("selected_assets") or []
+    if not selected_assets:
+        return []
+    if not isinstance(selected_assets, list):
+        raise ValueError("selected_assets must be an array")
+
+    manifest_assets: list[dict] = []
+    for idx, asset in enumerate(selected_assets, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"selected_assets[{idx}] must be an object")
+        corners = asset.get("corners")
+        if not corners:
+            return []
+        source = _resolve_product_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        target = run_input_dir / source.name
+        product_year = asset.get("product_year")
+        acq_time = str(asset.get("acq_time") or "").strip()
+        if not acq_time and product_year:
+            acq_time = f"{int(product_year):04d}-01-01T00:00:00Z"
+        manifest_assets.append(
+            {
+                "data_type": "product",
+                "source_uri": str(target),
+                "scene_id": str(asset.get("scene_id") or (f"dianzhong_ecological_security_{product_year}" if product_year else source.stem)),
+                "product_name": str(asset.get("product_name") or source.stem),
+                "product_year": product_year,
+                "acq_time": acq_time or "1970-01-01T00:00:00Z",
+                "band": str(asset.get("band") or "product_value"),
+                "bbox": asset.get("bbox"),
+                "corners": corners,
+                "sensor": str(asset.get("sensor") or "data_product"),
+                "product_family": str(asset.get("product_family") or "product"),
             }
         )
     return manifest_assets
@@ -173,7 +250,27 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
-def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
+def _carbon_selected_source_indexes(payload: dict | None) -> tuple[int, ...] | None:
+    selected_observations = (payload or {}).get("selected_observations") or []
+    if not isinstance(selected_observations, list):
+        return None
+    indexes: list[int] = []
+    for item in selected_observations:
+        if not isinstance(item, dict):
+            continue
+        source_index = item.get("source_index")
+        if source_index is None:
+            continue
+        try:
+            indexes.append(int(source_index))
+        except (TypeError, ValueError):
+            continue
+    if not indexes:
+        return None
+    return tuple(sorted(set(indexes)))
+
+
+def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | None = None) -> dict:
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
@@ -186,6 +283,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
     input_dir.mkdir(parents=True)
     (input_dir / sample.name).symlink_to(sample)
     workers = 4
+    selected_source_indexes = _carbon_selected_source_indexes(payload)
     args = SimpleNamespace(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
@@ -199,6 +297,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
         partition_backend=str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
         ray_address=str(os.environ.get("CUBE_WEB_RAY_ADDRESS", "")),
         ray_parallelism=workers,
+        selected_source_indexes=selected_source_indexes,
     )
     start = time.perf_counter()
     result = run_carbon_partition(args)
@@ -212,7 +311,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
             space_codes.add(row["space_code"])
             quality = str(row.get("quality_flag"))
             quality_counts[quality] = quality_counts.get(quality, 0) + 1
-    return {
+    response = {
         "status": "completed",
         "mode": mode,
         "data_type": "carbon_satellite",
@@ -227,16 +326,26 @@ def _run_carbon_partition_demo(mode: str = "partition_demo") -> dict:
         "grid_type": result["grid_type"],
         "grid_level": result["grid_level"],
         "workers": workers,
+        "batch_id": (payload or {}).get("batch_id") or "",
+        "batch_name": (payload or {}).get("batch_name") or "",
+        "selected_observation_count": len(selected_source_indexes or ()),
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
         "ray_address": result["ray_address"],
         "ingest_enabled": mode != "partition_test_no_ingest",
         "output_path": str(rows_path),
     }
+    if quality_checks.run_carbon_quality_check is not None:
+        quality_report = quality_checks.run_carbon_quality_check(quality_args(str(result["run_dir"]), {"target_crs": "EPSG:4326"}))
+        quality_report = get_quality_report_store().upsert_report("carbon", result["run_dir"], quality_report)
+        response["quality_status"] = quality_report.get("status")
+        response["quality_report"] = quality_report
+        response["quality_report_id"] = quality_report.get("report_id")
+    return response
 
 
 def _run_carbon_partition_test(payload: dict | None = None) -> dict:
-    return _run_carbon_partition_demo(mode="partition_test_no_ingest")
+    return _run_carbon_partition_demo(mode="partition_test_no_ingest", payload=payload)
 
 
 def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
@@ -256,9 +365,27 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
 
     payload = payload or {}
     root = _demo_run_dir("product")
-    input_dir = Path(str(payload.get("input_dir") or (repo_root() / "cube_split" / "data" / "product"))).expanduser().resolve()
+    input_dir = Path(str(payload.get("input_dir") or _product_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
         raise FileNotFoundError(f"Product demo input_dir not found: {input_dir}")
+    run_input_dir = _selected_product_input_dir(payload, input_dir, root)
+    manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
+    manifest_assets = _selected_product_manifest_assets(payload, input_dir, run_input_dir)
+    if manifest_assets:
+        manifest_path = root / "selected_assets_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "batch_id": payload.get("batch_id") or "frontend-product-demo",
+                    "batch_name": payload.get("batch_name") or "frontend product demo",
+                    "data_type": "product",
+                    "assets": manifest_assets,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in {"geohash", "mgrs", "isea4h"}:
@@ -268,7 +395,8 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         raise ValueError("grid_level must be greater than 0")
 
     args = SimpleNamespace(
-        input_dir=str(input_dir),
+        input_dir=str(run_input_dir),
+        manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
         output_dir=str(root / "output"),
         cog_input_dir=str(root / "cog"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
@@ -287,6 +415,10 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["output_path"] = result.get("rows_path")
     result["workers"] = args.partition_workers
     result["execution_engine"] = "thread"
+    result["batch_id"] = payload.get("batch_id") or ""
+    result["batch_name"] = payload.get("batch_name") or ""
+    result["selected_asset_count"] = len(payload.get("selected_assets") or [])
+    result["ingest_enabled"] = mode != "partition_test_no_ingest"
     if quality_checks.run_product_quality_check is not None:
         quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": args.target_crs}))
         quality_report = get_quality_report_store().upsert_report("product", result["run_dir"], quality_report)
@@ -294,6 +426,10 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         result["quality_report"] = quality_report
         result["quality_report_id"] = quality_report.get("report_id")
     return result
+
+
+def _run_product_partition_test(payload: dict | None = None) -> dict:
+    return _run_product_partition_demo(payload, mode="partition_test_no_ingest")
 
 
 def _run_product_partition_retry(payload: dict | None = None) -> dict:

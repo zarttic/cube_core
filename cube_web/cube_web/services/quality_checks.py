@@ -9,3 +9,8 @@ try:
     from cube_split.quality.product_quality import run_quality_check as run_product_quality_check
 except ModuleNotFoundError:  # pragma: no cover - cube_web can run with SDK-only routes.
     run_product_quality_check = None
+
+try:
+    from cube_split.quality.carbon_quality import run_quality_check as run_carbon_quality_check
+except ModuleNotFoundError:  # pragma: no cover - cube_web can run with SDK-only routes.
+    run_carbon_quality_check = None

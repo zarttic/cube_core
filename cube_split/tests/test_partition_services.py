@@ -104,6 +104,47 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     assert row["satellite"] == "OCO2"
 
 
+def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+    rows = []
+    for idx in range(4):
+        rows.append(
+            json.dumps(
+                {
+                    "satellite": "OCO2",
+                    "observation_id": f"snd-{idx}",
+                    "acq_time": "2026-04-24T00:00:00Z",
+                    "lon": 116.391 + idx * 0.001,
+                    "lat": 39.907 + idx * 0.001,
+                    "xco2": 420.5 + idx,
+                    "quality_flag": "0",
+                    "source_uri": "file:///oco2.nc4",
+                    "source_index": idx,
+                }
+            )
+        )
+    (input_dir / "oco2.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    result = CarbonSatellitePartitionService().run(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CarbonPartitionConfig(
+            grid_type="geohash",
+            grid_level=7,
+            selected_source_indexes=(1, 3),
+        ),
+        workers=1,
+    )
+
+    output_rows = [json.loads(line) for line in result.rows_path.read_text(encoding="utf-8").splitlines()]
+
+    assert result.total_rows == 2
+    assert [row["source_index"] for row in output_rows] == [1, 3]
+    assert [row["observation_id"] for row in output_rows] == ["snd-1", "snd-3"]
+
+
 def test_supported_carbon_product_types_are_registered():
     service = CarbonSatellitePartitionService()
 
@@ -405,6 +446,45 @@ def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
     assert [row["space_code"] for row in rows] == ["cell-a", "cell-b"]
     assert calls[0]["items"][0]["point"] == [116.391, 39.907]
     assert calls[0]["items"][1]["point"] == [116.392, 39.908]
+
+
+def test_carbon_partition_chunk_rejects_mismatched_batch_locate_results(monkeypatch):
+    class FakeSDK:
+        def batch_locate_st_codes(self, **kwargs):
+            return [
+                {
+                    "grid_level": kwargs["level"],
+                    "space_code": "cell-a",
+                    "st_code": "gh:7:cell-a:20260424:v1",
+                    "time_code": "20260424",
+                }
+            ]
+
+    monkeypatch.setattr("cube_split.partition.carbon.CubeEncoderSDK", FakeSDK)
+    observations = [
+        CarbonSatelliteObservation(
+            satellite="OCO2",
+            observation_id="snd-a",
+            acq_time="2026-04-24T00:00:00Z",
+            lon=116.391,
+            lat=39.907,
+            xco2=420.5,
+        ),
+        CarbonSatelliteObservation(
+            satellite="OCO2",
+            observation_id="snd-b",
+            acq_time="2026-04-24T00:00:00Z",
+            lon=116.392,
+            lat=39.908,
+            xco2=421.5,
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match="1 cells for 2 carbon observations"):
+        _partition_observation_chunk(
+            observations,
+            CarbonPartitionConfig(grid_type="geohash", grid_level=7),
+        )
 
 
 def test_carbon_partition_uses_process_backend_by_default(monkeypatch):

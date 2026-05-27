@@ -34,6 +34,7 @@ class CarbonPartitionConfig:
     time_granularity: str = "day"
     product_type: str = "xco2"
     max_observations: int | None = None
+    selected_source_indexes: tuple[int, ...] | None = None
     partition_chunk_size: int = 1000
     partition_backend: str = "process"
     ray_address: str = ""
@@ -402,8 +403,13 @@ def _partition_observation_chunk(
         time_granularity=config.time_granularity,
         version="v1",
     )
+    if len(located) != len(observations):
+        raise RuntimeError(
+            "batch locate returned "
+            f"{len(located)} cells for {len(observations)} carbon observations"
+        )
     rows: list[dict[str, Any]] = []
-    for observation, cell in zip(observations, located, strict=True):
+    for observation, cell in zip(observations, located):
         rows.append(
             {
                 "data_type": "carbon_satellite",
@@ -436,15 +442,22 @@ def _load_observation_chunks(
 ) -> list[list[CarbonSatelliteObservation]]:
     chunks: list[list[CarbonSatelliteObservation]] = []
     normalized_product_type = normalize_carbon_product_type(config.product_type)
+    selected_source_indexes = set(config.selected_source_indexes or ())
 
     def load_one(path: Path, max_observations: int | None = None) -> list[CarbonSatelliteObservation]:
         if normalized_product_type == "xco2":
             return load_observations_from_file(path, max_observations=max_observations)
         return load_observations_from_file(path, max_observations=max_observations, product_type=config.product_type)
 
+    def select_observations(observations: list[CarbonSatelliteObservation]) -> list[CarbonSatelliteObservation]:
+        if not selected_source_indexes:
+            return observations
+        return [obs for obs in observations if obs.source_index in selected_source_indexes]
+
     if config.max_observations is None and worker_count > 1 and len(files) > 1:
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             for observations in pool.map(load_one, files):
+                observations = select_observations(observations)
                 chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
         return chunks
 
@@ -453,6 +466,7 @@ def _load_observation_chunks(
         if remaining is not None and remaining <= 0:
             break
         observations = load_one(path, max_observations=remaining)
+        observations = select_observations(observations)
         if remaining is not None:
             observations = observations[:remaining]
             remaining -= len(observations)

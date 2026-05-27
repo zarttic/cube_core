@@ -10,14 +10,25 @@ from typing import Any
 from cube_split.quality import optical_quality
 
 
-EXPECTED_PRODUCT_YEARS = (1980, 1990, 2000, 2010, 2020)
-
-
 def _check(name: str, status: str, message: str, **metrics: Any) -> dict[str, Any]:
     return {"name": name, "status": status, "message": message, "metrics": metrics}
 
 
-def _validate_product_years(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _expected_product_years(args: argparse.Namespace) -> tuple[int, ...]:
+    raw = getattr(args, "expected_years", None)
+    if raw in (None, "", []):
+        return ()
+    values = raw if isinstance(raw, (list, tuple, set)) else str(raw).split(",")
+    years: list[int] = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        years.append(int(text))
+    return tuple(sorted(set(years)))
+
+
+def _validate_product_years(rows: list[dict[str, Any]], expected_years: tuple[int, ...] = ()) -> dict[str, Any]:
     years: set[int] = set()
     invalid_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -30,25 +41,34 @@ def _validate_product_years(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if str(row.get("time_bucket")) != str(year):
             invalid_rows.append({"line_no": row.get("_line_no"), "time_bucket": row.get("time_bucket"), "expected": str(year)})
 
-    missing = [year for year in EXPECTED_PRODUCT_YEARS if year not in years]
-    unexpected = sorted(year for year in years if year not in EXPECTED_PRODUCT_YEARS)
     if invalid_rows:
         return _check("product_years", "FAIL", "Some product rows have invalid year metadata.", invalid_rows=invalid_rows[:20])
-    if missing or unexpected:
+
+    if expected_years:
+        missing = [year for year in expected_years if year not in years]
+        unexpected = sorted(year for year in years if year not in expected_years)
+        if missing or unexpected:
+            return _check(
+                "product_years",
+                "WARN",
+                "Product year coverage differs from the explicitly expected years.",
+                expected_years=list(expected_years),
+                present_years=sorted(years),
+                missing_years=missing,
+                unexpected_years=unexpected,
+            )
         return _check(
             "product_years",
-            "WARN",
-            "Product year coverage is incomplete or contains unexpected years.",
-            expected_years=list(EXPECTED_PRODUCT_YEARS),
+            "PASS",
+            "Product year coverage matches the explicitly expected years.",
+            expected_years=list(expected_years),
             present_years=sorted(years),
-            missing_years=missing,
-            unexpected_years=unexpected,
         )
+
     return _check(
         "product_years",
         "PASS",
-        "Product year coverage is complete.",
-        expected_years=list(EXPECTED_PRODUCT_YEARS),
+        "Product year metadata matches the current output rows.",
         present_years=sorted(years),
     )
 
@@ -65,6 +85,7 @@ def _summarize_product(rows: list[dict[str, Any]], assets: list[dict[str, Any]],
 def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = Path(args.run_dir)
     target_crs = getattr(args, "target_crs", "EPSG:4326") or "EPSG:4326"
+    expected_years = _expected_product_years(args)
     rows_path = run_dir / "index_rows.jsonl"
     checks: list[dict[str, Any]] = []
 
@@ -99,7 +120,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
     checks.append(optical_quality._validate_required_fields(rows))
     assets: list[dict[str, Any]] = []
     if not any(check["name"] == "index_schema" and check["status"] == "FAIL" for check in checks):
-        checks.append(_validate_product_years(rows))
+        checks.append(_validate_product_years(rows, expected_years=expected_years))
         checks.append(optical_quality._validate_cell_bboxes(rows))
         checks.append(optical_quality._validate_duplicates(rows))
         asset_checks, assets = optical_quality._validate_assets(rows, target_crs)
@@ -127,6 +148,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run quality checks for product partition output")
     parser.add_argument("--run-dir", required=True, help="Partition run directory containing index_rows.jsonl")
     parser.add_argument("--target-crs", default="EPSG:4326", help="Expected CRS for standardized COG assets")
+    parser.add_argument("--expected-years", default="", help="Optional comma-separated product years required for completeness checks")
     parser.add_argument("--output", default="", help="Optional quality report JSON path")
     return parser.parse_args()
 

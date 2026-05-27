@@ -52,6 +52,7 @@ _retry_payload_for_warning_assets = partition_runners._retry_payload_for_warning
 
 run_optical_quality_check = quality_checks.run_optical_quality_check
 run_product_quality_check = quality_checks.run_product_quality_check
+run_carbon_quality_check = quality_checks.run_carbon_quality_check
 
 
 def _run_carbon_partition_demo() -> dict:
@@ -68,6 +69,10 @@ def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
 
 def _run_product_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
     return partition_runners._run_product_partition_demo(payload, mode=mode)
+
+
+def _run_product_partition_test(payload: dict | None = None) -> dict:
+    return partition_runners._run_product_partition_test(payload)
 
 
 def _run_product_partition_retry(payload: dict | None = None) -> dict:
@@ -157,6 +162,13 @@ def partition_carbon_retry(payload: PartitionRetryRequest | dict | None = None) 
 def partition_product_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_product_partition_demo(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def partition_product_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    try:
+        return _run_product_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -259,6 +271,36 @@ def quality_product_history(payload: dict | None = None) -> dict:
     return {"records": records, "count": len(records)}
 
 
+def quality_carbon_latest(payload: dict | None = None) -> dict:
+    payload_from_model(payload)
+    report = get_quality_report_store().latest_report("carbon")
+    if report is None:
+        raise HTTPException(status_code=404, detail="No carbon quality report found")
+    return report
+
+
+def quality_carbon_report(payload: dict) -> dict:
+    payload = payload_from_model(payload)
+    report_id = str(payload.get("report_id", "")).strip()
+    if not report_id:
+        raise HTTPException(status_code=422, detail="report_id is required")
+    report = get_quality_report_store().get_report("carbon", report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Carbon quality report not found: {report_id}")
+    return report
+
+
+def quality_carbon_report_pdf(payload: dict) -> Response:
+    return quality_report_pdf_response(quality_carbon_report(payload), data_type="carbon")
+
+
+def quality_carbon_history(payload: dict | None = None) -> dict:
+    payload = payload_from_model(payload)
+    limit = _history_limit(payload)
+    records = get_quality_report_store().list_reports("carbon", limit=limit)
+    return {"records": records, "count": len(records)}
+
+
 def _history_limit(payload: dict) -> int:
     try:
         limit = int(payload.get("limit", 20) or 20)
@@ -278,6 +320,7 @@ partition_service = PartitionService(
         carbon_test=partition_carbon_test,
         carbon_retry=partition_carbon_retry,
         product_demo=partition_product_demo,
+        product_test=partition_product_test,
         product_retry=partition_product_retry,
     )
 )
