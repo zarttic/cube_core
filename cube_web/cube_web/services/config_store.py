@@ -167,7 +167,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "mgrs", "isea4h"}, "grid_type")
     optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=1)
     optical["target_crs"] = _text_value(optical.get("target_crs"), "target_crs")
-    optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contains"}, "cover_mode")
+    optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
     optical["time_granularity"] = _choice(optical.get("time_granularity"), {"hour", "day", "month", "year"}, "time_granularity")
     optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=1)
     optical["cog_workers"] = _int_value(optical.get("cog_workers"), "cog_workers", minimum=0)

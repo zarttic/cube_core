@@ -32,8 +32,8 @@ class PartitionDemoRequest(CubeWebModel):
     batch_name: str | None = None
     selected_assets: list[OpticalAssetSelection] | None = None
     target_crs: str | None = None
-    cover_mode: str | None = None
-    time_granularity: str | None = None
+    cover_mode: Literal["intersect", "contain", "minimal"] | None = None
+    time_granularity: Literal["year", "month", "day", "hour", "minute"] | None = None
     max_cells_per_asset: int | None = Field(default=None, ge=1)
     cog_workers: int | None = Field(default=None, ge=0)
     partition_workers: int | None = Field(default=None, ge=0)

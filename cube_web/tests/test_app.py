@@ -215,7 +215,14 @@ def test_config_update_persists_normalized_values():
         "/v1/config/update",
         json={
             "config": {
-                "partition": {"optical": {"grid_type": "mgrs", "grid_level": 8, "ray_parallelism": 0}},
+                "partition": {
+                    "optical": {
+                        "grid_type": "mgrs",
+                        "grid_level": 8,
+                        "ray_parallelism": 0,
+                        "cover_mode": "contain",
+                    }
+                },
                 "ingest": {"optical": {"dataset": "customer_demo", "sensor": "landsat", "quality_rule": "latest_wins"}},
                 "quality": {"optical": {"history_limit": 50}},
             }
@@ -227,6 +234,7 @@ def test_config_update_persists_normalized_values():
     assert body["config"]["partition"]["optical"]["grid_type"] == "mgrs"
     assert body["config"]["partition"]["optical"]["grid_level"] == 8
     assert body["config"]["partition"]["optical"]["ray_parallelism"] == 0
+    assert body["config"]["partition"]["optical"]["cover_mode"] == "contain"
     assert body["config"]["ingest"]["optical"]["dataset"] == "customer_demo"
     assert body["config"]["quality"]["optical"]["history_limit"] == 50
 
@@ -239,6 +247,26 @@ def test_config_update_rejects_invalid_values():
 
     assert resp.status_code == 422
     assert "grid_level" in resp.json()["detail"]
+
+
+def test_config_update_rejects_legacy_contains_cover_mode():
+    resp = client.post("/v1/config/update", json={"config": {"partition": {"optical": {"cover_mode": "contains"}}}})
+
+    assert resp.status_code == 422
+    assert "cover_mode" in resp.json()["detail"]
+
+
+def test_partition_demo_rejects_legacy_contains_cover_mode():
+    resp = client.post(
+        "/v1/partition/optical/demo",
+        json={
+            "grid_type": "geohash",
+            "grid_level": 5,
+            "cover_mode": "contains",
+        },
+    )
+
+    assert resp.status_code == 422
 
 
 def test_carbon_partition_demo_endpoint(monkeypatch):

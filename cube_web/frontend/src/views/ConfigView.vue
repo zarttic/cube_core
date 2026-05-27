@@ -181,7 +181,7 @@ onMounted(loadConfig);
                 <el-form-item label="覆盖模式">
                   <el-select v-model="optical.cover_mode">
                     <el-option label="相交" value="intersect" />
-                    <el-option label="包含" value="contains" />
+                    <el-option label="包含" value="contain" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="时间粒度">
