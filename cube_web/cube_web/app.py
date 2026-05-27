@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from cube_web.routes.config import create_config_router
 from cube_web.routes.ingest import create_ingest_router
@@ -11,7 +12,7 @@ from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
 from cube_web.schemas import PartitionDemoRequest, PartitionRetryRequest, payload_from_model
-from cube_web.services import partition_runners, quality_checks, quality_service
+from cube_web.services import auth_service, partition_runners, quality_checks, quality_service
 from cube_web.services.partition_service import PartitionService, build_partition_registry
 from cube_web.services.quality_pdf import quality_report_pdf_response
 from cube_web.services.quality_report_store import get_quality_report_store
@@ -30,6 +31,7 @@ ENCODER_SDK_CLASS = CubeEncoderSDK
 
 app = FastAPI(title="cube-web")
 api_router = APIRouter(prefix="/v1", tags=["sdk-web"])
+auth_router = APIRouter(prefix="/api", tags=["auth"])
 sdk = CubeEncoderSDK()
 
 
@@ -126,6 +128,63 @@ def _resolve_web_file(path_name: str) -> Path:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.middleware("http")
+async def require_auth_for_api(request: Request, call_next):
+    settings = auth_service.auth_settings()
+    if settings.required and request.url.path.startswith("/v1/"):
+        try:
+            token = auth_service.bearer_token(request.headers.get("Authorization"))
+            auth_service.verify_access_token(token, settings)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
+@auth_router.get("/config")
+def auth_config() -> dict[str, str]:
+    settings = auth_service.auth_settings()
+    return {
+        "client_id": settings.client_id,
+        "redirect_uri": settings.redirect_uri,
+        "main_system_url": settings.main_system_url,
+    }
+
+
+@auth_router.get("/callback")
+def auth_callback(code: str, state: str | None = None) -> dict:
+    token_response = auth_service.exchange_code_for_token(code)
+    token = token_response.get("access_token") or token_response.get("token")
+    if not token:
+        raise HTTPException(status_code=502, detail="Auth service did not return access_token")
+    return {
+        "access_token": token,
+        "token_type": token_response.get("token_type", "bearer"),
+        "expires_in": token_response.get("expires_in"),
+        "state": state,
+    }
+
+
+@auth_router.get("/verify")
+def auth_verify(authorization: str | None = Header(default=None)) -> dict:
+    token = auth_service.bearer_token(authorization)
+    payload = auth_service.verify_access_token(token)
+    return {"valid": True, "sub": payload.get("sub")}
+
+
+@auth_router.get("/me")
+def auth_me(authorization: str | None = Header(default=None)) -> dict:
+    token = auth_service.bearer_token(authorization)
+    return auth_service.user_info_from_token(token)
+
+
+@auth_router.post("/logout")
+def auth_logout(authorization: str | None = Header(default=None)) -> dict:
+    token = None
+    if authorization:
+        token = auth_service.bearer_token(authorization)
+    return auth_service.notify_logout(token)
 
 
 @app.exception_handler(GridCoreError)
@@ -330,6 +389,17 @@ api_router.include_router(create_ingest_router())
 api_router.include_router(create_config_router())
 api_router.include_router(create_partition_router(partition_service))
 app.include_router(api_router)
+app.include_router(auth_router)
+
+
+@app.get("/callback")
+def auth_callback_page(code: str | None = None, state: str | None = None):
+    if code:
+        query = {"code": code}
+        if state:
+            query["state"] = state
+        return RedirectResponse(f"/?{urlencode(query)}")
+    return FileResponse(WEB_DIR / "index.html", media_type="text/html")
 
 
 @app.get("/")

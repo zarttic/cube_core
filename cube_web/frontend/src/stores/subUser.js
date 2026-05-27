@@ -1,0 +1,98 @@
+import { computed, reactive } from 'vue';
+
+import { requestGet, requestPost } from '@/api/client';
+import { AUTH_CONFIG } from '@/config';
+
+const state = reactive({
+  token: localStorage.getItem('access_token') || '',
+  userInfo: readUserInfo(),
+});
+
+function readUserInfo() {
+  try {
+    return JSON.parse(localStorage.getItem('user_info') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function persistToken(token) {
+  state.token = token || '';
+  if (token) {
+    localStorage.setItem('access_token', token);
+  } else {
+    localStorage.removeItem('access_token');
+  }
+}
+
+function persistUserInfo(userInfo) {
+  state.userInfo = userInfo || {};
+  if (userInfo && Object.keys(userInfo).length) {
+    localStorage.setItem('user_info', JSON.stringify(userInfo));
+  } else {
+    localStorage.removeItem('user_info');
+  }
+}
+
+export function useSubUserStore() {
+  const username = computed(() => state.userInfo.username || '');
+  const role = computed(() => state.userInfo.role || '普通用户');
+  const avatarUrl = computed(() => state.userInfo.avatarUrl || state.userInfo.avatar_url || '');
+  const isAuthenticated = computed(() => Boolean(state.token));
+
+  async function fetchUserInfo() {
+    if (!state.token) return null;
+    const userInfo = await requestGet('/api/me');
+    persistUserInfo(userInfo);
+    return userInfo;
+  }
+
+  async function exchangeCode(code, stateValue = '') {
+    const query = new URLSearchParams({ code });
+    if (stateValue) query.set('state', stateValue);
+    const response = await requestGet(`/api/callback?${query.toString()}`);
+    const token = response.access_token || response.token;
+    if (!token) throw new Error('登录回调未返回 access_token');
+    persistToken(token);
+    await fetchUserInfo();
+    return response;
+  }
+
+  function redirectToAuth(targetPath = window.location.pathname || '/') {
+    const stateValue = Math.random().toString(36).slice(2);
+    sessionStorage.setItem('oauth_state', stateValue);
+    sessionStorage.setItem('oauth_target', targetPath);
+    const redirectUri = AUTH_CONFIG.REDIRECT_URI.split('?')[0];
+    const authUrl = `${AUTH_CONFIG.MAIN_SYSTEM_URL}/api/authorize?client_id=${encodeURIComponent(AUTH_CONFIG.CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(stateValue)}`;
+    window.location.href = authUrl;
+  }
+
+  async function logout() {
+    const currentToken = state.token || localStorage.getItem('access_token') || '';
+    if (currentToken) {
+      try {
+        await requestPost('/api/logout', {});
+      } catch {
+        // Local logout should succeed even when the upstream auth service is unavailable.
+      }
+    }
+    persistToken('');
+    persistUserInfo({});
+    sessionStorage.removeItem('oauth_target');
+    sessionStorage.removeItem('oauth_state');
+    window.location.replace(`${AUTH_CONFIG.MAIN_SYSTEM_URL}/?logout=true`);
+  }
+
+  return {
+    state,
+    username,
+    role,
+    avatarUrl,
+    isAuthenticated,
+    persistToken,
+    fetchUserInfo,
+    exchangeCode,
+    redirectToAuth,
+    logout,
+  };
+}

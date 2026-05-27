@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 import subprocess
 import time
@@ -17,6 +20,19 @@ from cube_web.services.quality_report_store import set_quality_report_store
 
 
 client = TestClient(app)
+
+
+def make_jwt(payload, secret="your-secret-key-here-change-in-production"):
+    header = {"alg": "HS256", "typ": "JWT"}
+
+    def encode(data):
+        raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    signing_input = f"{encode(header)}.{encode(payload)}"
+    signature = hmac.new(secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"{signing_input}.{encoded_signature}"
 
 
 class FakeQualityReportStore:
@@ -193,6 +209,64 @@ def test_config_page_serves_vue_app():
     resp = client.get("/config")
     assert resp.status_code == 200
     assert "分析就绪数据剖分管理系统" in resp.text
+
+
+def test_auth_config_exposes_subsystem_client(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://10.136.1.14:5177")
+    monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
+    monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://10.136.1.14:50040/callback")
+
+    resp = client.get("/api/config")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "client_id": "system_ard",
+        "redirect_uri": "http://10.136.1.14:50040/callback",
+        "main_system_url": "http://10.136.1.14:5177",
+    }
+
+
+def test_auth_verify_and_me_accept_hs256_jwt():
+    token = make_jwt(
+        {
+            "sub": "u-1",
+            "username": "alice",
+            "role": "管理员",
+            "avatar_url": "http://example.test/avatar.png",
+            "exp": time.time() + 3600,
+        }
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    verify_resp = client.get("/api/verify", headers=headers)
+    me_resp = client.get("/api/me", headers=headers)
+
+    assert verify_resp.status_code == 200
+    assert verify_resp.json()["valid"] is True
+    assert verify_resp.json()["sub"] == "u-1"
+    assert me_resp.status_code == 200
+    assert me_resp.json()["username"] == "alice"
+    assert me_resp.json()["role"] == "管理员"
+    assert me_resp.json()["avatarUrl"] == "http://example.test/avatar.png"
+
+
+def test_auth_required_rejects_v1_without_bearer(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "1")
+
+    resp = client.post("/v1/config/get", json={})
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Missing Authorization header"
+
+
+def test_auth_required_allows_v1_with_valid_bearer(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "1")
+    token = make_jwt({"sub": "u-1", "username": "alice", "exp": time.time() + 3600})
+
+    resp = client.post("/v1/config/get", json={}, headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "geohash"
 
 
 def test_cube_web_imports_encoder_package():

@@ -4,8 +4,11 @@ import { navItems, normalizePath } from '@/data/navigation';
 import HomeView from '@/views/HomeView.vue';
 import PartitionView from '@/views/PartitionView.vue';
 import EncodingView from '@/views/EncodingView.vue';
+import { AUTH_REQUIRED } from '@/config';
+import { useSubUserStore } from '@/stores/subUser';
 
 const currentPath = ref(normalizePath(window.location.pathname));
+const userStore = useSubUserStore();
 
 const pageMap = {
   '/': HomeView,
@@ -32,7 +35,41 @@ function isNavActive(item) {
   return item.path === '/partition' && currentPath.value === '/config';
 }
 
-onMounted(() => window.addEventListener('popstate', handlePopState));
+async function initializeAuth() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const state = params.get('state') || '';
+  if (code) {
+    await userStore.exchangeCode(code, state);
+    const target = sessionStorage.getItem('oauth_target') || '/';
+    sessionStorage.removeItem('oauth_target');
+    sessionStorage.removeItem('oauth_state');
+    window.history.replaceState({}, '', target);
+    currentPath.value = normalizePath(window.location.pathname);
+    return;
+  }
+  if (localStorage.getItem('access_token')) {
+    try {
+      await userStore.fetchUserInfo();
+      return;
+    } catch {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('user_info');
+    }
+  }
+  if (AUTH_REQUIRED) {
+    userStore.redirectToAuth(window.location.pathname + window.location.search);
+  }
+}
+
+async function handleLogout() {
+  await userStore.logout();
+}
+
+onMounted(async () => {
+  window.addEventListener('popstate', handlePopState);
+  await initializeAuth();
+});
 onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
 </script>
 
@@ -67,7 +104,17 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
           </template>
         </nav>
         <div class="portal-header-side">
-          <span class="user-chip">系统总览</span>
+          <div class="user-profile">
+            <div class="user-info">
+              <img v-if="userStore.avatarUrl.value" :src="userStore.avatarUrl.value" class="user-avatar" alt="" />
+              <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+              <span>{{ userStore.username.value || '访客' }} · {{ userStore.role.value || '普通用户' }}</span>
+            </div>
+            <button class="logout-btn" type="button" @click="handleLogout">退出</button>
+          </div>
         </div>
       </div>
     </header>

@@ -1,18 +1,50 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
-export async function requestJson(path, payload = {}) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(payload),
-  });
+export function accessToken() {
+  return localStorage.getItem('access_token') || '';
+}
+
+function authHeaders(headers = {}) {
+  const token = accessToken();
+  return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
+}
+
+async function parseResponse(response) {
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message = body?.error?.message || body?.detail || `请求失败: ${response.status}`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return body;
+}
+
+export async function requestJson(path, payload = {}) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: authHeaders(JSON_HEADERS),
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function requestGet(path) {
+  const response = await fetch(path, {
+    method: 'GET',
+    headers: authHeaders(),
+  });
+  return parseResponse(response);
+}
+
+export async function requestPost(path, payload = {}) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: authHeaders(JSON_HEADERS),
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
 }
 
 export function apiPrefixes() {
