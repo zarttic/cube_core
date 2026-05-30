@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -11,7 +11,7 @@ from grid_core.app.core.enums import BoundaryType, CoverMode, GridType, TimeGran
 class LocateRequest(BaseModel):
     grid_type: GridType = GridType.GEOHASH
     level: int = Field(ge=1, le=12)
-    point: list[float] = Field(min_length=2, max_length=2)
+    point: List[float] = Field(min_length=2, max_length=2)
 
     @model_validator(mode="after")
     def validate_point_range(self):
@@ -28,8 +28,8 @@ class CoverRequest(BaseModel):
     level: int = Field(ge=1, le=12)
     cover_mode: CoverMode = CoverMode.INTERSECT
     boundary_type: BoundaryType = BoundaryType.BBOX
-    geometry: dict[str, Any] | None = None
-    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    geometry: Optional[Dict[str, Any]] = None
+    bbox: Optional[List[float]] = Field(default=None, min_length=4, max_length=4)
     crs: str = "EPSG:4326"
 
     @model_validator(mode="after")
@@ -62,7 +62,7 @@ class STCodeBatchGenerateRequest(BaseModel):
     level: int = Field(ge=1, le=12)
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
     version: str = "v1"
-    items: list[STCodeBatchItem] = Field(min_length=1, max_length=1000)
+    items: List[STCodeBatchItem] = Field(min_length=1, max_length=1000)
 
 
 class NeighborsRequest(BaseModel):
@@ -79,7 +79,7 @@ class CodeToGeometryRequest(BaseModel):
 
 class BatchCodeToGeometryRequest(BaseModel):
     grid_type: GridType = GridType.GEOHASH
-    codes: list[str] = Field(min_length=1, max_length=500)
+    codes: List[str] = Field(min_length=1, max_length=500)
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 

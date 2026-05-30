@@ -12,6 +12,7 @@ from cube_split.partition.carbon import (
     CarbonSatelliteObservation,
     _partition_chunks,
     _partition_observation_chunk,
+    _ray_runtime_env_from_env,
     load_oco2_lite_observations,
     partition_observation,
 )
@@ -624,6 +625,17 @@ def test_carbon_partition_can_use_ray_backend(monkeypatch):
     assert [row["observation_id"] for row in rows] == ["snd-a", "snd-b"]
     assert processed_chunks == [1, 1]
     assert remote_calls == ["init", "actor", "actor", "shutdown"]
+
+
+def test_carbon_ray_runtime_env_ships_project_code(monkeypatch):
+    monkeypatch.delenv("RAY_RUNTIME_ENV_JSON", raising=False)
+
+    runtime_env = _ray_runtime_env_from_env()
+
+    assert runtime_env is not None
+    assert runtime_env["working_dir"].endswith("cube_project")
+    assert runtime_env["env_vars"]["PYTHONPATH"] == ".:./cube_encoder:./cube_split:./cube_web"
+    assert "cube_split/data/**" in runtime_env["excludes"]
 
 
 def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):

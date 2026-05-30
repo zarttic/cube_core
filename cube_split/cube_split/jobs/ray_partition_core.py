@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
+from urllib.parse import urlparse
 
 import rasterio
 from pyproj import Transformer
@@ -22,6 +24,11 @@ from grid_core.sdk import CubeEncoderSDK
 from cube_split.partition.optical_products import parse_optical_asset
 from cube_split.partition.product_products import parse_product_asset
 
+DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
+DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
+DEFAULT_MINIO_SECRET_KEY = "minioadmin"
+DEFAULT_MINIO_BUCKET = "cube"
+
 
 @dataclass
 class AssetRecord:
@@ -33,6 +40,177 @@ class AssetRecord:
     sensor: str = "unknown"
     bbox: list[float] | None = None
     corners: list[list[float]] | None = None
+    resolution: float | None = None
+
+
+def _is_s3_uri(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("s3://")
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+        raise ValueError(f"Invalid s3 URI: {uri}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _bool_option(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _minio_service_env() -> dict[str, str]:
+    path = Path("/etc/default/minio")
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _minio_options(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = dict(options or {})
+    service_env = _minio_service_env()
+    return {
+        "endpoint": str(
+            raw.get("endpoint")
+            or raw.get("minio_endpoint")
+            or os.environ.get("CUBE_WEB_MINIO_ENDPOINT")
+            or os.environ.get("MINIO_ENDPOINT")
+            or DEFAULT_MINIO_ENDPOINT
+        ),
+        "access_key": str(
+            raw.get("access_key")
+            or raw.get("minio_access_key")
+            or os.environ.get("CUBE_WEB_MINIO_ACCESS_KEY")
+            or os.environ.get("MINIO_ACCESS_KEY")
+            or service_env.get("MINIO_ROOT_USER")
+            or DEFAULT_MINIO_ACCESS_KEY
+        ),
+        "secret_key": str(
+            raw.get("secret_key")
+            or raw.get("minio_secret_key")
+            or os.environ.get("CUBE_WEB_MINIO_SECRET_KEY")
+            or os.environ.get("MINIO_SECRET_KEY")
+            or service_env.get("MINIO_ROOT_PASSWORD")
+            or DEFAULT_MINIO_SECRET_KEY
+        ),
+        "secure": _bool_option(raw.get("secure", raw.get("minio_secure")), False),
+    }
+
+
+def _minio_client(options: dict[str, Any] | None = None):
+    try:
+        from minio import Minio
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("MinIO source assets require `minio` package") from exc
+
+    cfg = _minio_options(options)
+    if not cfg["endpoint"] or not cfg["access_key"] or not cfg["secret_key"]:
+        raise ValueError("MinIO endpoint/access-key/secret-key are required")
+    return Minio(
+        endpoint=cfg["endpoint"],
+        access_key=cfg["access_key"],
+        secret_key=cfg["secret_key"],
+        secure=bool(cfg["secure"]),
+    )
+
+
+def _cache_path_for_uri(uri: str, cache_root: Path, suffix: str | None = None) -> Path:
+    _, key = _parse_s3_uri(uri)
+    digest = hashlib.sha1(uri.encode("utf-8")).hexdigest()[:16]
+    name = Path(key).name
+    if suffix is not None:
+        name = f"{Path(name).stem}{suffix}"
+    return cache_root / digest / name
+
+
+def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | None = None) -> Path:
+    from minio.error import S3Error
+
+    bucket, key = _parse_s3_uri(uri)
+    client = _minio_client(options)
+    target = _cache_path_for_uri(uri, cache_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stat = client.stat_object(bucket, key)
+    if not target.exists() or target.stat().st_size != stat.size:
+        tmp = target.with_suffix(target.suffix + ".part")
+        client.fget_object(bucket, key, str(tmp))
+        tmp.replace(target)
+
+    sidecar_keys = [f"{key}.aux.xml", f"{key}.ovr"]
+    if key.lower().endswith((".tif", ".tiff")):
+        sidecar_keys.append(f"{key.rsplit('.', 1)[0]}.tfw")
+    for sidecar_key in sidecar_keys:
+        sidecar_uri = f"s3://{bucket}/{sidecar_key}"
+        sidecar_target = target.parent / Path(sidecar_key).name
+        try:
+            sidecar_stat = client.stat_object(bucket, sidecar_key)
+        except S3Error as exc:
+            if exc.code in {"NoSuchKey", "NoSuchObject"}:
+                continue
+            raise
+        if not sidecar_target.exists() or sidecar_target.stat().st_size != sidecar_stat.size:
+            tmp = sidecar_target.with_suffix(sidecar_target.suffix + ".part")
+            client.fget_object(bucket, sidecar_key, str(tmp))
+            tmp.replace(sidecar_target)
+    return target
+
+
+def resolve_asset_source_path(source_uri: str, options: dict[str, Any] | None = None) -> str:
+    text = str(source_uri or "").strip()
+    if not text:
+        raise ValueError("source_uri is required")
+    if not _is_s3_uri(text):
+        return text
+    cache_root = Path(
+        str(
+            (options or {}).get("source_cache_dir")
+            or os.environ.get("CUBE_SOURCE_CACHE_DIR")
+            or "/tmp/cube_split_source_cache"
+        )
+    )
+    return str(_download_s3_object(text, cache_root, options).resolve())
+
+
+def _upload_file_to_minio(path: Path, key: str, options: dict[str, Any]) -> str:
+    from minio.error import S3Error
+
+    bucket = str(options.get("bucket") or options.get("minio_bucket") or os.environ.get("CUBE_WEB_MINIO_BUCKET") or os.environ.get("MINIO_BUCKET") or DEFAULT_MINIO_BUCKET)
+    if not bucket:
+        raise ValueError("MinIO bucket is required")
+    client = _minio_client(options)
+    try:
+        stat = client.stat_object(bucket, key)
+        if stat.size == path.stat().st_size:
+            return f"s3://{bucket}/{key}"
+    except S3Error as exc:
+        if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+            raise
+    client.fput_object(bucket, key, str(path))
+    return f"s3://{bucket}/{key}"
+
+
+def upload_cog_to_minio(asset: AssetRecord, cog_path: Path, options: dict[str, Any] | None = None) -> str:
+    opts = dict(options or {})
+    prefix = str(opts.get("prefix") or opts.get("minio_prefix") or "cube/cog").strip("/")
+    dataset = str(opts.get("dataset") or "demo")
+    sensor = str(opts.get("sensor") or asset.sensor or "unknown")
+    version = str(opts.get("asset_version") or opts.get("version") or "v1")
+    date_path = datetime.fromisoformat(asset.acq_time.replace("Z", "+00:00")).strftime("%Y/%m/%d")
+    key = (
+        f"{prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
+        f"scene_id={asset.scene_id}/version={version}/{cog_path.name}"
+    )
+    return _upload_file_to_minio(cog_path, key, opts)
 
 
 def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[AssetRecord]:
@@ -90,23 +268,29 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
         lats = [p[1] for p in parsed_corners]
         bbox = [min(lons), min(lats), max(lons), max(lats)]
         datetime.fromisoformat(acq_time.replace("Z", "+00:00"))
-        path = Path(source_uri)
-        if not path.is_absolute():
-            path = (base_dir / path).resolve()
+        if _is_s3_uri(source_uri):
+            path_text = source_uri
+        else:
+            path = Path(source_uri)
+            if not path.is_absolute():
+                path = (base_dir / path).resolve()
+            path_text = str(path)
         data_type = str(row.get("data_type") or default_data_type).strip().lower()
         if data_type not in {"optical", "product", "radar"}:
             raise ValueError(f"Invalid manifest row #{idx}: unsupported data_type={data_type!r}")
         for band in bands:
+            resolution = _manifest_resolution(row)
             records.append(
                 AssetRecord(
                     scene_id=scene_id,
                     band=band,
-                    path=str(path),
+                    path=path_text,
                     acq_time=acq_time,
                     product_family=str(row.get("product_family") or row.get("product_type") or "manifest").strip().lower(),
                     sensor=str(row.get("sensor") or "unknown").strip().lower(),
                     bbox=bbox,
                     corners=parsed_corners,
+                    resolution=resolution,
                 )
             )
     return records
@@ -140,6 +324,19 @@ def build_manifest(
     return records
 
 
+def _manifest_resolution(row: dict[str, Any]) -> float | None:
+    value = row.get("resolution")
+    if value is None or value == "":
+        return None
+    try:
+        resolution = float(str(value).lower().replace("m", "").strip())
+    except ValueError:
+        return None
+    if resolution > 0:
+        return resolution
+    return None
+
+
 def convert_assets_to_cog(
     assets: list[AssetRecord],
     cog_input_dir: Path,
@@ -151,6 +348,7 @@ def convert_assets_to_cog(
     overviews: str = "NONE",
     num_threads: str = "ALL_CPUS",
     target_crs: str | None = None,
+    source_options: dict[str, Any] | None = None,
 ) -> list[AssetRecord]:
     if not assets:
         return []
@@ -173,38 +371,13 @@ def convert_assets_to_cog(
         creation_options["NUM_THREADS"] = str(num_threads)
 
     def convert_one(asset: AssetRecord) -> AssetRecord:
-        src = Path(asset.path)
-        dst = cog_input_dir / f"{src.stem}_cog.tif"
-        if overwrite and dst.exists():
-            dst.unlink()
-        if not dst.exists():
-            with rasterio.open(src) as ds:
-                if target_crs and (ds.crs is None or ds.crs.to_string().upper() != target_crs.upper()):
-                    if ds.crs is None:
-                        raise ValueError(f"Cannot reproject asset without CRS: {src}")
-                    with WarpedVRT(ds, crs=target_crs, resampling=Resampling.nearest) as vrt:
-                        rio_copy(
-                            vrt,
-                            str(dst),
-                            driver="COG",
-                            **creation_options,
-                        )
-                else:
-                    rio_copy(
-                        ds,
-                        str(dst),
-                        driver="COG",
-                        **creation_options,
-                    )
-        return AssetRecord(
-            scene_id=asset.scene_id,
-            band=asset.band,
-            path=str(dst.resolve()),
-            acq_time=asset.acq_time,
-            product_family=asset.product_family,
-            sensor=asset.sensor,
-            bbox=asset.bbox,
-            corners=asset.corners,
+        return convert_asset_to_cog(
+            asset,
+            cog_input_dir=cog_input_dir,
+            overwrite=overwrite,
+            creation_options=creation_options,
+            target_crs=target_crs,
+            source_options=source_options,
         )
 
     if worker_count == 1:
@@ -212,6 +385,94 @@ def convert_assets_to_cog(
 
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         return list(pool.map(convert_one, assets))
+
+
+def cog_creation_options(
+    compress: str = "LZW",
+    predictor: int = 2,
+    level: int | None = None,
+    overviews: str = "NONE",
+    num_threads: str = "ALL_CPUS",
+) -> dict[str, str]:
+    options: dict[str, str] = {
+        "COMPRESS": str(compress).upper(),
+        "OVERVIEWS": overviews,
+    }
+    if predictor > 0:
+        options["PREDICTOR"] = str(predictor)
+    if level is not None and level > 0:
+        options["LEVEL"] = str(level)
+    if num_threads:
+        options["NUM_THREADS"] = str(num_threads)
+    return options
+
+
+def asset_record_to_dict(asset: AssetRecord) -> dict[str, Any]:
+    return {
+        "scene_id": asset.scene_id,
+        "band": asset.band,
+        "path": asset.path,
+        "acq_time": asset.acq_time,
+        "product_family": asset.product_family,
+        "sensor": asset.sensor,
+        "bbox": asset.bbox,
+        "corners": asset.corners,
+        "resolution": asset.resolution,
+    }
+
+
+def asset_record_from_dict(row: dict[str, Any]) -> AssetRecord:
+    return AssetRecord(
+        scene_id=str(row["scene_id"]),
+        band=str(row["band"]),
+        path=str(row["path"]),
+        acq_time=str(row["acq_time"]),
+        product_family=str(row.get("product_family") or "unknown"),
+        sensor=str(row.get("sensor") or "unknown"),
+        bbox=row.get("bbox"),
+        corners=row.get("corners"),
+        resolution=(float(row["resolution"]) if row.get("resolution") is not None else None),
+    )
+
+
+def convert_asset_to_cog(
+    asset: AssetRecord,
+    cog_input_dir: Path,
+    overwrite: bool,
+    creation_options: dict[str, str],
+    target_crs: str | None = None,
+    source_options: dict[str, Any] | None = None,
+) -> AssetRecord:
+    cog_input_dir.mkdir(parents=True, exist_ok=True)
+    local_source = Path(resolve_asset_source_path(asset.path, source_options))
+    if _is_s3_uri(asset.path):
+        source_stem = Path(_parse_s3_uri(asset.path)[1]).stem
+        digest = hashlib.sha1(asset.path.encode("utf-8")).hexdigest()[:10]
+        dst = cog_input_dir / f"{source_stem}_{digest}_cog.tif"
+    else:
+        dst = cog_input_dir / f"{local_source.stem}_cog.tif"
+    if overwrite and dst.exists():
+        dst.unlink()
+    if not dst.exists():
+        with rasterio.open(local_source) as ds:
+            if target_crs and (ds.crs is None or ds.crs.to_string().upper() != target_crs.upper()):
+                if ds.crs is None:
+                    raise ValueError(f"Cannot reproject asset without CRS: {asset.path}")
+                with WarpedVRT(ds, crs=target_crs, resampling=Resampling.nearest) as vrt:
+                    rio_copy(vrt, str(dst), driver="COG", **creation_options)
+            else:
+                rio_copy(ds, str(dst), driver="COG", **creation_options)
+    return AssetRecord(
+        scene_id=asset.scene_id,
+        band=asset.band,
+        path=str(dst.resolve()),
+        acq_time=asset.acq_time,
+        product_family=asset.product_family,
+        sensor=asset.sensor,
+        bbox=asset.bbox,
+        corners=asset.corners,
+        resolution=asset.resolution,
+    )
 
 
 def _dataset_bounds_wgs84(ds: rasterio.DatasetReader) -> tuple[float, float, float, float]:
@@ -341,7 +602,7 @@ def build_grid_tasks_driver(
         if asset.bbox is not None:
             min_lon, min_lat, max_lon, max_lat = map(float, asset.bbox)
         else:
-            with rasterio.open(asset.path) as ds:
+            with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
                 min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
 
         scene_cover_key = (asset.scene_id, float(min_lon), float(min_lat), float(max_lon), float(max_lat))
@@ -360,7 +621,7 @@ def build_grid_tasks_driver(
             )
             scene_cover_cache[scene_cover_key] = cells
 
-        if len(cells) > max_cells_per_asset:
+        if max_cells_per_asset > 0 and len(cells) > max_cells_per_asset:
             raise RuntimeError(
                 "Cover cells exceed max limit for asset %s: %d > %d"
                 % (asset.path, len(cells), max_cells_per_asset)
@@ -381,6 +642,7 @@ def build_grid_tasks_driver(
                     "cell_max_lon": float(cb[2]),
                     "cell_max_lat": float(cb[3]),
                     "cover_mode": cover_mode,
+                    "resolution": asset.resolution,
                 }
             )
     return tasks
@@ -432,7 +694,8 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
             if open_path != row.asset_path:
                 if open_ds is not None:
                     open_ds.close()
-                open_ds = rasterio.open(row.asset_path)
+                local_asset_path = resolve_asset_source_path(row.asset_path)
+                open_ds = rasterio.open(local_asset_path)
                 open_path = row.asset_path
                 ds_bounds_wgs84 = _dataset_bounds_wgs84(open_ds)
 

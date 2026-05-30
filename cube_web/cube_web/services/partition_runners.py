@@ -6,12 +6,22 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
+from urllib.parse import urlparse
 
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
 from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
+
+
+DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
+DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
+DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
+DEFAULT_MINIO_SECRET_KEY = "minioadmin"
+DEFAULT_MINIO_BUCKET = "cube"
+DEFAULT_ENTITY_GRID_LEVEL = 6
+DEFAULT_ENTITY_TEST_GRID_LEVEL = 3
 
 
 def _demo_run_dir(name: str) -> Path:
@@ -36,7 +46,61 @@ def _product_demo_input_dir() -> Path:
     return repo_root() / "cube_split" / "data" / "product"
 
 
+def _is_s3_uri(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("s3://")
+
+
+def _parse_s3_source_name(source_uri: str) -> str:
+    parsed = urlparse(source_uri)
+    if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+        raise ValueError(f"Invalid s3 source_uri: {source_uri}")
+    return Path(parsed.path).name
+
+
+def _minio_service_env() -> dict[str, str]:
+    path = Path("/etc/default/minio")
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _minio_access_key(payload: dict | None = None) -> str:
+    service_env = _minio_service_env()
+    payload = payload or {}
+    return str(
+        payload.get("minio_access_key")
+        or _env_text("CUBE_WEB_MINIO_ACCESS_KEY")
+        or _env_text("MINIO_ACCESS_KEY")
+        or service_env.get("MINIO_ROOT_USER")
+        or DEFAULT_MINIO_ACCESS_KEY
+    )
+
+
+def _minio_secret_key(payload: dict | None = None) -> str:
+    service_env = _minio_service_env()
+    payload = payload or {}
+    return str(
+        payload.get("minio_secret_key")
+        or _env_text("CUBE_WEB_MINIO_SECRET_KEY")
+        or _env_text("MINIO_SECRET_KEY")
+        or service_env.get("MINIO_ROOT_PASSWORD")
+        or DEFAULT_MINIO_SECRET_KEY
+    )
+
+
 def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
+    if _is_s3_uri(source_uri):
+        name = _parse_s3_source_name(source_uri)
+        if Path(name).suffix.lower() not in {".tif", ".tiff"}:
+            raise FileNotFoundError(f"Optical demo asset is not a TIF: {source_uri}")
+        return Path(source_uri)
     source_path = Path(str(source_uri or "").strip())
     if not source_path:
         raise ValueError("selected_assets[].source_uri is required")
@@ -53,6 +117,11 @@ def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
 
 
 def _resolve_product_demo_source(source_uri: str, input_dir: Path) -> Path:
+    if _is_s3_uri(source_uri):
+        name = _parse_s3_source_name(source_uri)
+        if Path(name).suffix.lower() not in {".tif", ".tiff"}:
+            raise FileNotFoundError(f"Product demo asset is not a TIF: {source_uri}")
+        return Path(source_uri)
     source_path = Path(str(source_uri or "").strip())
     if not source_path:
         raise ValueError("selected_assets[].source_uri is required")
@@ -83,11 +152,12 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
         manifest_assets.append(
             {
                 "data_type": "optical",
-                "source_uri": str(source),
+                "source_uri": str(asset.get("source_uri") or source),
                 "scene_id": str(asset.get("scene_id") or source.stem),
                 "acq_time": str(asset.get("acq_time") or "1970-01-01T00:00:00Z"),
                 "bands": asset.get("bands") or ([asset["band"]] if asset.get("band") else [source.stem]),
                 "corners": asset.get("corners"),
+                "resolution": asset.get("resolution"),
                 "sensor": str(asset.get("sensor") or "optical_mosaic"),
                 "product_family": str(asset.get("product_family") or "other"),
             }
@@ -107,6 +177,8 @@ def _selected_product_input_dir(payload: dict, input_dir: Path, root: Path) -> P
     for idx, asset in enumerate(selected_assets, start=1):
         if not isinstance(asset, dict):
             raise ValueError(f"selected_assets[{idx}] must be an object")
+        if _is_s3_uri(str(asset.get("source_uri") or "")):
+            continue
         source = _resolve_product_demo_source(str(asset.get("source_uri") or ""), input_dir)
         target = selected_input_dir / source.name
         if not target.exists():
@@ -137,7 +209,7 @@ def _selected_product_manifest_assets(payload: dict, input_dir: Path, run_input_
         manifest_assets.append(
             {
                 "data_type": "product",
-                "source_uri": str(target),
+                "source_uri": str(asset.get("source_uri") if _is_s3_uri(str(asset.get("source_uri") or "")) else target),
                 "scene_id": str(asset.get("scene_id") or (f"dianzhong_ecological_security_{product_year}" if product_year else source.stem)),
                 "product_name": str(asset.get("product_name") or source.stem),
                 "product_year": product_year,
@@ -145,6 +217,7 @@ def _selected_product_manifest_assets(payload: dict, input_dir: Path, run_input_
                 "band": str(asset.get("band") or "product_value"),
                 "bbox": asset.get("bbox"),
                 "corners": corners,
+                "resolution": asset.get("resolution"),
                 "sensor": str(asset.get("sensor") or "data_product"),
                 "product_family": str(asset.get("product_family") or "product"),
             }
@@ -172,6 +245,10 @@ def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
 
 def _env_text(name: str, default: str = "") -> str:
     return str(os.environ.get(name, default) or "")
+
+
+def _ray_address() -> str:
+    return _env_text("CUBE_WEB_RAY_ADDRESS", DEFAULT_RAY_ADDRESS)
 
 
 def _postgres_dsn() -> str:
@@ -259,6 +336,144 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
+def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
+
+    raw_payload = payload or {}
+    payload = _payload_with_defaults(payload, optical_partition_defaults())
+    ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
+    input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Entity demo input_dir not found: {input_dir}")
+
+    root = _demo_run_dir("entity")
+    output_root = root / "output"
+    manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
+    manifest_assets = _selected_optical_manifest_assets(payload, input_dir)
+    if manifest_assets:
+        manifest_path = root / "selected_assets_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "batch_id": payload.get("batch_id") or "frontend-entity-demo",
+                    "batch_name": payload.get("batch_name") or "frontend entity demo",
+                    "data_type": "optical",
+                    "assets": manifest_assets,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    elif not str(manifest_path):
+        default_manifest = input_dir / "manifest.json"
+        manifest_path = default_manifest if default_manifest.exists() else Path("")
+
+    default_grid_level = DEFAULT_ENTITY_TEST_GRID_LEVEL if mode == "partition_test_no_ingest" else DEFAULT_ENTITY_GRID_LEVEL
+    grid_level = _int_payload_value(raw_payload, "grid_level", default_grid_level)
+    if grid_level < 0:
+        raise ValueError("grid_level must be greater than or equal to 0")
+    grid_level_mode = str(raw_payload.get("grid_level_mode") or "manual").lower()
+    if grid_level_mode not in {"auto", "manual"}:
+        raise ValueError("grid_level_mode must be one of: auto, manual")
+    entity_grid_level = 0 if grid_level_mode == "auto" else grid_level
+
+    args = SimpleNamespace(
+        input_dir=str(input_dir),
+        manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
+        product_family=str(payload.get("product_family") or "auto"),
+        output_dir=str(output_root),
+        cog_input_dir=str(root / "cog"),
+        cog_overwrite=True,
+        cog_workers=_int_payload_value(payload, "cog_workers", 2),
+        cog_compress=str(payload.get("cog_compress") or "LZW"),
+        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
+        cog_level=_int_payload_value(payload, "cog_level", 0),
+        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
+        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_level=entity_grid_level,
+        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
+        cover_mode=str(payload.get("cover_mode") or "intersect"),
+        time_granularity=str(payload.get("time_granularity") or "day"),
+        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
+        ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
+        ray_address=str(payload.get("ray_address") or _ray_address()),
+        chunk_size=_int_payload_value(payload, "chunk_size", 0),
+        partition_backend=str(payload.get("partition_backend") or "ray"),
+        job_id=str(payload.get("job_id") or payload.get("batch_id") or ""),
+        dataset=str(ingest_payload.get("dataset") or "demo_optical"),
+        sensor=str(ingest_payload.get("sensor") or "optical_mosaic"),
+        asset_version=str(ingest_payload.get("asset_version") or "v1"),
+        metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
+        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
+        minio_endpoint=str(
+            payload.get("minio_endpoint")
+            or ingest_payload.get("minio_endpoint")
+            or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)
+        ),
+        minio_access_key=_minio_access_key(payload),
+        minio_secret_key=_minio_secret_key(payload),
+        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
+        minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
+        minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
+        minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
+        ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
+    )
+    report = run_entity_partition(args)
+    run_dir = Path(report["run_dir"])
+    rows_path = Path(str(report.get("rows_path") or run_dir / "entity_index_rows.jsonl"))
+    response = {
+        "status": "completed",
+        "mode": mode,
+        "data_type": "entity",
+        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
+        "demo_source": str(input_dir),
+        "batch_id": payload.get("batch_id") or "",
+        "batch_name": payload.get("batch_name") or "",
+        "run_dir": str(run_dir),
+        "rows_path": str(rows_path),
+        "output_path": str(rows_path),
+        "rows": int(report.get("total_index_rows", 0)),
+        "workers": report.get("ray_parallelism", 0),
+        "ingest_enabled": bool(report.get("ingest_enabled", False)),
+        **report,
+    }
+    response["data_type"] = "entity"
+    response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
+    if quality_checks.run_optical_quality_check is not None:
+        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
+        response["quality_status"] = quality_report.get("status")
+        response["quality_report"] = quality_report
+        response["quality_report_id"] = quality_report.get("report_id")
+    return response
+
+
+def _run_entity_partition_demo(payload: dict | None = None) -> dict:
+    return _run_entity_partition_from_payload(payload, mode="partition_demo")
+
+
+def _run_entity_partition_test(payload: dict | None = None) -> dict:
+    return _run_entity_partition_from_payload(payload, mode="partition_test_no_ingest")
+
+
+def _run_entity_partition_retry(payload: dict | None = None) -> dict:
+    request = (payload or {}).get("request") or {}
+    request_payload = request.get("payload") if isinstance(request, dict) else {}
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    result = _run_entity_partition_from_payload(request_payload, mode="partition_retry")
+    result["retry"] = {
+        "strategy": "full_request",
+        "warning_check_names": [],
+        "warning_asset_count": 0,
+        "retried_asset_count": 0,
+    }
+    return result
+
+
 def _carbon_selected_source_indexes(payload: dict | None) -> tuple[int, ...] | None:
     selected_observations = (payload or {}).get("selected_observations") or []
     if not isinstance(selected_observations, list):
@@ -304,7 +519,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         partition_chunk_size=250,
         partition_workers=workers,
         partition_backend=str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
-        ray_address=str(os.environ.get("CUBE_WEB_RAY_ADDRESS", "")),
+        ray_address=_ray_address(),
         ray_parallelism=workers,
         selected_source_indexes=selected_source_indexes,
     )
@@ -417,17 +632,40 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         cog_overwrite=True,
         cog_workers=_int_payload_value(payload, "cog_workers", 2),
         partition_workers=_int_payload_value(payload, "partition_workers", 0),
+        partition_backend=str(payload.get("partition_backend") or "ray"),
+        ray_address=str(payload.get("ray_address") or _ray_address()),
+        ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
+        chunk_size=_int_payload_value(payload, "chunk_size", 0),
         sample_mean=bool(payload.get("sample_mean", False)),
+        job_id=str(payload.get("job_id") or payload.get("batch_id") or ""),
+        dataset=str(payload.get("dataset") or "dianzhong_ecological_security"),
+        product_name=str(payload.get("product_name") or "滇中地区30米生态安全评价数据集"),
+        asset_version=str(payload.get("asset_version") or "v1"),
+        cube_version=str(payload.get("cube_version") or "product_v1"),
+        metadata_backend=str(payload.get("metadata_backend") or "postgres"),
+        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        db_path=str(payload.get("db_path") or ""),
+        asset_storage_backend=str(payload.get("asset_storage_backend") or "minio"),
+        minio_endpoint=str(payload.get("minio_endpoint") or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)),
+        minio_access_key=_minio_access_key(payload),
+        minio_secret_key=_minio_secret_key(payload),
+        minio_bucket=str(payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
+        minio_prefix=str(payload.get("minio_prefix") or "cube/product"),
+        minio_secure=bool(payload.get("minio_secure", False)),
+        minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
+        cog_output_root=str(payload.get("cog_output_root") or root / "product_cog_store"),
+        cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
+        ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
     )
     result = run_product_partition(args)
     result["mode"] = mode
     result["output_path"] = result.get("rows_path")
-    result["workers"] = args.partition_workers
-    result["execution_engine"] = "thread"
+    result["workers"] = result.get("ray_parallelism") or args.partition_workers
+    result["execution_engine"] = result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend
     result["batch_id"] = payload.get("batch_id") or ""
     result["batch_name"] = payload.get("batch_name") or ""
     result["selected_asset_count"] = len(payload.get("selected_assets") or [])
-    result["ingest_enabled"] = mode != "partition_test_no_ingest"
+    result["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(result.get("ingest_enabled", False))
     if quality_checks.run_product_quality_check is not None:
         quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": args.target_crs}))
         quality_report = get_quality_report_store().upsert_report("product", result["run_dir"], quality_report)
@@ -493,13 +731,16 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in {"geohash", "mgrs", "isea4h"}:
         raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
-    grid_level = _int_payload_value(payload, "grid_level", 5)
+    grid_level_default = DEFAULT_ENTITY_GRID_LEVEL if grid_type == "isea4h" else 5
+    if mode == "partition_test_no_ingest" and grid_type == "isea4h":
+        grid_level_default = DEFAULT_ENTITY_TEST_GRID_LEVEL
+    grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
-    grid_level_mode = str(payload.get("grid_level_mode") or "auto").lower()
+    grid_level_mode = str(raw_payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = grid_level if grid_level_mode == "manual" and "grid_level" in raw_payload else 0
+    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
 
     args = SimpleNamespace(
         input_dir=str(input_dir),
@@ -521,7 +762,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
-        ray_address=str(payload.get("ray_address") or os.environ.get("CUBE_WEB_RAY_ADDRESS", "")),
+        ray_address=str(payload.get("ray_address") or _ray_address()),
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
@@ -538,14 +779,15 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         minio_endpoint=str(
             payload.get("minio_endpoint")
             or ingest_payload.get("minio_endpoint")
-            or _env_text("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
+            or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)
         ),
-        minio_access_key=str(payload.get("minio_access_key") or _env_text("CUBE_WEB_MINIO_ACCESS_KEY")),
-        minio_secret_key=str(payload.get("minio_secret_key") or _env_text("CUBE_WEB_MINIO_SECRET_KEY")),
-        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET")),
+        minio_access_key=_minio_access_key(payload),
+        minio_secret_key=_minio_secret_key(payload),
+        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
+        ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
     )
     report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])
@@ -564,9 +806,10 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
         "workers": report.get("ray_parallelism", 0),
-        "ingest_enabled": mode != "partition_test_no_ingest",
+        "ingest_enabled": bool(report.get("ingest_enabled", False)),
         **report,
     }
+    response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
         quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
         quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)

@@ -9,7 +9,13 @@ from uuid import uuid4
 
 from cube_split.ingest import ray_ingest_job
 from cube_web.services import quality_service
-from cube_web.services.config_store import optical_ingest_defaults
+from cube_web.services.config_store import (
+    DEFAULT_MINIO_ACCESS_KEY,
+    DEFAULT_MINIO_BUCKET,
+    DEFAULT_MINIO_ENDPOINT,
+    DEFAULT_MINIO_SECRET_KEY,
+    optical_ingest_defaults,
+)
 from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN, get_quality_report_store
 
 
@@ -80,14 +86,14 @@ def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         metadata_backend="postgres",
         postgres_dsn=_postgres_dsn(),
         db_path="",
-        asset_storage_backend="local",
-        minio_endpoint="",
-        minio_access_key="",
-        minio_secret_key="",
-        minio_bucket="",
-        minio_prefix="cube/raw",
-        minio_secure=False,
-        minio_upload_workers=1,
+        asset_storage_backend=_payload_text(payload, "asset_storage_backend", "minio"),
+        minio_endpoint=str(payload.get("minio_endpoint") or os.environ.get("CUBE_WEB_MINIO_ENDPOINT") or DEFAULT_MINIO_ENDPOINT),
+        minio_access_key=str(payload.get("minio_access_key") or os.environ.get("CUBE_WEB_MINIO_ACCESS_KEY") or DEFAULT_MINIO_ACCESS_KEY),
+        minio_secret_key=str(payload.get("minio_secret_key") or os.environ.get("CUBE_WEB_MINIO_SECRET_KEY") or DEFAULT_MINIO_SECRET_KEY),
+        minio_bucket=str(payload.get("minio_bucket") or os.environ.get("CUBE_WEB_MINIO_BUCKET") or DEFAULT_MINIO_BUCKET),
+        minio_prefix=str(payload.get("minio_prefix") or "cube/raw"),
+        minio_secure=bool(payload.get("minio_secure", False)),
+        minio_upload_workers=int(payload.get("minio_upload_workers") or 8),
         cog_output_root=str(Path("/tmp") / "cube_web_ingest_demo" / "cog"),
         cog_materialize_mode="symlink",
     )

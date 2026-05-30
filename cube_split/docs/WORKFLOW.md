@@ -75,9 +75,13 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.ray_logical_partition_job
 - `--manifest-path`：可选，`.jsonl` 或 `.json` 清单；设置后按清单读取资产。
 - `--product-family`：`auto`、`landsat`、`sentinel2`。
 - `--target-crs`：可选 COG 目标 CRS；为空则保留源 CRS。
-- `--partition-backend`：`auto`、`ray`、`thread`；`auto` 在设置 `--ray-address` 时使用 Ray，否则使用 thread。
-- `--ray-address`：例如 `auto` 或 `ray://10.136.1.13:10001`。
+- `--partition-backend`：`ray`、`auto`、`thread`；默认直接使用 Ray 集群。
+- `--ray-address`：集群默认使用 `ray://10.136.1.13:10001`；本机调试可用空值或 `auto`。
 - `--timing-mode`、`--skip-verify`：用于性能计时，减少汇总校验开销。
+- PostgreSQL、MinIO、Ray 已接入项目默认配置：PostgreSQL
+  `postgresql://postgres:postgres@127.0.0.1:55432/cube`，Ray
+  `ray://10.136.1.13:10001`，MinIO `10.136.1.14:9000`，bucket `cube`。
+  需要切换环境时再用命令行参数或环境变量覆盖。
 
 产品剖分：
 
@@ -99,7 +103,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
   --grid-type isea4h \
   --grid-level 5 \
   --partition-backend ray \
-  --ray-address auto \
+  --ray-address ray://10.136.1.13:10001 \
   --ray-parallelism 4
 ```
 
@@ -140,14 +144,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
 ```bash
 PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.ray_ingest_job \
   --run-dir data/ray_output/logical_partition/run_YYYYMMDD_HHMMSS \
-  --job-id optical-job-001 \
-  --metadata-backend postgres \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
-  --asset-storage-backend minio \
-  --minio-endpoint HOST:9000 \
-  --minio-access-key ACCESS_KEY \
-  --minio-secret-key SECRET_KEY \
-  --minio-bucket cube
+  --job-id optical-job-001
 ```
 
 产品入库：
@@ -155,14 +152,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.ray_ingest_job \
 ```bash
 PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.product_ingest_job \
   --run-dir data/ray_output/product/run_YYYYMMDD_HHMMSS \
-  --job-id product-job-001 \
-  --metadata-backend postgres \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
-  --asset-storage-backend minio \
-  --minio-endpoint HOST:9000 \
-  --minio-access-key ACCESS_KEY \
-  --minio-secret-key SECRET_KEY \
-  --minio-bucket cube
+  --job-id product-job-001
 ```
 
 碳卫星入库：
@@ -171,9 +161,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.product_ingest_job \
 PYTHONPATH=../cube_encoder:. python -m cube_split.ingest.carbon_ingest_job \
   --run-dir data/carbon_out \
   --job-id carbon-oco2-001 \
-  --cube-version v1 \
-  --metadata-backend postgres \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube
+  --cube-version v1
 ```
 
 本地调试可使用：
@@ -233,19 +221,13 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.read.aoi_reader \
   --bbox 120.8 44.0 122.2 44.6 \
   --time-bucket 20260204 \
   --bands sr_b2 sr_b3 sr_b4 \
-  --output .tmp/aoi_rgb.tif \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
-  --minio-endpoint HOST:9000 \
-  --minio-access-key ACCESS_KEY \
-  --minio-secret-key SECRET_KEY
+  --output .tmp/aoi_rgb.tif
 ```
 
 碳卫星查询：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python -m cube_split.read.carbon_query \
-  --metadata-backend postgres \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
   --bbox -168.0 40.5 -166.5 42.0 \
   --time-start 20201231 \
   --time-end 20201231 \

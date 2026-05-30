@@ -36,6 +36,10 @@ def create_partition_router(service: PartitionService) -> APIRouter:
     def submit_partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
         return service.submit(data_type, "retry", payload_from_model(payload)).to_dict()
 
+    @router.post("/{data_type}/tasks/test", response_model=PartitionTaskCreateResponse, status_code=202)
+    def submit_partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+        return service.submit(data_type, "test", payload_from_model(payload)).to_dict()
+
     @router.get("/tasks/{task_id}", response_model=PartitionTaskResponse)
     def get_partition_task(task_id: str) -> dict:
         return service.get_task(task_id).to_dict()

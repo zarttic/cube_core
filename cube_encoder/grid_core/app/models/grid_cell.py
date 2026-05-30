@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,7 @@ class GridCell(BaseModel):
     level: int
     cell_id: str
     space_code: str
-    center: list[float]
-    bbox: list[float]
-    geometry: dict[str, Any] | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    center: List[float]
+    bbox: List[float]
+    geometry: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)

@@ -123,8 +123,26 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     nav_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "data" / "navigation.js").read_text(
         encoding="utf-8"
     )
+    app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
     assert "{ label: '自动化质检'," not in nav_source
+    assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
+    assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
+    assert ':href="item.path"' in app_source
+    assert "targetFromAuthState(state)" in app_source
+    assert "normalizePath(window.location.pathname)" in app_source
+
+
+def test_auth_redirect_uses_clicked_page_as_redirect_uri():
+    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function authRedirectUri(targetPath)" in store_source
+    assert "base.pathname = target.pathname;" in store_source
+    assert "base.search = target.search;" in store_source
+    assert "sessionStorage.setItem('oauth_target', target);" in store_source
+    assert "const redirectUri = authRedirectUri(target);" in store_source
 
 
 def test_partition_view_uses_explicit_module_endpoint_mapping():
@@ -139,6 +157,10 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "product: 'product'" in source
     assert "const testModules = new Set(['optical', 'carbon', 'product']);" in source
     assert "const operation = testModules.has(activeModule.value) ? 'test' : 'demo';" in source
+    assert "activeModule === 'entity'" not in source
+    assert "activeModule.value === 'entity'" not in source
+    assert ">实体剖分</button>" not in source
+    assert '<el-option label="ISEA4H (实体剖分)" value="isea4h" />' in source
     assert "const carbonObservationSchema = [" in source
     assert "const selectedCarbonObservations = computed(() => {" in source
     assert "selected_observations: selectedObservations" in source
@@ -151,8 +173,17 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const productMapGeometries = computed(() => selectedProductAssets.value" in source
     assert "const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));" in source
     assert "activeModule.value === 'product' ? productGridType.value : opticalGridType.value" in source
+    assert "const defaultEntityGridLevel = 3;" in source
+    assert "const entityGridLevel = ref(defaultEntityGridLevel);" in source
+    assert "opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value" in source
     assert "activeModule === 'product' ? '产品范围地图预览'" in source
     assert "selected_assets: selectedAssets" in source
+    assert "function buildPartitionFailureResult(error, request = {})" in source
+    assert "const partitionFailureMessage = computed" in source
+    assert "partitionFailureMessage" in source
+    assert "剖分失败，详情已写入执行结果" not in source
+    assert "requestPartitionOperation(partitionPrefix, endpoint, operation, payload)" in source
+    assert "/tasks/${operation}" in source
     assert "PRODUCT_BATCH_DIANZHONG_1980_2020" in source
     assert '<el-option label="碳卫星" value="carbon" />' in source
     assert "carbon_rows: '观测行文件读取'" in source
@@ -306,7 +337,12 @@ def test_config_get_returns_defaults():
     body = resp.json()
     assert body["config"]["partition"]["optical"]["grid_type"] == "geohash"
     assert body["config"]["partition"]["optical"]["grid_level"] == 5
+    assert body["config"]["ingest"]["optical"]["metadata_backend"] == "postgres"
+    assert body["config"]["ingest"]["optical"]["asset_storage_backend"] == "minio"
+    assert body["config"]["ingest"]["optical"]["minio_endpoint"] == "10.136.1.14:9000"
+    assert body["config"]["ingest"]["optical"]["minio_bucket"] == "cube"
     assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@127.0.0.1:55432/cube"
+    assert body["runtime"]["ray_address"] == "ray://10.136.1.13:10001"
 
 
 def test_config_update_persists_normalized_values():
@@ -637,7 +673,7 @@ def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypa
     assert result["partition_type"] == "entity"
     assert result["output_path"].endswith("entity_index_rows.jsonl")
     assert captured["grid_type"] == "isea4h"
-    assert captured["grid_level"] == 0
+    assert captured["grid_level"] == 9
     assert captured["target_pixels_per_hex_edge"] == 512
 
 
@@ -675,6 +711,85 @@ def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_pa
     )
 
     assert captured["grid_level"] == 7
+
+
+def test_optical_partition_test_runner_defaults_isea4h_to_level3(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "ray",
+            "partition_type": "entity",
+            "grid_type": "isea4h",
+            "grid_level": args.grid_level,
+            "total_index_rows": 0,
+            "ray_parallelism": 0,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "isea4h",
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert captured["grid_level"] == 3
+
+
+def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "ray",
+            "partition_type": "entity",
+            "grid_type": "isea4h",
+            "grid_level": args.grid_level,
+            "total_index_rows": 0,
+            "ray_parallelism": 4,
+            "ingest_enabled": bool(args.ingest_enabled),
+        }
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_entity_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "selected_assets": [],
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["data_type"] == "entity"
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["partition_type"] == "entity"
+    assert result["output_path"].endswith("entity_index_rows.jsonl")
+    assert result["ingest_enabled"] is False
+    assert captured["grid_level"] == 3
+    assert captured["partition_backend"] == "ray"
+    assert captured["ray_address"] == "ray://10.136.1.13:10001"
+    assert captured["metadata_backend"] == "postgres"
+    assert captured["asset_storage_backend"] == "minio"
+    assert captured["ingest_enabled"] is False
 
 
 def test_partition_demo_rejects_invalid_grid_level():
@@ -715,6 +830,45 @@ def test_partition_demo_can_run_as_async_task(monkeypatch):
     assert task_body is not None
     assert task_body["status"] == "completed"
     assert task_body["result"]["rows"] == 20
+
+
+def test_partition_test_can_run_as_async_task(monkeypatch):
+    expected_payload = {"grid_type": "isea4h", "grid_level": 3, "grid_level_mode": "manual"}
+
+    def fake_run_optical_partition_test(payload=None):
+        assert payload == expected_payload
+        return {
+            "status": "completed",
+            "mode": "partition_test_no_ingest",
+            "data_type": "optical",
+            "rows": 64,
+            "ingest_enabled": False,
+        }
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_test", fake_run_optical_partition_test)
+
+    submit_resp = client.post("/v1/partition/optical/tasks/test", json=expected_payload)
+
+    assert submit_resp.status_code == 202
+    submitted = submit_resp.json()
+    assert submitted["status"] in {"queued", "running", "completed"}
+    assert submitted["data_type"] == "optical"
+    assert submitted["operation"] == "test"
+
+    task_body = None
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{submitted['task_id']}")
+        assert task_resp.status_code == 200
+        task_body = task_resp.json()
+        if task_body["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    assert task_body is not None
+    assert task_body["status"] == "completed"
+    assert task_body["result"]["mode"] == "partition_test_no_ingest"
+    assert task_body["result"]["ingest_enabled"] is False
+    assert task_body["result"]["rows"] == 64
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
@@ -809,7 +963,7 @@ def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
     assert body["cube_version"].startswith("demo-")
 
 
-def test_optical_ingest_confirm_uses_demo_versions_and_local_storage(monkeypatch, quality_store):
+def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch, quality_store):
     run_dir = "/tmp/cube_web_partition_demo/test_app_ingest_confirm"
     Path(run_dir).mkdir(parents=True, exist_ok=True)
     (Path(run_dir) / "index_rows.jsonl").write_text("", encoding="utf-8")
@@ -849,7 +1003,9 @@ def test_optical_ingest_confirm_uses_demo_versions_and_local_storage(monkeypatch
     assert body["status"] == "succeeded"
     assert body["cube_version"].startswith("demo-")
     assert captured["metadata_backend"] == "postgres"
-    assert captured["asset_storage_backend"] == "local"
+    assert captured["asset_storage_backend"] == "minio"
+    assert captured["minio_endpoint"] == "10.136.1.14:9000"
+    assert captured["minio_bucket"] == "cube"
     assert captured["cog_materialize_mode"] == "symlink"
     assert captured["asset_version"].startswith("demo-")
 
@@ -1030,6 +1186,13 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
         captured["input_dir"] = Path(args.input_dir)
         captured["manifest_path"] = Path(args.manifest_path)
         captured["files"] = sorted(path.name for path in Path(args.input_dir).iterdir())
+        captured["partition_backend"] = args.partition_backend
+        captured["ray_address"] = args.ray_address
+        captured["metadata_backend"] = args.metadata_backend
+        captured["asset_storage_backend"] = args.asset_storage_backend
+        captured["minio_endpoint"] = args.minio_endpoint
+        captured["minio_bucket"] = args.minio_bucket
+        captured["ingest_enabled"] = args.ingest_enabled
         run_dir = tmp_path / "run-root" / "output" / "run"
         run_dir.mkdir(parents=True)
         rows_path = run_dir / "index_rows.jsonl"
@@ -1068,6 +1231,13 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
 
     assert result["mode"] == "partition_test_no_ingest"
     assert result["ingest_enabled"] is False
+    assert captured["partition_backend"] == "ray"
+    assert captured["ray_address"] == "ray://10.136.1.13:10001"
+    assert captured["metadata_backend"] == "postgres"
+    assert captured["asset_storage_backend"] == "minio"
+    assert captured["minio_endpoint"] == "10.136.1.14:9000"
+    assert captured["minio_bucket"] == "cube"
+    assert captured["ingest_enabled"] is False
     assert result["selected_asset_count"] == 1
     assert captured["files"] == ["product_1980.tif"]
     assert captured["input_dir"].name == "input"

@@ -12,10 +12,21 @@ from typing import Any
 from cube_split.jobs.ray_partition_core import (
     build_manifest,
     build_grid_tasks_driver,
+    asset_record_to_dict,
+    cog_creation_options,
     convert_assets_to_cog,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
 )
+from cube_split.ingest.ray_ingest_job import (
+    DEFAULT_MINIO_ACCESS_KEY,
+    DEFAULT_MINIO_BUCKET,
+    DEFAULT_MINIO_ENDPOINT,
+    DEFAULT_MINIO_SECRET_KEY,
+    DEFAULT_POSTGRES_DSN,
+)
+
+DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,8 +76,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ray-address",
-        default="",
-        help="Ray address to connect (e.g. auto or ray://host:10001). Empty means start local runtime.",
+        default=DEFAULT_RAY_ADDRESS,
+        help="Ray address to connect (e.g. auto or ray://host:10001).",
     )
     parser.add_argument(
         "--chunk-size",
@@ -76,9 +87,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--partition-backend",
-        default="auto",
+        default="ray",
         choices=["auto", "ray", "thread"],
-        help="Parallel backend for partition stage (auto selects thread unless --ray-address is set).",
+        help="Parallel backend for partition stage.",
     )
     parser.add_argument(
         "--partition-prefix-len",
@@ -96,6 +107,45 @@ def parse_args() -> argparse.Namespace:
         "--sample-mean",
         action="store_true",
         help="Read per-window pixel values to compute sample_mean_band1 (disabled by default in timing-mode)",
+    )
+    parser.add_argument("--job-id", default="", help="Ingest job id; defaults to run directory name when ingest is enabled")
+    parser.add_argument("--dataset", default="demo_optical", help="Dataset name used for metadata and object keys")
+    parser.add_argument("--sensor", default="optical_mosaic", help="Sensor name used for metadata and object keys")
+    parser.add_argument("--asset-version", default="v1", help="Raw asset version used for ingest")
+    parser.add_argument("--cube-version", default="v1", help="Cube fact version used for ingest")
+    parser.add_argument(
+        "--quality-rule",
+        default="best_quality_wins",
+        choices=["best_quality_wins", "latest_wins"],
+        help="Conflict resolution rule used during metadata ingest",
+    )
+    parser.add_argument(
+        "--metadata-backend",
+        default="postgres",
+        choices=["none", "sqlite", "postgres"],
+        help="Metadata backend. Set to postgres for end-to-end ingest after partitioning.",
+    )
+    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN when metadata-backend=postgres")
+    parser.add_argument("--db-path", default="data/ingest/ingest.db", help="SQLite DB path when metadata-backend=sqlite")
+    parser.add_argument(
+        "--asset-storage-backend",
+        default="minio",
+        choices=["local", "minio"],
+        help="Asset storage backend used during ingest",
+    )
+    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT, help="MinIO endpoint host:port")
+    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY, help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY, help="MinIO secret key")
+    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET, help="MinIO bucket name")
+    parser.add_argument("--minio-prefix", default="cube/raw", help="MinIO object key prefix")
+    parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO")
+    parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers for MinIO")
+    parser.add_argument("--cog-output-root", default="data/cog/raw", help="Local asset materialization root")
+    parser.add_argument(
+        "--cog-materialize-mode",
+        default="copy",
+        choices=["copy", "hardlink", "symlink"],
+        help="Local asset materialization mode when asset-storage-backend=local",
     )
     return parser.parse_args()
 
@@ -140,12 +190,69 @@ def _load_ray():
 
 def _ray_runtime_env_from_env() -> dict[str, Any] | None:
     raw = os.environ.get("RAY_RUNTIME_ENV_JSON", "").strip()
-    if not raw:
-        return None
-    loaded = json.loads(raw)
-    if not isinstance(loaded, dict):
-        raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
-    return loaded
+    if raw:
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
+        return loaded
+
+    project_root = Path(__file__).resolve().parents[3]
+    return {
+        "working_dir": str(project_root),
+        "excludes": [
+            ".git/**",
+            "**/__pycache__/**",
+            "**/.pytest_cache/**",
+            "cube_split/*.gz",
+            "cube_split/*.nc4",
+            "cube_split/data/**",
+            "cube_split/data_tmp/**",
+            "cube_split/test_output/**",
+            "cube_split/results/**",
+            "cube_web/frontend/node_modules/**",
+            "cube_web/frontend/dist/**",
+            "cube_web/cube_web/web/assets/**",
+        ],
+        "env_vars": {
+            "CUBE_PROJECT_ROOT": ".",
+            "PYTHONPATH": ".:./cube_encoder:./cube_split:./cube_web",
+        },
+    }
+
+
+def _ray_project_roots() -> list[str]:
+    roots = [os.environ.get("CUBE_PROJECT_ROOT", ""), os.getcwd(), "/tmp/cube_project_ray_code"]
+    return [root for root in roots if root]
+
+
+def _prepend_sys_paths(paths: list[str]) -> None:
+    import sys
+
+    for path in reversed(paths):
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _ensure_ray_worker_project_paths() -> None:
+    package_paths = [
+        os.path.abspath(os.path.join(project_root, rel_path))
+        for project_root in _ray_project_roots()
+        for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
+    ]
+    _prepend_sys_paths(package_paths)
+
+    search_roots = [
+        os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
+        "/tmp/ray/session_latest/runtime_resources/working_dir_files",
+    ]
+    for search_root in search_roots:
+        if not search_root or not os.path.isdir(search_root):
+            continue
+        for dirpath, _, filenames in os.walk(search_root):
+            if "entity_partition_job.py" not in filenames and "ray_partition_core.py" not in filenames:
+                continue
+            package_parent = os.path.abspath(os.path.join(dirpath, "..", ".."))
+            _prepend_sys_paths([package_parent])
 
 
 def _ray_actor_options_from_env() -> dict[str, Any]:
@@ -153,6 +260,27 @@ def _ray_actor_options_from_env() -> dict[str, Any]:
     if not node_resource:
         return {}
     return {"resources": {node_resource: 0.001}}
+
+
+def _should_run_ingest(args: argparse.Namespace) -> bool:
+    explicit = getattr(args, "ingest_enabled", None)
+    if explicit is not None:
+        return bool(explicit)
+    metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
+    return metadata_backend in {"sqlite", "postgres"}
+
+
+def _run_partition_ingest(args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
+    metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
+    if metadata_backend not in {"sqlite", "postgres"}:
+        raise ValueError("metadata_backend must be sqlite or postgres when ingest is enabled")
+
+    from cube_split.ingest.ray_ingest_job import run_ingest
+
+    ingest_args = argparse.Namespace(**vars(args))
+    ingest_args.run_dir = str(run_dir)
+    ingest_args.job_id = str(getattr(args, "job_id", "") or "").strip() or run_dir.name
+    return run_ingest(ingest_args)
 
 
 def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
@@ -172,19 +300,28 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not source_assets:
         raise RuntimeError(f"No .TIF assets found under: {input_dir}")
+    backend_requested = args.partition_backend
+    if backend_requested == "auto":
+        backend = "ray" if args.ray_address else "thread"
+    else:
+        backend = backend_requested
+
     cog_start = time.perf_counter()
-    assets = convert_assets_to_cog(
-        source_assets,
-        cog_input_dir=Path(args.cog_input_dir),
-        overwrite=args.cog_overwrite,
-        workers=args.cog_workers,
-        compress=args.cog_compress,
-        predictor=args.cog_predictor,
-        level=(args.cog_level if args.cog_level > 0 else None),
-        overviews="NONE",
-        num_threads=(args.cog_num_threads or ""),
-        target_crs=(args.target_crs or None),
-    )
+    if backend == "ray":
+        assets = source_assets
+    else:
+        assets = convert_assets_to_cog(
+            source_assets,
+            cog_input_dir=Path(args.cog_input_dir),
+            overwrite=args.cog_overwrite,
+            workers=args.cog_workers,
+            compress=args.cog_compress,
+            predictor=args.cog_predictor,
+            level=(args.cog_level if args.cog_level > 0 else None),
+            overviews="NONE",
+            num_threads=(args.cog_num_threads or ""),
+            target_crs=(args.target_crs or None),
+        )
     cog_elapsed = time.perf_counter() - cog_start
 
     grid_tasks = build_grid_tasks_driver(
@@ -209,12 +346,6 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
     rows_path = run_dir / "index_rows.jsonl"
     report_path = run_dir / "job_report.json"
-
-    backend_requested = args.partition_backend
-    if backend_requested == "auto":
-        backend = "ray" if args.ray_address else "thread"
-    else:
-        backend = backend_requested
 
     ray_init_elapsed = 0.0
     include_sample_mean = args.sample_mean and (not args.timing_mode)
@@ -253,27 +384,107 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
         @ray.remote
         class AssetTaskProcessor:
-            def process_groups(self, task_groups: list[list[dict]], time_granularity: str, include_sample_mean: bool) -> list[dict]:
+            def process_groups(
+                self,
+                task_groups: list[list[dict]],
+                time_granularity: str,
+                include_sample_mean: bool,
+                assets_by_path_value: dict[str, dict],
+                cog_input_dir_value: str,
+                cog_overwrite_value: bool,
+                cog_options_value: dict[str, str],
+                target_crs_value: str,
+                source_options_value: dict[str, Any],
+                cog_upload_options_value: dict[str, Any],
+            ) -> list[dict]:
                 import os
-                import sys
+                from pathlib import Path
 
-                project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
-                for rel_path in ("cube_encoder", "cube_split", "cube_web"):
-                    package_path = os.path.join(project_root, rel_path)
-                    if package_path not in sys.path:
-                        sys.path.insert(0, package_path)
+                _prepend_sys_paths(
+                    [
+                        os.path.abspath(os.path.join(project_root, rel_path))
+                        for project_root in _ray_project_roots()
+                        for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
+                    ]
+                )
 
-                from cube_split.jobs.ray_partition_core import _process_local_task_group
+                from cube_split.jobs.ray_partition_core import (
+                    _process_local_task_group,
+                    asset_record_from_dict,
+                    convert_asset_to_cog,
+                    upload_cog_to_minio,
+                )
+
+                env_options = dict(cog_upload_options_value or source_options_value or {})
+                if env_options.get("endpoint"):
+                    os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
+                if env_options.get("access_key"):
+                    os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
+                if env_options.get("secret_key"):
+                    os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
+
+                prepared_groups: list[list[dict]] = []
+                cog_uri_by_source: dict[str, str] = {}
+                worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
+                for group in task_groups:
+                    if not group:
+                        continue
+                    source_path = str(group[0]["asset_path"])
+                    cog_uri = cog_uri_by_source.get(source_path)
+                    if cog_uri is None:
+                        asset = asset_record_from_dict(assets_by_path_value[source_path])
+                        converted = convert_asset_to_cog(
+                            asset,
+                            cog_input_dir=worker_cog_root,
+                            overwrite=cog_overwrite_value,
+                            creation_options=cog_options_value,
+                            target_crs=target_crs_value or None,
+                            source_options=source_options_value,
+                        )
+                        cog_uri = upload_cog_to_minio(converted, Path(converted.path), cog_upload_options_value)
+                        cog_uri_by_source[source_path] = cog_uri
+                    prepared_groups.append([{**row, "asset_path": cog_uri} for row in group])
 
                 rows_out: list[dict] = []
-                for group in task_groups:
+                for group in prepared_groups:
                     rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
                 return rows_out
 
         actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
         actors = [actor_cls.remote() for _ in range(parallelism)]
+        assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
+        minio_options = {
+            "endpoint": str(getattr(args, "minio_endpoint", "")),
+            "access_key": str(getattr(args, "minio_access_key", "")),
+            "secret_key": str(getattr(args, "minio_secret_key", "")),
+            "secure": bool(getattr(args, "minio_secure", False)),
+        }
         futures = [
-            actors[idx % parallelism].process_groups.remote(chunk, args.time_granularity, include_sample_mean)
+            actors[idx % parallelism].process_groups.remote(
+                chunk,
+                args.time_granularity,
+                include_sample_mean,
+                assets_by_path,
+                str(args.cog_input_dir),
+                bool(args.cog_overwrite),
+                cog_creation_options(
+                    compress=str(args.cog_compress or "LZW"),
+                    predictor=int(args.cog_predictor or 0),
+                    level=(int(args.cog_level or 0) or None),
+                    overviews="NONE",
+                    num_threads=str(args.cog_num_threads or ""),
+                ),
+                str(args.target_crs or ""),
+                minio_options,
+                {
+                    **minio_options,
+                    "bucket": str(getattr(args, "minio_bucket", "")),
+                    "prefix": str(getattr(args, "minio_prefix", "cube/raw")),
+                    "dataset": str(getattr(args, "dataset", "demo_optical")),
+                    "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+                    "asset_version": str(getattr(args, "asset_version", "v1")),
+                },
+            )
             for idx, chunk in enumerate(task_chunks)
         ]
         for rows in ray.get(futures):
@@ -291,6 +502,8 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             for rows in pool.map(process_chunk, task_chunks):
                 out_rows.extend(rows)
     elapsed = time.perf_counter() - start
+    if backend == "ray":
+        ray.shutdown()
 
     run_dir.mkdir(parents=True, exist_ok=True)
     with rows_path.open("w", encoding="utf-8") as fh:
@@ -309,6 +522,14 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         rows_by_band: dict[str, int] = {}
         for row in out_rows:
             rows_by_band[row["band"]] = rows_by_band.get(row["band"], 0) + 1
+
+    ingest_enabled = _should_run_ingest(args)
+    ingest_stats: dict[str, Any] | None = None
+    ingest_elapsed = 0.0
+    if ingest_enabled:
+        ingest_start = time.perf_counter()
+        ingest_stats = _run_partition_ingest(args, run_dir)
+        ingest_elapsed = time.perf_counter() - ingest_start
 
     report = {
         "run_dir": str(run_dir.resolve()),
@@ -344,13 +565,22 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         "cog_level": args.cog_level,
         "cog_num_threads": args.cog_num_threads,
         "target_crs": args.target_crs,
+        "ingest_enabled": ingest_enabled,
+        "ingest_stats": ingest_stats,
+        "metadata_backend": str(getattr(args, "metadata_backend", "none") or "none"),
+        "asset_storage_backend": str(getattr(args, "asset_storage_backend", "local") or "local"),
+        "dataset": str(getattr(args, "dataset", "")),
+        "sensor": str(getattr(args, "sensor", "")),
+        "asset_version": str(getattr(args, "asset_version", "")),
+        "cube_version": str(getattr(args, "cube_version", "")),
+        "minio_bucket": str(getattr(args, "minio_bucket", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
+        "minio_prefix": str(getattr(args, "minio_prefix", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
         "cog_elapsed_sec": round(cog_elapsed, 3),
         "partition_elapsed_sec": round(elapsed, 3),
+        "ingest_elapsed_sec": round(ingest_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    if backend == "ray":
-        ray.shutdown()
     return report
 
 

@@ -12,6 +12,12 @@ import rasterio
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 
+from cube_split.ingest.ray_ingest_job import (
+    DEFAULT_MINIO_ACCESS_KEY,
+    DEFAULT_MINIO_ENDPOINT,
+    DEFAULT_MINIO_SECRET_KEY,
+    DEFAULT_POSTGRES_DSN,
+)
 from grid_core.sdk import CubeEncoderSDK
 
 
@@ -21,10 +27,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--time-bucket", required=True, help="Time bucket such as 20260204")
     parser.add_argument("--bands", nargs="+", required=True, help="Band list such as sr_b2 sr_b3 sr_b4")
     parser.add_argument("--output", required=True, help="Output GeoTIFF path")
-    parser.add_argument("--postgres-dsn", required=True, help="PostgreSQL DSN")
-    parser.add_argument("--minio-endpoint", required=True, help="MinIO endpoint host:port")
-    parser.add_argument("--minio-access-key", required=True, help="MinIO access key")
-    parser.add_argument("--minio-secret-key", required=True, help="MinIO secret key")
+    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN")
+    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT, help="MinIO endpoint host:port")
+    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY, help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY, help="MinIO secret key")
     parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs", "isea4h"])
     parser.add_argument("--grid-level", type=int, default=7)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])
@@ -75,10 +81,10 @@ def read_aoi_rgb(
     time_bucket: str,
     bands: list[str],
     output: str,
-    postgres_dsn: str,
-    minio_endpoint: str,
-    minio_access_key: str,
-    minio_secret_key: str,
+    postgres_dsn: str = DEFAULT_POSTGRES_DSN,
+    minio_endpoint: str = DEFAULT_MINIO_ENDPOINT,
+    minio_access_key: str = DEFAULT_MINIO_ACCESS_KEY,
+    minio_secret_key: str = DEFAULT_MINIO_SECRET_KEY,
     grid_type: str = "geohash",
     grid_level: int = 7,
     cover_mode: str = "intersect",

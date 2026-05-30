@@ -18,6 +18,7 @@ class OpticalAssetSelection(CubeWebModel):
     acq_time: str | None = None
     bands: list[str] | None = None
     band: str | None = None
+    resolution: float | None = Field(default=None, gt=0)
     corners: list[list[float]] | None = None
     sensor: str | None = None
     product_family: str | None = None

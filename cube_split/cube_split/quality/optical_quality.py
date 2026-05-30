@@ -9,6 +9,8 @@ from typing import Any
 
 import rasterio
 
+from cube_split.jobs.ray_partition_core import resolve_asset_source_path
+
 
 REQUIRED_INDEX_FIELDS = {
     "scene_id",
@@ -54,6 +56,19 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
             row["_line_no"] = line_no
             rows.append(row)
     return rows
+
+
+def _quality_report_output_path(run_dir: Path, args: argparse.Namespace) -> Path:
+    output_path = getattr(args, "output", "") or ""
+    return Path(output_path) if output_path else run_dir / "quality_report.json"
+
+
+def _finalize_report(report: dict[str, Any], run_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    out = _quality_report_output_path(run_dir, args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    report["report_path"] = str(out.resolve())
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
 
 
 def _time_bucket_from_acq_time(acq_time: str) -> str:
@@ -138,7 +153,8 @@ def _validate_assets(rows: list[dict[str, Any]], target_crs: str) -> tuple[list[
     valid_pixel_stats: list[dict[str, Any]] = []
 
     for asset_path, asset_index_rows in _asset_rows(rows).items():
-        path = Path(asset_path)
+        local_asset_path = resolve_asset_source_path(asset_path)
+        path = Path(local_asset_path)
         if not path.exists():
             missing_assets.append(asset_path)
             continue
@@ -287,26 +303,26 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
 
     if not rows_path.exists():
         checks.append(_check("index_rows", "FAIL", f"index_rows.jsonl not found under run_dir: {run_dir}"))
-        return {
+        return _finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "summary": _summarize([], [], checks),
             "checks": checks,
             "assets": [],
-        }
+        }, run_dir, args)
 
     rows = _load_jsonl(rows_path)
     if not rows:
         checks.append(_check("index_rows", "FAIL", "index_rows.jsonl is empty."))
-        return {
+        return _finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "summary": _summarize([], [], checks),
             "checks": checks,
             "assets": [],
-        }
+        }, run_dir, args)
 
     checks.append(_check("index_rows", "PASS", "index_rows.jsonl was loaded.", row_count=len(rows), path=str(rows_path)))
     checks.append(_validate_required_fields(rows))
@@ -329,12 +345,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
         "assets": assets,
     }
 
-    output_path = getattr(args, "output", "") or ""
-    if output_path:
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return report
+    return _finalize_report(report, run_dir, args)
 
 
 def parse_args() -> argparse.Namespace:

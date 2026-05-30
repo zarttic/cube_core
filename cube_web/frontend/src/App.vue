@@ -35,13 +35,25 @@ function isNavActive(item) {
   return item.path === '/partition' && currentPath.value === '/config';
 }
 
+function targetFromAuthState(stateValue) {
+  if (!stateValue) return '';
+  try {
+    const payload = JSON.parse(decodeURIComponent(window.atob(stateValue)));
+    const target = String(payload.target || '');
+    if (target.startsWith('/') && !target.startsWith('//')) return target;
+  } catch {
+    return '';
+  }
+  return '';
+}
+
 async function initializeAuth() {
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
   const state = params.get('state') || '';
   if (code) {
     await userStore.exchangeCode(code, state);
-    const target = sessionStorage.getItem('oauth_target') || '/';
+    const target = sessionStorage.getItem('oauth_target') || targetFromAuthState(state) || normalizePath(window.location.pathname) || '/';
     sessionStorage.removeItem('oauth_target');
     sessionStorage.removeItem('oauth_state');
     window.history.replaceState({}, '', target);
@@ -94,7 +106,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
           <template v-for="item in navItems" :key="item.label">
             <a
               v-if="item.kind === 'internal'"
-              href="#"
+              :href="item.path"
               :class="{ active: isNavActive(item) }"
               @click.prevent="goInternal(item.path)"
             >

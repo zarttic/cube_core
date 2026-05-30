@@ -30,10 +30,10 @@ cd cube_encoder && python -m build
 Builds the `cube-encoder` distribution.
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-Runs the web UI with the in-repo SDK and partition backends.
+Runs the web UI with Python 3.8, the in-repo SDK, and partition backends.
 
 ## Coding Style & Naming Conventions
 
@@ -89,6 +89,51 @@ Do not commit local data, caches, `.pytest_cache/`, `__pycache__/`, virtual envi
 - **环境变量**: 各节点 `/etc/default/minio` 已配置 `MINIO_PROMETHEUS_AUTH_TYPE=public`
 - **数据盘**: .13/.14/.15 为 39T/39T/31T，.20 为 2.6T（/data1）
 - **SSH 认证**: 使用本地密钥管理或运维侧凭据，不在仓库记录口令。
+- **认证来源**: 运行任务时优先从环境变量或节点 `/etc/default/minio` 读取 MinIO 凭据，不在仓库记录明文口令。不要继续假设 `minioadmin/minioadmin` 可用。
+- **演示源数据前缀**:
+  - 光学/实体剖分源影像: `s3://cube/cube/source/optocal/...`
+  - 信息产品源影像: `s3://cube/cube/source/product/...`
+  - 前端 demo schema 的 `source_uri` 应使用上述 `s3://` URL，不要回退为某一台机器的本地绝对路径。
+- **源数据同步命令参考**:
+  ```bash
+  PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 - <<'PY'
+  from concurrent.futures import ThreadPoolExecutor, as_completed
+  from pathlib import Path
+  from minio import Minio
+  from minio.error import S3Error
+
+  root = Path("/home/lyjdev/projects/cube_project")
+  jobs = [
+      (root / "cube_split/data/product", "cube/source/product"),
+      (root / "cube_split/data/optocal", "cube/source/optocal"),
+  ]
+  client = Minio("10.136.1.14:9000", access_key="...", secret_key="...", secure=False)
+  bucket = "cube"
+  if not client.bucket_exists(bucket):
+      client.make_bucket(bucket)
+
+  items = []
+  for base, prefix in jobs:
+      for path in sorted(p for p in base.rglob("*") if p.is_file()):
+          items.append((path, f"{prefix}/{path.relative_to(base).as_posix()}"))
+
+  def upload_one(item):
+      path, key = item
+      try:
+          stat = client.stat_object(bucket, key)
+          if stat.size == path.stat().st_size:
+              return "skip", key
+      except S3Error as exc:
+          if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+              raise
+      client.fput_object(bucket, key, str(path))
+      return "put", key
+
+  with ThreadPoolExecutor(max_workers=4) as pool:
+      for status, key in (future.result() for future in as_completed([pool.submit(upload_one, item) for item in items])):
+          print(status, f"s3://{bucket}/{key}")
+  PY
+  ```
 
 ### 监控栈（Prometheus + Grafana）
 
@@ -134,3 +179,11 @@ Do not commit local data, caches, `.pytest_cache/`, `__pycache__/`, virtual envi
   - .14 不再作为 Head，原有 .14 Head 端口说明已失效
   - .20 的 pip 安装需要 sudo
   - Worker 配置了 `Restart=on-failure`，Head 重启后自动重连
+  - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
+  - 不要用 `RAY_ACTOR_NODE_RESOURCE=node:10.136.1.14` 规避数据路径问题；演示数据已同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
+  - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
+  - 普通光学逻辑剖分（geohash/MGRS）和实体剖分（ISEA4H）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
+  - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
+  - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
+  - 前端不单独暴露“实体剖分”模块；实体剖分由“光学遥感”页面的剖分格网选择 `ISEA4H` 触发，默认 `grid_level=6`。普通光学/产品逻辑剖分（geohash/MGRS）默认层级仍为 5。
+  - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。

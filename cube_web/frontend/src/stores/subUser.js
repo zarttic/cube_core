@@ -34,6 +34,29 @@ function persistUserInfo(userInfo) {
   }
 }
 
+function safeTargetPath(targetPath) {
+  const value = String(targetPath || window.location.pathname || '/');
+  if (!value.startsWith('/') || value.startsWith('//')) return '/';
+  return value;
+}
+
+function encodeAuthState(targetPath) {
+  const payload = {
+    nonce: Math.random().toString(36).slice(2),
+    target: safeTargetPath(targetPath),
+  };
+  return window.btoa(encodeURIComponent(JSON.stringify(payload)));
+}
+
+function authRedirectUri(targetPath) {
+  const base = new URL(AUTH_CONFIG.REDIRECT_URI, window.location.origin);
+  const target = new URL(safeTargetPath(targetPath), base.origin);
+  base.pathname = target.pathname;
+  base.search = target.search;
+  base.hash = '';
+  return base.toString();
+}
+
 export function useSubUserStore() {
   const username = computed(() => state.userInfo.username || '');
   const role = computed(() => state.userInfo.role || '普通用户');
@@ -59,10 +82,11 @@ export function useSubUserStore() {
   }
 
   function redirectToAuth(targetPath = window.location.pathname || '/') {
-    const stateValue = Math.random().toString(36).slice(2);
+    const target = safeTargetPath(targetPath);
+    const stateValue = encodeAuthState(target);
     sessionStorage.setItem('oauth_state', stateValue);
-    sessionStorage.setItem('oauth_target', targetPath);
-    const redirectUri = AUTH_CONFIG.REDIRECT_URI.split('?')[0];
+    sessionStorage.setItem('oauth_target', target);
+    const redirectUri = authRedirectUri(target);
     const authUrl = `${AUTH_CONFIG.MAIN_SYSTEM_URL}/api/authorize?client_id=${encodeURIComponent(AUTH_CONFIG.CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(stateValue)}`;
     window.location.href = authUrl;
   }

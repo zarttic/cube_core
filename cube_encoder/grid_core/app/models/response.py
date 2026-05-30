@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
@@ -13,8 +13,8 @@ class ApiError(BaseModel):
 
 
 class BaseResponse(BaseModel):
-    warnings: list[str] = Field(default_factory=list)
-    statistics: dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    statistics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class LocateResponse(BaseResponse):
@@ -25,7 +25,7 @@ class CoverResponse(BaseResponse):
     grid_type: str
     level: int
     cover_mode: str
-    cells: list[GridCell]
+    cells: List[GridCell]
 
 
 class STCodeGenerateResponse(BaseResponse):
@@ -33,7 +33,7 @@ class STCodeGenerateResponse(BaseResponse):
 
 
 class STCodeBatchGenerateResponse(BaseResponse):
-    st_codes: list[str]
+    st_codes: List[str]
 
 
 class STCodeParseResponse(BaseResponse):
@@ -45,15 +45,15 @@ class STCodeParseResponse(BaseResponse):
 
 
 class NeighborsResponse(BaseResponse):
-    result_codes: list[str]
+    result_codes: List[str]
 
 
 class GeometryResponse(BaseResponse):
-    geometry: dict[str, Any]
+    geometry: Dict[str, Any]
 
 
 class BatchGeometryResponse(BaseResponse):
-    geometries: dict[str, dict[str, Any]]
+    geometries: Dict[str, Dict[str, Any]]
 
 
 class ParentResponse(BaseResponse):
@@ -61,4 +61,4 @@ class ParentResponse(BaseResponse):
 
 
 class ChildrenResponse(BaseResponse):
-    child_codes: list[str]
+    child_codes: List[str]

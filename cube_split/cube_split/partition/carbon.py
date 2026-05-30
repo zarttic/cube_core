@@ -513,12 +513,34 @@ def _load_ray():
 
 def _ray_runtime_env_from_env() -> dict[str, Any] | None:
     raw = os.environ.get("RAY_RUNTIME_ENV_JSON", "").strip()
-    if not raw:
-        return None
-    loaded = json.loads(raw)
-    if not isinstance(loaded, dict):
-        raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
-    return loaded
+    if raw:
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
+        return loaded
+
+    project_root = Path(__file__).resolve().parents[3]
+    return {
+        "working_dir": str(project_root),
+        "excludes": [
+            ".git/**",
+            "**/__pycache__/**",
+            "**/.pytest_cache/**",
+            "cube_split/*.gz",
+            "cube_split/*.nc4",
+            "cube_split/data/**",
+            "cube_split/data_tmp/**",
+            "cube_split/test_output/**",
+            "cube_split/results/**",
+            "cube_web/frontend/node_modules/**",
+            "cube_web/frontend/dist/**",
+            "cube_web/cube_web/web/assets/**",
+        ],
+        "env_vars": {
+            "CUBE_PROJECT_ROOT": ".",
+            "PYTHONPATH": ".:./cube_encoder:./cube_split:./cube_web",
+        },
+    }
 
 
 def _ray_actor_options_from_env() -> dict[str, Any]:
@@ -566,10 +588,18 @@ def _partition_chunks_with_ray(
             import os
             import sys
 
-            project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
-            for rel_path in ("cube_encoder", "cube_split", "cube_web"):
-                package_path = os.path.join(project_root, rel_path)
-                if package_path not in sys.path:
+            project_roots = [
+                root
+                for root in (os.environ.get("CUBE_PROJECT_ROOT", ""), os.getcwd(), "/tmp/cube_project_ray_code")
+                if root
+            ]
+            package_paths = [
+                os.path.abspath(os.path.join(project_root, rel_path))
+                for project_root in project_roots
+                for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
+            ]
+            for package_path in reversed(package_paths):
+                if os.path.isdir(package_path) and package_path not in sys.path:
                     sys.path.insert(0, package_path)
 
             from cube_split.partition.carbon import _partition_observation_chunk

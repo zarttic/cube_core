@@ -92,6 +92,18 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
+def _run_entity_partition_demo(payload: dict | None = None) -> dict:
+    return partition_runners._run_entity_partition_demo(payload)
+
+
+def _run_entity_partition_test(payload: dict | None = None) -> dict:
+    return partition_runners._run_entity_partition_test(payload)
+
+
+def _run_entity_partition_retry(payload: dict | None = None) -> dict:
+    return partition_runners._run_entity_partition_retry(payload)
+
+
 def _run_optical_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
     return partition_runners._run_optical_partition_from_payload(payload, mode=mode)
 
@@ -239,6 +251,27 @@ def partition_product_retry(payload: PartitionRetryRequest | dict | None = None)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def partition_entity_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    try:
+        return _run_entity_partition_demo(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def partition_entity_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    try:
+        return _run_entity_partition_test(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def partition_entity_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
+    try:
+        return _run_entity_partition_retry(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 def partition_radar_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     raise HTTPException(status_code=501, detail="Radar partition demo is not implemented")
 
@@ -381,6 +414,9 @@ partition_service = PartitionService(
         product_demo=partition_product_demo,
         product_test=partition_product_test,
         product_retry=partition_product_retry,
+        entity_demo=partition_entity_demo,
+        entity_test=partition_entity_test,
+        entity_retry=partition_entity_retry,
     )
 )
 api_router.include_router(create_sdk_router(sdk))

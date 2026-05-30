@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import h3
 import mgrs
 from s2sphere import CellId
 
@@ -151,6 +150,8 @@ class CodeService:
             return
 
         if grid_type == GridType.ISEA4H:
+            import h3
+
             if not h3.is_valid_cell(space_code):
                 raise ValidationError("Invalid ISEA4H space_code")
             actual_level = h3.get_resolution(space_code)

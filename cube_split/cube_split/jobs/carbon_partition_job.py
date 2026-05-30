@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+from cube_split.jobs.ray_logical_partition_job import DEFAULT_RAY_ADDRESS
 from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
 
 
@@ -22,11 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--partition-workers", type=int, default=0, help="Parallel workers for partition stage; 0 means auto")
     parser.add_argument(
         "--partition-backend",
-        default="auto",
+        default="ray",
         choices=["auto", "ray", "process", "thread"],
-        help="Partition backend; auto selects ray when --ray-address is set, otherwise process.",
+        help="Partition backend.",
     )
-    parser.add_argument("--ray-address", default="", help="Ray address, e.g. auto or ray://host:10001")
+    parser.add_argument("--ray-address", default=DEFAULT_RAY_ADDRESS, help="Ray address, e.g. auto or ray://host:10001")
     parser.add_argument("--ray-parallelism", type=int, default=0, help="Ray worker count; 0 uses --partition-workers/auto")
     return parser.parse_args()
 

@@ -58,6 +58,9 @@ def test_quality_check_passes_valid_partition_rows(tmp_path: Path):
     assert report["summary"]["index_rows"] == 1
     assert report["summary"]["asset_count"] == 1
     assert report["summary"]["failed_checks"] == 0
+    report_path = run_dir / "quality_report.json"
+    assert report["report_path"] == str(report_path.resolve())
+    assert json.loads(report_path.read_text(encoding="utf-8"))["summary"]["index_rows"] == 1
 
 
 def test_quality_check_allows_entity_tiles_for_same_scene_band(tmp_path: Path):
@@ -162,6 +165,7 @@ def test_carbon_quality_check_passes_valid_observation_rows(tmp_path: Path):
         "quality_flag": "1",
         "center_lon": -167.413,
         "center_lat": 41.1686,
+        "footprint_geojson": {"type": "Point", "coordinates": [-167.413, 41.1686]},
         "source_uri": "s3://cube/carbon/raw/oco2.nc4",
     }
     (run_dir / "carbon_observation_rows.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -173,6 +177,9 @@ def test_carbon_quality_check_passes_valid_observation_rows(tmp_path: Path):
     assert report["summary"]["observation_rows"] == 1
     assert report["summary"]["quality_counts"] == {"1": 1}
     assert report["summary"]["avg_xco2"] == 417.384
+    report_path = run_dir / "quality_report.json"
+    assert report["report_path"] == str(report_path.resolve())
+    assert json.loads(report_path.read_text(encoding="utf-8"))["data_type"] == "carbon"
 
 
 def test_carbon_quality_check_fails_invalid_schema_coordinates_and_xco2(tmp_path: Path):

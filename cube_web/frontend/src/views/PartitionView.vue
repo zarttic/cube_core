@@ -5,7 +5,7 @@ import { Search } from '@element-plus/icons-vue';
 
 import LeafletMap from '@/components/LeafletMap.vue';
 import ConfigView from '@/views/ConfigView.vue';
-import { apiPrefixes, requestJson } from '@/api/client';
+import { apiPrefixes, requestGet, requestJson } from '@/api/client';
 
 function initialModule() {
   if (window.location.pathname === '/quality') return 'quality';
@@ -34,8 +34,13 @@ const deselectedCarbonObservationKeys = ref({});
 const selectedProductBatchIds = ref(['PRODUCT_BATCH_DIANZHONG_1980_2020']);
 const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
 const deselectedProductAssetKeys = ref({});
+const defaultLogicalGridLevel = 5;
+const defaultEntityGridLevel = 3;
+const partitionTaskPollIntervalMs = 1500;
+const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('geohash');
-const opticalGridLevel = ref(5);
+const opticalGridLevel = ref(defaultLogicalGridLevel);
+const entityGridLevel = ref(defaultEntityGridLevel);
 const productGridType = ref('geohash');
 const productGridLevel = ref(5);
 const mapGridLoading = ref(false);
@@ -75,16 +80,20 @@ const ingestDefaults = ref({
   allow_failed_quality: false,
 });
 
+const minioSourcePrefix = 's3://cube/cube/source';
+const opticalSourcePrefix = `${minioSourcePrefix}/optocal`;
+const productSourcePrefix = `${minioSourcePrefix}/product`;
+
 const opticalBatches = [
   {
     id: 'OPTICAL_BATCH_20260522_135546',
     name: 'Shandong_mosaic_optocal',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', bands: ['sr_band2'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif', scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', bands: ['sr_band2'], corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif`, scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif`, scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
   {
@@ -92,9 +101,9 @@ const opticalBatches = [
     name: 'Shandong_mosaic_2020Q3_rgb_batch',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band2'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
   {
@@ -102,8 +111,8 @@ const opticalBatches = [
     name: 'Shandong_mosaic_2017Q3_batch',
     status: '就绪',
     assets: [
-      { source_uri: 'Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band3'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: 'Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif', scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band4'], corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
+      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
     ],
   },
 ];
@@ -174,7 +183,7 @@ const dianzhongProductCorners = [
 const dianzhongProductBbox = [100.644783, 23.28638, 104.829333, 27.061367];
 
 const productAssetSchema = [
-  { field: 'source_uri', type: 'string', meaning: '产品栅格文件路径' },
+  { field: 'source_uri', type: 'string', meaning: '产品栅格 MinIO 对象 URL' },
   { field: 'product_name', type: 'string', meaning: '信息产品名称' },
   { field: 'product_year', type: 'int', meaning: '产品年份' },
   { field: 'product_family', type: 'string', meaning: '产品族' },
@@ -200,11 +209,11 @@ const productBatches = [
     target_crs: 'EPSG:4326',
     schema: productAssetSchema,
     assets: [
-      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1980, band: 'product_value', acq_time: '1980-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_1990年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1990, band: 'product_value', acq_time: '1990-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2000年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2000, band: 'product_value', acq_time: '2000-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2010年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2010, band: 'product_value', acq_time: '2010-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: '1980-2020年滇中地区30米生态安全评价数据集（第一版）_2020年.tif', product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2020, band: 'product_value', acq_time: '2020-01-01T00:00:00Z', resolution: '30m', bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1980, band: 'product_value', acq_time: '1980-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_1990年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1990, band: 'product_value', acq_time: '1990-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2000年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2000, band: 'product_value', acq_time: '2000-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2010年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2010, band: 'product_value', acq_time: '2010-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
+      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2020年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2020, band: 'product_value', acq_time: '2020-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
     ],
   },
 ];
@@ -412,14 +421,16 @@ const productMapGeometries = computed(() => selectedProductAssets.value
 
 const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));
 const selectedMapGridType = computed(() => (activeModule.value === 'product' ? productGridType.value : opticalGridType.value));
-const selectedMapGridLevel = computed(() => (activeModule.value === 'product' ? productGridLevel.value : opticalGridLevel.value));
+const selectedMapGridLevel = computed(() => (
+  activeModule.value === 'product' ? productGridLevel.value : opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value
+));
 const mapPreviewGeometries = computed(() => (activeModule.value === 'product' ? productMapGeometries.value : mapBatchGeometries.value));
 const mapGeometries = computed(() => [...mapPreviewGeometries.value, ...mapGridGeometries.value]);
 
 const partitionMetricRows = computed(() => {
   if (!lastPartitionResult.value) return [];
   const result = lastPartitionResult.value;
-  return [
+  const rows = [
     { label: '状态', value: result.status || '-' },
     { label: '模式', value: result.mode || '-' },
     { label: '数据类型', value: result.data_type || '-' },
@@ -433,6 +444,10 @@ const partitionMetricRows = computed(() => {
     { label: '质检状态', value: result.quality_status || result.quality_report?.status || '-' },
     { label: '正式入库', value: result.ingest_enabled === false ? '否' : '待确认' },
   ];
+  if (result.error) {
+    rows.splice(1, 0, { label: '失败原因', value: result.error });
+  }
+  return rows;
 });
 
 const selectedOpticalBandsText = computed(() => {
@@ -482,10 +497,11 @@ const partitionContextRows = computed(() => {
   const result = lastPartitionResult.value || {};
   const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'demo');
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
-  const status = resultLoading.value ? '执行中' : lastPartitionResult.value ? '已完成' : '待执行';
+  const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
+  const status = resultLoading.value ? '执行中' : result.status === 'failed' ? '失败' : lastPartitionResult.value ? '已完成' : '待执行';
   const rows = [
     { label: '运行状态', value: status },
-    { label: '执行接口', value: `/v1/partition/${endpoint}/${operation}` },
+    { label: '执行接口', value: apiPath },
     { label: '开始时间', value: partitionStartedAt.value ? formatQualityTime(partitionStartedAt.value) : '-' },
     { label: '已耗时', value: `${partitionElapsedSec.value.toFixed(1)} s` },
     { label: '数据批次', value: selectedDataName.value },
@@ -529,6 +545,7 @@ const partitionResultDetailRows = computed(() => {
   if (!result) return [];
   return [
     { label: '执行引擎', value: result.execution_engine || result.partition_backend || '-' },
+    { label: '后台任务 ID', value: result.partition_task_id || '-' },
     { label: '演示任务 ID', value: result.demo_task_id || '-' },
     { label: 'Ray 任务 ID', value: result.ray_task_id || '-' },
     { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
@@ -545,6 +562,10 @@ const partitionWarnNeedsRetry = computed(() => {
   const status = lastPartitionResult.value?.quality_status || lastPartitionResult.value?.quality_report?.status;
   return status === 'WARN';
 });
+
+const partitionFailureMessage = computed(() => (
+  lastPartitionResult.value?.status === 'failed' ? lastPartitionResult.value.error || '剖分失败' : ''
+));
 
 const opticalIngestReady = computed(() => activeModule.value === 'optical' && Boolean(
   lastPartitionResult.value?.quality_report_id || lastPartitionResult.value?.quality_report?.report_id || lastPartitionResult.value?.run_dir,
@@ -733,10 +754,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'optical') {
     const selectedBatch = opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id));
     const selectedAssets = selectedOpticalAssets.value;
+    const useEntityPartition = opticalGridType.value === 'isea4h';
     return {
       payload: {
         grid_type: opticalGridType.value,
-        grid_level: Number(opticalGridLevel.value),
+        grid_level: Number(selectedMapGridLevel.value),
+        grid_level_mode: useEntityPartition ? 'manual' : 'auto',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
         selected_assets: selectedAssets,
@@ -827,6 +850,78 @@ function formatRows(result) {
     key,
     value: typeof value === 'object' ? JSON.stringify(value) : String(value),
   }));
+}
+
+function errorText(error) {
+  return error?.message || String(error || '未知错误');
+}
+
+function buildPartitionFailureResult(error, request = {}) {
+  const payload = request.payload || {};
+  const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
+  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'demo');
+  const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
+  return {
+    status: 'failed',
+    mode: operation === 'test' ? 'partition_test_no_ingest' : 'partition_demo',
+    data_type: activeModule.value,
+    endpoint: apiPath,
+    grid_type: payload.grid_type || selectedMapGridType.value || '-',
+    grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
+    batch_name: selectedDataName.value,
+    selected_count:
+      activeModule.value === 'optical'
+        ? selectedOpticalAssets.value.length
+        : activeModule.value === 'carbon'
+          ? selectedCarbonObservations.value.length
+          : activeModule.value === 'product'
+            ? selectedProductAssets.value.length
+            : 0,
+    error: errorText(error),
+    started_at: partitionStartedAt.value || '',
+    elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
+    ingest_enabled: false,
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function waitForPartitionTask(partitionPrefix, taskId) {
+  for (let attempt = 0; attempt < partitionTaskMaxPolls; attempt += 1) {
+    const task = await requestGet(`${partitionPrefix}/tasks/${taskId}`);
+    if (task.status === 'completed') {
+      if (!task.result) {
+        throw new Error(`剖分任务 ${taskId} 已完成但未返回结果`);
+      }
+      return {
+        ...task.result,
+        partition_task_id: task.task_id || taskId,
+      };
+    }
+    if (task.status === 'failed') {
+      throw new Error(task.error || `剖分任务 ${taskId} 执行失败`);
+    }
+    if (!['queued', 'running'].includes(task.status)) {
+      throw new Error(`剖分任务 ${taskId} 状态异常: ${task.status || '-'}`);
+    }
+    await sleep(partitionTaskPollIntervalMs);
+  }
+  throw new Error(`剖分任务轮询超时: ${taskId}`);
+}
+
+async function requestPartitionOperation(partitionPrefix, endpoint, operation, payload) {
+  const apiPath = `${partitionPrefix}/${endpoint}/tasks/${operation}`;
+  const submitted = await requestJson(apiPath, payload);
+  const taskId = submitted.task_id;
+  if (!taskId) {
+    throw new Error('剖分任务提交后未返回 task_id');
+  }
+  setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
+  return waitForPartitionTask(partitionPrefix, taskId);
 }
 
 function resetPartitionStages() {
@@ -1204,6 +1299,8 @@ async function runDemo() {
       throw new Error(`不支持的剖分模块: ${activeModule.value}`);
     }
     const { payload, selectedCount } = partitionPayloadForActiveModule();
+    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
+    lastPartitionRequest.value = { endpoint, payload, operation, apiPath: `/v1/partition/${endpoint}/tasks/${operation}` };
     if (activeModule.value === 'optical' && selectedCount <= 0) {
       throw new Error('请至少选择一条影像资产');
     }
@@ -1213,9 +1310,7 @@ async function runDemo() {
 	    if (activeModule.value === 'product' && selectedCount <= 0) {
 	      throw new Error('请至少选择一个信息产品年份');
 	    }
-	    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
-	    lastPartitionRequest.value = { endpoint, payload, operation };
-	    setPartitionStage(
+		    setPartitionStage(
 	      'queue',
 	      'running',
 	      activeModule.value === 'optical'
@@ -1228,8 +1323,8 @@ async function runDemo() {
 	    );
     await Promise.resolve();
     setPartitionStage('queue', 'done', '数据队列已提交到后端。');
-    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/${operation} 执行剖分。`);
-    const result = await requestJson(`${partitionPrefix}/${endpoint}/${operation}`, payload);
+    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/tasks/${operation} 提交后台剖分任务。`);
+    const result = await requestPartitionOperation(partitionPrefix, endpoint, operation, payload);
     setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
     setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
     lastPartitionResult.value = result;
@@ -1241,10 +1336,13 @@ async function runDemo() {
 	      selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
 	    }
 	    ElMessage.success(testModules.has(activeModule.value) ? '剖分测试完成，未写入正式库' : '剖分任务完成');
-  } catch (error) {
-    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
-    ElMessage.error(error.message);
-  } finally {
+	  } catch (error) {
+	    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
+	    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
+	    lastPartitionResult.value = failure;
+	    resultRows.value = formatRows(failure);
+	    setPartitionStage('persist', 'failed', `执行失败：${failure.error}`);
+	  } finally {
     stopPartitionTimer();
     resultLoading.value = false;
   }
@@ -1348,6 +1446,7 @@ async function retryLastPartitionTask() {
   resultRows.value = [];
   const retryRequest = lastPartitionRequest.value;
   const retryResult = lastPartitionResult.value || {};
+  let currentRetryRequest = null;
   lastPartitionResult.value = null;
   ingestPreview.value = null;
   ingestResult.value = null;
@@ -1360,11 +1459,14 @@ async function retryLastPartitionTask() {
     setPartitionStage('queue', 'running', '重试请求已进入后端队列。');
     await Promise.resolve();
     setPartitionStage('queue', 'done', '后端已接收重试请求。');
-    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/retry 执行重试。`);
-    const result = await requestJson(`${partitionPrefix}/${endpoint}/retry`, {
+    const operation = 'retry';
+    const retryPayload = {
       request: retryRequest,
       last_result: retryResult,
-    });
+    };
+    currentRetryRequest = { endpoint, operation, payload: retryPayload, apiPath: `/v1/partition/${endpoint}/tasks/retry` };
+    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/tasks/retry 提交后台重试任务。`);
+    const result = await requestPartitionOperation(partitionPrefix, endpoint, operation, retryPayload);
     setPartitionStage('partition', 'done', `重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
     setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
     lastPartitionResult.value = result;
@@ -1379,7 +1481,10 @@ async function retryLastPartitionTask() {
     ElMessage.success('任务已重试完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
-    ElMessage.error(error.message);
+    const failure = buildPartitionFailureResult(error, currentRetryRequest || retryRequest || {});
+    lastPartitionResult.value = failure;
+    resultRows.value = formatRows(failure);
+    setPartitionStage('persist', 'failed', `重试失败：${failure.error}`);
   } finally {
     stopPartitionTimer();
     resultLoading.value = false;
@@ -1398,11 +1503,21 @@ watch(qualityDataType, () => {
   }
 });
 
+watch(opticalGridType, (gridType) => {
+  if (gridType === 'isea4h') {
+    entityGridLevel.value = defaultEntityGridLevel;
+  } else {
+    opticalGridLevel.value = defaultLogicalGridLevel;
+  }
+  mapGridGeometries.value = [];
+});
+
 watch([
   selectedOpticalBatchIds,
   deselectedOpticalAssetKeys,
   opticalGridType,
   opticalGridLevel,
+  entityGridLevel,
   selectedProductBatchIds,
   deselectedProductAssetKeys,
   productGridType,
@@ -1630,8 +1745,9 @@ onUnmounted(() => {
                 <div class="panel-header">
                   <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : activeModule === 'product' ? '产品范围地图预览' : '地图预览' }}</h3>
                   <div v-if="['optical', 'product'].includes(activeModule)" class="map-actions">
-                    <el-input-number v-if="activeModule === 'optical'" v-model="opticalGridLevel" :min="1" :max="15" size="small" />
-                    <el-input-number v-else v-model="productGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-if="activeModule === 'product'" v-model="productGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-else-if="opticalGridType === 'isea4h'" v-model="entityGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-else v-model="opticalGridLevel" :min="1" :max="15" size="small" />
                     <el-button size="small" :loading="mapGridLoading" @click="loadMapGridForSelectedAssets">加载格网</el-button>
                     <el-button size="small" @click="clearMapGrid">清空格网</el-button>
                   </div>
@@ -1728,6 +1844,13 @@ onUnmounted(() => {
                         </div>
                       </div>
                     </div>
+                    <el-alert
+                      v-if="partitionFailureMessage"
+                      type="error"
+                      :closable="false"
+                      :title="partitionFailureMessage"
+                      class="partition-failure-alert"
+                    />
                     <el-alert
                       v-if="partitionWarnNeedsRetry"
                       type="warning"

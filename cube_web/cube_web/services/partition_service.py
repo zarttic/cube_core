@@ -135,6 +135,9 @@ def build_partition_registry(
     product_demo: PartitionRunner,
     product_test: PartitionRunner,
     product_retry: PartitionRunner,
+    entity_demo: PartitionRunner,
+    entity_test: PartitionRunner,
+    entity_retry: PartitionRunner,
 ) -> Dict[str, PartitionBackend]:
     return {
         "optical": PartitionBackend(
@@ -154,6 +157,12 @@ def build_partition_registry(
             demo=product_demo,
             test=product_test,
             retry=product_retry,
+        ),
+        "entity": PartitionBackend(
+            data_type="entity",
+            demo=entity_demo,
+            test=entity_test,
+            retry=entity_retry,
         ),
         "radar": PartitionBackend(data_type="radar", implemented=False),
     }

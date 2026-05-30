@@ -144,12 +144,199 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
             cog_overwrite=True,
             cog_workers=1,
             partition_workers=1,
+            partition_backend="thread",
+            ray_address="",
+            ray_parallelism=0,
+            chunk_size=0,
             sample_mean=False,
         )
     )
 
     assert result["status"] == "completed"
     assert captured["predictor"] == 0
+
+
+def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    cog_dir = tmp_path / "cog"
+    input_dir.mkdir()
+    tif = input_dir / "1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif"
+    _write_product_tif(tif)
+    captured = {}
+
+    def fake_convert_assets_to_cog(assets, **kwargs):
+        return assets
+
+    def fake_build_grid_tasks_driver(**kwargs):
+        return [_product_row(tif, 1980)]
+
+    def fake_partition_groups_ray(
+        task_chunks,
+        parallelism,
+        ray_address,
+        include_sample_mean,
+        assets_by_path,
+        cog_input_dir,
+        cog_overwrite,
+        cog_options,
+        target_crs,
+        source_options,
+        cog_upload_options,
+    ):
+        captured["task_chunk_count"] = len(task_chunks)
+        captured["parallelism"] = parallelism
+        captured["ray_address"] = ray_address
+        captured["include_sample_mean"] = include_sample_mean
+        captured["assets_by_path"] = assets_by_path
+        captured["cog_input_dir"] = cog_input_dir
+        captured["cog_overwrite"] = cog_overwrite
+        captured["cog_options"] = cog_options
+        captured["target_crs"] = target_crs
+        captured["source_options"] = source_options
+        captured["cog_upload_options"] = cog_upload_options
+        return [_product_row(tif, 1980)], 0.25
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.convert_assets_to_cog", fake_convert_assets_to_cog)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", fake_build_grid_tasks_driver)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._partition_groups_ray", fake_partition_groups_ray)
+
+    result = run_product_partition(
+        Namespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            output_dir=str(output_dir),
+            cog_input_dir=str(cog_dir),
+            target_crs="EPSG:4326",
+            grid_type="geohash",
+            grid_level=5,
+            cover_mode="intersect",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            cog_overwrite=True,
+            cog_workers=1,
+            partition_workers=1,
+            partition_backend="ray",
+            ray_address="ray://10.136.1.13:10001",
+            ray_parallelism=4,
+            chunk_size=1,
+            sample_mean=True,
+            metadata_backend="none",
+            asset_storage_backend="local",
+            minio_endpoint="10.136.1.14:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/product",
+            minio_secure=False,
+            dataset="dianzhong_ecological_security",
+            asset_version="v1",
+        )
+    )
+
+    assert result["execution_engine"] == "ray"
+    assert result["partition_backend_used"] == "ray"
+    assert result["ray_parallelism"] == 1
+    assert result["ray_address"] == "ray://10.136.1.13:10001"
+    assert result["ray_init_elapsed_sec"] == 0.25
+    assert captured["parallelism"] == 1
+    assert captured["include_sample_mean"] is True
+    assert str(tif.resolve()) in captured["assets_by_path"]
+    assert captured["cog_input_dir"] == str(cog_dir)
+    assert captured["cog_overwrite"] is True
+    assert "PREDICTOR" not in captured["cog_options"]
+    assert captured["target_crs"] == "EPSG:4326"
+    assert captured["source_options"]["endpoint"] == "10.136.1.14:9000"
+    assert captured["source_options"]["access_key"] == "access"
+    assert captured["cog_upload_options"]["bucket"] == "cube"
+    assert captured["cog_upload_options"]["prefix"] == "cube/product"
+    assert captured["cog_upload_options"]["dataset"] == "dianzhong_ecological_security"
+
+
+def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    cog_dir = tmp_path / "cog"
+    input_dir.mkdir()
+    tif = input_dir / "1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif"
+    _write_product_tif(tif)
+    captured = {}
+
+    def fake_convert_assets_to_cog(assets, **kwargs):
+        return assets
+
+    def fake_build_grid_tasks_driver(**kwargs):
+        return [_product_row(tif, 1980)]
+
+    def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
+        return group
+
+    def fake_run_product_ingest(args):
+        captured["run_dir"] = args.run_dir
+        captured["job_id"] = args.job_id
+        captured["metadata_backend"] = args.metadata_backend
+        captured["asset_storage_backend"] = args.asset_storage_backend
+        captured["minio_bucket"] = args.minio_bucket
+        assert (Path(args.run_dir) / "index_rows.jsonl").exists()
+        return {
+            "input_rows": 1,
+            "product_asset_rows": 1,
+            "product_fact_rows": 1,
+            "metadata_backend": args.metadata_backend,
+            "asset_storage_backend": args.asset_storage_backend,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.convert_assets_to_cog", fake_convert_assets_to_cog)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", fake_build_grid_tasks_driver)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._process_local_task_group", fake_process_local_task_group)
+    monkeypatch.setattr("cube_split.ingest.product_ingest_job.run_product_ingest", fake_run_product_ingest)
+
+    result = run_product_partition(
+        Namespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            output_dir=str(output_dir),
+            cog_input_dir=str(cog_dir),
+            target_crs="EPSG:4326",
+            grid_type="geohash",
+            grid_level=5,
+            cover_mode="intersect",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            cog_overwrite=True,
+            cog_workers=1,
+            partition_workers=1,
+            partition_backend="thread",
+            ray_address="",
+            ray_parallelism=0,
+            chunk_size=0,
+            sample_mean=False,
+            job_id="",
+            dataset="dianzhong_ecological_security",
+            product_name="滇中地区30米生态安全评价数据集",
+            asset_version="v1",
+            cube_version="product_v1",
+            metadata_backend="postgres",
+            postgres_dsn="postgresql://postgres:postgres@127.0.0.1:5432/cube",
+            db_path="",
+            asset_storage_backend="minio",
+            minio_endpoint="10.136.1.14:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/product",
+            minio_secure=False,
+            minio_upload_workers=2,
+            cog_output_root=str(tmp_path / "product_cog_store"),
+            cog_materialize_mode="copy",
+        )
+    )
+
+    assert result["ingest_enabled"] is True
+    assert result["ingest_stats"]["input_rows"] == 1
+    assert captured["job_id"] == Path(captured["run_dir"]).name
+    assert captured["asset_storage_backend"] == "minio"
+    assert captured["minio_bucket"] == "cube"
 
 
 def test_product_quality_passes_complete_years(tmp_path: Path):
@@ -170,6 +357,11 @@ def test_product_quality_passes_complete_years(tmp_path: Path):
     assert report["status"] == "PASS"
     assert report["summary"]["index_rows"] == 5
     assert report["summary"]["product_years"] == [1980, 1990, 2000, 2010, 2020]
+    report_path = run_dir / "quality_report.json"
+    assert report["report_path"] == str(report_path.resolve())
+    stored_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert stored_report["data_type"] == "product"
+    assert stored_report["summary"]["product_years"] == [1980, 1990, 2000, 2010, 2020]
 
 
 def test_product_quality_passes_selected_single_year_by_default(tmp_path: Path):

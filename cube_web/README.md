@@ -25,6 +25,13 @@ Quality reports use PostgreSQL storage. Local development defaults to the
 Podman PostgreSQL service at `postgresql://postgres:postgres@127.0.0.1:55432/cube`;
 set `CUBE_WEB_POSTGRES_DSN` or `DATABASE_URL` to override it.
 
+Partition demos default to the configured infrastructure cluster: Ray Client
+`ray://10.136.1.13:10001`, MinIO API `10.136.1.14:9000`, and bucket `cube`.
+The default PostgreSQL DSN above is used for metadata. Set
+`CUBE_WEB_RAY_ADDRESS`, `CUBE_WEB_POSTGRES_DSN`, `CUBE_WEB_MINIO_ENDPOINT`,
+`CUBE_WEB_MINIO_ACCESS_KEY`, `CUBE_WEB_MINIO_SECRET_KEY`, and
+`CUBE_WEB_MINIO_BUCKET` to override them.
+
 For local frontend development:
 
 ```bash

@@ -8,6 +8,11 @@ from typing import Any
 from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
 
 CONFIG_SCOPE = "cube_web"
+DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
+DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
+DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
+DEFAULT_MINIO_SECRET_KEY = "minioadmin"
+DEFAULT_MINIO_BUCKET = "cube"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "partition": {
@@ -39,10 +44,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "sensor": "optical_mosaic",
             "quality_rule": "best_quality_wins",
             "allow_failed_quality": False,
-            "metadata_backend": "none",
-            "asset_storage_backend": "local",
-            "minio_endpoint": "",
-            "minio_bucket": "",
+            "metadata_backend": "postgres",
+            "asset_storage_backend": "minio",
+            "minio_endpoint": DEFAULT_MINIO_ENDPOINT,
+            "minio_bucket": DEFAULT_MINIO_BUCKET,
             "minio_prefix": "cube/entity",
             "minio_secure": False,
             "minio_upload_workers": 8,
@@ -239,7 +244,7 @@ def optical_quality_defaults() -> dict[str, Any]:
 def runtime_info() -> dict[str, Any]:
     return {
         "postgres_dsn": _masked_dsn(_postgres_dsn()),
-        "ray_address": os.environ.get("CUBE_WEB_RAY_ADDRESS", ""),
+        "ray_address": os.environ.get("CUBE_WEB_RAY_ADDRESS") or DEFAULT_RAY_ADDRESS,
         "config_scope": CONFIG_SCOPE,
     }
 

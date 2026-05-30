@@ -41,18 +41,28 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
   --grid-type isea4h \
   --grid-level 5 \
   --partition-backend ray \
-  --ray-address auto
+  --ray-address ray://10.136.1.13:10001
 ```
 
 Run optical ingest E2E:
 
 ```bash
-POSTGRES_DSN='postgresql://USER:PASSWORD@HOST:5432/cube' \
-MINIO_ENDPOINT='HOST:9000' \
-MINIO_ACCESS_KEY='ACCESS_KEY' \
-MINIO_SECRET_KEY='SECRET_KEY' \
-MINIO_BUCKET='cube' \
 scripts/run_ray_ingest_e2e.sh
+```
+
+The script defaults to the project infrastructure settings: PostgreSQL
+`postgresql://postgres:postgres@127.0.0.1:55432/cube`, Ray
+`ray://10.136.1.13:10001`, MinIO `10.136.1.14:9000`, and bucket `cube`.
+Override with `POSTGRES_DSN`, `RAY_ADDRESS`, `MINIO_ENDPOINT`,
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, and `MINIO_BUCKET` when needed.
+
+Run optical Ray partition and ingest in one job:
+
+```bash
+PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.ray_logical_partition_job \
+  --input-dir data/optocal \
+  --manifest-path data/optocal/manifest.jsonl \
+  --output-dir data/ray_output/logical_partition
 ```
 
 Run AOI readback:
@@ -62,11 +72,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.read.aoi_reader \
   --bbox 120.8 44.0 122.2 44.6 \
   --time-bucket 20260204 \
   --bands sr_b2 sr_b3 sr_b4 \
-  --output .tmp/aoi_rgb.tif \
-  --postgres-dsn postgresql://USER:PASSWORD@HOST:5432/cube \
-  --minio-endpoint HOST:9000 \
-  --minio-access-key ACCESS_KEY \
-  --minio-secret-key SECRET_KEY
+  --output .tmp/aoi_rgb.tif
 ```
 
 ## Tests

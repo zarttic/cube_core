@@ -162,7 +162,7 @@ def test_build_manifest_supports_unified_manifest_jsonl(tmp_path: Path):
         (
             '{"data_type":"optical","scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4",'
             '"acq_time":"2020-07-01T00:00:00Z","source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif",'
-            '"sensor":"optical_mosaic","product_family":"other",'
+            '"sensor":"optical_mosaic","product_family":"other","resolution":30,'
             '"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}\n'
         ),
         encoding="utf-8",
@@ -179,6 +179,7 @@ def test_build_manifest_supports_unified_manifest_jsonl(tmp_path: Path):
     assert records[0].sensor == "optical_mosaic"
     assert records[0].bbox == [117.0, 35.8, 117.2, 36.0]
     assert records[0].corners == [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]]
+    assert records[0].resolution == 30
 
 
 def test_build_manifest_manifest_jsonl_requires_required_fields(tmp_path: Path):
@@ -198,7 +199,7 @@ def test_build_manifest_supports_batch_manifest_json_with_assets(tmp_path: Path)
             '{"batch_id":"optical_batch_xx","data_type":"optical","assets":['
             '{"scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4","acq_time":"2020-07-01T00:00:00Z",'
             '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","sensor":"optical_mosaic",'
-            '"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}'
+            '"resolution":30,"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}'
             ']}'
         ),
         encoding="utf-8",
@@ -208,6 +209,7 @@ def test_build_manifest_supports_batch_manifest_json_with_assets(tmp_path: Path)
     assert len(records) == 1
     assert records[0].scene_id == "Shandong_mosaic_2020Q3"
     assert records[0].bbox == [117.0, 35.8, 117.2, 36.0]
+    assert records[0].resolution == 30
 
 
 def test_build_manifest_manifest_requires_four_corners(tmp_path: Path):

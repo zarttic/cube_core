@@ -169,13 +169,13 @@ def _validate_footprints(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if value in (None, "", {}):
             continue
         present_count += 1
-        if not isinstance(value, dict) or value.get("type") not in {"Polygon", "MultiPolygon"}:
+        if not isinstance(value, dict) or value.get("type") not in {"Point", "Polygon", "MultiPolygon"}:
             invalid_rows.append({"line_no": row.get("_line_no"), "type": value.get("type") if isinstance(value, dict) else type(value).__name__})
     if invalid_rows:
         return _check(
             "carbon_footprint",
             "WARN",
-            "Some carbon footprint geometries are not valid polygon GeoJSON objects.",
+            "Some carbon footprint geometries are not valid GeoJSON point or polygon objects.",
             invalid_rows=invalid_rows[:20],
             invalid_count=len(invalid_rows),
             present_count=present_count,
@@ -222,7 +222,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
 
     if not rows_path.exists():
         checks.append(_check("carbon_rows", "FAIL", f"carbon_observation_rows.jsonl not found under run_dir: {run_dir}"))
-        return {
+        return optical_quality._finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "target_crs": target_crs,
@@ -231,12 +231,12 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
             "checks": checks,
             "assets": [],
             "data_type": "carbon",
-        }
+        }, run_dir, args)
 
     rows = optical_quality._load_jsonl(rows_path)
     if not rows:
         checks.append(_check("carbon_rows", "FAIL", "carbon_observation_rows.jsonl is empty."))
-        return {
+        return optical_quality._finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "target_crs": target_crs,
@@ -245,7 +245,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
             "checks": checks,
             "assets": [],
             "data_type": "carbon",
-        }
+        }, run_dir, args)
 
     checks.append(_check("carbon_rows", "PASS", "carbon_observation_rows.jsonl was loaded.", row_count=len(rows), path=str(rows_path)))
     checks.append(_validate_required_fields(rows))
@@ -267,12 +267,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
         "assets": [],
         "data_type": "carbon",
     }
-    output_path = getattr(args, "output", "") or ""
-    if output_path:
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return report
+    return optical_quality._finalize_report(report, run_dir, args)
 
 
 def parse_args() -> argparse.Namespace:

@@ -91,7 +91,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
 
     if not rows_path.exists():
         checks.append(_check("index_rows", "FAIL", f"index_rows.jsonl not found under run_dir: {run_dir}"))
-        return {
+        return optical_quality._finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "target_crs": target_crs,
@@ -100,12 +100,12 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
             "checks": checks,
             "assets": [],
             "data_type": "product",
-        }
+        }, run_dir, args)
 
     rows = optical_quality._load_jsonl(rows_path)
     if not rows:
         checks.append(_check("index_rows", "FAIL", "index_rows.jsonl is empty."))
-        return {
+        return optical_quality._finalize_report({
             "status": "FAIL",
             "run_dir": str(run_dir),
             "target_crs": target_crs,
@@ -114,7 +114,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
             "checks": checks,
             "assets": [],
             "data_type": "product",
-        }
+        }, run_dir, args)
 
     checks.append(_check("index_rows", "PASS", "index_rows.jsonl was loaded.", row_count=len(rows), path=str(rows_path)))
     checks.append(optical_quality._validate_required_fields(rows))
@@ -136,12 +136,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
         "assets": assets,
         "data_type": "product",
     }
-    output_path = getattr(args, "output", "") or ""
-    if output_path:
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return report
+    return optical_quality._finalize_report(report, run_dir, args)
 
 
 def parse_args() -> argparse.Namespace:

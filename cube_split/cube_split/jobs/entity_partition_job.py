@@ -19,16 +19,31 @@ from pyproj import Geod
 from rasterio.warp import transform_geom
 
 from grid_core.sdk import CubeEncoderSDK
+from cube_split.ingest.ray_ingest_job import (
+    DEFAULT_MINIO_ACCESS_KEY,
+    DEFAULT_MINIO_BUCKET,
+    DEFAULT_MINIO_ENDPOINT,
+    DEFAULT_MINIO_SECRET_KEY,
+    DEFAULT_POSTGRES_DSN,
+)
 from cube_split.jobs.ray_partition_core import (
     AssetRecord,
     _dataset_bounds_wgs84,
+    asset_record_to_dict,
     build_grid_tasks_driver,
     build_manifest,
+    cog_creation_options,
+    convert_asset_to_cog,
+    upload_cog_to_minio,
+    resolve_asset_source_path,
 )
 from cube_split.jobs.ray_logical_partition_job import (
+    DEFAULT_RAY_ADDRESS,
     _chunk_tasks_for_ray,
     _load_ray,
+    _prepend_sys_paths,
     _ray_actor_options_from_env,
+    _ray_project_roots,
     _ray_runtime_env_from_env,
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
@@ -44,8 +59,11 @@ def infer_isea4h_level_for_assets(
 ) -> int:
     if target_pixels_per_hex_edge <= 0:
         raise ValueError("target_pixels_per_hex_edge must be greater than 0")
-    pixel_size_m = max(_asset_pixel_size_m(Path(asset.path)) for asset in assets)
-    target_edge_m = pixel_size_m * target_pixels_per_hex_edge
+    resolution = max(
+        float(asset.resolution) if asset.resolution is not None and float(asset.resolution) > 0 else _asset_pixel_size_m(asset.path)
+        for asset in assets
+    )
+    target_edge_m = resolution * target_pixels_per_hex_edge
     selected = 1
     for level in range(1, 13):
         if h3.average_hexagon_edge_length(level, unit="m") >= target_edge_m:
@@ -53,9 +71,9 @@ def infer_isea4h_level_for_assets(
     return selected
 
 
-def _asset_pixel_size_m(path: Path) -> float:
+def _asset_pixel_size_m(path: str | Path) -> float:
     geod = Geod(ellps="WGS84")
-    with rasterio.open(path) as ds:
+    with rasterio.open(resolve_asset_source_path(str(path))) as ds:
         res_x = abs(float(ds.transform.a))
         res_y = abs(float(ds.transform.e))
         if ds.crs and ds.crs.is_projected:
@@ -104,7 +122,7 @@ def _ensure_center_cell_tasks(
         if asset.bbox is not None:
             min_lon, min_lat, max_lon, max_lat = map(float, asset.bbox)
         else:
-            with rasterio.open(asset.path) as ds:
+            with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
                 min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
         center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
         cell = sdk.locate(grid_type="isea4h", level=grid_level, point=center)
@@ -162,7 +180,8 @@ def _write_entity_tiles(
         task_groups.setdefault(str(task["asset_path"]), []).append(task)
 
     for asset_path, asset_tasks in sorted(task_groups.items()):
-        with rasterio.open(asset_path) as ds:
+        local_asset_path = resolve_asset_source_path(asset_path)
+        with rasterio.open(local_asset_path) as ds:
             for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
                 geom = _hex_geometry_for_dataset(sdk, ds, str(task["space_code"]))
                 for band_index in range(1, ds.count + 1):
@@ -302,6 +321,14 @@ def _write_entity_tile_chunks_ray(
     partition_prefix_len: int,
     parallelism: int,
     ray_address: str,
+    assets_by_path: dict[str, dict[str, Any]] | None = None,
+    cog_input_dir: str = "",
+    cog_overwrite: bool = False,
+    cog_options: dict[str, str] | None = None,
+    target_crs: str = "",
+    source_options: dict[str, Any] | None = None,
+    cog_upload_options: dict[str, Any] | None = None,
+    tile_upload_options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
@@ -331,44 +358,157 @@ def _write_entity_tile_chunks_ray(
             run_dir_text: str,
             time_granularity_text: str,
             prefix_len: int,
+            assets_by_path_value: dict[str, dict[str, Any]] | None,
+            cog_input_dir_value: str,
+            cog_overwrite_value: bool,
+            cog_options_value: dict[str, str] | None,
+            target_crs_value: str,
+            source_options_value: dict[str, Any] | None,
+            cog_upload_options_value: dict[str, Any] | None,
+            tile_upload_options_value: dict[str, Any] | None,
         ) -> list[dict[str, Any]]:
             import os
             import sys
             from pathlib import Path
 
-            project_root = os.environ.get("CUBE_PROJECT_ROOT", "/tmp/cube_project_ray_code")
-            for rel_path in ("cube_encoder", "cube_split", "cube_web"):
-                package_path = os.path.join(project_root, rel_path)
-                if package_path not in sys.path:
-                    sys.path.insert(0, package_path)
+            entity_module_path = None
+            project_roots = _ray_project_roots()
+            for project_root in project_roots:
+                candidate = os.path.abspath(os.path.join(project_root, "cube_split", "cube_split", "jobs", "entity_partition_job.py"))
+                if entity_module_path is None and os.path.exists(candidate):
+                    entity_module_path = candidate
+            _prepend_sys_paths(
+                [
+                    os.path.abspath(os.path.join(project_root, rel_path))
+                    for project_root in project_roots
+                    for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
+                ]
+            )
 
-            from cube_split.jobs.entity_partition_job import _write_entity_tiles
+            for search_root in (
+                os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
+                "/tmp/ray/session_latest/runtime_resources/working_dir_files",
+            ):
+                if not search_root or not os.path.isdir(search_root):
+                    continue
+                for dirpath, _, filenames in os.walk(search_root):
+                    if "entity_partition_job.py" not in filenames:
+                        continue
+                    if entity_module_path is None:
+                        entity_module_path = os.path.abspath(os.path.join(dirpath, "entity_partition_job.py"))
+                    outer_cube_split = os.path.abspath(os.path.join(dirpath, "..", ".."))
+                    project_root = os.path.abspath(os.path.join(dirpath, "..", "..", "..", ".."))
+                    _prepend_sys_paths(
+                        [
+                            project_root,
+                            os.path.join(project_root, "cube_encoder"),
+                            outer_cube_split,
+                            os.path.join(project_root, "cube_web"),
+                        ]
+                    )
+                    break
+                if entity_module_path:
+                    break
+
+            try:
+                from cube_split.jobs.entity_partition_job import _write_entity_tiles as writer
+                from cube_split.jobs.entity_partition_job import _rows_with_asset_uris as rows_with_asset_uris
+            except ModuleNotFoundError:
+                if not entity_module_path:
+                    raise
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location("_ray_entity_partition_job", entity_module_path)
+                if spec is None or spec.loader is None:
+                    raise
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["_ray_entity_partition_job"] = module
+                spec.loader.exec_module(module)
+                writer = module._write_entity_tiles
+                rows_with_asset_uris = module._rows_with_asset_uris
 
             flat_tasks = [task for group in task_groups for task in group]
-            return _write_entity_tiles(
+            if assets_by_path_value and cog_options_value and cog_upload_options_value:
+                from cube_split.jobs.ray_partition_core import asset_record_from_dict, convert_asset_to_cog, upload_cog_to_minio
+
+                env_options = dict(cog_upload_options_value or source_options_value or {})
+                if env_options.get("endpoint"):
+                    os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
+                if env_options.get("access_key"):
+                    os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
+                if env_options.get("secret_key"):
+                    os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
+
+                prepared: list[dict[str, Any]] = []
+                cog_uri_by_source: dict[str, str] = {}
+                worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_entity_cog") / f"ray_worker_{os.getpid()}"
+                for task in flat_tasks:
+                    source_path = str(task["asset_path"])
+                    cog_uri = cog_uri_by_source.get(source_path)
+                    if cog_uri is None:
+                        asset = asset_record_from_dict(assets_by_path_value[source_path])
+                        converted = convert_asset_to_cog(
+                            asset,
+                            cog_input_dir=worker_cog_root,
+                            overwrite=cog_overwrite_value,
+                            creation_options=cog_options_value,
+                            target_crs=target_crs_value or None,
+                            source_options=source_options_value,
+                        )
+                        cog_uri = upload_cog_to_minio(converted, Path(converted.path), cog_upload_options_value)
+                        cog_uri_by_source[source_path] = cog_uri
+                    prepared.append({**task, "asset_path": cog_uri})
+                flat_tasks = prepared
+
+            rows = writer(
                 flat_tasks,
                 run_dir=Path(run_dir_text),
                 time_granularity=time_granularity_text,
                 partition_prefix_len=prefix_len,
-                )
+            )
+            if tile_upload_options_value:
+                from cube_split.jobs.entity_partition_job import _upload_entity_tiles_to_minio
+                import argparse
+
+                asset_uri_map = _upload_entity_tiles_to_minio(rows, argparse.Namespace(**tile_upload_options_value))
+                rows = rows_with_asset_uris(rows, asset_uri_map)
+            return rows
 
     actor_cls = EntityTileProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
-    futures = [
-        actors[idx % parallelism].process_groups.remote(
-            chunk,
+    def submit_chunk(idx: int):
+        return actors[idx % parallelism].process_groups.remote(
+            task_chunks[idx],
             str(run_dir),
             time_granularity,
             partition_prefix_len,
+            assets_by_path,
+            cog_input_dir,
+            cog_overwrite,
+            cog_options,
+            target_crs,
+            source_options,
+            cog_upload_options,
+            tile_upload_options,
         )
-        for idx, chunk in enumerate(task_chunks)
-    ]
 
     rows: list[dict[str, Any]] = []
+    next_idx = 0
+    pending = []
+    while next_idx < len(task_chunks) and len(pending) < parallelism:
+        pending.append(submit_chunk(next_idx))
+        next_idx += 1
     try:
-        for chunk_rows in ray.get(futures):
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1)
+            chunk_rows = ray.get(ready[0])
             rows.extend(chunk_rows)
+            if next_idx < len(task_chunks):
+                pending.append(submit_chunk(next_idx))
+                next_idx += 1
     finally:
+        for actor in actors:
+            ray.kill(actor, no_restart=True)
         ray.shutdown()
     return rows, ray_init_elapsed
 
@@ -634,7 +774,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     requested_level = int(getattr(args, "grid_level", 0) or 0)
     target_pixels = int(getattr(args, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE) or DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
-    inferred_level = infer_isea4h_level_for_assets(assets, target_pixels)
+    inferred_level = requested_level if requested_level > 0 else infer_isea4h_level_for_assets(assets, target_pixels)
     grid_level = requested_level if requested_level > 0 else inferred_level
 
     grid_tasks = build_grid_tasks_driver(
@@ -642,11 +782,9 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         grid_type="isea4h",
         grid_level=grid_level,
         cover_mode=args.cover_mode,
-        max_cells_per_asset=args.max_cells_per_asset,
+        max_cells_per_asset=0,
     )
     grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_level, args.cover_mode)
-    if len(grid_tasks) > int(args.max_cells_per_asset) * len(assets):
-        raise RuntimeError("Cover cells exceed max limit for entity partition")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
@@ -673,6 +811,13 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     ray_init_elapsed = 0.0
     partition_start = time.perf_counter()
     if backend == "ray":
+        assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
+        minio_options = {
+            "endpoint": str(getattr(args, "minio_endpoint", "")),
+            "access_key": str(getattr(args, "minio_access_key", "")),
+            "secret_key": str(getattr(args, "minio_secret_key", "")),
+            "secure": bool(getattr(args, "minio_secure", False)),
+        }
         rows, ray_init_elapsed = _write_entity_tile_chunks_ray(
             task_chunks=task_chunks,
             run_dir=run_dir,
@@ -680,6 +825,42 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             partition_prefix_len=args.partition_prefix_len,
             parallelism=parallelism,
             ray_address=ray_address,
+            assets_by_path=assets_by_path,
+            cog_input_dir=str(getattr(args, "cog_input_dir", "") or "/tmp/cube_entity_cog"),
+            cog_overwrite=bool(getattr(args, "cog_overwrite", False)),
+            cog_options=cog_creation_options(
+                compress=str(getattr(args, "cog_compress", "LZW") or "LZW"),
+                predictor=int(getattr(args, "cog_predictor", 2) or 0),
+                level=(int(getattr(args, "cog_level", 0) or 0) or None),
+                overviews="NONE",
+                num_threads=str(getattr(args, "cog_num_threads", "ALL_CPUS") or ""),
+            ),
+            target_crs=str(getattr(args, "target_crs", "") or ""),
+            source_options=minio_options,
+            cog_upload_options={
+                **minio_options,
+                "bucket": str(getattr(args, "minio_bucket", "")),
+                "prefix": "cube/entity_cog",
+                "dataset": str(getattr(args, "dataset", "demo_optical")),
+                "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+                "asset_version": str(getattr(args, "asset_version", "v1")),
+            },
+            tile_upload_options=(
+                {
+                    "dataset": str(getattr(args, "dataset", "demo_optical")),
+                    "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+                    "asset_version": str(getattr(args, "asset_version", "v1")),
+                    "minio_endpoint": str(getattr(args, "minio_endpoint", "")),
+                    "minio_access_key": str(getattr(args, "minio_access_key", "")),
+                    "minio_secret_key": str(getattr(args, "minio_secret_key", "")),
+                    "minio_bucket": str(getattr(args, "minio_bucket", "")),
+                    "minio_prefix": str(getattr(args, "minio_prefix", "cube/entity")),
+                    "minio_secure": bool(getattr(args, "minio_secure", False)),
+                    "minio_upload_workers": int(getattr(args, "minio_upload_workers", 8) or 8),
+                }
+                if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio"
+                else None
+            ),
         )
     else:
         rows = _write_entity_tile_chunks_thread(
@@ -697,6 +878,11 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     metadata_rows = 0
     asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
     metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
+    explicit_ingest = getattr(args, "ingest_enabled", True)
+    ingest_enabled = True if explicit_ingest is None else bool(explicit_ingest)
+    if not ingest_enabled:
+        asset_storage_backend = "local"
+        metadata_backend = "none"
     asset_uri_map: dict[str, str] = {}
     if asset_storage_backend == "minio":
         upload_start = time.perf_counter()
@@ -758,6 +944,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "ray_init_elapsed_sec": round(ray_init_elapsed, 3),
         "chunk_size": chunk_size,
         "task_group_count": len(grouped_tasks),
+        "ingest_enabled": ingest_enabled,
         "asset_storage_backend": asset_storage_backend,
         "metadata_backend": metadata_backend,
         "uploaded_tile_count": uploaded_tile_count,
@@ -798,20 +985,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cells-per-asset", type=int, default=20000)
     parser.add_argument("--partition-prefix-len", type=int, default=3)
     parser.add_argument("--ray-parallelism", type=int, default=0)
-    parser.add_argument("--ray-address", default="")
+    parser.add_argument("--ray-address", default=DEFAULT_RAY_ADDRESS)
     parser.add_argument("--chunk-size", type=int, default=0)
-    parser.add_argument("--partition-backend", default="thread", choices=["auto", "ray", "thread", "local", "process"])
+    parser.add_argument("--partition-backend", default="ray", choices=["auto", "ray", "thread", "local", "process"])
     parser.add_argument("--job-id", default="")
     parser.add_argument("--dataset", default="demo_optical")
     parser.add_argument("--sensor", default="optical_mosaic")
     parser.add_argument("--asset-version", default="v1")
-    parser.add_argument("--metadata-backend", default="none", choices=["none", "local", "postgres"])
-    parser.add_argument("--postgres-dsn", default="")
-    parser.add_argument("--asset-storage-backend", default="local", choices=["local", "minio"])
-    parser.add_argument("--minio-endpoint", default="")
-    parser.add_argument("--minio-access-key", default="")
-    parser.add_argument("--minio-secret-key", default="")
-    parser.add_argument("--minio-bucket", default="")
+    parser.add_argument("--metadata-backend", default="postgres", choices=["none", "local", "postgres"])
+    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN)
+    parser.add_argument("--asset-storage-backend", default="minio", choices=["local", "minio"])
+    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT)
+    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY)
+    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY)
+    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET)
     parser.add_argument("--minio-prefix", default="cube/entity")
     parser.add_argument("--minio-secure", action="store_true")
     parser.add_argument("--minio-upload-workers", type=int, default=8)
