@@ -154,6 +154,23 @@ def test_topology_code_to_geometry_function_mgrs():
     assert geo_resp.geometry["type"] == "Polygon"
 
 
+def test_topology_code_to_geometry_function_mgrs_level1_antimeridian():
+    locate_resp = locate(LocateRequest(grid_type="mgrs", level=1, point=[179.7867081825727, 62.449852732870454]))
+    geo_resp = code_to_geometry(
+        CodeToGeometryRequest(
+            grid_type="mgrs",
+            code=locate_resp.cell.space_code,
+            boundary_type="polygon",
+        )
+    )
+
+    coords = geo_resp.geometry["coordinates"][0]
+
+    assert locate_resp.cell.space_code == "60VXQ"
+    assert geo_resp.geometry["type"] == "Polygon"
+    assert max(abs(coords[index + 1][0] - coords[index][0]) for index in range(len(coords) - 1)) < 180.0
+
+
 def test_topology_mgrs_parent_children_neighbors_functions():
     locate_resp = locate(LocateRequest(grid_type="mgrs", level=3, point=[116.391, 39.907]))
     code = locate_resp.cell.space_code

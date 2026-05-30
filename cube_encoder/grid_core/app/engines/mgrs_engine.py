@@ -4,7 +4,9 @@ from collections import deque
 from functools import lru_cache
 
 import mgrs
-from shapely.geometry import box
+from pyproj import Transformer
+from shapely import affinity
+from shapely.geometry import Polygon
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
@@ -56,12 +58,14 @@ class MGRSEngine:
                 continue
             visited.add(code)
 
-            cell_poly = box(*self.code_to_bbox(code))
-            intersects = cell_poly.intersects(shp)
+            cell_poly = self._geometry_shape(code)
+            intersects = any(cell_poly.intersects(target_geom) for target_geom in self._wrapped_geometry_variants(shp))
             if not intersects:
                 continue
 
-            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} or shp.covers(cell_poly):
+            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} or any(
+                target_geom.covers(cell_poly) for target_geom in self._wrapped_geometry_variants(shp)
+            ):
                 selected.add(code)
 
             if len(selected) > 20000:
@@ -80,7 +84,7 @@ class MGRSEngine:
         ]
 
     def code_to_geometry(self, code: str):
-        return self._geometry_from_bbox(self.code_to_bbox(code))
+        return self._geometry_from_corners(self._code_to_corners(code))
 
     def code_to_center(self, code: str):
         return self._center_from_bbox(self.code_to_bbox(code))
@@ -90,22 +94,7 @@ class MGRSEngine:
 
     @lru_cache(maxsize=50000)
     def _code_to_bbox_cached(self, code: str) -> tuple[float, float, float, float]:
-        precision = self._precision_from_code(code)
-        zone, hemisphere, easting, northing = self._converter.MGRSToUTM(code)
-        cell_size_m = 10 ** (5 - precision)
-
-        sw_code = self._converter.UTMToMGRS(zone, hemisphere, easting, northing, MGRSPrecision=5)
-        ne_code = self._converter.UTMToMGRS(
-            zone,
-            hemisphere,
-            easting + cell_size_m,
-            northing + cell_size_m,
-            MGRSPrecision=5,
-        )
-        sw_lat, sw_lon = self._converter.toLatLon(sw_code)
-        ne_lat, ne_lon = self._converter.toLatLon(ne_code)
-
-        return sw_lon, sw_lat, ne_lon, ne_lat
+        return self._bbox_from_coords(self._code_to_corners(code))
 
     def neighbors(self, code: str, k: int = 1):
         return list(self._neighbors_cached(code, k))
@@ -156,6 +145,7 @@ class MGRSEngine:
 
     def _build_cell(self, code: str, level: int) -> GridCell:
         bbox = self.code_to_bbox(code)
+        geometry = self.code_to_geometry(code)
         return GridCell(
             grid_type=self.grid_type,
             level=level,
@@ -163,7 +153,7 @@ class MGRSEngine:
             space_code=code,
             center=self._center_from_bbox(bbox),
             bbox=bbox,
-            geometry=self._geometry_from_bbox(bbox),
+            geometry=geometry,
             metadata={"precision": self._precision_from_code(code), "zone": code[:3], "facet": None},
         )
 
@@ -221,20 +211,84 @@ class MGRSEngine:
         return [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
 
     @staticmethod
-    def _geometry_from_bbox(bbox: list[float] | tuple[float, float, float, float]) -> dict:
-        min_lon, min_lat, max_lon, max_lat = bbox
+    def _geometry_from_corners(
+        corners: list[list[float]] | tuple[tuple[float, float], ...],
+    ) -> dict:
         return {
             "type": "Polygon",
             "coordinates": [
                 [
-                    [min_lon, min_lat],
-                    [max_lon, min_lat],
-                    [max_lon, max_lat],
-                    [min_lon, max_lat],
-                    [min_lon, min_lat],
+                    [float(lon), float(lat)] for lon, lat in [*corners, corners[0]]
                 ]
             ],
         }
+
+    @lru_cache(maxsize=50000)
+    def _code_to_corners(self, code: str) -> tuple[tuple[float, float], ...]:
+        precision = self._precision_from_code(code)
+        zone, hemisphere, easting, northing = self._converter.MGRSToUTM(code)
+        cell_size_m = 10 ** (5 - precision)
+        transformer = self._utm_to_lonlat(zone, hemisphere)
+        corners = [
+            transformer.transform(easting, northing),
+            transformer.transform(easting + cell_size_m, northing),
+            transformer.transform(easting + cell_size_m, northing + cell_size_m),
+            transformer.transform(easting, northing + cell_size_m),
+        ]
+        normalized = self._normalize_longitudes(corners)
+        return tuple((float(lon), float(lat)) for lon, lat in normalized)
+
+    @staticmethod
+    def _bbox_from_coords(
+        corners: list[list[float]] | tuple[tuple[float, float], ...],
+    ) -> tuple[float, float, float, float]:
+        lons = [float(lon) for lon, _ in corners]
+        lats = [float(lat) for _, lat in corners]
+        return min(lons), min(lats), max(lons), max(lats)
+
+    @staticmethod
+    def _normalize_longitudes(corners: list[tuple[float, float]]) -> list[list[float]]:
+        if not corners:
+            return []
+        normalized = [[float(corners[0][0]), float(corners[0][1])]]
+        previous_lon = normalized[0][0]
+        for lon, lat in corners[1:]:
+            current_lon = float(lon)
+            while current_lon - previous_lon > 180.0:
+                current_lon -= 360.0
+            while current_lon - previous_lon < -180.0:
+                current_lon += 360.0
+            normalized.append([current_lon, float(lat)])
+            previous_lon = current_lon
+        mean_lon = sum(lon for lon, _ in normalized) / len(normalized)
+        shift = 0.0
+        while mean_lon < -180.0:
+            shift += 360.0
+            mean_lon += 360.0
+        while mean_lon > 180.0:
+            shift -= 360.0
+            mean_lon -= 360.0
+        if shift:
+            normalized = [[lon + shift, lat] for lon, lat in normalized]
+        return normalized
+
+    @staticmethod
+    @lru_cache(maxsize=120)
+    def _utm_to_lonlat(zone: int, hemisphere: str) -> Transformer:
+        epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
+        return Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+
+    def _geometry_shape(self, code: str) -> Polygon:
+        corners = self._code_to_corners(code)
+        return Polygon(corners)
+
+    @staticmethod
+    def _wrapped_geometry_variants(geometry) -> tuple:
+        return (
+            geometry,
+            affinity.translate(geometry, xoff=360.0),
+            affinity.translate(geometry, xoff=-360.0),
+        )
 
     @staticmethod
     def _seed_points(shp) -> list[tuple[float, float]]:

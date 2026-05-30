@@ -38,6 +38,29 @@ def test_mgrs_code_to_bbox_and_geometry():
     assert geometry["type"] == "Polygon"
 
 
+def test_mgrs_level1_geometry_handles_global_cells_without_bbox_errors():
+    engine = MGRSEngine()
+
+    cell = engine.locate_point(lon=161.82540138891696, lat=14.910591740788163, level=1)
+
+    assert cell.space_code == "57PZS"
+    assert cell.bbox[0] < cell.bbox[2]
+    assert cell.bbox[1] < cell.bbox[3]
+    assert cell.geometry["type"] == "Polygon"
+    assert len(cell.geometry["coordinates"][0]) == 5
+
+
+def test_mgrs_level1_geometry_keeps_antimeridian_cells_mappable():
+    engine = MGRSEngine()
+
+    cell = engine.locate_point(lon=179.7867081825727, lat=62.449852732870454, level=1)
+    coords = cell.geometry["coordinates"][0]
+
+    assert cell.space_code == "60VXQ"
+    assert cell.bbox[0] < cell.bbox[2]
+    assert max(abs(coords[index + 1][0] - coords[index][0]) for index in range(len(coords) - 1)) < 180.0
+
+
 def test_mgrs_level_validation():
     engine = MGRSEngine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=6)

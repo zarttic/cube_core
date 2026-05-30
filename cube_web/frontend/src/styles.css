@@ -1183,6 +1183,33 @@ section {
     font-weight: 500;
 }
 
+.grid-type-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+}
+
+.grid-type-badge {
+    min-height: 24px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(26, 95, 180, 0.1);
+    color: var(--primary-dark);
+}
+
+.grid-type-badge--mgrs {
+    background: rgba(145, 65, 172, 0.12);
+    color: #6f2e86;
+}
+
+.grid-type-badge--isea4h {
+    background: rgba(38, 162, 105, 0.12);
+    color: #1d7b4f;
+}
+
 /* 复选框组 */
 .checkbox-group {
     display: flex;
@@ -1457,8 +1484,17 @@ section {
     background: linear-gradient(to right, var(--primary-bg), white);
     border-bottom: 1px solid var(--border);
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.panel-header-main {
+    width: 100%;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .panel-header h3 {
@@ -1506,6 +1542,10 @@ section {
 
 .legend-color.active {
     background: var(--primary);
+}
+
+.legend-color.mgrs {
+    background: var(--accent);
 }
 
 .legend-color.neighbor {
@@ -2011,11 +2051,13 @@ section {
 }
 
 .result-value.code {
-    background: var(--dark);
-    color: #4ade80;
+    background: #f4f7fb;
+    color: var(--primary-dark);
+    border: 1px solid rgba(26, 95, 180, 0.18);
     padding: 10px;
     border-radius: var(--radius);
     display: block;
+    line-height: 1.6;
 }
 
 /* ========================================
@@ -2245,8 +2287,9 @@ section {
 }
 
 .result-part {
-    background: var(--dark);
-    color: white;
+    background: #f4f7fb;
+    color: var(--dark);
+    border: 2px solid rgba(26, 95, 180, 0.2);
     flex: 1;
 }
 
@@ -2273,7 +2316,7 @@ section {
 }
 
 .result-part .part-value {
-    color: #4ade80;
+    color: var(--primary-dark);
 }
 
 .encoding-plus,
@@ -2817,7 +2860,6 @@ section {
     margin-top: 1px;
     stroke: #f5c211;
 }
-
 
 /* 开发中弹窗样式 */
 .modal-overlay {

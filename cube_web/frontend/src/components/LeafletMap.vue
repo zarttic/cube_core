@@ -130,7 +130,7 @@ onMounted(() => {
   }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
   drawingLayer = L.layerGroup().addTo(map);
-  geometryLayer = L.layerGroup().addTo(map);
+  geometryLayer = L.featureGroup().addTo(map);
   map.on('click', handleClick);
   map.on('mousedown', handleMouseDown);
   map.on('mousemove', handleMouseMove);
