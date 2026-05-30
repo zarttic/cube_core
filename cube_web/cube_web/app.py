@@ -14,7 +14,7 @@ from cube_web.routes.sdk import create_sdk_router
 from cube_web.schemas import PartitionDemoRequest, PartitionRetryRequest, payload_from_model
 from cube_web.services import auth_service, partition_runners, quality_checks, quality_service
 from cube_web.services.partition_service import PartitionService, build_partition_registry
-from cube_web.services.quality_pdf import quality_report_pdf_response
+from cube_web.services.quality_pdf import quality_report_pdf_response, quality_report_text_response
 from cube_web.services.quality_report_store import get_quality_report_store
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
 from grid_core.sdk import CubeEncoderSDK
@@ -155,12 +155,13 @@ async def require_auth_for_api(request: Request, call_next):
 
 
 @auth_router.get("/config")
-def auth_config() -> dict[str, str]:
+def auth_config() -> dict[str, str | bool]:
     settings = auth_service.auth_settings()
     return {
         "client_id": settings.client_id,
         "redirect_uri": settings.redirect_uri,
         "main_system_url": settings.main_system_url,
+        "auth_required": settings.required,
     }
 
 
@@ -349,6 +350,10 @@ def quality_optical_report_pdf(payload: dict) -> Response:
     return quality_report_pdf_response(quality_optical_report(payload), data_type="optical")
 
 
+def quality_optical_report_txt(payload: dict) -> Response:
+    return quality_report_text_response(quality_optical_report(payload), data_type="optical")
+
+
 def quality_optical_history(payload: dict | None = None) -> dict:
     payload = payload_from_model(payload)
     limit = _history_limit(payload)
@@ -384,6 +389,10 @@ def quality_carbon_report(payload: dict) -> dict:
 
 def quality_carbon_report_pdf(payload: dict) -> Response:
     return quality_report_pdf_response(quality_carbon_report(payload), data_type="carbon")
+
+
+def quality_carbon_report_txt(payload: dict) -> Response:
+    return quality_report_text_response(quality_carbon_report(payload), data_type="carbon")
 
 
 def quality_carbon_history(payload: dict | None = None) -> dict:

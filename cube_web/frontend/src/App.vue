@@ -4,7 +4,7 @@ import { navItems, normalizePath } from '@/data/navigation';
 import HomeView from '@/views/HomeView.vue';
 import PartitionView from '@/views/PartitionView.vue';
 import EncodingView from '@/views/EncodingView.vue';
-import { AUTH_REQUIRED } from '@/config';
+import { authRequired, loadAuthRuntimeConfig } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
 
 const currentPath = ref(normalizePath(window.location.pathname));
@@ -48,6 +48,7 @@ function targetFromAuthState(stateValue) {
 }
 
 async function initializeAuth() {
+  await loadAuthRuntimeConfig();
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
   const state = params.get('state') || '';
@@ -69,7 +70,7 @@ async function initializeAuth() {
       localStorage.removeItem('user_info');
     }
   }
-  if (AUTH_REQUIRED) {
+  if (authRequired()) {
     userStore.redirectToAuth(window.location.pathname + window.location.search);
   }
 }

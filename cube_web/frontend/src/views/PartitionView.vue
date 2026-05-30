@@ -65,7 +65,7 @@ const partitionStages = ref([
 ]);
 const qualityLoading = ref(false);
 const qualityHistoryLoading = ref(false);
-const qualityPdfLoading = ref(false);
+const qualityExportLoading = ref(false);
 const qualityReport = ref(null);
 const qualityHistory = ref([]);
 const qualityError = ref('');
@@ -1230,22 +1230,26 @@ async function selectQualityRecord(row) {
   qualityHistoryDrawerVisible.value = false;
 }
 
-async function exportQualityPdf() {
+async function exportQualityReport(format) {
   if (!qualityReport.value?.report_id) {
     ElMessage.warning('请先加载质检结果');
     return;
   }
-  qualityPdfLoading.value = true;
+  if (!['pdf', 'txt'].includes(format)) {
+    ElMessage.error('不支持的导出格式');
+    return;
+  }
+  qualityExportLoading.value = true;
   try {
     const { qualityPrefix } = apiPrefixes();
-    const response = await fetch(`${qualityPrefix}/${qualityDataType.value}/report/pdf`, {
+    const response = await fetch(`${qualityPrefix}/${qualityDataType.value}/report/${format}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ report_id: qualityReport.value.report_id }),
     });
     if (!response.ok) {
       const text = await response.text();
-      let message = `PDF导出失败: ${response.status}`;
+      let message = `${format.toUpperCase()}导出失败: ${response.status}`;
       try {
         const body = text ? JSON.parse(text) : {};
         message = body?.detail || body?.error?.message || message;
@@ -1259,16 +1263,16 @@ async function exportQualityPdf() {
     const link = document.createElement('a');
     const runName = qualityReport.value.run_name || qualityReport.value.run_dir?.split('/').filter(Boolean).pop() || 'run';
     link.href = url;
-    link.download = `quality-report-${qualityDataType.value}-${runName}.pdf`;
+    link.download = `quality-report-${qualityDataType.value}-${runName}.${format}`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    ElMessage.success('PDF已导出');
+    ElMessage.success(`${format.toUpperCase()}已导出`);
   } catch (error) {
     ElMessage.error(error.message);
   } finally {
-    qualityPdfLoading.value = false;
+    qualityExportLoading.value = false;
   }
 }
 
@@ -1814,15 +1818,25 @@ onUnmounted(() => {
               <div class="result-panel">
                 <div class="result-panel-header">
                   <h3>{{ activeModule === 'quality' ? '质检结果' : '执行结果' }}</h3>
-                  <el-button
+                  <el-dropdown
                     v-if="activeModule === 'quality'"
-                    size="small"
-                    :loading="qualityPdfLoading"
-                    :disabled="!qualityReport"
-                    @click="exportQualityPdf"
+                    trigger="click"
+                    @command="exportQualityReport"
                   >
-                    导出PDF
-                  </el-button>
+                    <el-button
+                      size="small"
+                      :loading="qualityExportLoading"
+                      :disabled="!qualityReport"
+                    >
+                      导出报告
+                    </el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item command="pdf">导出 PDF</el-dropdown-item>
+                        <el-dropdown-item command="txt">导出 TXT</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
                 </div>
                 <div class="results-content">
                   <template v-if="activeModule !== 'quality'">

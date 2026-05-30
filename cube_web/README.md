@@ -25,6 +25,10 @@ Quality reports use PostgreSQL storage. Local development defaults to the
 Podman PostgreSQL service at `postgresql://postgres:postgres@127.0.0.1:55432/cube`;
 set `CUBE_WEB_POSTGRES_DSN` or `DATABASE_URL` to override it.
 
+Auth enforcement is controlled at runtime with `CUBE_WEB_AUTH_REQUIRED`.
+Set `CUBE_WEB_AUTH_REQUIRED=false` for local self-test to skip the frontend
+login redirect and the backend `/v1/*` bearer-token check.
+
 Partition demos default to the configured infrastructure cluster: Ray Client
 `ray://10.136.1.13:10001`, MinIO API `10.136.1.14:9000`, and bucket `cube`.
 The default PostgreSQL DSN above is used for metadata. Set
@@ -53,8 +57,8 @@ All API routes are under `/v1`:
 - `/v1/partition/{data_type}/retry`: retry using the previous request payload.
 - `/v1/partition/{data_type}/tasks/demo` and `/tasks/retry`: asynchronous
   partition task submission.
-- `/v1/quality/{optical|product}/run`, `/latest`, `/report`, `/report/pdf`,
-  `/history`: quality report workflow.
+- `/v1/quality/{optical|product|carbon}/run`, `/latest`, `/report`,
+  `/report/pdf`, `/report/txt`, `/history`: quality report workflow.
 
 ## Tests
 

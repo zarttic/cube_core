@@ -145,6 +145,20 @@ def test_auth_redirect_uses_clicked_page_as_redirect_uri():
     assert "const redirectUri = authRedirectUri(target);" in store_source
 
 
+def test_frontend_auth_bootstrap_uses_runtime_config_flag():
+    app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+    config_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "config.js").read_text(encoding="utf-8")
+    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "await loadAuthRuntimeConfig();" in app_source
+    assert "if (authRequired()) {" in app_source
+    assert "fetch('/api/config'" in config_source
+    assert "auth_required" in config_source
+    assert "if (authRequired()) {" in store_source
+
+
 def test_partition_view_uses_explicit_module_endpoint_mapping():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
         encoding="utf-8"
@@ -246,6 +260,7 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://10.136.1.14:5177")
     monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
     monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://10.136.1.14:50040/callback")
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
 
     resp = client.get("/api/config")
 
@@ -254,7 +269,17 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "client_id": "system_ard",
         "redirect_uri": "http://10.136.1.14:50040/callback",
         "main_system_url": "http://10.136.1.14:5177",
+        "auth_required": False,
     }
+
+
+def test_auth_config_exposes_runtime_auth_switch(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "1")
+
+    resp = client.get("/api/config")
+
+    assert resp.status_code == 200
+    assert resp.json()["auth_required"] is True
 
 
 def test_auth_verify_and_me_accept_hs256_jwt():
@@ -1450,6 +1475,43 @@ def test_optical_quality_report_pdf_endpoint_reads_database_without_rerun(monkey
     text = txt_path.read_text(encoding="utf-8")
     assert "质检报告" in text
     assert "质检概要" in text
+
+
+def test_optical_quality_report_txt_endpoint_reads_database_without_rerun(monkeypatch, quality_store):
+    quality_store.upsert_report(
+        "optical",
+        "/tmp/dataset_a/run_20260515_010203",
+        {
+          "report_id": "optical-txt",
+          "status": "WARN",
+          "target_crs": "EPSG:4326",
+          "generated_at": "2026-05-15T01:02:03Z",
+          "summary": {"index_rows": 7, "asset_count": 2, "failed_checks": 0, "warning_checks": 1},
+          "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "cached warn"}],
+          "assets": [{"path": "/data/a.tif", "crs": "EPSG:4326"}]
+        },
+    )
+
+    def fail_if_called(args):
+        raise AssertionError("TXT export should not re-run quality checks")
+
+    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+
+    response = web_app.quality_optical_report_txt({"report_id": "optical-txt"})
+
+    assert response.media_type == "text/plain"
+    text = response.body.decode("utf-8")
+    assert "质检报告" in text
+    assert "质检状态：WARN" in text
+    assert "检查项" in text
+
+
+def test_quality_report_txt_routes_are_registered():
+    route_paths = {route.path for route in app.routes}
+
+    assert "/v1/quality/optical/report/txt" in route_paths
+    assert "/v1/quality/product/report/txt" in route_paths
+    assert "/v1/quality/carbon/report/txt" in route_paths
 
 
 def test_optical_quality_history_endpoint(quality_store):

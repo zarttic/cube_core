@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue';
 
 import { requestGet, requestPost } from '@/api/client';
-import { AUTH_CONFIG } from '@/config';
+import { AUTH_CONFIG, authRequired } from '@/config';
 
 const state = reactive({
   token: localStorage.getItem('access_token') || '',
@@ -104,7 +104,11 @@ export function useSubUserStore() {
     persistUserInfo({});
     sessionStorage.removeItem('oauth_target');
     sessionStorage.removeItem('oauth_state');
-    window.location.replace(`${AUTH_CONFIG.MAIN_SYSTEM_URL}/?logout=true`);
+    if (authRequired()) {
+      window.location.replace(`${AUTH_CONFIG.MAIN_SYSTEM_URL}/?logout=true`);
+      return;
+    }
+    window.location.replace(safeTargetPath(window.location.pathname || '/'));
   }
 
   return {
