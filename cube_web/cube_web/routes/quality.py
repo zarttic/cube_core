@@ -12,7 +12,7 @@ from cube_web.schemas import (
 )
 from cube_web.services import quality_checks
 from cube_web.services import quality_service
-from cube_web.services.quality_pdf import quality_report_pdf_response
+from cube_web.services.quality_pdf import quality_report_pdf_response, quality_report_text_response
 from cube_web.services.quality_report_store import get_quality_report_store
 
 
@@ -58,6 +58,11 @@ def create_quality_router() -> APIRouter:
     def quality_optical_report_pdf(payload: QualityReportRequest) -> Response:
         report = quality_optical_report(payload)
         return quality_report_pdf_response(report, data_type="optical")
+
+    @router.post("/optical/report/txt")
+    def quality_optical_report_txt(payload: QualityReportRequest) -> Response:
+        report = quality_optical_report(payload)
+        return quality_report_text_response(report, data_type="optical")
 
     @router.post("/optical/history")
     def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
@@ -106,6 +111,11 @@ def create_quality_router() -> APIRouter:
         report = quality_product_report(payload)
         return quality_report_pdf_response(report, data_type="product")
 
+    @router.post("/product/report/txt")
+    def quality_product_report_txt(payload: QualityReportRequest) -> Response:
+        report = quality_product_report(payload)
+        return quality_report_text_response(report, data_type="product")
+
     @router.post("/product/history")
     def quality_product_history(payload: QualityHistoryRequest | None = None) -> dict:
         payload = payload_from_model(payload)
@@ -152,6 +162,11 @@ def create_quality_router() -> APIRouter:
     def quality_carbon_report_pdf(payload: QualityReportRequest) -> Response:
         report = quality_carbon_report(payload)
         return quality_report_pdf_response(report, data_type="carbon")
+
+    @router.post("/carbon/report/txt")
+    def quality_carbon_report_txt(payload: QualityReportRequest) -> Response:
+        report = quality_carbon_report(payload)
+        return quality_report_text_response(report, data_type="carbon")
 
     @router.post("/carbon/history")
     def quality_carbon_history(payload: QualityHistoryRequest | None = None) -> dict:

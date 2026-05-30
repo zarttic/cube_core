@@ -28,7 +28,7 @@ def _wrap_pdf_line(text: str, width: int = 96) -> list[str]:
     return lines
 
 
-def _quality_report_pdf_lines(report: dict, data_type: str) -> list[str]:
+def _quality_report_lines(report: dict, data_type: str) -> list[str]:
     summary = report.get("summary", {}) or {}
     data_type_texts = {
         "product": "数据产品",
@@ -94,6 +94,11 @@ def _quality_report_pdf_lines(report: dict, data_type: str) -> list[str]:
         for asset in assets[:12]:
             lines.append(f"- {Path(str(asset.get('path', '-'))).name} | 参考系统：{asset.get('crs', '-')}")
     return lines
+
+
+def _quality_report_filename(report: dict, data_type: str, suffix: str) -> str:
+    run_name = Path(str(report.get("run_dir", "run"))).name or "run"
+    return f"quality-report-{data_type}-{run_name}.{suffix}"
 
 
 def _quality_report_html(lines: list[str]) -> str:
@@ -186,10 +191,18 @@ def _build_quality_report_pdf(lines: list[str]) -> bytes:
 
 
 def quality_report_pdf_response(report: dict, data_type: str) -> Response:
-    pdf = _build_quality_report_pdf(_quality_report_pdf_lines(report, data_type))
-    filename = f"quality-report-{data_type}-{Path(str(report.get('run_dir', 'run'))).name or 'run'}.pdf"
+    pdf = _build_quality_report_pdf(_quality_report_lines(report, data_type))
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{_quality_report_filename(report, data_type, "pdf")}"'},
+    )
+
+
+def quality_report_text_response(report: dict, data_type: str) -> Response:
+    text = "\n".join(_quality_report_lines(report, data_type)).rstrip() + "\n"
+    return Response(
+        content=text,
+        media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{_quality_report_filename(report, data_type, "txt")}"'},
     )

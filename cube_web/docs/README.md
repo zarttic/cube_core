@@ -90,11 +90,19 @@ npm run build
 - `POST /v1/quality/optical/latest`
 - `POST /v1/quality/optical/report`
 - `POST /v1/quality/optical/report/pdf`
+- `POST /v1/quality/optical/report/txt`
 - `POST /v1/quality/optical/history`
+- `POST /v1/quality/carbon/run`
+- `POST /v1/quality/carbon/latest`
+- `POST /v1/quality/carbon/report`
+- `POST /v1/quality/carbon/report/pdf`
+- `POST /v1/quality/carbon/report/txt`
+- `POST /v1/quality/carbon/history`
 - `POST /v1/quality/product/run`
 - `POST /v1/quality/product/latest`
 - `POST /v1/quality/product/report`
 - `POST /v1/quality/product/report/pdf`
+- `POST /v1/quality/product/report/txt`
 - `POST /v1/quality/product/history`
 
 `latest` 和 `history` 会扫描 `cube_split/data/ray_output/*/run_*` 下包含 `index_rows.jsonl` 的批次目录。`product` 历史只取父目录名以 `product` 开头的批次；`optical` 历史排除这些产品批次。
@@ -104,6 +112,12 @@ npm run build
 - `/` 返回 `web/index.html`。
 - `/partition.html`、`/quality.html`、`/encoding.html` 和 `门户首页.html` 映射到同一个 SPA 入口。
 - 其他静态资源从 `cube_web/cube_web/web/` 读取。
+
+## 5.1 认证开关
+
+- 运行时通过环境变量 `CUBE_WEB_AUTH_REQUIRED` 控制是否启用认证。
+- 取值为 `1/true/yes/on` 时，前端会跳转统一认证，后端 `/v1/*` 也会校验 Bearer Token。
+- 取值为 `false` 或未设置时，适合本地自测，可直接进入剖分、质检、编码页面。
 
 ## 6. 测试
 
