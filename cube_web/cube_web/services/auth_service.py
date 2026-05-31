@@ -4,41 +4,14 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
 
-
-@dataclass(frozen=True)
-class AuthSettings:
-    main_system_url: str
-    client_id: str
-    client_secret: str
-    redirect_uri: str
-    jwt_secret_key: str
-    jwt_algorithm: str
-    token_path: str
-    logout_path: str
-    required: bool
-
-
-def auth_settings() -> AuthSettings:
-    return AuthSettings(
-        main_system_url=os.environ.get("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://10.136.1.14:5177").rstrip("/"),
-        client_id=os.environ.get("CUBE_WEB_AUTH_CLIENT_ID", "system_ard"),
-        client_secret=os.environ.get("CUBE_WEB_AUTH_CLIENT_SECRET", "ard_secret_abc123"),
-        redirect_uri=os.environ.get("CUBE_WEB_AUTH_REDIRECT_URI", "http://10.136.1.14:50040/callback"),
-        jwt_secret_key=os.environ.get("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production"),
-        jwt_algorithm=os.environ.get("CUBE_WEB_AUTH_JWT_ALGORITHM", "HS256"),
-        token_path=os.environ.get("CUBE_WEB_AUTH_TOKEN_PATH", "/api/token"),
-        logout_path=os.environ.get("CUBE_WEB_AUTH_LOGOUT_PATH", "/api/logout"),
-        required=os.environ.get("CUBE_WEB_AUTH_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"},
-    )
+from cube_web.services.runtime_config import AuthSettings, auth_settings
 
 
 def bearer_token(authorization: str | None) -> str:
@@ -54,6 +27,8 @@ def verify_access_token(token: str, settings: AuthSettings | None = None) -> dic
     settings = settings or auth_settings()
     if settings.jwt_algorithm.upper() != "HS256":
         raise HTTPException(status_code=500, detail=f"Unsupported JWT algorithm: {settings.jwt_algorithm}")
+    if not settings.jwt_secret_key:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_JWT_SECRET_KEY is required")
 
     parts = token.split(".")
     if len(parts) != 3:
@@ -95,6 +70,8 @@ def user_info_from_token(token: str, settings: AuthSettings | None = None) -> di
 
 def exchange_code_for_token(code: str, settings: AuthSettings | None = None) -> dict[str, Any]:
     settings = settings or auth_settings()
+    if not settings.client_secret:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_CLIENT_SECRET is required")
     payload = {
         "grant_type": "authorization_code",
         "client_id": settings.client_id,

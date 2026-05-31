@@ -23,11 +23,11 @@ from rasterio.windows import Window
 from grid_core.sdk import CubeEncoderSDK
 from cube_split.partition.optical_products import parse_optical_asset
 from cube_split.partition.product_products import parse_product_asset
-
-DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
-DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
-DEFAULT_MINIO_SECRET_KEY = "minioadmin"
-DEFAULT_MINIO_BUCKET = "cube"
+from cube_split.runtime_config import (
+    bool_option,
+    minio_service_env,
+    minio_settings,
+)
 
 
 @dataclass
@@ -55,55 +55,20 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
 
 
 def _bool_option(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return bool_option(value, default)
 
 
 def _minio_service_env() -> dict[str, str]:
-    path = Path("/etc/default/minio")
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        text = line.strip()
-        if not text or text.startswith("#") or "=" not in text:
-            continue
-        key, value = text.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
+    return minio_service_env()
 
 
 def _minio_options(options: dict[str, Any] | None = None) -> dict[str, Any]:
-    raw = dict(options or {})
-    service_env = _minio_service_env()
+    cfg = minio_settings(options)
     return {
-        "endpoint": str(
-            raw.get("endpoint")
-            or raw.get("minio_endpoint")
-            or os.environ.get("CUBE_WEB_MINIO_ENDPOINT")
-            or os.environ.get("MINIO_ENDPOINT")
-            or DEFAULT_MINIO_ENDPOINT
-        ),
-        "access_key": str(
-            raw.get("access_key")
-            or raw.get("minio_access_key")
-            or os.environ.get("CUBE_WEB_MINIO_ACCESS_KEY")
-            or os.environ.get("MINIO_ACCESS_KEY")
-            or service_env.get("MINIO_ROOT_USER")
-            or DEFAULT_MINIO_ACCESS_KEY
-        ),
-        "secret_key": str(
-            raw.get("secret_key")
-            or raw.get("minio_secret_key")
-            or os.environ.get("CUBE_WEB_MINIO_SECRET_KEY")
-            or os.environ.get("MINIO_SECRET_KEY")
-            or service_env.get("MINIO_ROOT_PASSWORD")
-            or DEFAULT_MINIO_SECRET_KEY
-        ),
-        "secure": _bool_option(raw.get("secure", raw.get("minio_secure")), False),
+        "endpoint": cfg.endpoint,
+        "access_key": cfg.access_key,
+        "secret_key": cfg.secret_key,
+        "secure": cfg.secure,
     }
 
 
@@ -184,7 +149,7 @@ def resolve_asset_source_path(source_uri: str, options: dict[str, Any] | None = 
 def _upload_file_to_minio(path: Path, key: str, options: dict[str, Any]) -> str:
     from minio.error import S3Error
 
-    bucket = str(options.get("bucket") or options.get("minio_bucket") or os.environ.get("CUBE_WEB_MINIO_BUCKET") or os.environ.get("MINIO_BUCKET") or DEFAULT_MINIO_BUCKET)
+    bucket = minio_settings(options).bucket
     if not bucket:
         raise ValueError("MinIO bucket is required")
     client = _minio_client(options)

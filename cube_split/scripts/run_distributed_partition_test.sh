@@ -2,12 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3.8}"
 cd "$ROOT_DIR"
 
 INPUT_DIR="${INPUT_DIR:-$ROOT_DIR/data/landsat8}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/data/ray_output/distributed}"
 COG_INPUT_DIR="${COG_INPUT_DIR:-$ROOT_DIR/data/cog/partition_input}"
-RAY_ADDRESS="${RAY_ADDRESS:-ray://10.136.1.13:10001}"
+RAY_ADDRESS="${RAY_ADDRESS:-$(PYTHONPATH="$ROOT_DIR:$ROOT_DIR/../cube_encoder" "$PYTHON_BIN" - <<'PY'
+from cube_split import runtime_config
+print(runtime_config.ray_address())
+PY
+)}"
 GRID_TYPE="${GRID_TYPE:-geohash}"
 GRID_LEVEL="${GRID_LEVEL:-7}"
 COVER_MODE="${COVER_MODE:-intersect}"
@@ -25,12 +30,17 @@ SUMMARY_PATH="${SUMMARY_PATH:-$OUTPUT_DIR/summary_$(date +%Y%m%d_%H%M%S).csv}"
 
 mkdir -p "$OUTPUT_DIR"
 
+if [[ -z "$RAY_ADDRESS" ]]; then
+  echo "RAY_ADDRESS is required for distributed partition tests" >&2
+  exit 2
+fi
+
 echo "distributed partition test"
 echo "ray_address=$RAY_ADDRESS"
 echo "repeat=$REPEAT target_sec=$TARGET_SEC"
 echo "summary_path=$SUMMARY_PATH"
 
-python - <<PY
+"$PYTHON_BIN" - <<PY
 import csv
 import json
 import subprocess
@@ -44,7 +54,7 @@ repeat = int("${REPEAT}")
 target = float("${TARGET_SEC}")
 
 cmd = [
-    "python", "-m", "cube_split.jobs.ray_logical_partition_job",
+    "${PYTHON_BIN}", "-m", "cube_split.jobs.ray_logical_partition_job",
     "--input-dir", "${INPUT_DIR}",
     "--output-dir", "${OUTPUT_DIR}",
     "--cog-input-dir", "${COG_INPUT_DIR}",

@@ -11,6 +11,6 @@ LATEST_WHEEL="$(ls -t dist/cube_encoder-*.whl | head -n 1)"
 python -m pip install --force-reinstall "$LATEST_WHEEL"
 
 cd "$ROOT_DIR"
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 
 echo "installed cube_encoder package: $LATEST_WHEEL"

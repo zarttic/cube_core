@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -11,6 +13,8 @@ from fastapi.testclient import TestClient
 from s2sphere import CellId
 
 import cube_web.app as web_app
+import cube_web.routes.partition_adapters as partition_adapters
+import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.services import partition_runners
 from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
@@ -110,7 +114,11 @@ class FakeConfigStore:
 
 
 @pytest.fixture(autouse=True)
-def quality_store():
+def quality_store(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_POSTGRES_DSN", "postgresql://postgres:postgres@127.0.0.1:55432/cube")
+    monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "ray://10.136.1.13:10001")
+    monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
+    monkeypatch.setenv("CUBE_WEB_MINIO_BUCKET", "cube")
     store = FakeQualityReportStore()
     set_quality_report_store(store)
     config_store = FakeConfigStore()
@@ -133,7 +141,9 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert "{ label: '自动化质检'," not in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
     assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
+    assert "runtimeNavigation()" in nav_source
     assert ':href="item.path"' in app_source
+    assert "currentNavItems" in app_source
     assert "targetFromAuthState(state)" in app_source
     assert "normalizePath(window.location.pathname)" in app_source
 
@@ -161,6 +171,8 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     assert "if (authRequired()) {" in app_source
     assert "fetch('/api/config'" in config_source
     assert "auth_required" in config_source
+    assert "navigation" in config_source
+    assert "http://10.136." not in config_source
     assert "if (authRequired()) {" in store_source
 
 
@@ -223,7 +235,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "最近邻" not in source
 
 
-def test_quality_report_store_defaults_to_local_podman_postgres(monkeypatch):
+def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
     captured = {}
 
     class DummyPostgresQualityReportStore:
@@ -231,6 +243,7 @@ def test_quality_report_store_defaults_to_local_podman_postgres(monkeypatch):
             captured["dsn"] = dsn
 
     monkeypatch.delenv("CUBE_WEB_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(
         quality_report_store_module,
@@ -240,8 +253,9 @@ def test_quality_report_store_defaults_to_local_podman_postgres(monkeypatch):
     quality_report_store_module.set_quality_report_store(None)
 
     try:
-        quality_report_store_module.get_quality_report_store()
-        assert captured["dsn"] == "postgresql://postgres:postgres@127.0.0.1:55432/cube"
+        with pytest.raises(RuntimeError, match="PostgreSQL DSN is required"):
+            quality_report_store_module.get_quality_report_store()
+        assert "dsn" not in captured
     finally:
         quality_report_store_module.set_quality_report_store(None)
 
@@ -274,6 +288,8 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://10.136.1.14:5177")
     monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
     monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://10.136.1.14:50040/callback")
+    monkeypatch.setenv("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL", "http://10.136.1.14:5176/#/partition")
+    monkeypatch.setenv("CUBE_WEB_PORTAL_DISPATCH_URL", "http://10.136.1.14:5176/#/dispatch")
     monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
 
     resp = client.get("/api/config")
@@ -284,6 +300,12 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "redirect_uri": "http://10.136.1.14:50040/callback",
         "main_system_url": "http://10.136.1.14:5177",
         "auth_required": False,
+        "navigation": [
+            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
+            {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
+            {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
+            {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
+        ],
     }
 
 
@@ -460,9 +482,9 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
             "output_path": "/tmp/demo/carbon_observation_rows.jsonl",
         }
 
-    monkeypatch.setattr("cube_web.app._run_carbon_partition_demo", fake_run_carbon_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_carbon_partition_demo", fake_run_carbon_partition_demo)
 
-    body = web_app.partition_carbon_demo()
+    body = partition_adapters.partition_carbon_demo()
 
     assert body["status"] == "completed"
     assert body["rows"] == 12
@@ -491,7 +513,7 @@ def test_carbon_partition_test_endpoint(monkeypatch):
             "output_path": "/tmp/demo/carbon_observation_rows.jsonl",
         }
 
-    monkeypatch.setattr("cube_web.app._run_carbon_partition_test", fake_run_carbon_partition_test)
+    monkeypatch.setattr(partition_adapters, "run_carbon_partition_test", fake_run_carbon_partition_test)
 
     resp = client.post("/v1/partition/carbon/test", json=expected_payload)
 
@@ -566,9 +588,9 @@ def test_optical_partition_demo_endpoint(monkeypatch):
             },
         }
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
 
-    body = web_app.partition_optical_demo()
+    body = partition_adapters.partition_optical_demo()
 
     assert body["status"] == "completed"
     assert body["asset_count"] == 2
@@ -613,7 +635,7 @@ def test_optical_partition_demo_endpoint_accepts_frontend_payload(monkeypatch):
             "output_path": "/tmp/demo/index_rows.jsonl",
         }
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
 
     resp = client.post("/v1/partition/optical/demo", json=expected_payload)
 
@@ -847,7 +869,7 @@ def test_partition_demo_can_run_as_async_task(monkeypatch):
             "rows": 20,
         }
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
     submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "geohash", "grid_level": 5})
 
@@ -884,7 +906,7 @@ def test_partition_test_can_run_as_async_task(monkeypatch):
             "ingest_enabled": False,
         }
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_test", fake_run_optical_partition_test)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_test", fake_run_optical_partition_test)
 
     submit_resp = client.post("/v1/partition/optical/tasks/test", json=expected_payload)
 
@@ -953,7 +975,7 @@ def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
     def fake_run_optical_partition_demo(payload=None):
         return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_ATTEMPTS/run", json={})
     assert submit_resp.status_code == 202
@@ -988,7 +1010,7 @@ def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypat
         assert payload["batch_id"] == "BATCH_RUN_SUCCESS"
         return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 2}
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_RUN_SUCCESS/run", json={})
     assert submit_resp.status_code == 202
@@ -1025,7 +1047,7 @@ def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
     def fail_optical(_payload=None):
         raise RuntimeError("source missing")
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fail_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_FAIL_RETRY/run", json={})
     assert submit_resp.status_code == 202
@@ -1063,7 +1085,7 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
         captured["payload"] = payload
         return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
 
     submit_resp = client.post("/v1/partition/assets/retry", json={"asset_ids": ["asset-b"]})
     assert submit_resp.status_code == 202
@@ -1091,7 +1113,7 @@ def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
         time.sleep(0.2)
         return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_demo", slow_product)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", slow_product)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1116,7 +1138,7 @@ def test_partition_task_cancel_keeps_running_task_from_completing(monkeypatch):
         time.sleep(0.1)
         return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_demo", slow_product)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", slow_product)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_RUNNING/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1148,7 +1170,7 @@ def test_partition_cancelled_runner_marks_batch_cancelled(monkeypatch):
     def cancelled_optical(payload=None):
         raise PartitionCancelledError("Partition task cancelled")
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", cancelled_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", cancelled_optical)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_EXCEPTION/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1183,7 +1205,7 @@ def test_optical_partition_test_endpoint(monkeypatch):
             "quality_report": {"report_id": "optical-test-report", "status": "PASS", "summary": {"index_rows": 147}},
         }
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_test", fake_run_optical_partition_test)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_test", fake_run_optical_partition_test)
 
     resp = client.post(
         "/v1/partition/optical/test",
@@ -1345,7 +1367,7 @@ def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
         assert [asset["source_uri"] for asset in payload["selected_assets"]] == ["scene_b/asset_b.tif"]
         return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 3}
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
 
     resp = client.post("/v1/partition/optical/retry", json=retry_request)
 
@@ -1373,7 +1395,7 @@ def test_optical_partition_retry_endpoint_falls_back_to_full_request(monkeypatch
         assert payload == original_payload
         return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 5}
 
-    monkeypatch.setattr("cube_web.app._run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
 
     resp = client.post("/v1/partition/optical/retry", json=retry_request)
 
@@ -1395,7 +1417,7 @@ def test_carbon_partition_retry_endpoint(monkeypatch):
             "retry": {"strategy": "full_request"},
         }
 
-    monkeypatch.setattr("cube_web.app._run_carbon_partition_retry", fake_run_carbon_partition_retry)
+    monkeypatch.setattr(partition_adapters, "run_carbon_partition_retry", fake_run_carbon_partition_retry)
 
     resp = client.post(
         "/v1/partition/carbon/retry",
@@ -1421,7 +1443,7 @@ def test_product_partition_demo_endpoint(monkeypatch):
             "output_path": "/tmp/product/index_rows.jsonl",
         }
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
     resp = client.post("/v1/partition/product/demo", json={"grid_type": "geohash", "grid_level": 5})
 
@@ -1449,7 +1471,7 @@ def test_product_partition_test_endpoint(monkeypatch):
             "ingest_enabled": False,
         }
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_test", fake_run_product_partition_test)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_test", fake_run_product_partition_test)
 
     resp = client.post("/v1/partition/product/test", json=expected_payload)
 
@@ -1553,7 +1575,7 @@ def test_product_partition_retry_endpoint(monkeypatch):
             "retry": {"strategy": "full_request"},
         }
 
-    monkeypatch.setattr("cube_web.app._run_product_partition_retry", fake_run_product_partition_retry)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_retry", fake_run_product_partition_retry)
 
     resp = client.post(
         "/v1/partition/product/retry",
@@ -1675,7 +1697,7 @@ def test_optical_quality_latest_reads_database_without_rerun(monkeypatch, qualit
 
     monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
-    body = web_app.quality_optical_latest({})
+    body = quality_adapters.quality_optical_latest({})
 
     assert body["status"] == "PASS"
     assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
@@ -1703,7 +1725,7 @@ def test_optical_quality_report_endpoint_reads_database_without_rerun(monkeypatc
 
     monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
-    body = web_app.quality_optical_report({"report_id": "optical-report"})
+    body = quality_adapters.quality_optical_report({"report_id": "optical-report"})
 
     assert body["status"] == "WARN"
     assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
@@ -1729,9 +1751,9 @@ def test_optical_quality_report_pdf_endpoint_reads_database_without_rerun(monkey
     def fail_if_called(args):
         raise AssertionError("PDF export should not re-run quality checks")
 
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
-    response = web_app.quality_optical_report_pdf({"report_id": "optical-pdf"})
+    response = quality_adapters.quality_optical_report_pdf({"report_id": "optical-pdf"})
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF-")
@@ -1763,9 +1785,9 @@ def test_optical_quality_report_txt_endpoint_reads_database_without_rerun(monkey
     def fail_if_called(args):
         raise AssertionError("TXT export should not re-run quality checks")
 
-    monkeypatch.setattr("cube_web.app.run_optical_quality_check", fail_if_called)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
 
-    response = web_app.quality_optical_report_txt({"report_id": "optical-txt"})
+    response = quality_adapters.quality_optical_report_txt({"report_id": "optical-txt"})
 
     assert response.media_type == "text/plain"
     text = response.body.decode("utf-8")
@@ -1801,7 +1823,7 @@ def test_optical_quality_history_endpoint(quality_store):
         },
     )
 
-    body = web_app.quality_optical_history({"target_crs": "EPSG:4326"})
+    body = quality_adapters.quality_optical_history({"target_crs": "EPSG:4326"})
 
     assert body["count"] == 1
     record = body["records"][0]
@@ -1831,7 +1853,7 @@ def test_product_quality_history_endpoint(quality_store):
         },
     )
 
-    body = web_app.quality_product_history({"target_crs": "EPSG:4326"})
+    body = quality_adapters.quality_product_history({"target_crs": "EPSG:4326"})
 
     assert body["count"] == 1
     record = body["records"][0]
@@ -1860,7 +1882,7 @@ def test_carbon_quality_history_endpoint(quality_store):
         },
     )
 
-    body = web_app.quality_carbon_history({"target_crs": "EPSG:4326"})
+    body = quality_adapters.quality_carbon_history({"target_crs": "EPSG:4326"})
 
     assert body["count"] == 1
     record = body["records"][0]

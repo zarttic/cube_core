@@ -19,13 +19,7 @@ from pyproj import Geod
 from rasterio.warp import transform_geom
 
 from grid_core.sdk import CubeEncoderSDK
-from cube_split.ingest.ray_ingest_job import (
-    DEFAULT_MINIO_ACCESS_KEY,
-    DEFAULT_MINIO_BUCKET,
-    DEFAULT_MINIO_ENDPOINT,
-    DEFAULT_MINIO_SECRET_KEY,
-    DEFAULT_POSTGRES_DSN,
-)
+from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import (
     AssetRecord,
     _dataset_bounds_wgs84,
@@ -39,7 +33,6 @@ from cube_split.jobs.ray_partition_core import (
 )
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.jobs.ray_logical_partition_job import (
-    DEFAULT_RAY_ADDRESS,
     _chunk_tasks_for_ray,
     _load_ray,
     _prepend_sys_paths,
@@ -986,6 +979,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local entity partition job for ISEA4H optical raster tiles")
+    minio = runtime_config.minio_settings()
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--product-family", default="auto")
@@ -1005,7 +999,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cells-per-asset", type=int, default=20000)
     parser.add_argument("--partition-prefix-len", type=int, default=3)
     parser.add_argument("--ray-parallelism", type=int, default=0)
-    parser.add_argument("--ray-address", default=DEFAULT_RAY_ADDRESS)
+    parser.add_argument("--ray-address", default=runtime_config.ray_address())
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--partition-backend", default="ray", choices=["auto", "ray", "thread", "local", "process"])
     parser.add_argument("--job-id", default="")
@@ -1013,12 +1007,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor", default="optical_mosaic")
     parser.add_argument("--asset-version", default="v1")
     parser.add_argument("--metadata-backend", default="postgres", choices=["none", "local", "postgres"])
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN)
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn())
     parser.add_argument("--asset-storage-backend", default="minio", choices=["local", "minio"])
-    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT)
-    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY)
-    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY)
-    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET)
+    parser.add_argument("--minio-endpoint", default=minio.endpoint)
+    parser.add_argument("--minio-access-key", default=minio.access_key)
+    parser.add_argument("--minio-secret-key", default=minio.secret_key)
+    parser.add_argument("--minio-bucket", default=minio.bucket)
     parser.add_argument("--minio-prefix", default="cube/entity")
     parser.add_argument("--minio-secure", action="store_true")
     parser.add_argument("--minio-upload-workers", type=int, default=8)

@@ -20,15 +20,8 @@ from cube_split.jobs.ray_partition_core import (
     convert_assets_to_cog,
 )
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
-from cube_split.ingest.ray_ingest_job import (
-    DEFAULT_MINIO_ACCESS_KEY,
-    DEFAULT_MINIO_BUCKET,
-    DEFAULT_MINIO_ENDPOINT,
-    DEFAULT_MINIO_SECRET_KEY,
-    DEFAULT_POSTGRES_DSN,
-)
+from cube_split import runtime_config
 from cube_split.jobs.ray_logical_partition_job import (
-    DEFAULT_RAY_ADDRESS,
     _chunk_tasks_for_ray,
     _load_ray,
     _prepend_sys_paths,
@@ -54,6 +47,7 @@ def _prepare_product_task_rows(tasks: list[dict], partition_prefix_len: int) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Partition raster product TIF data into cube index rows")
+    minio = runtime_config.minio_settings()
     parser.add_argument("--input-dir", default="data/product", help="Input directory containing product TIF files")
     parser.add_argument("--manifest-path", default="", help="Optional selected product asset manifest")
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
@@ -68,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cog-workers", type=int, default=0, help="Parallel workers for COG conversion")
     parser.add_argument("--partition-workers", type=int, default=0, help="Parallel workers for partition stage")
     parser.add_argument("--partition-backend", default="ray", choices=["auto", "ray", "thread"], help="Partition backend")
-    parser.add_argument("--ray-address", default=DEFAULT_RAY_ADDRESS, help="Ray address, e.g. auto or ray://host:10001")
+    parser.add_argument("--ray-address", default=runtime_config.ray_address(), help="Ray address, e.g. auto or ray://host:10001")
     parser.add_argument("--ray-parallelism", type=int, default=0, help="Ray worker count; 0 means auto")
     parser.add_argument("--chunk-size", type=int, default=0, help="Number of grouped tasks per Ray chunk; 0 means auto")
     parser.add_argument("--sample-mean", action="store_true", help="Compute per-window sample mean")
@@ -78,13 +72,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asset-version", default="v1", help="Asset version")
     parser.add_argument("--cube-version", default="product_v1", help="Product cube version")
     parser.add_argument("--metadata-backend", default="postgres", choices=["none", "sqlite", "postgres"], help="Metadata backend")
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN when metadata-backend=postgres")
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn(), help="PostgreSQL DSN when metadata-backend=postgres")
     parser.add_argument("--db-path", default="data/ingest/product_ingest.db", help="SQLite DB path")
     parser.add_argument("--asset-storage-backend", default="minio", choices=["local", "minio"], help="Asset storage backend")
-    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT, help="MinIO endpoint host:port")
-    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY, help="MinIO access key")
-    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY, help="MinIO secret key")
-    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET, help="MinIO bucket name")
+    parser.add_argument("--minio-endpoint", default=minio.endpoint, help="MinIO endpoint host:port")
+    parser.add_argument("--minio-access-key", default=minio.access_key, help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default=minio.secret_key, help="MinIO secret key")
+    parser.add_argument("--minio-bucket", default=minio.bucket, help="MinIO bucket name")
     parser.add_argument("--minio-prefix", default="cube/product", help="Object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers")

@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.8"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -33,26 +33,37 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build
-          pip install -r cube_encoder/requirements.txt
-          pip install -r cube_split/requirements.txt
-          pip install -r cube_web/requirements.txt
-          cd cube_encoder
-          python -m build
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          cd ..
-          cd cube_split
-          python -m build
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          cd ..
+          python -m pip install -e "cube_encoder[dev]"
+          python -m pip install -e "cube_split[dev]"
+          python -m pip install -e "cube_web[dev]"
           cd cube_web/frontend
           npm ci
+
+      - name: Lint and type check
+        run: |
+          python -m ruff check cube_encoder cube_split cube_web
+          python -m mypy cube_encoder/grid_core cube_split/cube_split cube_web/cube_web
 
       - name: Run tests
         run: |
           PYTHONPATH=cube_encoder:cube_split:cube_web python -m pytest -q cube_encoder/tests cube_split/tests
           cd cube_web
           PYTHONPATH=../cube_encoder:../cube_split:. python -m pytest -q tests
+
+      - name: App start smoke
+        run: |
+          cd cube_web
+          PYTHONPATH=../cube_encoder:../cube_split:. python -m uvicorn cube_web.app:app --host 127.0.0.1 --port 50040 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:50040/health; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:50040/health
+          curl -fsS http://127.0.0.1:50040/
 
       - name: Build frontend
         run: |
@@ -69,15 +80,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.8"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build
-          cd cube_encoder
-          python -m build
-          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install -e "cube_encoder[dev]"
 
       - name: Load perf thresholds
         run: cat .github/perf-thresholds.env >> "$GITHUB_ENV"
@@ -104,7 +112,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.8"
 
       - name: Build SDK package artifacts
         run: |

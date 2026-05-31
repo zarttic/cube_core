@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -182,14 +181,13 @@ class PostgresQualityReportStore(QualityReportStore):
 
 _store: QualityReportStore | None = None
 
-DEFAULT_POSTGRES_DSN = "postgresql://postgres:postgres@127.0.0.1:55432/cube"
+from cube_split.runtime_config import require_postgres_dsn
 
 
 def get_quality_report_store() -> QualityReportStore:
     global _store
     if _store is None:
-        dsn = os.environ.get("CUBE_WEB_POSTGRES_DSN") or os.environ.get("DATABASE_URL") or DEFAULT_POSTGRES_DSN
-        _store = PostgresQualityReportStore(dsn)
+        _store = PostgresQualityReportStore(require_postgres_dsn())
     return _store
 
 

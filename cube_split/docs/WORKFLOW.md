@@ -75,13 +75,13 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.ray_logical_partition_job
 - `--manifest-path`：可选，`.jsonl` 或 `.json` 清单；设置后按清单读取资产。
 - `--product-family`：`auto`、`landsat`、`sentinel2`。
 - `--target-crs`：可选 COG 目标 CRS；为空则保留源 CRS。
-- `--partition-backend`：`ray`、`auto`、`thread`；默认直接使用 Ray 集群。
-- `--ray-address`：集群默认使用 `ray://10.136.1.13:10001`；本机调试可用空值或 `auto`。
+- `--partition-backend`：`ray`、`auto`、`thread`；需要分布式执行时显式提供 Ray 地址。
+- `--ray-address`：优先来自 `CUBE_WEB_RAY_ADDRESS` 或 `RAY_ADDRESS`，也可通过命令行参数传入；本机调试可用空值或 `auto`。
 - `--timing-mode`、`--skip-verify`：用于性能计时，减少汇总校验开销。
-- PostgreSQL、MinIO、Ray 已接入项目默认配置：PostgreSQL
-  `postgresql://postgres:postgres@127.0.0.1:55432/cube`，Ray
-  `ray://10.136.1.13:10001`，MinIO `10.136.1.14:9000`，bucket `cube`。
-  需要切换环境时再用命令行参数或环境变量覆盖。
+- PostgreSQL、MinIO、Ray 统一从运行时配置读取：PostgreSQL 使用
+  `CUBE_WEB_POSTGRES_DSN`、`POSTGRES_DSN` 或 `DATABASE_URL`；Ray 使用
+  `CUBE_WEB_RAY_ADDRESS` 或 `RAY_ADDRESS`；MinIO 使用
+  `CUBE_WEB_MINIO_*`、`MINIO_*` 或节点 `/etc/default/minio`。业务模块不再内置集群 IP 或默认密钥。
 
 产品剖分：
 
@@ -103,7 +103,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
   --grid-type isea4h \
   --grid-level 5 \
   --partition-backend ray \
-  --ray-address ray://10.136.1.13:10001 \
+  --ray-address "$RAY_ADDRESS" \
   --ray-parallelism 4
 ```
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3.8}"
 INPUT_DIR="${1:-$ROOT_DIR/data/landsat8}"
 RAY_OUTPUT_DIR="${2:-$ROOT_DIR/data/ray_output/e2e_ingest}"
 DB_PATH="${3:-$ROOT_DIR/data/ingest/e2e_ingest.db}"
@@ -9,10 +10,24 @@ COG_OUTPUT_ROOT="${4:-$ROOT_DIR/data/cog/raw}"
 COG_INPUT_DIR="${COG_INPUT_DIR:-$ROOT_DIR/data/cog/partition_input}"
 METADATA_BACKEND="${METADATA_BACKEND:-postgres}"
 ASSET_STORAGE_BACKEND="${ASSET_STORAGE_BACKEND:-minio}"
-POSTGRES_DSN="${POSTGRES_DSN:-postgresql://postgres:postgres@127.0.0.1:55432/cube}"
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-10.136.1.14:9000}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
+eval "$(
+  PYTHONPATH="$ROOT_DIR:$ROOT_DIR/../cube_encoder" "$PYTHON_BIN" - <<'PY'
+import shlex
+from cube_split import runtime_config
+
+minio = runtime_config.minio_settings()
+values = {
+    "POSTGRES_DSN": runtime_config.postgres_dsn(),
+    "MINIO_ENDPOINT": minio.endpoint,
+    "MINIO_ACCESS_KEY": minio.access_key,
+    "MINIO_SECRET_KEY": minio.secret_key,
+    "MINIO_BUCKET": minio.bucket,
+    "RAY_ADDRESS": runtime_config.ray_address(),
+}
+for key, value in values.items():
+    print(f'{key}={shlex.quote(str(value))}')
+PY
+)"
 MINIO_BUCKET="${MINIO_BUCKET:-cube}"
 MINIO_PREFIX="${MINIO_PREFIX:-cube/raw}"
 MINIO_UPLOAD_WORKERS="${MINIO_UPLOAD_WORKERS:-8}"
@@ -22,7 +37,7 @@ GRID_LEVEL="${GRID_LEVEL:-7}"
 COVER_MODE="${COVER_MODE:-intersect}"
 TIME_GRANULARITY="${TIME_GRANULARITY:-day}"
 PARTITION_BACKEND="${PARTITION_BACKEND:-ray}"
-RAY_ADDRESS="${RAY_ADDRESS:-ray://10.136.1.13:10001}"
+: "${RAY_ADDRESS:=${RAY_ADDRESS:-}}"
 RAY_PARALLELISM="${RAY_PARALLELISM:-0}"
 CHUNK_SIZE="${CHUNK_SIZE:-1}"
 COG_WORKERS="${COG_WORKERS:-8}"
@@ -44,10 +59,18 @@ if [[ "$ASSET_STORAGE_BACKEND" == "minio" ]]; then
     fi
   done
 fi
+if [[ "$METADATA_BACKEND" == "postgres" && -z "$POSTGRES_DSN" ]]; then
+  echo "POSTGRES_DSN is required when METADATA_BACKEND=postgres" >&2
+  exit 2
+fi
+if [[ "$PARTITION_BACKEND" == "ray" && -z "$RAY_ADDRESS" ]]; then
+  echo "RAY_ADDRESS is required when PARTITION_BACKEND=ray" >&2
+  exit 2
+fi
 
 cd "$ROOT_DIR"
 
-python -m cube_split.jobs.ray_logical_partition_job \
+"$PYTHON_BIN" -m cube_split.jobs.ray_logical_partition_job \
   --input-dir "$INPUT_DIR" \
   --output-dir "$RAY_OUTPUT_DIR" \
   --cog-input-dir "$COG_INPUT_DIR" \
@@ -68,7 +91,7 @@ python -m cube_split.jobs.ray_logical_partition_job \
 
 LATEST_RUN_DIR="$(ls -dt "$RAY_OUTPUT_DIR"/run_* | head -n 1)"
 
-python -m cube_split.ingest.ray_ingest_job \
+"$PYTHON_BIN" -m cube_split.ingest.ray_ingest_job \
   --run-dir "$LATEST_RUN_DIR" \
   --job-id "$JOB_ID" \
   --dataset "$DATASET" \

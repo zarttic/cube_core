@@ -19,6 +19,7 @@ const pageMap = {
 };
 
 const currentView = computed(() => pageMap[currentPath.value] || HomeView);
+const currentNavItems = computed(() => navItems());
 
 function goInternal(path) {
   if (path === currentPath.value) return;
@@ -104,7 +105,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
           </div>
         </div>
         <nav class="portal-nav" aria-label="主导航">
-          <template v-for="item in navItems" :key="item.label">
+          <template v-for="item in currentNavItems" :key="item.label">
             <a
               v-if="item.kind === 'internal'"
               :href="item.path"

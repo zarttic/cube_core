@@ -1,3 +1,5 @@
+import { reactive } from 'vue';
+
 function parseFlag(value, fallback = false) {
   if (value === undefined || value === null || String(value).trim() === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
@@ -5,16 +7,21 @@ function parseFlag(value, fallback = false) {
 
 export const AUTH_CONFIG = {
   CLIENT_ID: import.meta.env.VITE_AUTH_CLIENT_ID || 'system_ard',
-  MAIN_SYSTEM_URL: (import.meta.env.VITE_AUTH_MAIN_SYSTEM_URL || 'http://10.136.1.14:5177').replace(/\/$/, ''),
-  REDIRECT_URI: import.meta.env.VITE_AUTH_REDIRECT_URI || 'http://10.136.1.14:50040/callback',
+  MAIN_SYSTEM_URL: (import.meta.env.VITE_AUTH_MAIN_SYSTEM_URL || '').replace(/\/$/, ''),
+  REDIRECT_URI: import.meta.env.VITE_AUTH_REDIRECT_URI || '/callback',
 };
 
-const authRuntimeState = {
+const authRuntimeState = reactive({
   required: parseFlag(import.meta.env.VITE_AUTH_REQUIRED, false),
-};
+  navigation: [],
+});
 
 export function authRequired() {
   return authRuntimeState.required;
+}
+
+export function runtimeNavigation() {
+  return authRuntimeState.navigation;
 }
 
 export async function loadAuthRuntimeConfig() {
@@ -27,6 +34,7 @@ export async function loadAuthRuntimeConfig() {
       if (body.main_system_url) AUTH_CONFIG.MAIN_SYSTEM_URL = String(body.main_system_url).replace(/\/$/, '');
       if (body.redirect_uri) AUTH_CONFIG.REDIRECT_URI = String(body.redirect_uri);
       authRuntimeState.required = parseFlag(body.auth_required, authRuntimeState.required);
+      if (Array.isArray(body.navigation)) authRuntimeState.navigation = body.navigation;
     }
   } catch {
     // Fall back to bundled defaults when the runtime config endpoint is unavailable.

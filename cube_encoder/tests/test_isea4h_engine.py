@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import h3
 import pytest
 

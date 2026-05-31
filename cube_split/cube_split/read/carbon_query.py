@@ -4,14 +4,14 @@ import argparse
 import json
 from typing import Any
 
-from cube_split.ingest.ray_ingest_job import DEFAULT_POSTGRES_DSN
+from cube_split import runtime_config
 from grid_core.sdk import CubeEncoderSDK
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query carbon satellite observations by AOI and time")
     parser.add_argument("--metadata-backend", default="postgres", choices=["postgres"], help="Metadata backend")
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN when metadata-backend=postgres")
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn(), help="PostgreSQL DSN when metadata-backend=postgres")
     parser.add_argument("--bbox", nargs=4, type=float, required=True, metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"))
     parser.add_argument("--time-start", required=True, help="Start time bucket such as 20201231")
     parser.add_argument("--time-end", required=True, help="End time bucket such as 20201231")
@@ -45,7 +45,7 @@ def _postgres_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
 
 def query_carbon_observations(
     *,
-    postgres_dsn: str = DEFAULT_POSTGRES_DSN,
+    postgres_dsn: str = "",
     metadata_backend: str = "postgres",
     bbox: list[float],
     time_start: str,
@@ -80,6 +80,7 @@ def query_carbon_observations(
     """
     if metadata_backend != "postgres":
         raise ValueError(f"Unsupported metadata_backend: {metadata_backend}")
+    postgres_dsn = postgres_dsn or runtime_config.postgres_dsn()
     if not postgres_dsn:
         raise ValueError("postgres_dsn is required when metadata_backend=postgres")
     try:

@@ -12,11 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-DEFAULT_POSTGRES_DSN = "postgresql://postgres:postgres@127.0.0.1:55432/cube"
-DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
-DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
-DEFAULT_MINIO_SECRET_KEY = "minioadmin"
-DEFAULT_MINIO_BUCKET = "cube"
+from cube_split import runtime_config
 
 
 @dataclass(frozen=True)
@@ -72,7 +68,8 @@ def parse_args() -> argparse.Namespace:
         choices=["postgres", "sqlite"],
         help="Metadata store backend",
     )
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN, required when metadata-backend=postgres")
+    minio = runtime_config.minio_settings()
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn(), help="PostgreSQL DSN, required when metadata-backend=postgres")
     parser.add_argument("--db-path", default="data/ingest/ingest.db", help="SQLite DB path (used when metadata-backend=sqlite)")
 
     parser.add_argument(
@@ -81,10 +78,10 @@ def parse_args() -> argparse.Namespace:
         choices=["minio", "local"],
         help="Asset storage backend",
     )
-    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT, help="MinIO endpoint host:port")
-    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY, help="MinIO access key")
-    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY, help="MinIO secret key")
-    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET, help="MinIO bucket name")
+    parser.add_argument("--minio-endpoint", default=minio.endpoint, help="MinIO endpoint host:port")
+    parser.add_argument("--minio-access-key", default=minio.access_key, help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default=minio.secret_key, help="MinIO secret key")
+    parser.add_argument("--minio-bucket", default=minio.bucket, help="MinIO bucket name")
     parser.add_argument("--minio-prefix", default="cube/raw", help="Object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO connection")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers for MinIO")

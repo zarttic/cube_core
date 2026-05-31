@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import copy
-import os
 from datetime import datetime
 from typing import Any
 
-from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
+from cube_split import runtime_config
 
 CONFIG_SCOPE = "cube_web"
-DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
-DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
-DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
-DEFAULT_MINIO_SECRET_KEY = "minioadmin"
-DEFAULT_MINIO_BUCKET = "cube"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "partition": {
@@ -46,8 +40,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "allow_failed_quality": False,
             "metadata_backend": "postgres",
             "asset_storage_backend": "minio",
-            "minio_endpoint": DEFAULT_MINIO_ENDPOINT,
-            "minio_bucket": DEFAULT_MINIO_BUCKET,
+            "minio_endpoint": "",
+            "minio_bucket": runtime_config.DEFAULT_MINIO_BUCKET,
             "minio_prefix": "cube/entity",
             "minio_secure": False,
             "minio_upload_workers": 8,
@@ -156,7 +150,7 @@ _store: ConfigStore | None = None
 def get_config_store() -> ConfigStore:
     global _store
     if _store is None:
-        _store = PostgresConfigStore(_postgres_dsn())
+        _store = PostgresConfigStore(runtime_config.require_postgres_dsn())
     return _store
 
 
@@ -170,7 +164,12 @@ def get_app_config() -> dict[str, Any]:
 
 
 def default_config() -> dict[str, Any]:
-    return copy.deepcopy(DEFAULT_CONFIG)
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    minio = runtime_config.minio_settings()
+    config["ingest"]["optical"]["minio_endpoint"] = minio.endpoint
+    config["ingest"]["optical"]["minio_bucket"] = minio.bucket
+    config["ingest"]["optical"]["minio_secure"] = minio.secure
+    return config
 
 
 def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -242,15 +241,16 @@ def optical_quality_defaults() -> dict[str, Any]:
 
 
 def runtime_info() -> dict[str, Any]:
+    postgres = _postgres_dsn()
     return {
-        "postgres_dsn": _masked_dsn(_postgres_dsn()),
-        "ray_address": os.environ.get("CUBE_WEB_RAY_ADDRESS") or DEFAULT_RAY_ADDRESS,
+        "postgres_dsn": _masked_dsn(postgres) if postgres else "",
+        "ray_address": runtime_config.ray_address(),
         "config_scope": CONFIG_SCOPE,
     }
 
 
 def _postgres_dsn() -> str:
-    return os.environ.get("CUBE_WEB_POSTGRES_DSN") or os.environ.get("DATABASE_URL") or DEFAULT_POSTGRES_DSN
+    return runtime_config.postgres_dsn()
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

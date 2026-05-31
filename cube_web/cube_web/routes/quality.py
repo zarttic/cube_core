@@ -22,7 +22,7 @@ def create_quality_router() -> APIRouter:
     @router.post("/optical/run")
     def quality_optical_run(payload: QualityRunRequest) -> dict:
         payload = payload_from_model(payload)
-        if quality_checks.run_optical_quality_check is None:
+        if not quality_checks.run_optical_quality_check:
             raise HTTPException(status_code=500, detail="cube_split quality module is not available")
         run_dir_text = str(payload.get("run_dir", "")).strip()
         if not run_dir_text:
@@ -74,7 +74,7 @@ def create_quality_router() -> APIRouter:
     @router.post("/product/run")
     def quality_product_run(payload: QualityRunRequest) -> dict:
         payload = payload_from_model(payload)
-        if quality_checks.run_product_quality_check is None:
+        if not quality_checks.run_product_quality_check:
             raise HTTPException(status_code=500, detail="cube_split product quality module is not available")
         run_dir_text = str(payload.get("run_dir", "")).strip()
         if not run_dir_text:
@@ -126,7 +126,7 @@ def create_quality_router() -> APIRouter:
     @router.post("/carbon/run")
     def quality_carbon_run(payload: QualityRunRequest) -> dict:
         payload = payload_from_model(payload)
-        if quality_checks.run_carbon_quality_check is None:
+        if not quality_checks.run_carbon_quality_check:
             raise HTTPException(status_code=500, detail="cube_split carbon quality module is not available")
         run_dir_text = str(payload.get("run_dir", "")).strip()
         if not run_dir_text:

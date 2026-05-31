@@ -17,7 +17,7 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 

@@ -9,18 +9,13 @@ from uuid import uuid4
 from urllib.parse import urlparse
 from typing import Any
 
+from cube_split import runtime_config
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
-from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
 
-DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
-DEFAULT_MINIO_ENDPOINT = "10.136.1.14:9000"
-DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
-DEFAULT_MINIO_SECRET_KEY = "minioadmin"
-DEFAULT_MINIO_BUCKET = "cube"
 DEFAULT_ENTITY_GRID_LEVEL = 6
 DEFAULT_ENTITY_TEST_GRID_LEVEL = 3
 
@@ -58,42 +53,12 @@ def _parse_s3_source_name(source_uri: str) -> str:
     return Path(parsed.path).name
 
 
-def _minio_service_env() -> dict[str, str]:
-    path = Path("/etc/default/minio")
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-
 def _minio_access_key(payload: dict | None = None) -> str:
-    service_env = _minio_service_env()
-    payload = payload or {}
-    return str(
-        payload.get("minio_access_key")
-        or _env_text("CUBE_WEB_MINIO_ACCESS_KEY")
-        or _env_text("MINIO_ACCESS_KEY")
-        or service_env.get("MINIO_ROOT_USER")
-        or DEFAULT_MINIO_ACCESS_KEY
-    )
+    return runtime_config.minio_settings(payload).access_key
 
 
 def _minio_secret_key(payload: dict | None = None) -> str:
-    service_env = _minio_service_env()
-    payload = payload or {}
-    return str(
-        payload.get("minio_secret_key")
-        or _env_text("CUBE_WEB_MINIO_SECRET_KEY")
-        or _env_text("MINIO_SECRET_KEY")
-        or service_env.get("MINIO_ROOT_PASSWORD")
-        or DEFAULT_MINIO_SECRET_KEY
-    )
+    return runtime_config.minio_settings(payload).secret_key
 
 
 def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
@@ -250,15 +215,19 @@ def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
 
 
 def _env_text(name: str, default: str = "") -> str:
-    return str(os.environ.get(name, default) or "")
+    return runtime_config.env_text(name, default)
 
 
 def _ray_address() -> str:
-    return _env_text("CUBE_WEB_RAY_ADDRESS", DEFAULT_RAY_ADDRESS)
+    return runtime_config.require_ray_address()
 
 
 def _postgres_dsn() -> str:
-    return _env_text("CUBE_WEB_POSTGRES_DSN") or _env_text("DATABASE_URL") or DEFAULT_POSTGRES_DSN
+    return runtime_config.require_postgres_dsn()
+
+
+def _minio_settings(payload: dict | None = None, ingest_payload: dict | None = None) -> runtime_config.MinioSettings:
+    return runtime_config.minio_settings({**(ingest_payload or {}), **(payload or {})})
 
 
 def _warn_checks_from_result(result: dict) -> list[dict]:
@@ -415,14 +384,10 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
         postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
-        minio_endpoint=str(
-            payload.get("minio_endpoint")
-            or ingest_payload.get("minio_endpoint")
-            or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)
-        ),
+        minio_endpoint=_minio_settings(payload, ingest_payload).endpoint,
         minio_access_key=_minio_access_key(payload),
         minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
+        minio_bucket=_minio_settings(payload, ingest_payload).bucket,
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
@@ -657,10 +622,10 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
         db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(payload.get("asset_storage_backend") or "minio"),
-        minio_endpoint=str(payload.get("minio_endpoint") or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)),
+        minio_endpoint=_minio_settings(payload).endpoint,
         minio_access_key=_minio_access_key(payload),
         minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=str(payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
+        minio_bucket=_minio_settings(payload).bucket,
         minio_prefix=str(payload.get("minio_prefix") or "cube/product"),
         minio_secure=bool(payload.get("minio_secure", False)),
         minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
@@ -789,14 +754,10 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
         postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
-        minio_endpoint=str(
-            payload.get("minio_endpoint")
-            or ingest_payload.get("minio_endpoint")
-            or _env_text("CUBE_WEB_MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT)
-        ),
+        minio_endpoint=_minio_settings(payload, ingest_payload).endpoint,
         minio_access_key=_minio_access_key(payload),
         minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=str(payload.get("minio_bucket") or ingest_payload.get("minio_bucket") or _env_text("CUBE_WEB_MINIO_BUCKET", DEFAULT_MINIO_BUCKET)),
+        minio_bucket=_minio_settings(payload, ingest_payload).bucket,
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),

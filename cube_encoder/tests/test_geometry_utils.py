@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from grid_core.app.utils.geometry import bbox_to_polygon
 
 

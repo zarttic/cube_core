@@ -1,22 +1,33 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from cube_split.ingest import ray_ingest_job
+from cube_split import runtime_config
 from cube_web.services import quality_service
-from cube_web.services.config_store import (
-    DEFAULT_MINIO_ACCESS_KEY,
-    DEFAULT_MINIO_BUCKET,
-    DEFAULT_MINIO_ENDPOINT,
-    DEFAULT_MINIO_SECRET_KEY,
-    optical_ingest_defaults,
-)
-from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN, get_quality_report_store
+from cube_web.services.config_store import optical_ingest_defaults
+from cube_web.services.quality_report_store import get_quality_report_store
+
+
+class _LazyRayIngestJob:
+    def __getattr__(self, name: str):
+        module = self._load()
+        return getattr(module, name)
+
+    def _load(self):
+        from cube_split.ingest import ray_ingest_job as module
+
+        return module
+
+
+ray_ingest_job = _LazyRayIngestJob()
+
+
+def _ray_ingest_job():
+    return ray_ingest_job
 
 
 def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
@@ -24,6 +35,7 @@ def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
     run_dir, quality_report = _resolve_run(payload)
     versions = _resolve_versions(payload)
     rows_path = run_dir / "index_rows.jsonl"
+    ray_ingest_job = _ray_ingest_job()
     rows = ray_ingest_job.load_rows(rows_path)
     asset_uri_map = {str(row["asset_path"]): str(row["asset_path"]) for row in rows}
     raw_records = ray_ingest_job.build_raw_asset_records(
@@ -75,6 +87,7 @@ def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Quality status is FAIL; set allow_failed_quality=true to ingest anyway")
     versions = _resolve_versions(payload)
     job_id = f"demo-optical-{uuid4().hex[:12]}"
+    minio = runtime_config.minio_settings(payload)
     args = SimpleNamespace(
         run_dir=str(run_dir),
         job_id=job_id,
@@ -87,17 +100,17 @@ def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         postgres_dsn=_postgres_dsn(),
         db_path="",
         asset_storage_backend=_payload_text(payload, "asset_storage_backend", "minio"),
-        minio_endpoint=str(payload.get("minio_endpoint") or os.environ.get("CUBE_WEB_MINIO_ENDPOINT") or DEFAULT_MINIO_ENDPOINT),
-        minio_access_key=str(payload.get("minio_access_key") or os.environ.get("CUBE_WEB_MINIO_ACCESS_KEY") or DEFAULT_MINIO_ACCESS_KEY),
-        minio_secret_key=str(payload.get("minio_secret_key") or os.environ.get("CUBE_WEB_MINIO_SECRET_KEY") or DEFAULT_MINIO_SECRET_KEY),
-        minio_bucket=str(payload.get("minio_bucket") or os.environ.get("CUBE_WEB_MINIO_BUCKET") or DEFAULT_MINIO_BUCKET),
+        minio_endpoint=minio.endpoint,
+        minio_access_key=minio.access_key,
+        minio_secret_key=minio.secret_key,
+        minio_bucket=minio.bucket,
         minio_prefix=str(payload.get("minio_prefix") or "cube/raw"),
         minio_secure=bool(payload.get("minio_secure", False)),
         minio_upload_workers=int(payload.get("minio_upload_workers") or 8),
         cog_output_root=str(Path("/tmp") / "cube_web_ingest_demo" / "cog"),
         cog_materialize_mode="symlink",
     )
-    stats = ray_ingest_job.run_ingest(args)
+    stats = _ray_ingest_job().run_ingest(args)
     return {
         "status": "succeeded",
         "mode": "confirmed_ingest",
@@ -161,7 +174,7 @@ def _preview_run_id(report: dict[str, Any]) -> str:
 
 
 def _postgres_dsn() -> str:
-    return os.environ.get("CUBE_WEB_POSTGRES_DSN") or os.environ.get("DATABASE_URL") or DEFAULT_POSTGRES_DSN
+    return runtime_config.require_postgres_dsn()
 
 
 def _existing_conflicts(raw_records: list[Any], cube_records: list[Any]) -> dict[str, int]:
@@ -171,6 +184,7 @@ def _existing_conflicts(raw_records: list[Any], cube_records: list[Any]) -> dict
         return {"raw_asset_rows": 0, "cube_fact_rows": 0}
 
     with psycopg.connect(_postgres_dsn()) as conn:
+        ray_ingest_job = _ray_ingest_job()
         ray_ingest_job.ensure_tables_postgres(conn)
         with conn.cursor() as cur:
             raw_count = 0

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from s2sphere import CellId
 
 from grid_core.app.engines.geohash_engine import GeohashEngine

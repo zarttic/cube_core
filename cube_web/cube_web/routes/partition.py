@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib import import_module
+
 from fastapi import APIRouter
 
 from cube_web.schemas import (
@@ -17,9 +19,35 @@ from cube_web.services.partition_service import PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
 
 
-def create_partition_router(service: PartitionService, workflow: PartitionWorkflowService | None = None) -> APIRouter:
+def create_partition_service() -> PartitionService:
+    partition_adapters = import_module("cube_web.routes.partition_adapters")
+    partition_service_module = import_module("cube_web.services.partition_service")
+    return PartitionService(
+        partition_service_module.build_partition_registry(
+            optical_demo=partition_adapters.partition_optical_demo,
+            optical_test=partition_adapters.partition_optical_test,
+            optical_retry=partition_adapters.partition_optical_retry,
+            carbon_demo=partition_adapters.partition_carbon_demo,
+            carbon_test=partition_adapters.partition_carbon_test,
+            carbon_retry=partition_adapters.partition_carbon_retry,
+            product_demo=partition_adapters.partition_product_demo,
+            product_test=partition_adapters.partition_product_test,
+            product_retry=partition_adapters.partition_product_retry,
+            entity_demo=partition_adapters.partition_entity_demo,
+            entity_test=partition_adapters.partition_entity_test,
+            entity_retry=partition_adapters.partition_entity_retry,
+        )
+    )
+
+
+partition_service = create_partition_service()
+partition_workflow_service = PartitionWorkflowService(partition_service)
+
+
+def create_partition_router(service: PartitionService | None = None, workflow: PartitionWorkflowService | None = None) -> APIRouter:
+    service = service or partition_service
     router = APIRouter(prefix="/partition", tags=["partition"])
-    workflow_service = workflow or PartitionWorkflowService(service)
+    workflow_service = workflow or (partition_workflow_service if service is partition_service else PartitionWorkflowService(service))
 
     @router.post("/assets/retry", response_model=PartitionTaskCreateResponse, status_code=202)
     def retry_partition_assets(payload: PartitionAssetRetryRequest) -> dict:

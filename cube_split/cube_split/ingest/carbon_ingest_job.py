@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cube_split.ingest.ray_ingest_job import DEFAULT_POSTGRES_DSN
+from cube_split import runtime_config
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-id", required=True, help="Ingestion job id")
     parser.add_argument("--cube-version", default="v1", help="Carbon fact version")
     parser.add_argument("--metadata-backend", default="postgres", choices=["postgres"], help="Metadata backend")
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN when metadata-backend=postgres")
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn(), help="PostgreSQL DSN when metadata-backend=postgres")
     return parser.parse_args()
 
 

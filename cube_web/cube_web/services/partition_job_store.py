@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import copy
-import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from cube_web.services.quality_report_store import DEFAULT_POSTGRES_DSN
+from cube_split.runtime_config import postgres_dsn
 
 
 BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_requested"}
@@ -662,8 +661,7 @@ _store: PartitionJobStore | None = None
 def get_partition_job_store() -> PartitionJobStore:
     global _store
     if _store is None:
-        dsn = os.environ.get("CUBE_WEB_POSTGRES_DSN") or os.environ.get("DATABASE_URL") or DEFAULT_POSTGRES_DSN
-        _store = PostgresPartitionJobStore(dsn)
+        _store = PostgresPartitionJobStore(postgres_dsn())
     return _store
 
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from grid_core.app.perf_smoke import run_perf_smoke
 from grid_core.app import perf_smoke
 

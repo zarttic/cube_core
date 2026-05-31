@@ -16,9 +16,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/v1': 'http://127.0.0.1:50040',
-      '/api': 'http://127.0.0.1:50040',
-      '/health': 'http://127.0.0.1:50040',
+      '/v1': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
+      '/api': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
+      '/health': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
     },
   },
 });

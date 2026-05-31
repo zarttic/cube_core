@@ -18,23 +18,22 @@ Detailed web documentation: [docs/README.md](docs/README.md).
 From the repository root:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-Quality reports use PostgreSQL storage. Local development defaults to the
-Podman PostgreSQL service at `postgresql://postgres:postgres@127.0.0.1:55432/cube`;
-set `CUBE_WEB_POSTGRES_DSN` or `DATABASE_URL` to override it.
+Quality reports and managed partition tasks use PostgreSQL storage. Set
+`CUBE_WEB_POSTGRES_DSN`, `POSTGRES_DSN`, or `DATABASE_URL` before using those
+workflows.
 
 Auth enforcement is controlled at runtime with `CUBE_WEB_AUTH_REQUIRED`.
 Set `CUBE_WEB_AUTH_REQUIRED=false` for local self-test to skip the frontend
 login redirect and the backend `/v1/*` bearer-token check.
 
-Partition demos default to the configured infrastructure cluster: Ray Client
-`ray://10.136.1.13:10001`, MinIO API `10.136.1.14:9000`, and bucket `cube`.
-The default PostgreSQL DSN above is used for metadata. Set
-`CUBE_WEB_RAY_ADDRESS`, `CUBE_WEB_POSTGRES_DSN`, `CUBE_WEB_MINIO_ENDPOINT`,
+Partition demos read Ray, MinIO, and PostgreSQL settings from runtime
+configuration. Set `CUBE_WEB_RAY_ADDRESS`, `CUBE_WEB_MINIO_ENDPOINT`,
 `CUBE_WEB_MINIO_ACCESS_KEY`, `CUBE_WEB_MINIO_SECRET_KEY`, and
-`CUBE_WEB_MINIO_BUCKET` to override them.
+`CUBE_WEB_MINIO_BUCKET` when using the distributed backends. MinIO credentials
+may also be sourced from the node-local MinIO service environment.
 
 For local frontend development:
 
@@ -65,7 +64,7 @@ All API routes are under `/v1`:
 From this package:
 
 ```bash
-PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. python3.8 -m pytest tests
 ```
 
 From the workspace root, run the cross-package pytest command in `AGENTS.md`.

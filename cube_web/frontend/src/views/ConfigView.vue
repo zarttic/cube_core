@@ -47,7 +47,7 @@ function emptyConfig() {
         allow_failed_quality: false,
         metadata_backend: 'postgres',
         asset_storage_backend: 'minio',
-        minio_endpoint: '10.136.1.14:9000',
+        minio_endpoint: '',
         minio_bucket: 'cube',
         minio_prefix: 'cube/entity',
         minio_secure: false,
@@ -298,7 +298,7 @@ onMounted(loadConfig);
                   </el-select>
                 </el-form-item>
                 <el-form-item label="MinIO Endpoint">
-                  <el-input v-model="ingest.minio_endpoint" placeholder="10.136.1.14:9000" />
+                  <el-input v-model="ingest.minio_endpoint" placeholder="由 CUBE_WEB_MINIO_ENDPOINT 或 MINIO_ENDPOINT 提供" />
                 </el-form-item>
                 <el-form-item label="MinIO Bucket">
                   <el-input v-model="ingest.minio_bucket" />

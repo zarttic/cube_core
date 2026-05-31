@@ -19,15 +19,7 @@ from cube_split.jobs.ray_partition_core import (
     _prepare_task_rows_for_partitioning,
 )
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
-from cube_split.ingest.ray_ingest_job import (
-    DEFAULT_MINIO_ACCESS_KEY,
-    DEFAULT_MINIO_BUCKET,
-    DEFAULT_MINIO_ENDPOINT,
-    DEFAULT_MINIO_SECRET_KEY,
-    DEFAULT_POSTGRES_DSN,
-)
-
-DEFAULT_RAY_ADDRESS = "ray://10.136.1.13:10001"
+from cube_split import runtime_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ray-address",
-        default=DEFAULT_RAY_ADDRESS,
+        default=runtime_config.ray_address(),
         help="Ray address to connect (e.g. auto or ray://host:10001).",
     )
     parser.add_argument(
@@ -126,7 +118,7 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "sqlite", "postgres"],
         help="Metadata backend. Set to postgres for end-to-end ingest after partitioning.",
     )
-    parser.add_argument("--postgres-dsn", default=DEFAULT_POSTGRES_DSN, help="PostgreSQL DSN when metadata-backend=postgres")
+    parser.add_argument("--postgres-dsn", default=runtime_config.postgres_dsn(), help="PostgreSQL DSN when metadata-backend=postgres")
     parser.add_argument("--db-path", default="data/ingest/ingest.db", help="SQLite DB path when metadata-backend=sqlite")
     parser.add_argument(
         "--asset-storage-backend",
@@ -134,10 +126,10 @@ def parse_args() -> argparse.Namespace:
         choices=["local", "minio"],
         help="Asset storage backend used during ingest",
     )
-    parser.add_argument("--minio-endpoint", default=DEFAULT_MINIO_ENDPOINT, help="MinIO endpoint host:port")
-    parser.add_argument("--minio-access-key", default=DEFAULT_MINIO_ACCESS_KEY, help="MinIO access key")
-    parser.add_argument("--minio-secret-key", default=DEFAULT_MINIO_SECRET_KEY, help="MinIO secret key")
-    parser.add_argument("--minio-bucket", default=DEFAULT_MINIO_BUCKET, help="MinIO bucket name")
+    parser.add_argument("--minio-endpoint", default=runtime_config.minio_settings().endpoint, help="MinIO endpoint host:port")
+    parser.add_argument("--minio-access-key", default=runtime_config.minio_settings().access_key, help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default=runtime_config.minio_settings().secret_key, help="MinIO secret key")
+    parser.add_argument("--minio-bucket", default=runtime_config.minio_settings().bucket, help="MinIO bucket name")
     parser.add_argument("--minio-prefix", default="cube/raw", help="MinIO object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers for MinIO")
