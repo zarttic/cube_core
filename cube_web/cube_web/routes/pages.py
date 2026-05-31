@@ -6,7 +6,6 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 
-
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 STATIC_MEDIA_TYPES = {
     ".css": "text/css",

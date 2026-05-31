@@ -9,11 +9,11 @@ from urllib.parse import urlparse
 import numpy as np
 import psycopg
 import rasterio
+from grid_core.sdk import CubeEncoderSDK
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 
 from cube_split import runtime_config
-from grid_core.sdk import CubeEncoderSDK
 
 
 def _parse_args() -> argparse.Namespace:

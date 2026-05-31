@@ -31,6 +31,9 @@ const deselectedOpticalAssetKeys = ref({});
 const selectedCarbonBatchIds = ref(['CARBON_BATCH_20201231_A']);
 const expandedCarbonBatchId = ref('CARBON_BATCH_20201231_A');
 const deselectedCarbonObservationKeys = ref({});
+const selectedRadarBatchIds = ref(['RADAR_BATCH_YANGZHOU_S1_2018_2020']);
+const expandedRadarBatchId = ref('RADAR_BATCH_YANGZHOU_S1_2018_2020');
+const deselectedRadarAssetKeys = ref({});
 const selectedProductBatchIds = ref(['PRODUCT_BATCH_DIANZHONG_1980_2020']);
 const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
 const deselectedProductAssetKeys = ref({});
@@ -41,6 +44,8 @@ const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('geohash');
 const opticalGridLevel = ref(defaultLogicalGridLevel);
 const entityGridLevel = ref(defaultEntityGridLevel);
+const radarGridType = ref('geohash');
+const radarGridLevel = ref(5);
 const productGridType = ref('geohash');
 const productGridLevel = ref(5);
 const mapGridLoading = ref(false);
@@ -83,6 +88,7 @@ const ingestDefaults = ref({
 const minioSourcePrefix = 's3://cube/cube/source';
 const opticalSourcePrefix = `${minioSourcePrefix}/optocal`;
 const productSourcePrefix = `${minioSourcePrefix}/product`;
+const radarSourceRoot = '/home/lyjdev/projects/cube_project/cube_split/data/2018-2020年6月-8月江苏扬州10米Sentinel-1影像数据-01';
 
 const opticalBatches = [
   {
@@ -169,10 +175,52 @@ const carbonRows = carbonBatches.map((batch) => ({
   status: batch.status,
 }));
 
-const radarRows = [
-  { id: 'R20240307001', name: 'Sentinel-1A_GRD_20240307', params: 'VV/VH | 10m', status: '就绪' },
-  { id: 'R20240307002', name: 'GF3_SAR_20240306', params: 'HH/HV | 8m', status: '就绪' },
+const radarAssetSchema = [
+  { field: 'source_uri', type: 'string', meaning: '雷达栅格源文件路径' },
+  { field: 'scene_id', type: 'string', meaning: 'Sentinel-1 场景标识' },
+  { field: 'sensor', type: 'string', meaning: '雷达传感器' },
+  { field: 'product_family', type: 'string', meaning: '雷达产品族' },
+  { field: 'band / polarization', type: 'string', meaning: '极化方式' },
+  { field: 'acq_time', type: 'datetime', meaning: '采集时间' },
+  { field: 'bbox', type: 'float[4]', meaning: '覆盖范围 bbox（WGS84）' },
+  { field: 'corners', type: 'float[4][2]', meaning: '覆盖范围四角点（WGS84 lon/lat）' },
 ];
+
+const yangzhouRadarDates = [
+  '20180603', '20180615', '20180627', '20180709', '20180721', '20180802', '20180814', '20180826',
+  '20190604', '20190616', '20190628', '20190710', '20190722', '20190803', '20190815', '20190827',
+  '20200604', '20200616', '20200628', '20200710', '20200722', '20200803', '20200815', '20200827',
+];
+const yangzhouRadarCorners = [[119.249917, 32.640053], [119.490233, 32.635514], [119.48019, 32.26987], [119.240841, 32.274346]];
+const yangzhouRadarBbox = [119.240841, 32.26987, 119.490233, 32.640053];
+const radarBatches = [
+  {
+    id: 'RADAR_BATCH_YANGZHOU_S1_2018_2020',
+    name: '江苏扬州 Sentinel-1 10m 2018-2020 夏季',
+    status: '就绪',
+    product_family: 'sentinel1',
+    sensor: 'sentinel1_sar',
+    target_crs: 'EPSG:4326',
+    schema: radarAssetSchema,
+    assets: yangzhouRadarDates.flatMap((date) => ['vh', 'vv'].map((polarization) => ({
+      source_uri: `${radarSourceRoot}/Data/${date}_${polarization.toUpperCase()}.dat`,
+      scene_id: `S1_${date}`,
+      acq_time: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T00:00:00Z`,
+      bands: [polarization],
+      band: polarization,
+      polarization,
+      resolution: 10,
+      bbox: yangzhouRadarBbox,
+      corners: yangzhouRadarCorners,
+    }))),
+  },
+];
+const radarRows = radarBatches.map((batch) => ({
+  id: batch.id,
+  name: batch.name,
+  params: `${batch.assets.length} 条资产 | VV/VH | 10m`,
+  status: batch.status,
+}));
 
 const dianzhongProductCorners = [
   [100.644783, 27.061367],
@@ -233,6 +281,7 @@ const dataRowsByModule = {
 
 const managedOpticalBatches = ref([]);
 const managedCarbonBatches = ref([]);
+const managedRadarBatches = ref([]);
 const managedProductBatches = ref([]);
 const partitionBatchLoading = ref(false);
 const partitionBatchDetailVisible = ref(false);
@@ -246,12 +295,16 @@ const partitionBatchDetailSelectedAssetIds = ref([]);
 
 const visibleOpticalBatches = computed(() => (managedOpticalBatches.value.length ? managedOpticalBatches.value : opticalBatches));
 const visibleCarbonBatches = computed(() => (managedCarbonBatches.value.length ? managedCarbonBatches.value : carbonBatches));
+const visibleRadarBatches = computed(() => (managedRadarBatches.value.length ? managedRadarBatches.value : radarBatches));
 const visibleProductBatches = computed(() => (managedProductBatches.value.length ? managedProductBatches.value : productBatches));
 
 function setBatchSelection(batchId, dataType) {
   if (dataType === 'carbon') {
     selectedCarbonBatchIds.value = [batchId];
     expandedCarbonBatchId.value = batchId;
+  } else if (dataType === 'radar') {
+    selectedRadarBatchIds.value = [batchId];
+    expandedRadarBatchId.value = batchId;
   } else if (dataType === 'product') {
     selectedProductBatchIds.value = [batchId];
     expandedProductBatchId.value = batchId;
@@ -499,6 +552,14 @@ function partitionBatchDetailPayloadRows(batch) {
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '目标参考系统', value: payload.target_crs || '-' },
       { label: '选择年份', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
+    );
+  }
+  if (batch.data_type === 'radar') {
+    rows.splice(2, 0,
+      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网层级', value: payload.grid_level ?? '-' },
+      { label: '目标参考系统', value: payload.target_crs || '-' },
+      { label: '选择资产', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
     );
   }
   return rows;
@@ -834,7 +895,12 @@ const visibleDataRowsByModule = computed(() => ({
     params: `${batch.observations.length} 条观测 | ${batch.product_type || '-'}`,
     status: batch.status,
   })),
-  radar: radarRows,
+  radar: visibleRadarBatches.value.map((batch) => ({
+    id: batch.id,
+    name: batch.name,
+    params: `${batch.assets.length} 条资产 | ${batch.sensor || 'sentinel1_sar'}`,
+    status: batch.status,
+  })),
   product: visibleProductBatches.value.map((batch) => ({
     id: batch.id,
     name: batch.name,
@@ -857,7 +923,7 @@ const partitionEndpointsByModule = {
   product: 'product',
 };
 
-const testModules = new Set(['optical', 'carbon', 'product']);
+const testModules = new Set(['optical', 'carbon', 'radar', 'product']);
 
 const activeDataRows = computed(() => visibleDataRowsByModule.value[activeModule.value] || dataRowsByModule[activeModule.value] || []);
 
@@ -875,6 +941,13 @@ const selectedDataName = computed(() => {
     if (!selectedCarbonBatchIds.value.length) return '未选择';
     const names = visibleCarbonBatches.value
       .filter((batch) => selectedCarbonBatchIds.value.includes(batch.id))
+      .map((batch) => batch.name);
+    return names.join('，');
+  }
+  if (activeModule.value === 'radar') {
+    if (!selectedRadarBatchIds.value.length) return '未选择';
+    const names = visibleRadarBatches.value
+      .filter((batch) => selectedRadarBatchIds.value.includes(batch.id))
       .map((batch) => batch.name);
     return names.join('，');
   }
@@ -942,6 +1015,27 @@ const selectedCarbonObservations = computed(() => {
           batch_name: batch.name,
           product_type: batch.product_type,
           source_uri: batch.source_uri,
+        });
+      }
+    });
+  });
+  return rows;
+});
+
+const selectedRadarAssets = computed(() => {
+  const selectedBatchSet = new Set(selectedRadarBatchIds.value);
+  const rows = [];
+  visibleRadarBatches.value.forEach((batch) => {
+    if (!selectedBatchSet.has(batch.id)) return;
+    batch.assets.forEach((asset) => {
+      if (isRadarAssetSelected(batch.id, asset)) {
+        rows.push({
+          ...asset,
+          batch_id: batch.id,
+          batch_name: batch.name,
+          product_family: batch.product_family,
+          sensor: batch.sensor,
+          target_crs: batch.target_crs,
         });
       }
     });
@@ -1031,12 +1125,41 @@ const productMapGeometries = computed(() => selectedProductAssets.value
   })
   .filter(Boolean));
 
-const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));
-const selectedMapGridType = computed(() => (activeModule.value === 'product' ? productGridType.value : opticalGridType.value));
-const selectedMapGridLevel = computed(() => (
-  activeModule.value === 'product' ? productGridLevel.value : opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value
+const radarMapGeometries = computed(() => selectedRadarAssets.value
+  .map((asset) => {
+    const geometry = cornersToPolygon(asset.corners);
+    if (!geometry) return null;
+    return {
+      geometry,
+      label: `${asset.scene_id} / ${(asset.polarization || asset.band || '').toUpperCase()}`,
+      color: '#b06f2c',
+      fillColor: '#b06f2c',
+      fillOpacity: 0.12,
+      weight: 2,
+    };
+  })
+  .filter(Boolean));
+
+const selectedMapAssets = computed(() => (
+  activeModule.value === 'product'
+    ? selectedProductAssets.value
+    : activeModule.value === 'radar'
+      ? selectedRadarAssets.value
+      : selectedOpticalAssets.value
 ));
-const mapPreviewGeometries = computed(() => (activeModule.value === 'product' ? productMapGeometries.value : mapBatchGeometries.value));
+const selectedMapGridType = computed(() => (
+  activeModule.value === 'product'
+    ? productGridType.value
+    : activeModule.value === 'radar'
+      ? radarGridType.value
+      : opticalGridType.value
+));
+const selectedMapGridLevel = computed(() => (
+  activeModule.value === 'product' ? productGridLevel.value : activeModule.value === 'radar' ? radarGridLevel.value : opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value
+));
+const mapPreviewGeometries = computed(() => (
+  activeModule.value === 'product' ? productMapGeometries.value : activeModule.value === 'radar' ? radarMapGeometries.value : mapBatchGeometries.value
+));
 const mapGeometries = computed(() => [...mapPreviewGeometries.value, ...mapGridGeometries.value]);
 
 const partitionMetricRows = computed(() => {
@@ -1245,6 +1368,10 @@ function productAssetKey(asset) {
   return `${asset.source_uri}|${asset.product_year}|${asset.band}`;
 }
 
+function radarAssetKey(asset) {
+  return `${asset.source_uri}|${asset.scene_id}|${asset.polarization || asset.band}`;
+}
+
 function isOpticalAssetSelected(batchId, asset) {
   const excluded = deselectedOpticalAssetKeys.value[batchId] || [];
   return !excluded.includes(assetKey(asset));
@@ -1258,6 +1385,11 @@ function isCarbonObservationSelected(batchId, observation) {
 function isProductAssetSelected(batchId, asset) {
   const excluded = deselectedProductAssetKeys.value[batchId] || [];
   return !excluded.includes(productAssetKey(asset));
+}
+
+function isRadarAssetSelected(batchId, asset) {
+  const excluded = deselectedRadarAssetKeys.value[batchId] || [];
+  return !excluded.includes(radarAssetKey(asset));
 }
 
 function toggleOpticalBatchSelect(batchId) {
@@ -1286,6 +1418,19 @@ function toggleCarbonBatchExpand(batchId) {
   expandedCarbonBatchId.value = expandedCarbonBatchId.value === batchId ? '' : batchId;
 }
 
+function toggleRadarBatchSelect(batchId) {
+  const exists = selectedRadarBatchIds.value.includes(batchId);
+  if (exists) {
+    selectedRadarBatchIds.value = selectedRadarBatchIds.value.filter((id) => id !== batchId);
+  } else {
+    selectedRadarBatchIds.value = [...selectedRadarBatchIds.value, batchId];
+  }
+}
+
+function toggleRadarBatchExpand(batchId) {
+  expandedRadarBatchId.value = expandedRadarBatchId.value === batchId ? '' : batchId;
+}
+
 function toggleProductBatchSelect(batchId) {
   const exists = selectedProductBatchIds.value.includes(batchId);
   if (exists) {
@@ -1307,6 +1452,10 @@ function selectSingleCarbonBatch(batchId) {
   selectedCarbonBatchIds.value = [batchId];
 }
 
+function selectSingleRadarBatch(batchId) {
+  selectedRadarBatchIds.value = [batchId];
+}
+
 function selectSingleProductBatch(batchId) {
   selectedProductBatchIds.value = [batchId];
 }
@@ -1314,6 +1463,8 @@ function selectSingleProductBatch(batchId) {
 async function runDemoForBatch(batchId) {
   if (activeModule.value === 'carbon') {
     selectSingleCarbonBatch(batchId);
+  } else if (activeModule.value === 'radar') {
+    selectSingleRadarBatch(batchId);
   } else if (activeModule.value === 'product') {
     selectSingleProductBatch(batchId);
   } else {
@@ -1339,6 +1490,14 @@ function toggleCarbonObservationSelect(batchId, observation) {
   deselectedCarbonObservationKeys.value = { ...deselectedCarbonObservationKeys.value, [batchId]: next };
 }
 
+function toggleRadarAssetSelect(batchId, asset) {
+  const key = radarAssetKey(asset);
+  const current = deselectedRadarAssetKeys.value[batchId] || [];
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  deselectedRadarAssetKeys.value = { ...deselectedRadarAssetKeys.value, [batchId]: next };
+}
+
 function toggleProductAssetSelect(batchId, asset) {
   const key = productAssetKey(asset);
   const current = deselectedProductAssetKeys.value[batchId] || [];
@@ -1355,6 +1514,11 @@ function opticalBatchSummary(batch) {
 function carbonBatchSummary(batch) {
   const selectedCount = batch.observations.filter((observation) => isCarbonObservationSelected(batch.id, observation)).length;
   return `${selectedCount}/${batch.observations.length} 条观测已选 | schema ${batch.schema.length} 字段`;
+}
+
+function radarBatchSummary(batch) {
+  const selectedCount = batch.assets.filter((asset) => isRadarAssetSelected(batch.id, asset)).length;
+  return `${selectedCount}/${batch.assets.length} 条资产已选 | schema ${batch.schema.length} 字段`;
 }
 
 function productBatchSummary(batch) {
@@ -1389,6 +1553,16 @@ function normalizeManagedBatch(batch) {
       assets: payload.selected_assets || [],
     };
   }
+  if (batch.data_type === 'radar') {
+    return {
+      ...base,
+      product_family: payload.product_family || 'sentinel1',
+      sensor: payload.sensor || 'sentinel1_sar',
+      target_crs: payload.target_crs || 'EPSG:4326',
+      schema: batch.source_schema?.schema || radarAssetSchema,
+      assets: payload.selected_assets || [],
+    };
+  }
   return {
     ...base,
     assets: payload.selected_assets || [],
@@ -1403,6 +1577,7 @@ async function loadPartitionBatches() {
     const batches = response.batches || [];
     managedOpticalBatches.value = batches.filter((batch) => batch.data_type === 'optical').map(normalizeManagedBatch);
     managedCarbonBatches.value = batches.filter((batch) => batch.data_type === 'carbon').map(normalizeManagedBatch);
+    managedRadarBatches.value = batches.filter((batch) => batch.data_type === 'radar').map(normalizeManagedBatch);
     managedProductBatches.value = batches.filter((batch) => batch.data_type === 'product').map(normalizeManagedBatch);
     if (managedOpticalBatches.value.length && !managedOpticalBatches.value.some((batch) => selectedOpticalBatchIds.value.includes(batch.id))) {
       const batchId = preferredBatchId(managedOpticalBatches.value);
@@ -1416,6 +1591,13 @@ async function loadPartitionBatches() {
       if (batchId) {
         selectedCarbonBatchIds.value = [batchId];
         expandedCarbonBatchId.value = batchId;
+      }
+    }
+    if (managedRadarBatches.value.length && !managedRadarBatches.value.some((batch) => selectedRadarBatchIds.value.includes(batch.id))) {
+      const batchId = preferredBatchId(managedRadarBatches.value);
+      if (batchId) {
+        selectedRadarBatchIds.value = [batchId];
+        expandedRadarBatchId.value = batchId;
       }
     }
     if (managedProductBatches.value.length && !managedProductBatches.value.some((batch) => selectedProductBatchIds.value.includes(batch.id))) {
@@ -1464,6 +1646,21 @@ function partitionPayloadForActiveModule() {
       selectedCount: selectedObservations.length,
     };
   }
+  if (activeModule.value === 'radar') {
+    const selectedBatch = visibleRadarBatches.value.find((batch) => selectedRadarBatchIds.value.includes(batch.id));
+    const selectedAssets = selectedRadarAssets.value;
+    return {
+      payload: {
+        grid_type: radarGridType.value,
+        grid_level: Number(radarGridLevel.value),
+        target_crs: selectedBatch?.target_crs || 'EPSG:4326',
+        batch_id: selectedBatch?.id || '',
+        batch_name: selectedBatch?.name || '',
+        selected_assets: selectedAssets,
+      },
+      selectedCount: selectedAssets.length,
+    };
+  }
   if (activeModule.value === 'product') {
     const selectedBatch = visibleProductBatches.value.find((batch) => selectedProductBatchIds.value.includes(batch.id));
     const selectedAssets = selectedProductAssets.value;
@@ -1483,10 +1680,10 @@ function partitionPayloadForActiveModule() {
 }
 
 async function loadMapGridForSelectedAssets() {
-  if (!['optical', 'product'].includes(activeModule.value)) return;
+  if (!['optical', 'radar', 'product'].includes(activeModule.value)) return;
   const selectedAssets = selectedMapAssets.value;
   if (!selectedAssets.length) {
-    ElMessage.warning(activeModule.value === 'product' ? '请至少选择一个产品年份' : '请至少选择一条资产');
+    ElMessage.warning(activeModule.value === 'product' ? '请至少选择一个产品年份' : activeModule.value === 'radar' ? '请至少选择一条雷达资产' : '请至少选择一条资产');
     return;
   }
   mapGridLoading.value = true;
@@ -1993,6 +2190,9 @@ async function runDemo() {
 	    if (activeModule.value === 'carbon' && selectedCount <= 0) {
 	      throw new Error('请至少选择一条碳卫星观测');
 	    }
+	    if (activeModule.value === 'radar' && selectedCount <= 0) {
+	      throw new Error('请至少选择一条雷达资产');
+	    }
 	    if (activeModule.value === 'product' && selectedCount <= 0) {
 	      throw new Error('请至少选择一个信息产品年份');
 	    }
@@ -2003,6 +2203,8 @@ async function runDemo() {
 	        ? `准备读取 ${selectedCount} 条影像资产。`
 	        : activeModule.value === 'carbon'
 	          ? `准备读取 ${selectedCount} 条碳卫星观测。`
+	          : activeModule.value === 'radar'
+	            ? `准备读取 ${selectedCount} 条雷达资产。`
 	          : activeModule.value === 'product'
 	            ? `准备读取 ${selectedCount} 个信息产品年份。`
 	            : '准备读取当前队列中的数据。',
@@ -2204,6 +2406,10 @@ watch([
   opticalGridType,
   opticalGridLevel,
   entityGridLevel,
+  selectedRadarBatchIds,
+  deselectedRadarAssetKeys,
+  radarGridType,
+  radarGridLevel,
   selectedProductBatchIds,
   deselectedProductAssetKeys,
   productGridType,
@@ -2299,6 +2505,13 @@ onUnmounted(() => {
                       </button>
                       <div class="queue-selected-summary">当前选择：<span>{{ selectedDataName }}</span></div>
                     </div>
+                  </div>
+                  <div class="form-group">
+                    <label>剖分格网</label>
+                    <el-select v-model="radarGridType" class="legacy-control">
+                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
+                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                    </el-select>
                   </div>
                 </template>
 
@@ -2431,15 +2644,16 @@ onUnmounted(() => {
               <div v-if="activeModule !== 'quality'" class="map-panel">
                 <div class="panel-header">
                   <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : activeModule === 'product' ? '产品范围地图预览' : '地图预览' }}</h3>
-                  <div v-if="['optical', 'product'].includes(activeModule)" class="map-actions">
+                  <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="map-actions">
                     <el-input-number v-if="activeModule === 'product'" v-model="productGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-else-if="activeModule === 'radar'" v-model="radarGridLevel" :min="1" :max="15" size="small" />
                     <el-input-number v-else-if="opticalGridType === 'isea4h'" v-model="entityGridLevel" :min="1" :max="15" size="small" />
                     <el-input-number v-else v-model="opticalGridLevel" :min="1" :max="15" size="small" />
                     <el-button size="small" :loading="mapGridLoading" @click="loadMapGridForSelectedAssets">加载格网</el-button>
                     <el-button size="small" @click="clearMapGrid">清空格网</el-button>
                   </div>
                 </div>
-                <LeafletMap :markers="[]" :geometries="['optical', 'product'].includes(activeModule) ? mapGeometries : []" />
+                <LeafletMap :markers="[]" :geometries="['optical', 'radar', 'product'].includes(activeModule) ? mapGeometries : []" />
               </div>
               <div v-else class="quality-overview-panel">
                 <div class="panel-header">
@@ -2627,7 +2841,7 @@ onUnmounted(() => {
 
     <el-drawer v-model="dataDrawerVisible" :title="`已载入${activeDataLabel}`" size="680px" direction="rtl">
       <el-input v-model="dataSearch" :prefix-icon="Search" placeholder="按名称查询" clearable />
-      <div v-loading="partitionBatchLoading && ['optical', 'carbon', 'product'].includes(activeModule)">
+      <div v-loading="partitionBatchLoading && ['optical', 'carbon', 'radar', 'product'].includes(activeModule)">
         <template v-if="activeModule === 'optical'">
           <div class="batch-list">
           <div
@@ -2720,6 +2934,58 @@ onUnmounted(() => {
 	              </div>
 	            </div>
 	          </div>
+          </div>
+        </template>
+        <template v-else-if="activeModule === 'radar'">
+          <div class="batch-list">
+            <div
+              v-for="batch in visibleRadarBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+              :key="batch.id"
+              class="batch-card"
+            >
+              <div class="batch-card-header">
+                <el-checkbox :model-value="selectedRadarBatchIds.includes(batch.id)" @change="toggleRadarBatchSelect(batch.id)">
+                  <span class="batch-name">{{ batch.name }}</span>
+                </el-checkbox>
+                <div class="batch-meta">
+                  <span class="batch-id">{{ batch.id }}</span>
+                  <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
+                  <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
+                  <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
+                    {{ partitionBatchActionLabel(batch) }}
+                  </el-button>
+                  <button type="button" class="batch-expand-btn" @click="toggleRadarBatchExpand(batch.id)">
+                    {{ expandedRadarBatchId === batch.id ? '收起' : '展开' }}
+                  </button>
+                </div>
+              </div>
+              <div class="batch-summary">{{ radarBatchSummary(batch) }}</div>
+              <div class="batch-footer">
+                <span>{{ partitionBatchSummary(batch) }}</span>
+                <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
+              </div>
+              <div v-if="expandedRadarBatchId === batch.id" class="batch-assets">
+                <div class="schema-grid">
+                  <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
+                    <strong>{{ field.field }}</strong>
+                    <span>{{ field.type }}</span>
+                    <small>{{ field.meaning }}</small>
+                  </div>
+                </div>
+                <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
+                  <div class="asset-main">
+                    <el-checkbox :model-value="isRadarAssetSelected(batch.id, asset)" @change="toggleRadarAssetSelect(batch.id, asset)" />
+                    <strong>{{ asset.scene_id }}</strong>
+                    <span>{{ (asset.polarization || asset.band || '').toUpperCase() }}</span>
+                    <span>{{ asset.resolution }}m</span>
+                    <span>{{ asset.acq_time }}</span>
+                  </div>
+                  <div class="asset-source">{{ asset.source_uri }}</div>
+                  <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
+                  <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+                </div>
+              </div>
+            </div>
           </div>
         </template>
         <template v-else-if="activeModule === 'product'">

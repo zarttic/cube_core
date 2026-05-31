@@ -6,6 +6,7 @@ from cube_split.partition.carbon import (
     CarbonSatellitePartitionService,
 )
 from cube_split.partition.optical import OpticalPartitionService
+from cube_split.partition.radar import RadarPartitionService
 from cube_split.partition.registry import get_partition_service
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "CarbonSatelliteObservation",
     "CarbonSatellitePartitionService",
     "OpticalPartitionService",
+    "RadarPartitionService",
     "get_partition_service",
 ]

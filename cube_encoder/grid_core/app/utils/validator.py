@@ -2,7 +2,6 @@ import re
 
 from grid_core.app.core.exceptions import ParseError
 
-
 ST_CODE_PATTERN = re.compile(
     r"^(?P<prefix>[a-z0-9]+):(?P<level>\d+):(?P<space_code>[^:]+):(?P<time_code>\d+):(?P<version>v\d+)$"
 )

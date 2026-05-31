@@ -10,8 +10,7 @@ from cube_web.schemas import (
     QualityRunRequest,
     payload_from_model,
 )
-from cube_web.services import quality_checks
-from cube_web.services import quality_service
+from cube_web.services import quality_checks, quality_service
 from cube_web.services.quality_pdf import quality_report_pdf_response, quality_report_text_response
 from cube_web.services.quality_report_store import get_quality_report_store
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from grid_core.app.core.enums import GridType
 from grid_core.app.services.grid_service import GridService
 from grid_core.app.services.topology_service import TopologyService

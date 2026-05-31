@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-
 PartitionRunner = Callable[[Optional[dict]], dict]
 TaskHook = Callable[[str], None]
 TaskResultHook = Callable[[str, dict], None]
@@ -218,6 +217,9 @@ def build_partition_registry(
     product_demo: PartitionRunner,
     product_test: PartitionRunner,
     product_retry: PartitionRunner,
+    radar_demo: PartitionRunner,
+    radar_test: PartitionRunner,
+    radar_retry: PartitionRunner,
     entity_demo: PartitionRunner,
     entity_test: PartitionRunner,
     entity_retry: PartitionRunner,
@@ -241,11 +243,16 @@ def build_partition_registry(
             test=product_test,
             retry=product_retry,
         ),
+        "radar": PartitionBackend(
+            data_type="radar",
+            demo=radar_demo,
+            test=radar_test,
+            retry=radar_retry,
+        ),
         "entity": PartitionBackend(
             data_type="entity",
             demo=entity_demo,
             test=entity_test,
             retry=entity_retry,
         ),
-        "radar": PartitionBackend(data_type="radar", implemented=False),
     }

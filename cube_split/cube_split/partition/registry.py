@@ -3,6 +3,7 @@ from __future__ import annotations
 from cube_split.partition.base import PartitionService
 from cube_split.partition.carbon import CarbonSatellitePartitionService
 from cube_split.partition.optical import OpticalPartitionService
+from cube_split.partition.radar import RadarPartitionService
 
 
 def get_partition_service(data_type: str) -> PartitionService:
@@ -11,4 +12,6 @@ def get_partition_service(data_type: str) -> PartitionService:
         return OpticalPartitionService()
     if normalized in {"carbon", "carbon_satellite"}:
         return CarbonSatellitePartitionService()
+    if normalized == "radar":
+        return RadarPartitionService()
     raise ValueError(f"Unsupported partition data_type: {data_type}")

@@ -20,7 +20,7 @@ def create_auth_router() -> APIRouter:
             "redirect_uri": settings.redirect_uri,
             "main_system_url": portal.main_system_url or settings.main_system_url,
             "auth_required": settings.required,
-            "navigation": runtime_config.navigation_items(),
+            "navigation": _navigation_items(),
         }
 
     @router.get("/callback")
@@ -53,6 +53,34 @@ def create_auth_router() -> APIRouter:
         return auth_service.notify_logout(token)
 
     return router
+
+
+def _navigation_items() -> list[dict[str, str]]:
+    runtime_items = runtime_config.navigation_items()
+    if runtime_items:
+        return runtime_items
+    try:
+        from cube_web.services import config_store
+
+        config = config_store.get_app_config()
+    except Exception:
+        return []
+    configured = ((config.get("runtime") or {}).get("portal") or {}).get("navigation")
+    if not isinstance(configured, list):
+        return []
+    items: list[dict[str, str]] = []
+    for raw_item in configured:
+        if not isinstance(raw_item, dict):
+            continue
+        label = str(raw_item.get("label") or "").strip()
+        kind = str(raw_item.get("kind") or "external").strip() or "external"
+        url = str(raw_item.get("url") or "").strip()
+        path = str(raw_item.get("path") or "").strip()
+        if kind == "internal" and label and path.startswith("/") and not path.startswith("//"):
+            items.append({"label": label, "kind": "internal", "path": path})
+        elif label and url:
+            items.append({"label": label, "kind": "external", "url": url})
+    return items
 
 
 async def require_auth_for_api(request: Request, call_next):

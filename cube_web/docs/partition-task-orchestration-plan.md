@@ -69,7 +69,7 @@ PartitionOrchestrator
 | `id BIGSERIAL PRIMARY KEY` | 内部主键 |
 | `batch_id TEXT UNIQUE NOT NULL` | 外部系统批次号 |
 | `batch_name TEXT NOT NULL` | 批次名称 |
-| `data_type TEXT NOT NULL` | `optical/product/carbon`，radar 继续占位 |
+| `data_type TEXT NOT NULL` | `optical/product/carbon/radar` |
 | `source_system TEXT` | 来源系统 |
 | `source_schema JSONB NOT NULL` | 原始同步 schema |
 | `normalized_payload JSONB NOT NULL` | 已转换为 partition runner 可用的 payload |
@@ -370,4 +370,3 @@ API 测试：
 - MinIO 凭据不要继续依赖默认 `minioadmin/minioadmin`，应沿用环境变量或节点 `/etc/default/minio` 读取策略。
 - 成功隐藏不能删除记录；应通过 `partitioned_at/status=succeeded` 过滤，方便审计、回溯和重新入队。
 - 外部 schema 同步建议做幂等：同一个 `batch_id` 重复同步时更新 schema 版本或保留 `source_schema_hash`，避免重复剖分。
-

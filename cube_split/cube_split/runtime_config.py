@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-
 DEFAULT_POSTGRES_DSN = ""
 DEFAULT_RAY_ADDRESS = ""
 DEFAULT_MINIO_ENDPOINT = ""

@@ -4,8 +4,9 @@ import argparse
 import json
 from typing import Any
 
-from cube_split import runtime_config
 from grid_core.sdk import CubeEncoderSDK
+
+from cube_split import runtime_config
 
 
 def _parse_args() -> argparse.Namespace:

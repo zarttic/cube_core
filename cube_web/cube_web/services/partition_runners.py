@@ -5,16 +5,16 @@ import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
-from urllib.parse import urlparse
 from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid4
 
 from cube_split import runtime_config
+
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
-
 
 DEFAULT_ENTITY_GRID_LEVEL = 6
 DEFAULT_ENTITY_TEST_GRID_LEVEL = 3
@@ -40,6 +40,10 @@ def _optical_demo_input_dir() -> Path:
 
 def _product_demo_input_dir() -> Path:
     return repo_root() / "cube_split" / "data" / "product"
+
+
+def _radar_demo_input_dir() -> Path:
+    return repo_root() / "cube_split" / "data" / "2018-2020年6月-8月江苏扬州10米Sentinel-1影像数据-01"
 
 
 def _is_s3_uri(value: str) -> bool:
@@ -103,6 +107,27 @@ def _resolve_product_demo_source(source_uri: str, input_dir: Path) -> Path:
     return resolved
 
 
+def _resolve_radar_demo_source(source_uri: str, input_dir: Path) -> Path:
+    if _is_s3_uri(source_uri):
+        name = _parse_s3_source_name(source_uri)
+        if Path(name).suffix.lower() not in {".dat", ".tif", ".tiff"}:
+            raise FileNotFoundError(f"Radar demo asset is not a supported raster: {source_uri}")
+        return Path(source_uri)
+    source_path = Path(str(source_uri or "").strip())
+    if not source_path:
+        raise ValueError("selected_assets[].source_uri is required")
+    if source_path.is_absolute():
+        resolved = source_path.resolve()
+    else:
+        resolved = (input_dir / source_path).resolve()
+    input_root = input_dir.resolve()
+    if input_root != resolved and input_root not in resolved.parents:
+        raise ValueError(f"Radar demo asset is outside input_dir: {source_uri}")
+    if not resolved.exists() or resolved.suffix.lower() not in {".dat", ".tif", ".tiff"}:
+        raise FileNotFoundError(f"Radar demo asset not found: {resolved}")
+    return resolved
+
+
 def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[dict]:
     selected_assets = payload.get("selected_assets") or []
     if not selected_assets:
@@ -126,6 +151,68 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
                 "resolution": asset.get("resolution"),
                 "sensor": str(asset.get("sensor") or "optical_mosaic"),
                 "product_family": str(asset.get("product_family") or "other"),
+            }
+        )
+    return manifest_assets
+
+
+def _selected_radar_input_dir(payload: dict, input_dir: Path, root: Path) -> Path:
+    selected_assets = payload.get("selected_assets") or []
+    if not selected_assets:
+        return input_dir
+    if not isinstance(selected_assets, list):
+        raise ValueError("selected_assets must be an array")
+
+    selected_input_dir = root / "input"
+    selected_input_dir.mkdir(parents=True, exist_ok=True)
+    for idx, asset in enumerate(selected_assets, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"selected_assets[{idx}] must be an object")
+        if _is_s3_uri(str(asset.get("source_uri") or "")):
+            continue
+        source = _resolve_radar_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        target = selected_input_dir / source.name
+        if not target.exists():
+            target.symlink_to(source)
+        hdr = source.with_suffix(".hdr")
+        if hdr.exists():
+            hdr_target = selected_input_dir / hdr.name
+            if not hdr_target.exists():
+                hdr_target.symlink_to(hdr)
+    return selected_input_dir
+
+
+def _selected_radar_manifest_assets(payload: dict, input_dir: Path, run_input_dir: Path) -> list[dict]:
+    selected_assets = payload.get("selected_assets") or []
+    if not selected_assets:
+        return []
+    if not isinstance(selected_assets, list):
+        raise ValueError("selected_assets must be an array")
+
+    manifest_assets: list[dict] = []
+    for idx, asset in enumerate(selected_assets, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"selected_assets[{idx}] must be an object")
+        corners = asset.get("corners")
+        if not corners:
+            return []
+        source = _resolve_radar_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        target = run_input_dir / source.name
+        source_uri = str(asset.get("source_uri") or source)
+        manifest_assets.append(
+            {
+                "data_type": "radar",
+                "source_uri": source_uri if _is_s3_uri(source_uri) else str(target),
+                "scene_id": str(asset.get("scene_id") or source.stem),
+                "acq_time": str(asset.get("acq_time") or "1970-01-01T00:00:00Z"),
+                "bands": asset.get("bands") or ([asset["band"]] if asset.get("band") else [str(asset.get("polarization") or source.stem).lower()]),
+                "band": str(asset.get("band") or asset.get("polarization") or "").lower() or None,
+                "polarization": str(asset.get("polarization") or asset.get("band") or "").lower() or None,
+                "bbox": asset.get("bbox"),
+                "corners": corners,
+                "resolution": asset.get("resolution"),
+                "sensor": str(asset.get("sensor") or "sentinel1_sar"),
+                "product_family": str(asset.get("product_family") or "sentinel1"),
             }
         )
     return manifest_assets
@@ -662,6 +749,142 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
     if not isinstance(request_payload, dict):
         request_payload = {}
     result = _run_product_partition_demo(request_payload, mode="partition_retry")
+    result["retry"] = {
+        "strategy": "full_request",
+        "warning_check_names": [],
+        "warning_asset_count": 0,
+        "retried_asset_count": 0,
+    }
+    return result
+
+
+def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.ray_logical_partition_job import run_logical_partition
+
+    raw_payload = payload or {}
+    payload = _payload_with_defaults(payload, optical_partition_defaults())
+    if "partition_backend" not in raw_payload:
+        payload["partition_backend"] = "thread"
+    if "product_family" not in raw_payload:
+        payload["product_family"] = "sentinel1"
+    cancellation_check = _cancellation_check_from_payload(raw_payload)
+    root = _demo_run_dir("radar")
+    input_dir = Path(str(payload.get("input_dir") or _radar_demo_input_dir())).expanduser().resolve()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Radar demo input_dir not found: {input_dir}")
+    run_input_dir = _selected_radar_input_dir(payload, input_dir, root)
+    manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
+    manifest_assets = _selected_radar_manifest_assets(payload, input_dir, run_input_dir)
+    if manifest_assets:
+        manifest_path = root / "selected_assets_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "batch_id": payload.get("batch_id") or "frontend-radar-demo",
+                    "batch_name": payload.get("batch_name") or "frontend radar demo",
+                    "data_type": "radar",
+                    "assets": manifest_assets,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    elif not str(manifest_path):
+        default_manifest = input_dir / "manifest.json"
+        manifest_path = default_manifest if default_manifest.exists() else Path("")
+
+    grid_type = str(payload.get("grid_type") or "geohash").lower()
+    if grid_type not in {"geohash", "mgrs", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    grid_level = _int_payload_value(raw_payload, "grid_level", 5)
+    if grid_level <= 0:
+        raise ValueError("grid_level must be greater than 0")
+    partition_backend = str(payload.get("partition_backend") or "thread")
+    ray_address = str(payload.get("ray_address") or (_ray_address() if partition_backend in {"auto", "ray"} else ""))
+    metadata_backend = str(payload.get("metadata_backend") or "none")
+    postgres_dsn = str(payload.get("postgres_dsn") or (_postgres_dsn() if metadata_backend == "postgres" else ""))
+
+    args = SimpleNamespace(
+        input_dir=str(run_input_dir),
+        manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
+        product_family=str(payload.get("product_family") or "sentinel1"),
+        data_type="radar",
+        output_dir=str(root / "output"),
+        cog_input_dir=str(root / "cog"),
+        cog_overwrite=True,
+        cog_workers=_int_payload_value(payload, "cog_workers", 2),
+        cog_compress=str(payload.get("cog_compress") or "LZW"),
+        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
+        cog_level=_int_payload_value(payload, "cog_level", 0),
+        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
+        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_type=grid_type,
+        grid_level=grid_level,
+        cover_mode=str(payload.get("cover_mode") or "intersect"),
+        time_granularity=str(payload.get("time_granularity") or "day"),
+        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
+        ray_address=ray_address,
+        chunk_size=_int_payload_value(payload, "chunk_size", 0),
+        partition_backend=partition_backend,
+        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
+        timing_mode=False,
+        skip_verify=False,
+        sample_mean=bool(payload.get("sample_mean", False)),
+        job_id=str(payload.get("job_id") or payload.get("batch_id") or ""),
+        dataset=str(payload.get("dataset") or "jiangsu_yangzhou_sentinel1"),
+        sensor=str(payload.get("sensor") or "sentinel1_sar"),
+        asset_version=str(payload.get("asset_version") or "v1"),
+        cube_version=str(payload.get("cube_version") or "radar_v1"),
+        metadata_backend=metadata_backend,
+        postgres_dsn=postgres_dsn,
+        asset_storage_backend=str(payload.get("asset_storage_backend") or "local"),
+        minio_endpoint=_minio_settings(payload).endpoint,
+        minio_access_key=_minio_access_key(payload),
+        minio_secret_key=_minio_secret_key(payload),
+        minio_bucket=_minio_settings(payload).bucket,
+        minio_prefix=str(payload.get("minio_prefix") or "cube/radar"),
+        minio_secure=bool(payload.get("minio_secure", False)),
+        minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
+        ingest_enabled=False if mode == "partition_test_no_ingest" else None,
+        cancellation_check=cancellation_check,
+    )
+    report = run_logical_partition(args)
+    run_dir = Path(report["run_dir"])
+    rows_path = Path(str(report.get("rows_path") or run_dir / "index_rows.jsonl"))
+    response = {
+        "status": "completed",
+        "mode": mode,
+        "data_type": "radar",
+        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
+        "demo_source": str(input_dir),
+        "batch_id": payload.get("batch_id") or "",
+        "batch_name": payload.get("batch_name") or "",
+        "run_dir": str(run_dir),
+        "rows_path": str(rows_path),
+        "output_path": str(rows_path),
+        "rows": int(report.get("total_index_rows", 0)),
+        "workers": report.get("ray_parallelism", 0),
+        "selected_asset_count": len(raw_payload.get("selected_assets") or []),
+        "ingest_enabled": bool(report.get("ingest_enabled", False)),
+        **report,
+    }
+    response["data_type"] = "radar"
+    response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
+    return response
+
+
+def _run_radar_partition_test(payload: dict | None = None) -> dict:
+    return _run_radar_partition_demo(payload, mode="partition_test_no_ingest")
+
+
+def _run_radar_partition_retry(payload: dict | None = None) -> dict:
+    request = (payload or {}).get("request") or {}
+    request_payload = request.get("payload") if isinstance(request, dict) else {}
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    result = _run_radar_partition_demo(request_payload, mode="partition_retry")
     result["retry"] = {
         "strategy": "full_request",
         "warning_check_names": [],

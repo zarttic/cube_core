@@ -11,7 +11,6 @@ import rasterio
 
 from cube_split.jobs.ray_partition_core import resolve_asset_source_path
 
-
 REQUIRED_INDEX_FIELDS = {
     "scene_id",
     "band",

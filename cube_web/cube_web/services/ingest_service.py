@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from cube_split import runtime_config
+
 from cube_web.services import quality_service
 from cube_web.services.config_store import optical_ingest_defaults
 from cube_web.services.quality_report_store import get_quality_report_store

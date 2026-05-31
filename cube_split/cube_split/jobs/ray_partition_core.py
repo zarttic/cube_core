@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import os
-import json
 import hashlib
+import json
+import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -14,15 +14,16 @@ from typing import Any, Iterator, Optional
 from urllib.parse import urlparse
 
 import rasterio
+from grid_core.sdk import CubeEncoderSDK
 from pyproj import Transformer
 from rasterio.enums import Resampling
 from rasterio.shutil import copy as rio_copy
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
-from grid_core.sdk import CubeEncoderSDK
 from cube_split.partition.optical_products import parse_optical_asset
 from cube_split.partition.product_products import parse_product_asset
+from cube_split.partition.radar_products import RADAR_ASSET_EXTENSIONS, parse_radar_asset
 from cube_split.runtime_config import (
     bool_option,
     minio_service_env,
@@ -114,8 +115,9 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
     sidecar_keys = [f"{key}.aux.xml", f"{key}.ovr"]
     if key.lower().endswith((".tif", ".tiff")):
         sidecar_keys.append(f"{key.rsplit('.', 1)[0]}.tfw")
+    if key.lower().endswith(".dat"):
+        sidecar_keys.append(f"{key.rsplit('.', 1)[0]}.hdr")
     for sidecar_key in sidecar_keys:
-        sidecar_uri = f"s3://{bucket}/{sidecar_key}"
         sidecar_target = target.parent / Path(sidecar_key).name
         try:
             sidecar_stat = client.stat_object(bucket, sidecar_key)
@@ -270,17 +272,20 @@ def build_manifest(
     if manifest_path is not None:
         return _load_manifest_records(manifest_path, default_data_type=data_type)
     records: list[AssetRecord] = []
-    tif_paths = sorted(path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".tif", ".tiff"})
-    for tif in tif_paths:
+    asset_suffixes = RADAR_ASSET_EXTENSIONS if data_type == "radar" else {".tif", ".tiff"}
+    asset_paths = sorted(path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() in asset_suffixes)
+    for asset_path in asset_paths:
         if data_type == "product":
-            metadata = parse_product_asset(tif)
+            metadata = parse_product_asset(asset_path)
+        elif data_type == "radar":
+            metadata = parse_radar_asset(asset_path)
         else:
-            metadata = parse_optical_asset(tif, product_family=product_family)
+            metadata = parse_optical_asset(asset_path, product_family=product_family)
         records.append(
             AssetRecord(
                 scene_id=metadata.scene_id,
                 band=metadata.band,
-                path=str(tif.resolve()),
+                path=str(asset_path.resolve()),
                 acq_time=metadata.acq_time.isoformat().replace("+00:00", "Z"),
                 product_family=metadata.product_family,
                 sensor=metadata.sensor,

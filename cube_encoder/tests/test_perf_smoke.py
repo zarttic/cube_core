@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from grid_core.app.perf_smoke import run_perf_smoke
 from grid_core.app import perf_smoke
+from grid_core.app.perf_smoke import run_perf_smoke
 
 
 def test_perf_smoke_main_writes_json_report(tmp_path, monkeypatch):
