@@ -70,6 +70,7 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
         partition_chunk_size=int(args.partition_chunk_size),
         partition_backend=backend,
         ray_address=args.ray_address,
+        cancellation_check=getattr(args, "cancellation_check", None),
     )
     partition_start = time.perf_counter()
     result = CarbonSatellitePartitionService().run(

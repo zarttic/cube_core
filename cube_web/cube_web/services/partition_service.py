@@ -11,6 +11,9 @@ from fastapi import HTTPException
 
 
 PartitionRunner = Callable[[Optional[dict]], dict]
+TaskHook = Callable[[str], None]
+TaskResultHook = Callable[[str, dict], None]
+TaskErrorHook = Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,19 @@ class PartitionTaskStore:
         self._lock = Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cube-web-partition")
 
-    def submit(self, data_type: str, operation: str, runner: Callable[[], dict]) -> PartitionTask:
+    def submit(
+        self,
+        data_type: str,
+        operation: str,
+        runner: Callable[[], dict],
+        task_id: str | None = None,
+        on_started: TaskHook | None = None,
+        on_succeeded: TaskResultHook | None = None,
+        on_failed: TaskErrorHook | None = None,
+    ) -> PartitionTask:
         now = time.time()
         task = PartitionTask(
-            task_id=f"partition-{uuid4().hex[:12]}",
+            task_id=task_id or f"partition-{uuid4().hex[:12]}",
             status="queued",
             data_type=data_type,
             operation=operation,
@@ -55,12 +67,24 @@ class PartitionTaskStore:
         )
         with self._lock:
             self._tasks[task.task_id] = task
-        self._executor.submit(self._run, task.task_id, runner)
+        self._executor.submit(self._run, task.task_id, runner, on_started, on_succeeded, on_failed)
         return task
 
     def get(self, task_id: str) -> Optional[PartitionTask]:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def cancel(self, task_id: str) -> Optional[PartitionTask]:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            if task.status == "queued":
+                task.status = "cancelled"
+            elif task.status == "running":
+                task.status = "cancel_requested"
+            task.updated_at = time.time()
+            return task
 
     def _set_task(self, task_id: str, **updates) -> None:
         with self._lock:
@@ -69,14 +93,41 @@ class PartitionTaskStore:
                 setattr(task, key, value)
             task.updated_at = time.time()
 
-    def _run(self, task_id: str, runner: Callable[[], dict]) -> None:
+    def _run(
+        self,
+        task_id: str,
+        runner: Callable[[], dict],
+        on_started: TaskHook | None = None,
+        on_succeeded: TaskResultHook | None = None,
+        on_failed: TaskErrorHook | None = None,
+    ) -> None:
+        task = self.get(task_id)
+        if task is not None and task.status == "cancelled":
+            return
         self._set_task(task_id, status="running")
+        if on_started is not None:
+            on_started(task_id)
         try:
             result = runner()
         except Exception as exc:  # pragma: no cover - covered through public task status.
+            if exc.__class__.__name__ == "PartitionCancelledError":
+                self._set_task(task_id, status="cancelled", error=str(exc))
+                if on_failed is not None:
+                    on_failed(task_id, str(exc))
+                return
             self._set_task(task_id, status="failed", error=str(exc))
+            if on_failed is not None:
+                on_failed(task_id, str(exc))
+            return
+        task = self.get(task_id)
+        if task is not None and task.status == "cancel_requested":
+            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+            if on_failed is not None:
+                on_failed(task_id, "Partition task cancelled")
             return
         self._set_task(task_id, status="completed", result=result)
+        if on_succeeded is not None:
+            on_succeeded(task_id, result)
 
 
 class PartitionService:
@@ -93,12 +144,44 @@ class PartitionService:
     def test(self, data_type: str, payload: Optional[dict] = None) -> dict:
         return self._run(data_type, "test", payload)
 
-    def submit(self, data_type: str, operation: str, payload: Optional[dict] = None) -> PartitionTask:
+    def submit(
+        self,
+        data_type: str,
+        operation: str,
+        payload: Optional[dict] = None,
+        task_id: str | None = None,
+        on_started: TaskHook | None = None,
+        on_succeeded: TaskResultHook | None = None,
+        on_failed: TaskErrorHook | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
+    ) -> PartitionTask:
         backend, runner = self._resolve(data_type, operation)
-        return self.task_store.submit(backend.data_type, operation, lambda: runner(payload))
+        return self.task_store.submit(
+            backend.data_type,
+            operation,
+            lambda: runner(
+                {
+                    **(payload or {}),
+                    "_cancellation_check": cancellation_check,
+                    "cancellation_check": cancellation_check,
+                }
+                if cancellation_check is not None
+                else payload
+            ),
+            task_id=task_id,
+            on_started=on_started,
+            on_succeeded=on_succeeded,
+            on_failed=on_failed,
+        )
 
     def get_task(self, task_id: str) -> PartitionTask:
         task = self.task_store.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
+        return task
+
+    def cancel_task(self, task_id: str) -> PartitionTask:
+        task = self.task_store.cancel(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
         return task

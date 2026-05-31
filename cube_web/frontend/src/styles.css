@@ -3039,15 +3039,27 @@ section {
     padding: 10px 12px;
 }
 
+.batch-card-header .el-checkbox {
+    min-width: 0;
+}
+
 .batch-name {
+    display: inline-block;
+    max-width: 280px;
     font-weight: 600;
     color: var(--dark);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
 }
 
 .batch-meta {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .batch-id {
@@ -3068,6 +3080,23 @@ section {
     padding: 0 12px 10px;
     color: var(--gray);
     font-size: 12px;
+}
+
+.batch-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 12px 10px;
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.batch-footer span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .batch-assets {
@@ -3218,6 +3247,177 @@ section {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.partition-batch-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 520px;
+}
+
+.partition-batch-detail-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 14px 16px;
+}
+
+.partition-batch-detail-subtitle {
+    color: var(--gray);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.partition-batch-detail-summary {
+    color: var(--dark);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.partition-batch-detail-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.partition-batch-detail-tabs {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 3px;
+}
+
+.partition-detail-tab {
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    color: var(--gray);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 7px 13px;
+}
+
+.partition-detail-tab.active {
+    background: var(--primary-bg);
+    color: var(--primary);
+}
+
+.partition-detail-section {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.partition-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.partition-detail-grid .quality-kv {
+    min-width: 0;
+}
+
+.partition-detail-grid .quality-kv strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.partition-detail-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 160px;
+    gap: 12px;
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    background: #fbfcfe;
+}
+
+.partition-detail-asset-summary {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.partition-asset-table {
+    margin-top: 0;
+}
+
+.partition-asset-subtitle,
+.partition-asset-detail {
+    margin-top: 3px;
+    color: var(--gray);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.partition-attempt-list {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.partition-attempt-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fbfcfe;
+    padding: 12px;
+}
+
+.partition-attempt-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.partition-attempt-head strong {
+    min-width: 0;
+    color: var(--dark);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.partition-attempt-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    color: var(--gray);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.partition-attempt-error {
+    margin-top: 10px;
+    border-left: 3px solid var(--danger);
+    background: #fff6f6;
+    color: var(--danger);
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    word-break: break-word;
 }
 
 .coord-inputs {

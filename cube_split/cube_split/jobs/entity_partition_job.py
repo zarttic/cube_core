@@ -37,6 +37,7 @@ from cube_split.jobs.ray_partition_core import (
     upload_cog_to_minio,
     resolve_asset_source_path,
 )
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.jobs.ray_logical_partition_job import (
     DEFAULT_RAY_ADDRESS,
     _chunk_tasks_for_ray,
@@ -329,6 +330,7 @@ def _write_entity_tile_chunks_ray(
     source_options: dict[str, Any] | None = None,
     cog_upload_options: dict[str, Any] | None = None,
     tile_upload_options: dict[str, Any] | None = None,
+    cancellation_check: Any | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
@@ -496,16 +498,27 @@ def _write_entity_tile_chunks_ray(
     next_idx = 0
     pending = []
     while next_idx < len(task_chunks) and len(pending) < parallelism:
+        if cancellation_check is not None and cancellation_check():
+            raise PartitionCancelledError("Partition task cancelled")
         pending.append(submit_chunk(next_idx))
         next_idx += 1
     try:
         while pending:
-            ready, pending = ray.wait(pending, num_returns=1)
+            if cancellation_check is not None and cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not ready:
+                continue
             chunk_rows = ray.get(ready[0])
             rows.extend(chunk_rows)
             if next_idx < len(task_chunks):
+                if cancellation_check is not None and cancellation_check():
+                    raise PartitionCancelledError("Partition task cancelled")
                 pending.append(submit_chunk(next_idx))
                 next_idx += 1
+    except PartitionCancelledError:
+        cancel_ray_refs(ray, pending)
+        raise
     finally:
         for actor in actors:
             ray.kill(actor, no_restart=True)
@@ -754,6 +767,7 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
 
 def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     total_start = time.perf_counter()
+    check_cancelled(args)
     for key in ("SPARK_HOME", "SPARK_CONF_DIR", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(key, None)
 
@@ -769,6 +783,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not source_assets:
         raise RuntimeError(f"No .TIF assets found under: {input_dir}")
+    check_cancelled(args)
 
     assets = source_assets
 
@@ -785,6 +800,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         max_cells_per_asset=0,
     )
     grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_level, args.cover_mode)
+    check_cancelled(args)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
@@ -861,6 +877,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
                 if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio"
                 else None
             ),
+            cancellation_check=getattr(args, "cancellation_check", None),
         )
     else:
         rows = _write_entity_tile_chunks_thread(
@@ -871,6 +888,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             workers=parallelism,
         )
     partition_elapsed = time.perf_counter() - partition_start
+    check_cancelled(args)
 
     upload_elapsed = 0.0
     metadata_elapsed = 0.0
@@ -885,6 +903,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         metadata_backend = "none"
     asset_uri_map: dict[str, str] = {}
     if asset_storage_backend == "minio":
+        check_cancelled(args)
         upload_start = time.perf_counter()
         asset_uri_map = _upload_entity_tiles_to_minio(rows, args)
         upload_elapsed = time.perf_counter() - upload_start
@@ -894,6 +913,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("asset_storage_backend must be one of: local, minio")
 
     if metadata_backend == "postgres":
+        check_cancelled(args)
         metadata_start = time.perf_counter()
         metadata_stats = _write_entity_metadata_postgres(rows, args, run_dir)
         metadata_elapsed = time.perf_counter() - metadata_start

@@ -2,6 +2,10 @@
 
 更新时间：2026-05-26
 
+相关规划：
+
+- [数据驱动剖分任务编排开发规划](partition-task-orchestration-plan.md)
+
 ## 1. 定位
 
 `cube_web` 提供 cube 项目的 Web 入口和 FastAPI API facade。它不实现格网算法，也不持久化入库数据；格网能力来自 `CubeEncoderSDK`，剖分和质检执行能力来自 `cube_split`。

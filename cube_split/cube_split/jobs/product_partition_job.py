@@ -5,6 +5,7 @@ import argparse
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from cube_split.jobs.ray_partition_core import (
     cog_creation_options,
     convert_assets_to_cog,
 )
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.ingest.ray_ingest_job import (
     DEFAULT_MINIO_ACCESS_KEY,
     DEFAULT_MINIO_BUCKET,
@@ -132,6 +134,7 @@ def _partition_groups_ray(
     target_crs: str,
     source_options: dict,
     cog_upload_options: dict,
+    cancellation_check: Any | None = None,
 ) -> tuple[list[dict], float]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
@@ -215,24 +218,55 @@ def _partition_groups_ray(
 
     actor_cls = ProductTaskProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
-    futures = [
-        actors[idx % parallelism].process_groups.remote(
-            chunk,
-            include_sample_mean,
-            assets_by_path,
-            cog_input_dir,
-            cog_overwrite,
-            cog_options,
-            target_crs,
-            source_options,
-            cog_upload_options,
-        )
-        for idx, chunk in enumerate(task_chunks)
-    ]
     rows: list[dict] = []
     try:
-        for chunk_rows in ray.get(futures):
-            rows.extend(chunk_rows)
+        next_idx = 0
+        pending = []
+        while next_idx < len(task_chunks) and len(pending) < parallelism:
+            if cancellation_check is not None and cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            pending.append(
+                actors[next_idx % parallelism].process_groups.remote(
+                    task_chunks[next_idx],
+                    include_sample_mean,
+                    assets_by_path,
+                    cog_input_dir,
+                    cog_overwrite,
+                    cog_options,
+                    target_crs,
+                    source_options,
+                    cog_upload_options,
+                )
+            )
+            next_idx += 1
+        while pending:
+            if cancellation_check is not None and cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not ready:
+                continue
+            for ready_ref in ready:
+                rows.extend(ray.get(ready_ref))
+            while next_idx < len(task_chunks) and len(pending) < parallelism:
+                if cancellation_check is not None and cancellation_check():
+                    raise PartitionCancelledError("Partition task cancelled")
+                pending.append(
+                    actors[next_idx % parallelism].process_groups.remote(
+                        task_chunks[next_idx],
+                        include_sample_mean,
+                        assets_by_path,
+                        cog_input_dir,
+                        cog_overwrite,
+                        cog_options,
+                        target_crs,
+                        source_options,
+                        cog_upload_options,
+                    )
+                )
+                next_idx += 1
+    except PartitionCancelledError:
+        cancel_ray_refs(ray, pending)
+        raise
     finally:
         ray.shutdown()
     return rows, ray_init_elapsed
@@ -264,6 +298,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    check_cancelled(args)
 
     total_start = time.perf_counter()
     backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
@@ -281,6 +316,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     )
     if not source_assets:
         raise RuntimeError(f"No product TIF assets found under: {input_dir}")
+    check_cancelled(args)
 
     cog_start = time.perf_counter()
     if backend == "ray":
@@ -296,8 +332,10 @@ def run_product_partition(args: argparse.Namespace) -> dict:
             overviews="NONE",
             num_threads="ALL_CPUS",
             target_crs=args.target_crs,
+            cancellation_check=getattr(args, "cancellation_check", None),
         )
     cog_elapsed = time.perf_counter() - cog_start
+    check_cancelled(args)
 
     grid_tasks = build_grid_tasks_driver(
         assets=assets,
@@ -308,6 +346,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     )
     task_rows = _prepare_product_task_rows(grid_tasks, partition_prefix_len=int(args.partition_prefix_len))
     grouped_tasks = _group_tasks_for_local_processing(task_rows)
+    check_cancelled(args)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
@@ -334,23 +373,23 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         out_rows = []
     elif backend == "ray":
         assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
-        out_rows, ray_init_elapsed = _partition_groups_ray(
-            task_chunks=task_chunks,
-            parallelism=worker_count,
-            ray_address=ray_address,
-            include_sample_mean=bool(args.sample_mean),
-            assets_by_path=assets_by_path,
-            cog_input_dir=str(args.cog_input_dir),
-            cog_overwrite=bool(args.cog_overwrite),
-            cog_options=cog_creation_options("LZW", predictor=0, overviews="NONE", num_threads="ALL_CPUS"),
-            target_crs=str(args.target_crs or ""),
-            source_options={
+        partition_kwargs = {
+            "task_chunks": task_chunks,
+            "parallelism": worker_count,
+            "ray_address": ray_address,
+            "include_sample_mean": bool(args.sample_mean),
+            "assets_by_path": assets_by_path,
+            "cog_input_dir": str(args.cog_input_dir),
+            "cog_overwrite": bool(args.cog_overwrite),
+            "cog_options": cog_creation_options("LZW", predictor=0, overviews="NONE", num_threads="ALL_CPUS"),
+            "target_crs": str(args.target_crs or ""),
+            "source_options": {
                 "endpoint": str(getattr(args, "minio_endpoint", "")),
                 "access_key": str(getattr(args, "minio_access_key", "")),
                 "secret_key": str(getattr(args, "minio_secret_key", "")),
                 "secure": bool(getattr(args, "minio_secure", False)),
             },
-            cog_upload_options={
+            "cog_upload_options": {
                 "endpoint": str(getattr(args, "minio_endpoint", "")),
                 "access_key": str(getattr(args, "minio_access_key", "")),
                 "secret_key": str(getattr(args, "minio_secret_key", "")),
@@ -361,10 +400,14 @@ def run_product_partition(args: argparse.Namespace) -> dict:
                 "sensor": "data_product",
                 "asset_version": str(getattr(args, "asset_version", "v1")),
             },
-        )
+        }
+        if "cancellation_check" in signature(_partition_groups_ray).parameters:
+            partition_kwargs["cancellation_check"] = getattr(args, "cancellation_check", None)
+        out_rows, ray_init_elapsed = _partition_groups_ray(**partition_kwargs)
     else:
         out_rows = _partition_groups_thread(grouped_tasks, worker_count, bool(args.sample_mean))
     partition_elapsed = time.perf_counter() - start
+    check_cancelled(args)
 
     with rows_path.open("w", encoding="utf-8") as fh:
         for row in out_rows:
@@ -374,6 +417,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     ingest_stats: dict[str, Any] | None = None
     ingest_elapsed = 0.0
     if ingest_enabled:
+        check_cancelled(args)
         ingest_start = time.perf_counter()
         ingest_stats = _run_product_partition_ingest(args, run_dir)
         ingest_elapsed = time.perf_counter() - ingest_start

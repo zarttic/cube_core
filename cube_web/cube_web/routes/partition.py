@@ -3,18 +3,31 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from cube_web.schemas import (
+    PartitionAssetRetryRequest,
+    PartitionBatchRunRequest,
     PartitionDemoRequest,
     PartitionResult,
     PartitionRetryRequest,
+    PartitionSchemaImportRequest,
     PartitionTaskCreateResponse,
     PartitionTaskResponse,
     payload_from_model,
 )
 from cube_web.services.partition_service import PartitionService
+from cube_web.services.partition_workflow import PartitionWorkflowService
 
 
-def create_partition_router(service: PartitionService) -> APIRouter:
+def create_partition_router(service: PartitionService, workflow: PartitionWorkflowService | None = None) -> APIRouter:
     router = APIRouter(prefix="/partition", tags=["partition"])
+    workflow_service = workflow or PartitionWorkflowService(service)
+
+    @router.post("/assets/retry", response_model=PartitionTaskCreateResponse, status_code=202)
+    def retry_partition_assets(payload: PartitionAssetRetryRequest) -> dict:
+        request = payload_from_model(payload)
+        return workflow_service.retry_assets(
+            list(request.get("asset_ids") or []),
+            config_override=request.get("config_override") or {},
+        ).to_dict()
 
     @router.post("/{data_type}/demo", response_model=PartitionResult)
     def partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
@@ -43,5 +56,61 @@ def create_partition_router(service: PartitionService) -> APIRouter:
     @router.get("/tasks/{task_id}", response_model=PartitionTaskResponse)
     def get_partition_task(task_id: str) -> dict:
         return service.get_task(task_id).to_dict()
+
+    @router.post("/tasks/{task_id}/cancel")
+    def cancel_partition_task(task_id: str) -> dict:
+        return workflow_service.cancel_task(task_id)
+
+    @router.post("/schemas/import")
+    def import_partition_schema(payload: PartitionSchemaImportRequest) -> dict:
+        return workflow_service.import_schema(payload_from_model(payload))
+
+    @router.get("/batches")
+    def list_partition_batches(
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+        include_succeeded: bool = False,
+        limit: int = 100,
+    ) -> dict:
+        return {
+            "batches": workflow_service.list_batches(
+                status=status,
+                data_type=data_type,
+                keyword=keyword,
+                include_succeeded=include_succeeded,
+                limit=limit,
+            )
+        }
+
+    @router.get("/batches/{batch_id}")
+    def get_partition_batch(batch_id: str) -> dict:
+        return workflow_service.get_batch(batch_id)
+
+    @router.get("/batches/{batch_id}/assets")
+    def list_partition_assets(batch_id: str, status: str | None = None) -> dict:
+        return {"assets": workflow_service.list_assets(batch_id, status=status)}
+
+    @router.get("/batches/{batch_id}/attempts")
+    def list_partition_attempts(batch_id: str) -> dict:
+        return {"attempts": workflow_service.list_attempts(batch_id)}
+
+    @router.post("/batches/{batch_id}/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    def run_partition_batch(batch_id: str, payload: PartitionBatchRunRequest | None = None) -> dict:
+        request = payload_from_model(payload)
+        return workflow_service.run_batch(batch_id, config_override=request.get("config_override") or {}).to_dict()
+
+    @router.post("/batches/{batch_id}/retry", response_model=PartitionTaskCreateResponse, status_code=202)
+    def retry_partition_batch(batch_id: str, payload: PartitionBatchRunRequest | None = None) -> dict:
+        request = payload_from_model(payload)
+        return workflow_service.retry_batch(batch_id, config_override=request.get("config_override") or {}).to_dict()
+
+    @router.post("/batches/{batch_id}/cancel")
+    def cancel_partition_batch(batch_id: str) -> dict:
+        batch = workflow_service.get_batch(batch_id)
+        task_id = batch.get("last_task_id")
+        if not task_id:
+            return {"batch_id": batch_id, "status": batch.get("status")}
+        return workflow_service.cancel_task(str(task_id))
 
     return router

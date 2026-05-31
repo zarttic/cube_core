@@ -74,6 +74,27 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
     error: str | None = None
 
 
+class PartitionSchemaImportRequest(CubeWebModel):
+    batch_id: str = Field(min_length=1)
+    batch_name: str | None = None
+    data_type: Literal["optical", "product", "carbon"] = "optical"
+    source_system: str | None = None
+    assets: list[dict[str, Any]] | None = None
+    observations: list[dict[str, Any]] | None = None
+    normalized_payload: dict[str, Any] | None = None
+    priority: int = 0
+    max_auto_retries: int = Field(default=1, ge=0)
+
+
+class PartitionBatchRunRequest(CubeWebModel):
+    config_override: dict[str, Any] = Field(default_factory=dict)
+
+
+class PartitionAssetRetryRequest(CubeWebModel):
+    asset_ids: list[str] = Field(min_length=1)
+    config_override: dict[str, Any] = Field(default_factory=dict)
+
+
 class QualityRunRequest(CubeWebModel):
     run_dir: str = Field(min_length=1)
     target_crs: str | None = "EPSG:4326"

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 from urllib.parse import urlparse
+from typing import Any
 
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
@@ -243,6 +244,11 @@ def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
     return result
 
 
+def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
+    payload = payload or {}
+    return payload.get("_cancellation_check") or payload.get("cancellation_check")
+
+
 def _env_text(name: str, default: str = "") -> str:
     return str(os.environ.get(name, default) or "")
 
@@ -342,6 +348,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     raw_payload = payload or {}
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
+    cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
         raise FileNotFoundError(f"Entity demo input_dir not found: {input_dir}")
@@ -420,6 +427,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
+        cancellation_check=cancellation_check,
     )
     report = run_entity_partition(args)
     run_dir = Path(report["run_dir"])
@@ -508,6 +516,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     (input_dir / sample.name).symlink_to(sample)
     workers = 4
     selected_source_indexes = _carbon_selected_source_indexes(payload)
+    cancellation_check = _cancellation_check_from_payload(payload)
     args = SimpleNamespace(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
@@ -522,6 +531,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         ray_address=_ray_address(),
         ray_parallelism=workers,
         selected_source_indexes=selected_source_indexes,
+        cancellation_check=cancellation_check,
     )
     start = time.perf_counter()
     result = run_carbon_partition(args)
@@ -588,6 +598,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     from cube_split.jobs.product_partition_job import run_product_partition
 
     payload = payload or {}
+    cancellation_check = _cancellation_check_from_payload(payload)
     root = _demo_run_dir("product")
     input_dir = Path(str(payload.get("input_dir") or _product_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
@@ -656,6 +667,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         cog_output_root=str(payload.get("cog_output_root") or root / "product_cog_store"),
         cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
+        cancellation_check=cancellation_check,
     )
     result = run_product_partition(args)
     result["mode"] = mode
@@ -701,6 +713,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     raw_payload = payload or {}
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
+    cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
     if not input_dir.exists():
         raise FileNotFoundError(f"Optical demo input_dir not found: {input_dir}")
@@ -788,6 +801,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
+        cancellation_check=cancellation_check,
     )
     report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])

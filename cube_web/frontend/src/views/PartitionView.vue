@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Search } from '@element-plus/icons-vue';
+import { CircleCloseFilled, Document, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
 import LeafletMap from '@/components/LeafletMap.vue';
 import ConfigView from '@/views/ConfigView.vue';
@@ -231,6 +231,618 @@ const dataRowsByModule = {
   product: productRows,
 };
 
+const managedOpticalBatches = ref([]);
+const managedCarbonBatches = ref([]);
+const managedProductBatches = ref([]);
+const partitionBatchLoading = ref(false);
+const partitionBatchDetailVisible = ref(false);
+const partitionBatchDetailLoading = ref(false);
+const partitionBatchDetailAction = ref('');
+const partitionBatchDetail = ref(null);
+const partitionBatchDetailTab = ref('overview');
+const partitionBatchDetailSearch = ref('');
+const partitionBatchDetailAssetStatus = ref('all');
+const partitionBatchDetailSelectedAssetIds = ref([]);
+
+const visibleOpticalBatches = computed(() => (managedOpticalBatches.value.length ? managedOpticalBatches.value : opticalBatches));
+const visibleCarbonBatches = computed(() => (managedCarbonBatches.value.length ? managedCarbonBatches.value : carbonBatches));
+const visibleProductBatches = computed(() => (managedProductBatches.value.length ? managedProductBatches.value : productBatches));
+
+function setBatchSelection(batchId, dataType) {
+  if (dataType === 'carbon') {
+    selectedCarbonBatchIds.value = [batchId];
+    expandedCarbonBatchId.value = batchId;
+  } else if (dataType === 'product') {
+    selectedProductBatchIds.value = [batchId];
+    expandedProductBatchId.value = batchId;
+  } else {
+    selectedOpticalBatchIds.value = [batchId];
+    expandedOpticalBatchId.value = batchId;
+  }
+}
+
+function preferredBatchId(batches) {
+  if (!Array.isArray(batches) || !batches.length) return '';
+  return batches.find((batch) => batch.status !== 'succeeded')?.id || batches[0]?.id || '';
+}
+
+function partitionStatusText(status) {
+  const map = {
+    pending: '待处理',
+    queued: '已排队',
+    running: '执行中',
+    retrying: '重试中',
+    cancel_requested: '取消中',
+    failed: '失败',
+    manual_required: '人工确认',
+    cancelled: '已取消',
+    succeeded: '已完成',
+  };
+  return map[status] || status || '未知';
+}
+
+function partitionStatusType(status) {
+  const map = {
+    pending: 'info',
+    queued: 'info',
+    running: 'warning',
+    retrying: 'warning',
+    cancel_requested: 'warning',
+    failed: 'danger',
+    manual_required: 'warning',
+    cancelled: 'info',
+    succeeded: 'success',
+  };
+  return map[status] || 'info';
+}
+
+function partitionAttemptStatusText(status) {
+  return partitionStatusText(status);
+}
+
+function partitionAttemptStatusType(status) {
+  return partitionStatusType(status);
+}
+
+function buildLocalPartitionBatchDetail(batch, dataType = activeModule.value) {
+  const rawAssets = Array.isArray(batch?.assets)
+    ? batch.assets
+    : Array.isArray(batch?.observations)
+      ? batch.observations
+      : [];
+  const assets = rawAssets.map((item, index) => ({
+    asset_id: item.asset_id || item.observation_id || `${batch?.id || batch?.batch_id || 'local'}:${index}`,
+    batch_id: batch?.id || batch?.batch_id || '',
+    data_type: dataType,
+    scene_id: item.scene_id || item.product_year || item.observation_id || item.source_index || '',
+    source_uri: item.source_uri || batch?.source_uri || '',
+    status: item.status || 'pending',
+    asset_payload: item,
+    last_error: item.last_error || '',
+  }));
+  return {
+    ...batch,
+    batch_id: batch?.batch_id || batch?.id || '',
+    batch_name: batch?.batch_name || batch?.name || batch?.id || '',
+    id: batch?.batch_id || batch?.id || '',
+    data_type: batch?.data_type || dataType,
+    is_local_demo: true,
+    status: batch?.status || 'pending',
+    normalized_payload: batch?.normalized_payload || {
+      selected_assets: dataType === 'carbon' ? [] : rawAssets,
+      selected_observations: dataType === 'carbon' ? rawAssets : [],
+      grid_type: dataType === 'product' ? productGridType.value : opticalGridType.value,
+      grid_level: dataType === 'product' ? Number(productGridLevel.value) : Number(selectedMapGridLevel.value),
+      target_crs: batch?.target_crs || 'EPSG:4326',
+      product_type: batch?.product_type || 'xco2',
+      source_uri: batch?.source_uri || '',
+    },
+    assets,
+    attempts: Array.isArray(batch?.attempts) ? batch.attempts : [],
+  };
+}
+
+function partitionAssetStatusText(status) {
+  return partitionStatusText(status);
+}
+
+function partitionAssetStatusType(status) {
+  return partitionStatusType(status);
+}
+
+function partitionOperationText(operation) {
+  const map = {
+    auto_run: '自动执行',
+    auto_retry: '自动重试',
+    manual_retry: '人工重试',
+    manual_asset_retry: '失败资产重试',
+    demo: '演示执行',
+    retry: '重试',
+    test: '测试',
+    run: '执行',
+  };
+  return map[operation] || operation || '-';
+}
+
+function formatPartitionTimestamp(value) {
+  return formatQualityTime(value);
+}
+
+function partitionBatchDetailTitle(batch) {
+  if (!batch) return '批次详情';
+  return batch.batch_name || batch.name || batch.batch_id || batch.id || '批次详情';
+}
+
+function partitionBatchDetailSubtitle(batch) {
+  if (!batch) return '';
+  const parts = [batch.batch_id || batch.id || '-', dataLabelsByModule[batch.data_type] || batch.data_type || '-'];
+  return parts.join(' · ');
+}
+
+function partitionBatchCanCancel(batch) {
+  return ['queued', 'running', 'retrying', 'cancel_requested'].includes(batch?.status);
+}
+
+function partitionBatchCanRetrySelectedAssets(batch) {
+  return Boolean(batch) && ['failed', 'manual_required'].includes(batch.status) && partitionBatchSelectedRetryableAssets.value.length > 0;
+}
+
+function partitionBatchExecutionOperation(batch) {
+  return ['failed', 'manual_required'].includes(batch?.status) ? 'retry' : 'run';
+}
+
+function partitionBatchConfigOverride(batch) {
+  if (batch?.data_type === 'optical') {
+    return {
+      grid_type: opticalGridType.value,
+      grid_level: Number(selectedMapGridLevel.value),
+    };
+  }
+  if (batch?.data_type === 'product') {
+    return {
+      grid_type: productGridType.value,
+      grid_level: Number(productGridLevel.value),
+      target_crs: batch.normalized_payload?.target_crs || 'EPSG:4326',
+    };
+  }
+  return {};
+}
+
+function partitionAssetRetryable(asset) {
+  return ['failed', 'manual_required'].includes(asset?.status);
+}
+
+function partitionAssetSearchText(asset) {
+  const payload = asset?.asset_payload || {};
+  const values = [
+    asset?.asset_id,
+    asset?.scene_id,
+    asset?.source_uri,
+    asset?.status,
+    asset?.last_error,
+    asset?.last_run_dir,
+    payload?.observation_id,
+    payload?.product_name,
+    payload?.product_year,
+    payload?.scene_id,
+    payload?.band,
+    Array.isArray(payload?.bands) ? payload.bands.join(',') : '',
+    payload?.acq_time,
+    payload?.source_uri,
+    payload?.xco2,
+  ];
+  return values.filter(Boolean).join(' ').toLowerCase();
+}
+
+function partitionBatchActionLabel(batch) {
+  if (partitionBatchCanCancel(batch)) return '取消任务';
+  if (batch?.status === 'manual_required') return '继续重试';
+  if (batch?.status === 'failed') return '重试批次';
+  if (batch?.status === 'cancelled') return '重新执行';
+  if (batch?.status === 'succeeded') return '再次执行';
+  return batch?.attempt_count ? '再次执行' : '开始执行';
+}
+
+function partitionBatchActionType(batch) {
+  if (partitionBatchCanCancel(batch)) return 'danger';
+  if (['failed', 'manual_required', 'cancelled'].includes(batch?.status)) return 'warning';
+  return 'primary';
+}
+
+function partitionBatchActionIcon(batch) {
+  if (partitionBatchCanCancel(batch)) return CircleCloseFilled;
+  if (['failed', 'manual_required', 'cancelled'].includes(batch?.status)) return Refresh;
+  return VideoPlay;
+}
+
+function partitionBatchSummary(batch) {
+  const attemptCount = Number(batch.attempt_count || 0);
+  const lastError = batch.last_error ? `最近错误：${batch.last_error}` : '暂无错误信息';
+  return `${partitionStatusText(batch.status)} · 尝试 ${attemptCount} 次 · ${lastError}`;
+}
+
+function partitionBatchDetailPayloadRows(batch) {
+  if (!batch) return [];
+  const payload = batch.normalized_payload || {};
+  const rows = [
+    { label: '数据类型', value: dataLabelsByModule[batch.data_type] || batch.data_type || '-' },
+    { label: '状态', value: partitionStatusText(batch.status) },
+    { label: '尝试次数', value: batch.attempt_count ?? 0 },
+    { label: '最大自动重试', value: batch.max_auto_retries ?? 0 },
+    { label: '最后任务', value: batch.last_task_id || '-' },
+    { label: '最后错误', value: batch.last_error || '-' },
+    { label: '创建时间', value: formatPartitionTimestamp(batch.created_at) },
+    { label: '更新时间', value: formatPartitionTimestamp(batch.updated_at) },
+  ];
+  if (batch.partitioned_at) {
+    rows.splice(5, 0, { label: '完成时间', value: formatPartitionTimestamp(batch.partitioned_at) });
+  }
+  if (batch.manual_required_at) {
+    rows.splice(6, 0, { label: '人工确认时间', value: formatPartitionTimestamp(batch.manual_required_at) });
+  }
+  if (batch.data_type === 'optical') {
+    rows.splice(2, 0,
+      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网层级', value: payload.grid_level ?? '-' },
+      { label: '选择资产', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
+    );
+  }
+  if (batch.data_type === 'carbon') {
+    rows.splice(2, 0,
+      { label: '产品类型', value: payload.product_type || '-' },
+      { label: '选择观测', value: Array.isArray(payload.selected_observations) ? payload.selected_observations.length : 0 },
+    );
+  }
+  if (batch.data_type === 'product') {
+    rows.splice(2, 0,
+      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网层级', value: payload.grid_level ?? '-' },
+      { label: '目标参考系统', value: payload.target_crs || '-' },
+      { label: '选择年份', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
+    );
+  }
+  return rows;
+}
+
+function partitionBatchAssetRows(batch) {
+  if (!batch) return [];
+  return (partitionBatchDetail.value?.assets || []).map((asset) => {
+    const payload = asset.asset_payload || {};
+    if (batch.data_type === 'carbon') {
+      return {
+        asset_id: asset.asset_id,
+        status: asset.status || 'pending',
+        source_uri: asset.source_uri,
+        title: asset.scene_id || payload.observation_id || asset.asset_id,
+        subtitle: payload.observation_id || asset.scene_id || '-',
+        details: [
+          `时间：${payload.acq_time || '-'}`,
+          `XCO2：${payload.xco2 ?? payload.xco2_value ?? '-'}`,
+          `Q${payload.quality_flag ?? payload.xco2_quality_flag ?? '-'}`,
+        ],
+        error: asset.last_error || '',
+        retryable: partitionAssetRetryable(asset),
+      };
+    }
+    if (batch.data_type === 'product') {
+      return {
+        asset_id: asset.asset_id,
+        status: asset.status || 'pending',
+        source_uri: asset.source_uri,
+        title: payload.product_year ? `${payload.product_year} 年` : asset.scene_id || asset.asset_id,
+        subtitle: payload.product_name || payload.band || '-',
+        details: [
+          `时间：${payload.acq_time || '-'}`,
+          `目标参考系统：${payload.target_crs || batch.normalized_payload?.target_crs || '-'}`,
+          `波段：${payload.band || '-'}`,
+        ],
+        error: asset.last_error || '',
+        retryable: partitionAssetRetryable(asset),
+      };
+    }
+    return {
+      asset_id: asset.asset_id,
+      status: asset.status || 'pending',
+      source_uri: asset.source_uri,
+      title: asset.scene_id || payload.scene_id || asset.asset_id,
+      subtitle: asset.asset_id,
+      details: [
+        `时间：${payload.acq_time || '-'}`,
+        `波段：${Array.isArray(payload.bands) ? payload.bands.join(', ') : payload.band || '-'}`,
+      ],
+      error: asset.last_error || '',
+      retryable: partitionAssetRetryable(asset),
+    };
+  });
+}
+
+const partitionBatchDetailAssets = computed(() => partitionBatchAssetRows(partitionBatchDetail.value));
+const partitionBatchDetailAttempts = computed(() => partitionBatchDetail.value?.attempts || []);
+const partitionBatchRetryableAssetCount = computed(() => partitionBatchDetailAssets.value.filter((asset) => asset.retryable).length);
+const partitionBatchSelectedRetryableAssets = computed(() => (
+  partitionBatchDetailAssets.value.filter((asset) => partitionBatchDetailSelectedAssetIds.value.includes(asset.asset_id) && asset.retryable)
+));
+const partitionBatchDetailFilteredAssets = computed(() => {
+  const keyword = partitionBatchDetailSearch.value.trim().toLowerCase();
+  const status = partitionBatchDetailAssetStatus.value;
+  return partitionBatchDetailAssets.value.filter((asset) => {
+    const matchesStatus = status === 'all' || asset.status === status;
+    const matchesKeyword = !keyword || partitionAssetSearchText(asset).includes(keyword);
+    return matchesStatus && matchesKeyword;
+  });
+});
+
+function partitionBatchAssetSelectable(row) {
+  return row.retryable;
+}
+
+function clearPartitionBatchDetailSelection() {
+  partitionBatchDetailSelectedAssetIds.value = [];
+}
+
+function partitionBatchAssetSelectionChange(rows) {
+  partitionBatchDetailSelectedAssetIds.value = rows.map((row) => row.asset_id);
+}
+
+function selectManagedBatchByDetail(batch) {
+  setBatchSelection(batch.batch_id || batch.id, batch.data_type);
+}
+
+async function loadPartitionBatchDetail(batchId) {
+  const { partitionPrefix } = apiPrefixes();
+  const [batch, assetsResp, attemptsResp] = await Promise.all([
+    requestGet(`${partitionPrefix}/batches/${batchId}`),
+    requestGet(`${partitionPrefix}/batches/${batchId}/assets`),
+    requestGet(`${partitionPrefix}/batches/${batchId}/attempts`),
+  ]);
+  return {
+    ...batch,
+    id: batch.batch_id || batch.id || batchId,
+    is_local_demo: false,
+    assets: assetsResp.assets || [],
+    attempts: attemptsResp.attempts || [],
+  };
+}
+
+async function openPartitionBatchDetail(batch) {
+  const resolved = typeof batch === 'string'
+    ? [...visibleOpticalBatches.value, ...visibleCarbonBatches.value, ...visibleProductBatches.value].find((item) => (item.id || item.batch_id) === batch)
+    : batch;
+  const batchId = resolved?.id || resolved?.batch_id || batch;
+  if (!batchId) return;
+  const isManagedBatch = Boolean(resolved?.batch_id);
+  partitionBatchDetailVisible.value = true;
+  partitionBatchDetailLoading.value = true;
+  partitionBatchDetailAction.value = '';
+  partitionBatchDetailSearch.value = '';
+  partitionBatchDetailAssetStatus.value = 'all';
+  clearPartitionBatchDetailSelection();
+  partitionBatchDetailTab.value = 'overview';
+  try {
+    const detail = isManagedBatch ? await loadPartitionBatchDetail(batchId) : buildLocalPartitionBatchDetail(resolved, resolved?.data_type || activeModule.value);
+    partitionBatchDetail.value = detail;
+    selectManagedBatchByDetail(detail);
+    return detail;
+  } catch (error) {
+    if (!isManagedBatch && resolved) {
+      const detail = buildLocalPartitionBatchDetail(resolved, resolved?.data_type || activeModule.value);
+      partitionBatchDetail.value = detail;
+      selectManagedBatchByDetail(detail);
+      return detail;
+    }
+    partitionBatchDetail.value = null;
+    ElMessage.error(error.message);
+    return null;
+  } finally {
+    partitionBatchDetailLoading.value = false;
+  }
+}
+
+async function refreshPartitionBatchDetail() {
+  if (partitionBatchDetail.value?.is_local_demo) {
+    partitionBatchDetail.value = buildLocalPartitionBatchDetail(partitionBatchDetail.value, partitionBatchDetail.value.data_type);
+    return;
+  }
+  const batchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
+  if (!batchId) return;
+  partitionBatchDetailLoading.value = true;
+  try {
+    const detail = await loadPartitionBatchDetail(batchId);
+    partitionBatchDetail.value = detail;
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    partitionBatchDetailLoading.value = false;
+  }
+}
+
+async function runPartitionBatchFromDetail() {
+  const batch = partitionBatchDetail.value;
+  const batchId = batch?.id || batch?.batch_id;
+  if (!batchId) return;
+  if (batch?.is_local_demo) {
+    await runDemoForBatch(batchId);
+    return;
+  }
+  const operation = partitionBatchExecutionOperation(batch);
+  const configOverride = partitionBatchConfigOverride(batch);
+  partitionBatchDetailAction.value = operation;
+  resultLoading.value = true;
+  resultRows.value = [];
+  lastPartitionResult.value = null;
+  ingestPreview.value = null;
+  ingestResult.value = null;
+  startPartitionTimer();
+  resetPartitionStages();
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const apiPath = `${partitionPrefix}/batches/${batchId}/${operation}`;
+    setPartitionStage('prepare', 'done', '已锁定批次详情中的执行参数。');
+    setPartitionStage('queue', 'running', operation === 'retry' ? `批次 ${batchId} 正在提交人工重试。` : `批次 ${batchId} 正在提交执行队列。`);
+    const response = await requestJson(apiPath, { config_override: configOverride });
+    if (!response.task_id) {
+      throw new Error('批次执行任务未返回 task_id');
+    }
+    lastPartitionRequest.value = {
+      endpoint: `batches/${batchId}`,
+      payload: { config_override: configOverride },
+      operation,
+      apiPath,
+    };
+    setPartitionStage('queue', 'done', `后端任务 ${response.task_id} 已创建。`);
+    setPartitionStage('partition', 'running', `后台任务 ${response.task_id} 执行中。`);
+    const result = await waitForPartitionTask(partitionPrefix, response.task_id);
+    setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+    lastPartitionResult.value = result;
+    resultRows.value = formatRows(result);
+    ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
+    await loadPartitionBatches();
+    await refreshPartitionBatchDetail();
+  } catch (error) {
+    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
+    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
+    lastPartitionResult.value = failure;
+    resultRows.value = formatRows(failure);
+    setPartitionStage('persist', 'failed', `执行失败：${failure.error}`);
+    ElMessage.error(error.message);
+  } finally {
+    stopPartitionTimer();
+    resultLoading.value = false;
+    partitionBatchDetailAction.value = '';
+  }
+}
+
+async function retrySelectedPartitionAssetsFromDetail() {
+  const batch = partitionBatchDetail.value;
+  const batchId = batch?.id || batch?.batch_id;
+  const selectedAssetIds = partitionBatchSelectedRetryableAssets.value.map((asset) => asset.asset_id);
+  if (!batchId || !selectedAssetIds.length) {
+    ElMessage.warning('请先选择失败或人工确认状态的资产');
+    return;
+  }
+  partitionBatchDetailAction.value = 'assetRetry';
+  resultLoading.value = true;
+  resultRows.value = [];
+  lastPartitionResult.value = null;
+  ingestPreview.value = null;
+  ingestResult.value = null;
+  startPartitionTimer();
+  resetPartitionStages();
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const configOverride = partitionBatchConfigOverride(batch);
+    setPartitionStage('prepare', 'done', '已锁定失败资产重试范围。');
+    setPartitionStage('queue', 'running', `正在提交 ${selectedAssetIds.length} 条失败资产重试。`);
+    const response = await requestJson(`${partitionPrefix}/assets/retry`, {
+      asset_ids: selectedAssetIds,
+      config_override: configOverride,
+    });
+    if (!response.task_id) {
+      throw new Error('失败资产重试任务未返回 task_id');
+    }
+    lastPartitionRequest.value = {
+      endpoint: 'assets',
+      operation: 'retry',
+      payload: { asset_ids: selectedAssetIds, config_override: configOverride },
+      apiPath: `${partitionPrefix}/assets/retry`,
+    };
+    setPartitionStage('queue', 'done', `后端任务 ${response.task_id} 已创建。`);
+    setPartitionStage('partition', 'running', `后台任务 ${response.task_id} 执行中。`);
+    const result = await waitForPartitionTask(partitionPrefix, response.task_id);
+    setPartitionStage('partition', 'done', `失败资产重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+    lastPartitionResult.value = result;
+    resultRows.value = formatRows(result);
+    clearPartitionBatchDetailSelection();
+    ElMessage.success('失败资产重试完成');
+    await loadPartitionBatches();
+    await refreshPartitionBatchDetail();
+  } catch (error) {
+    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
+    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
+    lastPartitionResult.value = failure;
+    resultRows.value = formatRows(failure);
+    setPartitionStage('persist', 'failed', `重试失败：${failure.error}`);
+    ElMessage.error(error.message);
+  } finally {
+    stopPartitionTimer();
+    resultLoading.value = false;
+    partitionBatchDetailAction.value = '';
+  }
+}
+
+async function cancelPartitionBatchFromDetail() {
+  const batch = partitionBatchDetail.value;
+  const batchId = batch?.id || batch?.batch_id;
+  if (!batchId) return;
+  if (batch?.is_local_demo) {
+    ElMessage.warning('演示批次只能执行测试，不能发起取消');
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      '取消会立即请求执行层中断当前任务，适用于参数配置错误或任务无需继续执行的场景。',
+      '取消批次任务',
+      { confirmButtonText: '确认取消', cancelButtonText: '返回', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  partitionBatchDetailAction.value = 'cancel';
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const response = await requestJson(`${partitionPrefix}/batches/${batchId}/cancel`, {});
+    if (response?.status === 'cancel_requested' || response?.status === 'cancelled') {
+      ElMessage.success(response.status === 'cancelled' ? '任务已取消' : '已发起取消请求');
+    } else {
+      ElMessage.success('已发起取消请求');
+    }
+    await loadPartitionBatches();
+    await refreshPartitionBatchDetail();
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    partitionBatchDetailAction.value = '';
+  }
+}
+
+async function handlePartitionBatchPrimaryAction(batch) {
+  if (!batch?.batch_id) {
+    await runDemoForBatch(batch.id);
+    return;
+  }
+  const detail = await openPartitionBatchDetail(batch);
+  if (!detail) return;
+  if (partitionBatchCanCancel(detail)) {
+    await cancelPartitionBatchFromDetail();
+    return;
+  }
+  await runPartitionBatchFromDetail();
+}
+
+const visibleDataRowsByModule = computed(() => ({
+  optical: visibleOpticalBatches.value.map((batch) => ({
+    id: batch.id,
+    name: batch.name,
+    params: `${batch.assets.length} 条资产`,
+    status: batch.status,
+  })),
+  carbon: visibleCarbonBatches.value.map((batch) => ({
+    id: batch.id,
+    name: batch.name,
+    params: `${batch.observations.length} 条观测 | ${batch.product_type || '-'}`,
+    status: batch.status,
+  })),
+  radar: radarRows,
+  product: visibleProductBatches.value.map((batch) => ({
+    id: batch.id,
+    name: batch.name,
+    params: `${batch.assets.length} 个年份 | ${batch.target_crs || 'EPSG:4326'}`,
+    status: batch.status,
+  })),
+}));
+
 const dataLabelsByModule = {
   optical: '光学遥感数据',
   carbon: '碳卫星数据',
@@ -247,28 +859,28 @@ const partitionEndpointsByModule = {
 
 const testModules = new Set(['optical', 'carbon', 'product']);
 
-const activeDataRows = computed(() => dataRowsByModule[activeModule.value] || []);
+const activeDataRows = computed(() => visibleDataRowsByModule.value[activeModule.value] || dataRowsByModule[activeModule.value] || []);
 
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
 
 const selectedDataName = computed(() => {
   if (activeModule.value === 'optical') {
     if (!selectedOpticalBatchIds.value.length) return '未选择';
-    const names = opticalBatches
+    const names = visibleOpticalBatches.value
       .filter((batch) => selectedOpticalBatchIds.value.includes(batch.id))
       .map((batch) => batch.name);
     return names.join('，');
   }
   if (activeModule.value === 'carbon') {
     if (!selectedCarbonBatchIds.value.length) return '未选择';
-    const names = carbonBatches
+    const names = visibleCarbonBatches.value
       .filter((batch) => selectedCarbonBatchIds.value.includes(batch.id))
       .map((batch) => batch.name);
     return names.join('，');
   }
   if (activeModule.value === 'product') {
     if (!selectedProductBatchIds.value.length) return '未选择';
-    const names = productBatches
+    const names = visibleProductBatches.value
       .filter((batch) => selectedProductBatchIds.value.includes(batch.id))
       .map((batch) => batch.name);
     return names.join('，');
@@ -306,7 +918,7 @@ const selectedQualityRecord = computed(() => {
 const selectedOpticalAssets = computed(() => {
   const selectedBatchSet = new Set(selectedOpticalBatchIds.value);
   const rows = [];
-  opticalBatches.forEach((batch) => {
+  visibleOpticalBatches.value.forEach((batch) => {
     if (!selectedBatchSet.has(batch.id)) return;
     batch.assets.forEach((asset) => {
       if (isOpticalAssetSelected(batch.id, asset)) {
@@ -320,7 +932,7 @@ const selectedOpticalAssets = computed(() => {
 const selectedCarbonObservations = computed(() => {
   const selectedBatchSet = new Set(selectedCarbonBatchIds.value);
   const rows = [];
-  carbonBatches.forEach((batch) => {
+  visibleCarbonBatches.value.forEach((batch) => {
     if (!selectedBatchSet.has(batch.id)) return;
     batch.observations.forEach((observation) => {
       if (isCarbonObservationSelected(batch.id, observation)) {
@@ -340,7 +952,7 @@ const selectedCarbonObservations = computed(() => {
 const selectedProductAssets = computed(() => {
   const selectedBatchSet = new Set(selectedProductBatchIds.value);
   const rows = [];
-  productBatches.forEach((batch) => {
+  visibleProductBatches.value.forEach((batch) => {
     if (!selectedBatchSet.has(batch.id)) return;
     batch.assets.forEach((asset) => {
       if (isProductAssetSelected(batch.id, asset)) {
@@ -750,9 +1362,79 @@ function productBatchSummary(batch) {
   return `${selectedCount}/${batch.assets.length} 个年份已选 | schema ${batch.schema.length} 字段`;
 }
 
+function normalizeManagedBatch(batch) {
+  const payload = batch.normalized_payload || {};
+  const base = {
+    ...batch,
+    id: batch.batch_id,
+    name: batch.batch_name || batch.batch_id,
+    status: batch.status || '待处理',
+  };
+  if (batch.data_type === 'carbon') {
+    return {
+      ...base,
+      product_type: payload.product_type || 'xco2',
+      source_uri: payload.source_uri || '',
+      schema: batch.source_schema?.schema || carbonObservationSchema,
+      observations: payload.selected_observations || [],
+    };
+  }
+  if (batch.data_type === 'product') {
+    return {
+      ...base,
+      product_family: payload.product_family || 'product',
+      sensor: payload.sensor || 'data_product',
+      target_crs: payload.target_crs || 'EPSG:4326',
+      schema: batch.source_schema?.schema || productAssetSchema,
+      assets: payload.selected_assets || [],
+    };
+  }
+  return {
+    ...base,
+    assets: payload.selected_assets || [],
+  };
+}
+
+async function loadPartitionBatches() {
+  partitionBatchLoading.value = true;
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const response = await requestGet(`${partitionPrefix}/batches?include_succeeded=false&limit=200`);
+    const batches = response.batches || [];
+    managedOpticalBatches.value = batches.filter((batch) => batch.data_type === 'optical').map(normalizeManagedBatch);
+    managedCarbonBatches.value = batches.filter((batch) => batch.data_type === 'carbon').map(normalizeManagedBatch);
+    managedProductBatches.value = batches.filter((batch) => batch.data_type === 'product').map(normalizeManagedBatch);
+    if (managedOpticalBatches.value.length && !managedOpticalBatches.value.some((batch) => selectedOpticalBatchIds.value.includes(batch.id))) {
+      const batchId = preferredBatchId(managedOpticalBatches.value);
+      if (batchId) {
+        selectedOpticalBatchIds.value = [batchId];
+        expandedOpticalBatchId.value = batchId;
+      }
+    }
+    if (managedCarbonBatches.value.length && !managedCarbonBatches.value.some((batch) => selectedCarbonBatchIds.value.includes(batch.id))) {
+      const batchId = preferredBatchId(managedCarbonBatches.value);
+      if (batchId) {
+        selectedCarbonBatchIds.value = [batchId];
+        expandedCarbonBatchId.value = batchId;
+      }
+    }
+    if (managedProductBatches.value.length && !managedProductBatches.value.some((batch) => selectedProductBatchIds.value.includes(batch.id))) {
+      const batchId = preferredBatchId(managedProductBatches.value);
+      if (batchId) {
+        selectedProductBatchIds.value = [batchId];
+        expandedProductBatchId.value = batchId;
+      }
+    }
+  } catch (error) {
+    ElMessage.warning(`剖分批次加载失败，使用页面演示数据：${error.message}`);
+  } finally {
+    partitionBatchLoading.value = false;
+  }
+}
+
 function partitionPayloadForActiveModule() {
   if (activeModule.value === 'optical') {
-    const selectedBatch = opticalBatches.find((batch) => selectedOpticalBatchIds.value.includes(batch.id));
+    const selectedBatch = visibleOpticalBatches.value.find((batch) => selectedOpticalBatchIds.value.includes(batch.id));
     const selectedAssets = selectedOpticalAssets.value;
     const useEntityPartition = opticalGridType.value === 'isea4h';
     return {
@@ -768,7 +1450,7 @@ function partitionPayloadForActiveModule() {
     };
   }
   if (activeModule.value === 'carbon') {
-    const selectedBatch = carbonBatches.find((batch) => selectedCarbonBatchIds.value.includes(batch.id));
+    const selectedBatch = visibleCarbonBatches.value.find((batch) => selectedCarbonBatchIds.value.includes(batch.id));
     const selectedObservations = selectedCarbonObservations.value;
     return {
       payload: {
@@ -783,7 +1465,7 @@ function partitionPayloadForActiveModule() {
     };
   }
   if (activeModule.value === 'product') {
-    const selectedBatch = productBatches.find((batch) => selectedProductBatchIds.value.includes(batch.id));
+    const selectedBatch = visibleProductBatches.value.find((batch) => selectedProductBatchIds.value.includes(batch.id));
     const selectedAssets = selectedProductAssets.value;
     return {
       payload: {
@@ -1532,6 +2214,7 @@ watch([
 
 onMounted(async () => {
   await loadManagedConfig();
+  await loadPartitionBatches();
   if (activeModule.value === 'quality') {
     refreshQuality();
   }
@@ -1944,10 +2627,11 @@ onUnmounted(() => {
 
     <el-drawer v-model="dataDrawerVisible" :title="`已载入${activeDataLabel}`" size="680px" direction="rtl">
       <el-input v-model="dataSearch" :prefix-icon="Search" placeholder="按名称查询" clearable />
-      <template v-if="activeModule === 'optical'">
-        <div class="batch-list">
+      <div v-loading="partitionBatchLoading && ['optical', 'carbon', 'product'].includes(activeModule)">
+        <template v-if="activeModule === 'optical'">
+          <div class="batch-list">
           <div
-            v-for="batch in opticalBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+            v-for="batch in visibleOpticalBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
             :key="batch.id"
             class="batch-card"
           >
@@ -1957,14 +2641,21 @@ onUnmounted(() => {
               </el-checkbox>
               <div class="batch-meta">
                 <span class="batch-id">{{ batch.id }}</span>
-                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
-                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
+                <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
+                <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
+                <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
+                  {{ partitionBatchActionLabel(batch) }}
+                </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleOpticalBatchExpand(batch.id)">
                   {{ expandedOpticalBatchId === batch.id ? '收起' : '展开' }}
                 </button>
               </div>
             </div>
             <div class="batch-summary">{{ opticalBatchSummary(batch) }}</div>
+            <div class="batch-footer">
+              <span>{{ partitionBatchSummary(batch) }}</span>
+              <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
+            </div>
             <div v-if="expandedOpticalBatchId === batch.id" class="batch-assets">
               <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}-${assetBandsText(asset)}`" class="asset-row">
                 <div class="asset-main">
@@ -1978,12 +2669,12 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-        </div>
-      </template>
-      <template v-else-if="activeModule === 'carbon'">
-        <div class="batch-list">
+          </div>
+        </template>
+        <template v-else-if="activeModule === 'carbon'">
+          <div class="batch-list">
           <div
-            v-for="batch in carbonBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+            v-for="batch in visibleCarbonBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
             :key="batch.id"
             class="batch-card"
           >
@@ -1993,14 +2684,21 @@ onUnmounted(() => {
               </el-checkbox>
               <div class="batch-meta">
                 <span class="batch-id">{{ batch.id }}</span>
-                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
-                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
+                <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
+                <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
+                <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
+                  {{ partitionBatchActionLabel(batch) }}
+                </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleCarbonBatchExpand(batch.id)">
                   {{ expandedCarbonBatchId === batch.id ? '收起' : '展开' }}
                 </button>
               </div>
             </div>
             <div class="batch-summary">{{ carbonBatchSummary(batch) }}</div>
+            <div class="batch-footer">
+              <span>{{ partitionBatchSummary(batch) }}</span>
+              <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
+            </div>
             <div v-if="expandedCarbonBatchId === batch.id" class="batch-assets">
               <div class="schema-grid">
                 <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
@@ -2018,68 +2716,76 @@ onUnmounted(() => {
                   <span>Q{{ observation.quality_flag }}</span>
                 </div>
                 <div class="asset-source">{{ batch.source_uri }} #{{ observation.source_index }}</div>
-                <div class="asset-corners">center: [{{ observation.lon }}, {{ observation.lat }}]</div>
+	                <div class="asset-corners">center: [{{ observation.lon }}, {{ observation.lat }}]</div>
+	              </div>
+	            </div>
+	          </div>
+          </div>
+        </template>
+        <template v-else-if="activeModule === 'product'">
+          <div class="batch-list">
+            <div
+              v-for="batch in visibleProductBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
+              :key="batch.id"
+              class="batch-card"
+            >
+              <div class="batch-card-header">
+                <el-checkbox :model-value="selectedProductBatchIds.includes(batch.id)" @change="toggleProductBatchSelect(batch.id)">
+                  <span class="batch-name">{{ batch.name }}</span>
+                </el-checkbox>
+                <div class="batch-meta">
+                  <span class="batch-id">{{ batch.id }}</span>
+                  <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
+                  <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
+                  <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
+                    {{ partitionBatchActionLabel(batch) }}
+                  </el-button>
+                  <button type="button" class="batch-expand-btn" @click="toggleProductBatchExpand(batch.id)">
+                    {{ expandedProductBatchId === batch.id ? '收起' : '展开' }}
+                  </button>
+                </div>
+              </div>
+              <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
+              <div class="batch-footer">
+                <span>{{ partitionBatchSummary(batch) }}</span>
+                <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
+              </div>
+              <div v-if="expandedProductBatchId === batch.id" class="batch-assets">
+                <div class="schema-grid">
+                  <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
+                    <strong>{{ field.field }}</strong>
+                    <span>{{ field.type }}</span>
+                    <small>{{ field.meaning }}</small>
+                  </div>
+                </div>
+                <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
+                  <div class="asset-main">
+                    <el-checkbox :model-value="isProductAssetSelected(batch.id, asset)" @change="toggleProductAssetSelect(batch.id, asset)" />
+                    <strong>{{ asset.product_year }} 年</strong>
+                    <span>{{ asset.band }}</span>
+                    <span>{{ asset.resolution }}</span>
+                    <span>{{ asset.acq_time }}</span>
+                  </div>
+                  <div class="asset-source">{{ asset.source_uri }}</div>
+                  <div class="asset-corners">product: {{ asset.product_name }} | {{ batch.target_crs }}</div>
+                  <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
+                  <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-	      </template>
-	      <template v-else-if="activeModule === 'product'">
-	        <div class="batch-list">
-	          <div
-	            v-for="batch in productBatches.filter((item) => !dataSearch.trim() || item.name.toLowerCase().includes(dataSearch.trim().toLowerCase()) || item.id.toLowerCase().includes(dataSearch.trim().toLowerCase()))"
-	            :key="batch.id"
-	            class="batch-card"
-	          >
-	            <div class="batch-card-header">
-	              <el-checkbox :model-value="selectedProductBatchIds.includes(batch.id)" @change="toggleProductBatchSelect(batch.id)">
-	                <span class="batch-name">{{ batch.name }}</span>
-	              </el-checkbox>
-	              <div class="batch-meta">
-	                <span class="batch-id">{{ batch.id }}</span>
-	                <el-tag size="small" type="success">{{ batch.status }}</el-tag>
-	                <el-button size="small" type="primary" @click="runDemoForBatch(batch.id)">测试该批次</el-button>
-	                <button type="button" class="batch-expand-btn" @click="toggleProductBatchExpand(batch.id)">
-	                  {{ expandedProductBatchId === batch.id ? '收起' : '展开' }}
-	                </button>
-	              </div>
-	            </div>
-	            <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
-	            <div v-if="expandedProductBatchId === batch.id" class="batch-assets">
-	              <div class="schema-grid">
-	                <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
-	                  <strong>{{ field.field }}</strong>
-	                  <span>{{ field.type }}</span>
-	                  <small>{{ field.meaning }}</small>
-	                </div>
-	              </div>
-	              <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
-	                <div class="asset-main">
-	                  <el-checkbox :model-value="isProductAssetSelected(batch.id, asset)" @change="toggleProductAssetSelect(batch.id, asset)" />
-	                  <strong>{{ asset.product_year }} 年</strong>
-	                  <span>{{ asset.band }}</span>
-	                  <span>{{ asset.resolution }}</span>
-	                  <span>{{ asset.acq_time }}</span>
-	                </div>
-		                <div class="asset-source">{{ asset.source_uri }}</div>
-		                <div class="asset-corners">product: {{ asset.product_name }} | {{ batch.target_crs }}</div>
-		                <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
-		                <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
-		              </div>
-	            </div>
-	          </div>
-	        </div>
-	      </template>
-	      <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
-        <el-table-column prop="id" label="批次ID" min-width="190" />
-        <el-table-column prop="name" label="名称" min-width="260" />
-        <el-table-column prop="params" label="参数" min-width="180" />
-        <el-table-column prop="status" label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag type="success">{{ row.status }}</el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
+        </template>
+        <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
+          <el-table-column prop="id" label="批次ID" min-width="190" />
+          <el-table-column prop="name" label="名称" min-width="260" />
+          <el-table-column prop="params" label="参数" min-width="180" />
+          <el-table-column prop="status" label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag type="success">{{ row.status }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </el-drawer>
 
     <el-drawer v-model="qualityHistoryDrawerVisible" title="历史质检记录" size="760px" direction="rtl">
@@ -2124,6 +2830,140 @@ onUnmounted(() => {
           <template #default="{ row }">{{ formatQualityTime(row.generated_at || row.modified_at) }}</template>
         </el-table-column>
       </el-table>
+    </el-drawer>
+
+    <el-drawer
+      v-model="partitionBatchDetailVisible"
+      :title="partitionBatchDetailTitle(partitionBatchDetail)"
+      size="920px"
+      direction="rtl"
+      @open="refreshPartitionBatchDetail"
+    >
+      <div v-loading="partitionBatchDetailLoading" class="partition-batch-detail">
+        <div class="partition-batch-detail-head">
+          <div>
+            <div class="partition-batch-detail-subtitle">{{ partitionBatchDetailSubtitle(partitionBatchDetail) }}</div>
+            <div v-if="partitionBatchDetail" class="partition-batch-detail-summary">{{ partitionBatchSummary(partitionBatchDetail) }}</div>
+          </div>
+          <div class="partition-batch-detail-actions">
+            <el-button :icon="Document" @click="refreshPartitionBatchDetail">刷新</el-button>
+            <el-button
+              v-if="partitionBatchCanCancel(partitionBatchDetail)"
+              type="danger"
+              :icon="CircleCloseFilled"
+              :loading="partitionBatchDetailAction === 'cancel'"
+              @click="cancelPartitionBatchFromDetail"
+            >
+              取消任务
+            </el-button>
+            <el-button
+              v-else
+              type="primary"
+              :icon="partitionBatchActionIcon(partitionBatchDetail)"
+              :loading="partitionBatchDetailAction === 'run' || partitionBatchDetailAction === 'retry'"
+              @click="runPartitionBatchFromDetail"
+            >
+              {{ partitionBatchActionLabel(partitionBatchDetail) }}
+            </el-button>
+          </div>
+        </div>
+
+        <div class="partition-batch-detail-tabs">
+          <button type="button" class="partition-detail-tab" :class="{ active: partitionBatchDetailTab === 'overview' }" @click="partitionBatchDetailTab = 'overview'">概览</button>
+          <button type="button" class="partition-detail-tab" :class="{ active: partitionBatchDetailTab === 'assets' }" @click="partitionBatchDetailTab = 'assets'">资产</button>
+          <button type="button" class="partition-detail-tab" :class="{ active: partitionBatchDetailTab === 'attempts' }" @click="partitionBatchDetailTab = 'attempts'">尝试历史</button>
+        </div>
+
+        <div v-if="partitionBatchDetailTab === 'overview'" class="partition-detail-section">
+          <div class="quality-section-title">批次信息</div>
+          <div class="partition-detail-grid">
+            <div v-for="item in partitionBatchDetailPayloadRows(partitionBatchDetail)" :key="item.label" class="quality-kv">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="partitionBatchDetailTab === 'assets'" class="partition-detail-section">
+          <div class="partition-detail-toolbar">
+            <el-input v-model="partitionBatchDetailSearch" :prefix-icon="Search" placeholder="按资产、时间、路径筛选" clearable />
+            <el-select v-model="partitionBatchDetailAssetStatus" placeholder="状态" clearable>
+              <el-option label="全部" value="all" />
+              <el-option label="待处理" value="pending" />
+              <el-option label="已排队" value="queued" />
+              <el-option label="执行中" value="running" />
+              <el-option label="失败" value="failed" />
+              <el-option label="人工确认" value="manual_required" />
+              <el-option label="已取消" value="cancelled" />
+              <el-option label="已完成" value="succeeded" />
+            </el-select>
+          </div>
+          <div class="partition-detail-asset-summary">
+            <span>可重试资产 {{ partitionBatchRetryableAssetCount }} 条</span>
+            <span>已选 {{ partitionBatchSelectedRetryableAssets.length }} 条</span>
+            <el-button size="small" :icon="Refresh" :disabled="!partitionBatchCanRetrySelectedAssets(partitionBatchDetail) || partitionBatchDetailAction === 'assetRetry'" :loading="partitionBatchDetailAction === 'assetRetry'" @click="retrySelectedPartitionAssetsFromDetail">
+              重试失败资产
+            </el-button>
+          </div>
+          <el-table
+            :data="partitionBatchDetailFilteredAssets"
+            class="drawer-table partition-asset-table"
+            height="420"
+            row-key="asset_id"
+            @selection-change="partitionBatchAssetSelectionChange"
+          >
+            <el-table-column type="selection" width="42" :selectable="partitionBatchAssetSelectable" />
+            <el-table-column label="状态" width="96">
+              <template #default="{ row }">
+                <el-tag :type="partitionAssetStatusType(row.status)" size="small">{{ partitionAssetStatusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="标题" min-width="190">
+              <template #default="{ row }">
+                <strong>{{ row.title }}</strong>
+                <div class="partition-asset-subtitle">{{ row.subtitle }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="来源" min-width="240">
+              <template #default="{ row }">{{ row.source_uri }}</template>
+            </el-table-column>
+            <el-table-column label="详情" min-width="220">
+              <template #default="{ row }">
+                <div class="partition-asset-detail" v-for="line in row.details" :key="line">{{ line }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="错误" min-width="170">
+              <template #default="{ row }">{{ row.error || '-' }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+
+        <div v-else class="partition-detail-section">
+          <div class="quality-section-title">尝试历史</div>
+          <div class="partition-attempt-list">
+            <div v-for="attempt in partitionBatchDetailAttempts" :key="attempt.task_id" class="partition-attempt-item">
+              <div class="partition-attempt-main">
+                <div class="partition-attempt-head">
+                  <strong>{{ attempt.task_id }}</strong>
+                  <el-tag :type="partitionAttemptStatusType(attempt.status)" size="small">{{ partitionAttemptStatusText(attempt.status) }}</el-tag>
+                </div>
+                <div class="partition-attempt-meta">
+                  <span>{{ partitionOperationText(attempt.operation) }}</span>
+                  <span>第 {{ attempt.attempt_no }} 次</span>
+                  <span>创建 {{ formatPartitionTimestamp(attempt.created_at) }}</span>
+                  <span v-if="attempt.started_at">开始 {{ formatPartitionTimestamp(attempt.started_at) }}</span>
+                  <span v-if="attempt.finished_at">结束 {{ formatPartitionTimestamp(attempt.finished_at) }}</span>
+                  <span v-if="attempt.requested_by">提交者 {{ attempt.requested_by }}</span>
+                </div>
+                <div v-if="attempt.error_message" class="partition-attempt-error">{{ attempt.error_message }}</div>
+              </div>
+            </div>
+            <div v-if="!partitionBatchDetailAttempts.length" class="empty-state compact">
+              <p>尚无尝试记录</p>
+            </div>
+          </div>
+        </div>
+      </div>
     </el-drawer>
   </section>
 </template>
