@@ -18,6 +18,7 @@ from cube_split.jobs.ray_partition_core import (
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
 )
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.ingest.ray_ingest_job import (
     DEFAULT_MINIO_ACCESS_KEY,
     DEFAULT_MINIO_BUCKET,
@@ -285,6 +286,7 @@ def _run_partition_ingest(args: argparse.Namespace, run_dir: Path) -> dict[str, 
 
 def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     total_start = time.perf_counter()
+    check_cancelled(args)
     for key in ("SPARK_HOME", "SPARK_CONF_DIR", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(key, None)
 
@@ -300,6 +302,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not source_assets:
         raise RuntimeError(f"No .TIF assets found under: {input_dir}")
+    check_cancelled(args)
     backend_requested = args.partition_backend
     if backend_requested == "auto":
         backend = "ray" if args.ray_address else "thread"
@@ -321,8 +324,10 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             overviews="NONE",
             num_threads=(args.cog_num_threads or ""),
             target_crs=(args.target_crs or None),
+            cancellation_check=(getattr(args, "cancellation_check", None)),
         )
     cog_elapsed = time.perf_counter() - cog_start
+    check_cancelled(args)
 
     grid_tasks = build_grid_tasks_driver(
         assets=assets,
@@ -341,6 +346,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     chunk_size = _resolve_ray_chunk_size(len(grouped_tasks), parallelism, args.chunk_size)
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
     skip_verify = args.skip_verify or args.timing_mode
+    check_cancelled(args)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
@@ -487,8 +493,18 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             )
             for idx, chunk in enumerate(task_chunks)
         ]
-        for rows in ray.get(futures):
-            out_rows.extend(rows)
+        pending = list(futures)
+        try:
+            while pending:
+                check_cancelled(args)
+                ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+                if not ready:
+                    continue
+                for ready_ref in ready:
+                    out_rows.extend(ray.get(ready_ref))
+        except PartitionCancelledError:
+            cancel_ray_refs(ray, pending)
+            raise
     else:
         from cube_split.jobs.ray_partition_core import _process_local_task_group
 
@@ -500,11 +516,13 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
         with ThreadPoolExecutor(max_workers=parallelism) as pool:
             for rows in pool.map(process_chunk, task_chunks):
+                check_cancelled(args)
                 out_rows.extend(rows)
     elapsed = time.perf_counter() - start
     if backend == "ray":
         ray.shutdown()
 
+    check_cancelled(args)
     run_dir.mkdir(parents=True, exist_ok=True)
     with rows_path.open("w", encoding="utf-8") as fh:
         for row in out_rows:
@@ -527,6 +545,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     ingest_stats: dict[str, Any] | None = None
     ingest_elapsed = 0.0
     if ingest_enabled:
+        check_cancelled(args)
         ingest_start = time.perf_counter()
         ingest_stats = _run_partition_ingest(args, run_dir)
         ingest_elapsed = time.perf_counter() - ingest_start

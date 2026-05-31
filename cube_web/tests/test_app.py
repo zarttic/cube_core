@@ -16,6 +16,7 @@ from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
 from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
+from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.quality_report_store import set_quality_report_store
 
 
@@ -114,9 +115,13 @@ def quality_store():
     set_quality_report_store(store)
     config_store = FakeConfigStore()
     set_config_store(config_store)
+    set_partition_job_store(InMemoryPartitionJobStore())
+    web_app.partition_workflow_service._store = None
     yield store
     set_quality_report_store(None)
     set_config_store(None)
+    set_partition_job_store(None)
+    web_app.partition_workflow_service._store = None
 
 
 def test_header_navigation_does_not_expose_quality_as_top_level_item():
@@ -179,6 +184,15 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const selectedCarbonObservations = computed(() => {" in source
     assert "selected_observations: selectedObservations" in source
     assert "const productAssetSchema = [" in source
+    assert "const managedOpticalBatches = ref([]);" in source
+    assert "const partitionBatchDetailVisible = ref(false);" in source
+    assert "async function loadPartitionBatches()" in source
+    assert "requestGet(`${partitionPrefix}/batches?include_succeeded=false&limit=200`)" in source
+    assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
+    assert "取消会立即请求执行层中断当前任务" in source
+    assert "重试失败资产" in source
+    assert "partitionBatchDetailTab === 'attempts'" in source
+    assert "visibleOpticalBatches" in source
     assert "const dianzhongProductBbox = [100.644783, 23.28638, 104.829333, 27.061367];" in source
     assert "{ field: 'bbox', type: 'float[4]'" in source
     assert "{ field: 'corners', type: 'float[4][2]'" in source
@@ -894,6 +908,260 @@ def test_partition_test_can_run_as_async_task(monkeypatch):
     assert task_body["result"]["mode"] == "partition_test_no_ingest"
     assert task_body["result"]["ingest_enabled"] is False
     assert task_body["result"]["rows"] == 64
+
+
+def test_partition_schema_import_lists_batches_and_assets():
+    payload = {
+        "batch_id": "BATCH_IMPORT_1",
+        "batch_name": "Imported optical batch",
+        "data_type": "optical",
+        "assets": [
+            {
+                "source_uri": "s3://cube/cube/source/optocal/a.tif",
+                "scene_id": "scene-a",
+                "acq_time": "2026-05-30T00:00:00Z",
+                "bands": ["b1"],
+            }
+        ],
+    }
+
+    import_resp = client.post("/v1/partition/schemas/import", json=payload)
+    list_resp = client.get("/v1/partition/batches", params={"data_type": "optical"})
+    assets_resp = client.get("/v1/partition/batches/BATCH_IMPORT_1/assets")
+
+    assert import_resp.status_code == 200
+    assert import_resp.json()["status"] == "pending"
+    assert list_resp.status_code == 200
+    assert [batch["batch_id"] for batch in list_resp.json()["batches"]] == ["BATCH_IMPORT_1"]
+    assert assets_resp.status_code == 200
+    assets = assets_resp.json()["assets"]
+    assert len(assets) == 1
+    assert assets[0]["scene_id"] == "scene-a"
+
+
+def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_ATTEMPTS",
+            "batch_name": "Attempt detail",
+            "data_type": "optical",
+            "assets": [{"asset_id": "asset-a", "source_uri": "s3://cube/cube/source/optocal/a.tif", "scene_id": "scene-a"}],
+        },
+    )
+
+    def fake_run_optical_partition_demo(payload=None):
+        return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_ATTEMPTS/run", json={})
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
+        if task_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    attempts_resp = client.get("/v1/partition/batches/BATCH_ATTEMPTS/attempts")
+    assert attempts_resp.status_code == 200
+    attempts = attempts_resp.json()["attempts"]
+    assert len(attempts) == 1
+    assert attempts[0]["task_id"] == task_id
+    assert attempts[0]["operation"] == "auto_run"
+
+
+def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_RUN_SUCCESS",
+            "batch_name": "Run success",
+            "data_type": "product",
+            "assets": [{"source_uri": "s3://cube/cube/source/product/a.tif", "product_year": 2020}],
+            "normalized_payload": {"grid_type": "geohash", "grid_level": 5},
+        },
+    )
+
+    def fake_run_product_partition_demo(payload=None):
+        assert payload["batch_id"] == "BATCH_RUN_SUCCESS"
+        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 2}
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_demo", fake_run_product_partition_demo)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_RUN_SUCCESS/run", json={})
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
+        if task_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    batch_resp = client.get("/v1/partition/batches/BATCH_RUN_SUCCESS")
+    pending_resp = client.get("/v1/partition/batches")
+    history_resp = client.get("/v1/partition/batches", params={"include_succeeded": True})
+
+    assert batch_resp.json()["status"] == "succeeded"
+    assert batch_resp.json()["partitioned_at"]
+    assert "BATCH_RUN_SUCCESS" not in [batch["batch_id"] for batch in pending_resp.json()["batches"]]
+    assert "BATCH_RUN_SUCCESS" in [batch["batch_id"] for batch in history_resp.json()["batches"]]
+
+
+def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_FAIL_RETRY",
+            "batch_name": "Fail retry",
+            "data_type": "optical",
+            "max_auto_retries": 1,
+            "assets": [{"source_uri": "s3://cube/cube/source/optocal/fail.tif", "scene_id": "fail"}],
+        },
+    )
+
+    def fail_optical(_payload=None):
+        raise RuntimeError("source missing")
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fail_optical)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_FAIL_RETRY/run", json={})
+    assert submit_resp.status_code == 202
+    first_task_id = submit_resp.json()["task_id"]
+
+    for _ in range(50):
+        batch = client.get("/v1/partition/batches/BATCH_FAIL_RETRY").json()
+        if batch["status"] == "manual_required":
+            break
+        time.sleep(0.02)
+
+    batch = client.get("/v1/partition/batches/BATCH_FAIL_RETRY").json()
+    assert batch["status"] == "manual_required"
+    assert batch["attempt_count"] == 2
+    assert batch["last_task_id"] != first_task_id
+    assert "source missing" in batch["last_error"]
+
+
+def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_ASSET_RETRY",
+            "batch_name": "Asset retry",
+            "data_type": "optical",
+            "assets": [
+                {"asset_id": "asset-a", "source_uri": "s3://cube/cube/source/optocal/a.tif", "scene_id": "a"},
+                {"asset_id": "asset-b", "source_uri": "s3://cube/cube/source/optocal/b.tif", "scene_id": "b"},
+            ],
+        },
+    )
+    captured = {}
+
+    def fake_run_optical_partition_demo(payload=None):
+        captured["payload"] = payload
+        return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    submit_resp = client.post("/v1/partition/assets/retry", json={"asset_ids": ["asset-b"]})
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    assert [asset["asset_id"] for asset in captured["payload"]["selected_assets"]] == ["asset-b"]
+
+
+def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_CANCEL",
+            "batch_name": "Cancel",
+            "data_type": "product",
+            "assets": [{"asset_id": "cancel-a", "source_uri": "s3://cube/cube/source/product/a.tif"}],
+        },
+    )
+
+    def slow_product(_payload=None):
+        time.sleep(0.2)
+        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_demo", slow_product)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL/run", json={})
+    task_id = submit_resp.json()["task_id"]
+    cancel_resp = client.post(f"/v1/partition/tasks/{task_id}/cancel")
+
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] in {"cancel_requested", "cancelled"}
+
+
+def test_partition_task_cancel_keeps_running_task_from_completing(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_CANCEL_RUNNING",
+            "batch_name": "Cancel running",
+            "data_type": "product",
+            "assets": [{"asset_id": "cancel-b", "source_uri": "s3://cube/cube/source/product/b.tif"}],
+        },
+    )
+
+    def slow_product(payload=None):
+        time.sleep(0.1)
+        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
+
+    monkeypatch.setattr("cube_web.app._run_product_partition_demo", slow_product)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_RUNNING/run", json={})
+    task_id = submit_resp.json()["task_id"]
+    client.post(f"/v1/partition/tasks/{task_id}/cancel")
+
+    for _ in range(50):
+        task = client.get(f"/v1/partition/tasks/{task_id}").json()
+        if task["status"] in {"cancelled", "cancel_requested"}:
+            break
+        time.sleep(0.01)
+
+    task = client.get(f"/v1/partition/tasks/{task_id}").json()
+    assert task["status"] in {"cancelled", "cancel_requested"}
+
+
+def test_partition_cancelled_runner_marks_batch_cancelled(monkeypatch):
+    from cube_split.jobs.cancellation import PartitionCancelledError
+
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_CANCEL_EXCEPTION",
+            "batch_name": "Cancel exception",
+            "data_type": "optical",
+            "assets": [{"asset_id": "cancel-ex", "source_uri": "s3://cube/cube/source/optocal/c.tif"}],
+        },
+    )
+
+    def cancelled_optical(payload=None):
+        raise PartitionCancelledError("Partition task cancelled")
+
+    monkeypatch.setattr("cube_web.app._run_optical_partition_demo", cancelled_optical)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_EXCEPTION/run", json={})
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        task = client.get(f"/v1/partition/tasks/{task_id}").json()
+        if task["status"] == "cancelled":
+            break
+        time.sleep(0.01)
+
+    task = client.get(f"/v1/partition/tasks/{task_id}").json()
+    batch = client.get("/v1/partition/batches/BATCH_CANCEL_EXCEPTION").json()
+    assert task["status"] == "cancelled"
+    assert batch["status"] == "cancelled"
 
 
 def test_optical_partition_test_endpoint(monkeypatch):

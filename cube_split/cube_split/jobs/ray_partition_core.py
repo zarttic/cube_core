@@ -349,6 +349,7 @@ def convert_assets_to_cog(
     num_threads: str = "ALL_CPUS",
     target_crs: str | None = None,
     source_options: dict[str, Any] | None = None,
+    cancellation_check: Any | None = None,
 ) -> list[AssetRecord]:
     if not assets:
         return []
@@ -371,6 +372,10 @@ def convert_assets_to_cog(
         creation_options["NUM_THREADS"] = str(num_threads)
 
     def convert_one(asset: AssetRecord) -> AssetRecord:
+        if cancellation_check is not None and cancellation_check():
+            from cube_split.jobs.cancellation import PartitionCancelledError
+
+            raise PartitionCancelledError("Partition task cancelled")
         return convert_asset_to_cog(
             asset,
             cog_input_dir=cog_input_dir,
@@ -381,10 +386,24 @@ def convert_assets_to_cog(
         )
 
     if worker_count == 1:
-        return [convert_one(asset) for asset in assets]
+        converted = []
+        for asset in assets:
+            if cancellation_check is not None and cancellation_check():
+                from cube_split.jobs.cancellation import PartitionCancelledError
+
+                raise PartitionCancelledError("Partition task cancelled")
+            converted.append(convert_one(asset))
+        return converted
 
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
-        return list(pool.map(convert_one, assets))
+        converted = []
+        for item in pool.map(convert_one, assets):
+            if cancellation_check is not None and cancellation_check():
+                from cube_split.jobs.cancellation import PartitionCancelledError
+
+                raise PartitionCancelledError("Partition task cancelled")
+            converted.append(item)
+        return converted
 
 
 def cog_creation_options(

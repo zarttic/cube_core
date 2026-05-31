@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import repeat
 from pathlib import Path
@@ -23,6 +23,7 @@ from cube_split.partition.carbon_products import (
     normalize_carbon_product_type,
     supported_carbon_product_types,
 )
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs
 
 UTC = timezone.utc
 
@@ -38,6 +39,7 @@ class CarbonPartitionConfig:
     partition_chunk_size: int = 1000
     partition_backend: str = "process"
     ray_address: str = ""
+    cancellation_check: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -481,13 +483,16 @@ def _partition_chunks(
 ) -> list[dict[str, Any]]:
     if not chunks:
         return []
+    worker_config = replace(config, cancellation_check=None)
     if config.partition_backend == "ray":
         return _partition_chunks_with_ray(chunks, config, worker_count)
 
     rows: list[dict[str, Any]] = []
     if worker_count == 1 or len(chunks) <= 1:
         for chunk in chunks:
-            rows.extend(_partition_observation_chunk(chunk, config))
+            if config.cancellation_check is not None and config.cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            rows.extend(_partition_observation_chunk(chunk, worker_config))
         return rows
 
     if config.partition_backend == "process":
@@ -498,7 +503,9 @@ def _partition_chunks(
         raise ValueError("partition_backend must be 'process', 'thread', or 'ray'")
 
     with executor_cls(max_workers=worker_count) as pool:
-        for part in pool.map(_partition_observation_chunk, chunks, repeat(config)):
+        for part in pool.map(_partition_observation_chunk, chunks, repeat(worker_config)):
+            if config.cancellation_check is not None and config.cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
             rows.extend(part)
     return rows
 
@@ -577,6 +584,7 @@ def _partition_chunks_with_ray(
     ray = _load_ray()
     _init_ray(ray, config.ray_address)
     parallelism = max(1, min(worker_count, len(chunks)))
+    worker_config = replace(config, cancellation_check=None)
 
     @ray.remote
     class CarbonChunkProcessor:
@@ -610,12 +618,36 @@ def _partition_chunks_with_ray(
     try:
         actor_cls = CarbonChunkProcessor.options(**_ray_actor_options_from_env())
         actors = [actor_cls.remote() for _ in range(parallelism)]
-        futures = [
-            actors[idx % parallelism].process_chunk.remote(chunk, config)
-            for idx, chunk in enumerate(chunks)
-        ]
-        for part in ray.get(futures):
-            rows.extend(part)
+        if not hasattr(ray, "wait"):
+            futures = [
+                actors[idx % parallelism].process_chunk.remote(chunk, worker_config)
+                for idx, chunk in enumerate(chunks)
+            ]
+            for part in ray.get(futures):
+                rows.extend(part)
+            return rows
+        next_idx = 0
+        pending = []
+        while next_idx < len(chunks) and len(pending) < parallelism:
+            if config.cancellation_check is not None and config.cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            pending.append(actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config))
+            next_idx += 1
+        while pending:
+            if config.cancellation_check is not None and config.cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not ready:
+                continue
+            rows.extend(ray.get(ready[0]))
+            while next_idx < len(chunks) and len(pending) < parallelism:
+                if config.cancellation_check is not None and config.cancellation_check():
+                    raise PartitionCancelledError("Partition task cancelled")
+                pending.append(actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config))
+                next_idx += 1
+    except PartitionCancelledError:
+        cancel_ray_refs(ray, pending)
+        raise
     finally:
         ray.shutdown()
     return rows
@@ -639,8 +671,14 @@ class CarbonSatellitePartitionService:
             raise RuntimeError(f"No carbon observation .jsonl/.csv files found under: {input_dir}")
 
         worker_count = max(1, workers)
+        if cfg.cancellation_check is not None and cfg.cancellation_check():
+            raise PartitionCancelledError("Partition task cancelled")
         chunks = _load_observation_chunks(files, cfg, worker_count)
+        if cfg.cancellation_check is not None and cfg.cancellation_check():
+            raise PartitionCancelledError("Partition task cancelled")
         rows = _partition_chunks(chunks, cfg, worker_count)
+        if cfg.cancellation_check is not None and cfg.cancellation_check():
+            raise PartitionCancelledError("Partition task cancelled")
 
         output_dir.mkdir(parents=True, exist_ok=True)
         rows_path = output_dir / "carbon_observation_rows.jsonl"

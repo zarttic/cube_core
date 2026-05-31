@@ -14,6 +14,7 @@ from cube_web.routes.sdk import create_sdk_router
 from cube_web.schemas import PartitionDemoRequest, PartitionRetryRequest, payload_from_model
 from cube_web.services import auth_service, partition_runners, quality_checks, quality_service
 from cube_web.services.partition_service import PartitionService, build_partition_registry
+from cube_web.services.partition_workflow import PartitionWorkflowService
 from cube_web.services.quality_pdf import quality_report_pdf_response, quality_report_text_response
 from cube_web.services.quality_report_store import get_quality_report_store
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
@@ -57,8 +58,14 @@ run_product_quality_check = quality_checks.run_product_quality_check
 run_carbon_quality_check = quality_checks.run_carbon_quality_check
 
 
-def _run_carbon_partition_demo() -> dict:
-    return partition_runners._run_carbon_partition_demo()
+def _raise_http_unless_cancelled(exc: Exception) -> None:
+    if exc.__class__.__name__ == "PartitionCancelledError":
+        raise exc
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _run_carbon_partition_demo(payload: dict | None = None) -> dict:
+    return partition_runners._run_carbon_partition_demo(payload=payload)
 
 
 def _run_carbon_partition_test(payload: dict | None = None) -> dict:
@@ -210,67 +217,69 @@ async def handle_grid_core_error(_: Request, exc: GridCoreError):
     return JSONResponse(status_code=status_code, content={"error": {"code": exc.code, "message": exc.message}})
 
 
-def partition_carbon_demo() -> dict:
+def partition_carbon_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
-        return _run_carbon_partition_demo()
+        if payload is None:
+            return _run_carbon_partition_demo()
+        return _run_carbon_partition_demo(payload_from_model(payload))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_carbon_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_carbon_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_carbon_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
         return _run_carbon_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_product_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_product_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_product_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_product_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_product_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
         return _run_product_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_entity_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_entity_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_entity_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_entity_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_entity_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
         return _run_entity_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_radar_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
@@ -285,21 +294,21 @@ def partition_optical_demo(payload: PartitionDemoRequest | dict | None = None) -
     try:
         return _run_optical_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_optical_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
     try:
         return _run_optical_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def partition_optical_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
     try:
         return _run_optical_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_http_unless_cancelled(exc)
 
 
 def _run_optical_partition_retry(payload: dict | None = None) -> dict:
@@ -417,7 +426,7 @@ partition_service = PartitionService(
         optical_demo=partition_optical_demo,
         optical_test=partition_optical_test,
         optical_retry=partition_optical_retry,
-        carbon_demo=lambda payload=None: partition_carbon_demo(),
+        carbon_demo=partition_carbon_demo,
         carbon_test=partition_carbon_test,
         carbon_retry=partition_carbon_retry,
         product_demo=partition_product_demo,
@@ -428,11 +437,12 @@ partition_service = PartitionService(
         entity_retry=partition_entity_retry,
     )
 )
+partition_workflow_service = PartitionWorkflowService(partition_service)
 api_router.include_router(create_sdk_router(sdk))
 api_router.include_router(create_quality_router())
 api_router.include_router(create_ingest_router())
 api_router.include_router(create_config_router())
-api_router.include_router(create_partition_router(partition_service))
+api_router.include_router(create_partition_router(partition_service, partition_workflow_service))
 app.include_router(api_router)
 app.include_router(auth_router)
 
