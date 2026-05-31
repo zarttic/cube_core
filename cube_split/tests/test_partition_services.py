@@ -633,7 +633,7 @@ def test_carbon_ray_runtime_env_ships_project_code(monkeypatch):
     runtime_env = _ray_runtime_env_from_env()
 
     assert runtime_env is not None
-    assert runtime_env["working_dir"].endswith("cube_project")
+    assert Path(runtime_env["working_dir"]).resolve() == Path(__file__).resolve().parents[2]
     assert runtime_env["env_vars"]["PYTHONPATH"] == ".:./cube_encoder:./cube_split:./cube_web"
     assert "cube_split/data/**" in runtime_env["excludes"]
 
