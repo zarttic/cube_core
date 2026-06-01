@@ -33,7 +33,7 @@ Builds the `cube-encoder` distribution.
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-Runs the web UI with Python 3.8, the in-repo SDK, and partition backends.
+Runs the web UI with Python 3.8, the in-repo SDK, and partition backends. Runtime service endpoints are auto-loaded from local `.cube_web.env` when matching environment variables are not already set.
 
 ## Coding Style & Naming Conventions
 
@@ -68,6 +68,46 @@ If `gh` authentication or GitHub CLI access fails inside the sandbox, retry the 
 ## Security & Configuration Tips
 
 Do not commit local data, caches, `.pytest_cache/`, `__pycache__/`, virtual environments, or large ingest inputs. Keep service endpoints configurable; avoid hard-coding machine-specific IPs.
+
+## Web Runtime Configuration
+
+Web startup configuration is runtime-only. Do not store PostgreSQL DSNs, Ray addresses, MinIO endpoints, portal URLs, or credentials in the `cube_web_configs` table. That table is for user-editable business defaults only:
+
+- `partition`
+- `ingest`
+- `quality`
+
+`cube_split.runtime_config` resolves runtime values in this order:
+
+1. Process environment variables.
+2. `CUBE_WEB_ENV_FILE`, when set.
+3. Local `.cube_web.env` in the current working directory or repository root.
+4. Code defaults where present.
+
+The repository ignores `.cube_web.env`. Keep it local and do not commit credentials. A local deployment file should contain at least:
+
+```bash
+CUBE_WEB_POSTGRES_DSN=postgresql://<user>:<password>@127.0.0.1:55432/cube
+CUBE_WEB_RAY_ADDRESS=ray://10.136.1.13:10001
+CUBE_WEB_MINIO_ENDPOINT=10.136.1.14:9000
+CUBE_WEB_MINIO_BUCKET=cube
+```
+
+Current runtime endpoints:
+
+- **PostgreSQL**: Podman container `cube-pg`, host port `127.0.0.1:55432`, database `cube`.
+- **Ray**: `ray://10.136.1.13:10001`.
+- **MinIO**: `10.136.1.14:9000`, bucket `cube`, `secure=false`.
+
+The configuration page must display runtime startup information for PostgreSQL, Ray, and MinIO, but must not persist those values back into `cube_web_configs`.
+
+Portal navigation is runtime configuration, not configuration-management data. Defaults are:
+
+- 首页: `http://10.136.1.14:5176/#/home`
+- 剖分数据服务: `http://10.136.1.14:5176/#/partition`
+- 资源调度: `http://10.136.1.14:5176/#/dispatch`
+- ARD数据载入: `http://10.136.1.14:5177/ard`
+- 后台管理: `http://10.136.1.14:5177/admin`
 
 ---
 

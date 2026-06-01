@@ -3,10 +3,8 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from cube_split.runtime_config import postgres_dsn
-
 
 BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_requested"}
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
@@ -677,15 +675,15 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
     if not batch_id:
         raise ValueError("batch_id is required")
     data_type = str(schema.get("data_type") or "optical").strip().lower()
-    if data_type not in {"optical", "product", "carbon"}:
-        raise ValueError("data_type must be one of: optical, product, carbon")
+    if data_type not in {"optical", "product", "carbon", "radar"}:
+        raise ValueError("data_type must be one of: optical, product, carbon, radar")
     batch_name = str(schema.get("batch_name") or schema.get("name") or batch_id).strip()
     payload = copy.deepcopy(schema.get("normalized_payload") or schema.get("payload") or {})
     if not isinstance(payload, dict):
         raise ValueError("normalized_payload must be an object")
     payload.setdefault("batch_id", batch_id)
     payload.setdefault("batch_name", batch_name)
-    if data_type in {"optical", "product"}:
+    if data_type in {"optical", "product", "radar"}:
         payload.setdefault("selected_assets", copy.deepcopy(schema.get("assets") or schema.get("selected_assets") or []))
     elif data_type == "carbon":
         payload.setdefault("selected_observations", copy.deepcopy(schema.get("observations") or schema.get("selected_observations") or []))

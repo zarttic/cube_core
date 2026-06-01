@@ -9,7 +9,6 @@ from typing import Any
 
 from cube_split.quality import optical_quality
 
-
 REQUIRED_CARBON_FIELDS = {
     "data_type",
     "satellite",

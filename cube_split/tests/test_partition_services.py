@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, get_partition_service
+from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, RadarPartitionService, get_partition_service
 from cube_split.partition.carbon import (
     CarbonPartitionConfig,
     CarbonSatelliteObservation,
@@ -19,17 +19,29 @@ from cube_split.partition.carbon import (
     partition_observation,
 )
 from cube_split.partition.carbon_products import get_carbon_product_adapter, supported_carbon_product_types
+from cube_split.partition.radar_products import parse_radar_asset
 
 
 def test_partition_registry_separates_optical_and_carbon_services():
     assert isinstance(get_partition_service("optical"), OpticalPartitionService)
     assert isinstance(get_partition_service("carbon_satellite"), CarbonSatellitePartitionService)
+    assert isinstance(get_partition_service("radar"), RadarPartitionService)
 
 
 def test_optical_service_declares_landsat_and_sentinel2_families():
     service = OpticalPartitionService()
 
     assert service.supported_families == ("landsat", "sentinel2", "other")
+
+
+def test_radar_asset_parser_extracts_sentinel1_date_and_polarization():
+    metadata = parse_radar_asset(Path("20180615_VV.dat"))
+
+    assert metadata.scene_id == "S1_20180615"
+    assert metadata.band == "vv"
+    assert metadata.acq_time.isoformat() == "2018-06-15T00:00:00+00:00"
+    assert metadata.product_family == "sentinel1"
+    assert metadata.sensor == "sentinel1_sar"
 
 
 def test_carbon_observation_partition_outputs_observation_fact():

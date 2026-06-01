@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-
 DEFAULT_POSTGRES_DSN = ""
 DEFAULT_RAY_ADDRESS = ""
 DEFAULT_MINIO_ENDPOINT = ""
@@ -20,6 +19,11 @@ DEFAULT_AUTH_TOKEN_PATH = "/api/token"
 DEFAULT_AUTH_LOGOUT_PATH = "/api/logout"
 DEFAULT_PORTAL_DATA_PATH = "/ard"
 DEFAULT_PORTAL_ADMIN_PATH = "/admin"
+DEFAULT_PORTAL_HOME_URL = "http://10.136.1.14:5176/#/home"
+DEFAULT_PORTAL_DATA_INGEST_URL = "http://10.136.1.14:5177/ard"
+DEFAULT_PORTAL_PARTITION_SERVICE_URL = "http://10.136.1.14:5176/#/partition"
+DEFAULT_PORTAL_DISPATCH_URL = "http://10.136.1.14:5176/#/dispatch"
+DEFAULT_PORTAL_ADMIN_URL = "http://10.136.1.14:5177/admin"
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class AuthSettings:
 @dataclass(frozen=True)
 class PortalSettings:
     main_system_url: str
+    home_url: str
     data_ingest_url: str
     partition_service_url: str
     dispatch_url: str
@@ -124,12 +129,14 @@ def auth_settings() -> AuthSettings:
 def portal_settings() -> PortalSettings:
     auth = auth_settings()
     main_url = env_text("CUBE_WEB_PORTAL_MAIN_URL") or auth.main_system_url
-    partition_url = env_text("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL")
-    dispatch_url = env_text("CUBE_WEB_PORTAL_DISPATCH_URL")
-    data_ingest_url = env_text("CUBE_WEB_PORTAL_DATA_INGEST_URL") or join_url(main_url, DEFAULT_PORTAL_DATA_PATH)
-    admin_url = env_text("CUBE_WEB_PORTAL_ADMIN_URL") or join_url(main_url, DEFAULT_PORTAL_ADMIN_PATH)
+    home_url = env_text("CUBE_WEB_PORTAL_HOME_URL") or DEFAULT_PORTAL_HOME_URL
+    partition_url = env_text("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL") or DEFAULT_PORTAL_PARTITION_SERVICE_URL
+    dispatch_url = env_text("CUBE_WEB_PORTAL_DISPATCH_URL") or DEFAULT_PORTAL_DISPATCH_URL
+    data_ingest_url = env_text("CUBE_WEB_PORTAL_DATA_INGEST_URL") or join_url(main_url, DEFAULT_PORTAL_DATA_PATH) or DEFAULT_PORTAL_DATA_INGEST_URL
+    admin_url = env_text("CUBE_WEB_PORTAL_ADMIN_URL") or join_url(main_url, DEFAULT_PORTAL_ADMIN_PATH) or DEFAULT_PORTAL_ADMIN_URL
     return PortalSettings(
         main_system_url=main_url,
+        home_url=home_url,
         data_ingest_url=data_ingest_url,
         partition_service_url=partition_url,
         dispatch_url=dispatch_url,
@@ -140,9 +147,10 @@ def portal_settings() -> PortalSettings:
 def navigation_items() -> list[dict[str, str]]:
     settings = portal_settings()
     items = [
-        ("ARD数据载入", settings.data_ingest_url),
+        ("首页", settings.home_url),
         ("剖分数据服务", settings.partition_service_url),
         ("资源调度", settings.dispatch_url),
+        ("ARD数据载入", settings.data_ingest_url),
         ("后台管理", settings.admin_url),
     ]
     return [{"label": label, "kind": "external", "url": url} for label, url in items if url]
@@ -165,8 +173,44 @@ def minio_service_env(path: Path | str = "/etc/default/minio") -> dict[str, str]
 def env_text(name: str, default: str = "") -> str:
     value = os.environ.get(name)
     if value is None:
+        value = local_env_values().get(name)
+    if value is None:
         return default
     return value.strip() or default
+
+
+def local_env_values() -> dict[str, str]:
+    env_file = os.environ.get("CUBE_WEB_ENV_FILE")
+    if env_file:
+        return read_env_file(Path(env_file))
+    for path in env_file_candidates():
+        values = read_env_file(path)
+        if values:
+            return values
+    return {}
+
+
+def env_file_candidates() -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [Path.cwd() / ".cube_web.env", repo_root / ".cube_web.env"]
+    unique: list[Path] = []
+    for path in candidates:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
 def join_url(base: str, path: str) -> str:

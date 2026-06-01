@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from grid_core.app.core.enums import TimeGranularity
 from grid_core.app.core.exceptions import ValidationError
 
-
 TIME_FORMATS = {
     TimeGranularity.SECOND: "%Y%m%d%H%M%S",
     TimeGranularity.MINUTE: "%Y%m%d%H%M",

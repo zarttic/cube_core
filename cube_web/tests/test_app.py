@@ -15,14 +15,13 @@ from s2sphere import CellId
 import cube_web.app as web_app
 import cube_web.routes.partition_adapters as partition_adapters
 import cube_web.routes.quality_adapters as quality_adapters
-from cube_web.services import partition_runners
 from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
+from cube_web.services import partition_runners
 from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.quality_report_store import set_quality_report_store
-
 
 client = TestClient(app)
 
@@ -119,6 +118,7 @@ def quality_store(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "ray://10.136.1.13:10001")
     monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
     monkeypatch.setenv("CUBE_WEB_MINIO_BUCKET", "cube")
+    monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
     store = FakeQualityReportStore()
     set_quality_report_store(store)
     config_store = FakeConfigStore()
@@ -186,7 +186,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "carbon: 'carbon'" in source
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
-    assert "const testModules = new Set(['optical', 'carbon', 'product']);" in source
+    assert "const testModules = new Set(['optical', 'carbon', 'radar', 'product']);" in source
     assert "const operation = testModules.has(activeModule.value) ? 'test' : 'demo';" in source
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
@@ -196,6 +196,9 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const selectedCarbonObservations = computed(() => {" in source
     assert "selected_observations: selectedObservations" in source
     assert "const productAssetSchema = [" in source
+    assert "const radarAssetSchema = [" in source
+    assert "RADAR_BATCH_YANGZHOU_S1_2018_2020" in source
+    assert "selectedRadarAssets" in source
     assert "const managedOpticalBatches = ref([]);" in source
     assert "const partitionBatchDetailVisible = ref(false);" in source
     assert "async function loadPartitionBatches()" in source
@@ -211,11 +214,12 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "bbox: dianzhongProductBbox, corners: dianzhongProductCorners" in source
     assert "const selectedProductAssets = computed(() => {" in source
     assert "const productMapGeometries = computed(() => selectedProductAssets.value" in source
-    assert "const selectedMapAssets = computed(() => (activeModule.value === 'product' ? selectedProductAssets.value : selectedOpticalAssets.value));" in source
-    assert "activeModule.value === 'product' ? productGridType.value : opticalGridType.value" in source
+    assert "activeModule.value === 'radar'" in source
+    assert "? selectedRadarAssets.value" in source
+    assert "? radarGridType.value" in source
     assert "const defaultEntityGridLevel = 3;" in source
     assert "const entityGridLevel = ref(defaultEntityGridLevel);" in source
-    assert "opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value" in source
+    assert "activeModule.value === 'radar' ? radarGridLevel.value" in source
     assert "activeModule === 'product' ? '产品范围地图预览'" in source
     assert "selected_assets: selectedAssets" in source
     assert "function buildPartitionFailureResult(error, request = {})" in source
@@ -245,6 +249,7 @@ def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
     monkeypatch.delenv("CUBE_WEB_POSTGRES_DSN", raising=False)
     monkeypatch.delenv("POSTGRES_DSN", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/tmp/cube-web-missing-env-file")
     monkeypatch.setattr(
         quality_report_store_module,
         "PostgresQualityReportStore",
@@ -301,12 +306,47 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "main_system_url": "http://10.136.1.14:5177",
         "auth_required": False,
         "navigation": [
-            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
+            {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
             {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
             {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
+            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
             {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
         ],
     }
+
+
+def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch):
+    monkeypatch.delenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_MAIN_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_DATA_INGEST_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_DISPATCH_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_ADMIN_URL", raising=False)
+    store = FakeConfigStore()
+    store.update_config(
+        {
+            "runtime": {
+                "portal": {
+                    "navigation": [
+                        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:9001"},
+                        {"label": "剖分数据服务", "kind": "internal", "path": "/partition"},
+                    ]
+                }
+            }
+        }
+    )
+    set_config_store(store)
+
+    resp = client.get("/api/config")
+
+    assert resp.status_code == 200
+    assert resp.json()["navigation"] == [
+        {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
+        {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
+        {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
+        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
+        {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
+    ]
 
 
 def test_auth_config_exposes_runtime_auth_switch(monkeypatch):
@@ -404,6 +444,11 @@ def test_config_get_returns_defaults():
     assert body["config"]["ingest"]["optical"]["minio_bucket"] == "cube"
     assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@127.0.0.1:55432/cube"
     assert body["runtime"]["ray_address"] == "ray://10.136.1.13:10001"
+    assert body["runtime"]["minio"] == {
+        "endpoint": "10.136.1.14:9000",
+        "bucket": "cube",
+        "secure": False,
+    }
 
 
 def test_config_update_persists_normalized_values():
@@ -421,6 +466,8 @@ def test_config_update_persists_normalized_values():
                 },
                 "ingest": {"optical": {"dataset": "customer_demo", "sensor": "landsat", "quality_rule": "latest_wins"}},
                 "quality": {"optical": {"history_limit": 50}},
+                "runtime": {"portal": {"navigation": [{"label": "unused", "kind": "external", "url": "http://example.test"}]}},
+                "unused": {"value": True},
             }
         },
     )
@@ -433,9 +480,12 @@ def test_config_update_persists_normalized_values():
     assert body["config"]["partition"]["optical"]["cover_mode"] == "contain"
     assert body["config"]["ingest"]["optical"]["dataset"] == "customer_demo"
     assert body["config"]["quality"]["optical"]["history_limit"] == 50
+    assert "runtime" not in body["config"]
+    assert "unused" not in body["config"]
 
     get_resp = client.post("/v1/config/get", json={})
     assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+    assert "runtime" not in get_resp.json()["config"]
 
 
 def test_config_update_rejects_invalid_values():
@@ -959,6 +1009,35 @@ def test_partition_schema_import_lists_batches_and_assets():
     assets = assets_resp.json()["assets"]
     assert len(assets) == 1
     assert assets[0]["scene_id"] == "scene-a"
+
+
+def test_radar_partition_schema_import_lists_batches_and_assets():
+    payload = {
+        "batch_id": "RADAR_IMPORT_1",
+        "batch_name": "Imported radar batch",
+        "data_type": "radar",
+        "assets": [
+            {
+                "source_uri": "/data/radar/20180615_VV.dat",
+                "scene_id": "S1_20180615",
+                "acq_time": "2018-06-15T00:00:00Z",
+                "bands": ["vv"],
+            }
+        ],
+    }
+
+    import_resp = client.post("/v1/partition/schemas/import", json=payload)
+    list_resp = client.get("/v1/partition/batches", params={"data_type": "radar"})
+    assets_resp = client.get("/v1/partition/batches/RADAR_IMPORT_1/assets")
+
+    assert import_resp.status_code == 200
+    assert import_resp.json()["status"] == "pending"
+    assert list_resp.status_code == 200
+    assert [batch["batch_id"] for batch in list_resp.json()["batches"]] == ["RADAR_IMPORT_1"]
+    assert assets_resp.status_code == 200
+    assets = assets_resp.json()["assets"]
+    assert len(assets) == 1
+    assert assets[0]["scene_id"] == "S1_20180615"
 
 
 def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
@@ -1588,14 +1667,126 @@ def test_product_partition_retry_endpoint(monkeypatch):
     assert body["retry"]["strategy"] == "full_request"
 
 
-def test_radar_partition_endpoints_return_not_implemented():
-    demo_resp = client.post("/v1/partition/radar/demo", json={})
-    retry_resp = client.post("/v1/partition/radar/retry", json={})
+def test_radar_partition_demo_endpoint(monkeypatch):
+    def fake_run_radar_partition_demo(payload=None):
+        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "radar",
+            "rows": 12,
+        }
 
-    assert demo_resp.status_code == 501
-    assert retry_resp.status_code == 501
-    assert "not implemented" in demo_resp.json()["detail"]
-    assert "not implemented" in retry_resp.json()["detail"]
+    monkeypatch.setattr(partition_adapters, "run_radar_partition_demo", fake_run_radar_partition_demo)
+
+    resp = client.post("/v1/partition/radar/demo", json={"grid_type": "geohash", "grid_level": 5})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data_type"] == "radar"
+    assert body["mode"] == "partition_demo"
+
+
+def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    selected = source_dir / "20180615_VV.dat"
+    selected_hdr = source_dir / "20180615_VV.hdr"
+    ignored = source_dir / "20180615_VH.dat"
+    selected.write_text("selected", encoding="utf-8")
+    selected_hdr.write_text("hdr", encoding="utf-8")
+    ignored.write_text("ignored", encoding="utf-8")
+    captured = {}
+
+    def fake_demo_run_dir(name):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir()
+        return run_dir
+
+    def fake_run_logical_partition(args):
+        captured["input_dir"] = Path(args.input_dir)
+        captured["manifest_path"] = Path(args.manifest_path)
+        captured["files"] = sorted(path.name for path in Path(args.input_dir).iterdir())
+        captured["data_type"] = args.data_type
+        captured["product_family"] = args.product_family
+        captured["partition_backend"] = args.partition_backend
+        captured["metadata_backend"] = args.metadata_backend
+        captured["asset_storage_backend"] = args.asset_storage_backend
+        captured["ingest_enabled"] = args.ingest_enabled
+        run_dir = tmp_path / "run-root" / "output" / "run"
+        run_dir.mkdir(parents=True)
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "radar",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "thread",
+            "execution_engine": "thread",
+        }
+
+    monkeypatch.setattr(partition_runners, "_demo_run_dir", fake_demo_run_dir)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+
+    result = partition_runners._run_radar_partition_test(
+        {
+            "input_dir": str(source_dir),
+            "selected_assets": [
+                {
+                    "source_uri": "20180615_VV.dat",
+                    "scene_id": "S1_20180615",
+                    "band": "vv",
+                    "polarization": "vv",
+                    "acq_time": "2018-06-15T00:00:00Z",
+                    "bbox": [119.2, 32.2, 119.5, 32.7],
+                    "corners": [[119.2, 32.7], [119.5, 32.7], [119.5, 32.2], [119.2, 32.2]],
+                }
+            ],
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["ingest_enabled"] is False
+    assert result["selected_asset_count"] == 1
+    assert captured["data_type"] == "radar"
+    assert captured["product_family"] == "sentinel1"
+    assert captured["partition_backend"] == "thread"
+    assert captured["metadata_backend"] == "none"
+    assert captured["asset_storage_backend"] == "local"
+    assert captured["ingest_enabled"] is False
+    assert captured["files"] == ["20180615_VV.dat", "20180615_VV.hdr"]
+    manifest = json.loads(captured["manifest_path"].read_text(encoding="utf-8"))
+    assert manifest["data_type"] == "radar"
+    assert manifest["assets"][0]["source_uri"] == str(captured["input_dir"] / "20180615_VV.dat")
+    assert manifest["assets"][0]["band"] == "vv"
+
+
+def test_radar_partition_retry_endpoint(monkeypatch):
+    def fake_run_radar_partition_retry(payload=None):
+        assert payload == {"request": {"endpoint": "radar", "payload": {}}, "last_result": {"status": "completed"}}
+        return {
+            "status": "completed",
+            "mode": "partition_retry",
+            "data_type": "radar",
+            "rows": 20,
+            "retry": {"strategy": "full_request"},
+        }
+
+    monkeypatch.setattr(partition_adapters, "run_radar_partition_retry", fake_run_radar_partition_retry)
+
+    resp = client.post(
+        "/v1/partition/radar/retry",
+        json={"request": {"endpoint": "radar", "payload": {}}, "last_result": {"status": "completed"}},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "partition_retry"
+    assert body["retry"]["strategy"] == "full_request"
 
 
 def test_optical_quality_endpoint(monkeypatch):

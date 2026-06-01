@@ -8,8 +8,8 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-from cube_split.quality.optical_quality import run_quality_check
 from cube_split.quality.carbon_quality import run_quality_check as run_carbon_quality_check
+from cube_split.quality.optical_quality import run_quality_check
 
 
 def _write_tif(path: Path, *, crs: str = "EPSG:4326") -> None:

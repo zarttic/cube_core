@@ -20,7 +20,7 @@ def create_auth_router() -> APIRouter:
             "redirect_uri": settings.redirect_uri,
             "main_system_url": portal.main_system_url or settings.main_system_url,
             "auth_required": settings.required,
-            "navigation": runtime_config.navigation_items(),
+            "navigation": _navigation_items(),
         }
 
     @router.get("/callback")
@@ -53,6 +53,10 @@ def create_auth_router() -> APIRouter:
         return auth_service.notify_logout(token)
 
     return router
+
+
+def _navigation_items() -> list[dict[str, str]]:
+    return runtime_config.navigation_items()
 
 
 async def require_auth_for_api(request: Request, call_next):

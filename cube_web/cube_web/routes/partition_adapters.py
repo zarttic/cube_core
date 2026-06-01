@@ -52,6 +52,18 @@ def run_product_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
+def run_radar_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    return _partition_runners()._run_radar_partition_demo(payload, mode=mode)
+
+
+def run_radar_partition_test(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_radar_partition_test(payload)
+
+
+def run_radar_partition_retry(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_radar_partition_retry(payload)
+
+
 def run_entity_partition_demo(payload: dict | None = None) -> dict:
     return _partition_runners()._run_entity_partition_demo(payload)
 
@@ -77,7 +89,27 @@ def run_optical_partition_test(payload: dict | None = None) -> dict:
 
 
 def run_optical_partition_retry(payload: dict | None = None) -> dict:
-    return _partition_runners()._run_optical_partition_retry(payload)
+    payload = payload or {}
+    request = payload.get("request") or {}
+    request_payload = request.get("payload") if isinstance(request, dict) else {}
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    last_result = payload.get("last_result") or {}
+    if not isinstance(last_result, dict):
+        last_result = {}
+
+    runners = _partition_runners()
+    warn_checks = runners._warn_checks_from_result(last_result)
+    warning_paths = runners._warning_asset_paths(warn_checks)
+    retry_payload, retried_asset_count = runners._retry_payload_for_warning_assets(request_payload, warning_paths)
+    result = run_optical_partition_from_payload(retry_payload, mode="partition_retry")
+    result["retry"] = {
+        "strategy": "warning_assets" if retried_asset_count else "full_request",
+        "warning_check_names": [str(check.get("name")) for check in warn_checks],
+        "warning_asset_count": len(warning_paths),
+        "retried_asset_count": retried_asset_count,
+    }
+    return result
 
 
 def partition_carbon_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
@@ -146,11 +178,24 @@ def partition_entity_retry(payload: PartitionRetryRequest | dict | None = None) 
 
 
 def partition_radar_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    raise HTTPException(status_code=501, detail="Radar partition demo is not implemented")
+    try:
+        return run_radar_partition_demo(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
+
+
+def partition_radar_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    try:
+        return run_radar_partition_test(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_radar_retry(payload: PartitionRetryRequest | dict | None = None) -> dict:
-    raise HTTPException(status_code=501, detail="Radar partition retry is not implemented")
+    try:
+        return run_radar_partition_retry(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_optical_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:

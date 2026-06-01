@@ -2,24 +2,24 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from cube_split import runtime_config
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.jobs.ray_partition_core import (
-    build_manifest,
-    build_grid_tasks_driver,
-    asset_record_to_dict,
-    cog_creation_options,
-    convert_assets_to_cog,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
+    asset_record_to_dict,
+    build_grid_tasks_driver,
+    build_manifest,
+    cog_creation_options,
+    convert_assets_to_cog,
 )
-from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
-from cube_split import runtime_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +102,7 @@ def parse_args() -> argparse.Namespace:
         help="Read per-window pixel values to compute sample_mean_band1 (disabled by default in timing-mode)",
     )
     parser.add_argument("--job-id", default="", help="Ingest job id; defaults to run directory name when ingest is enabled")
+    parser.add_argument("--data-type", default="optical", choices=["optical", "radar"], help="Input data type")
     parser.add_argument("--dataset", default="demo_optical", help="Dataset name used for metadata and object keys")
     parser.add_argument("--sensor", default="optical_mosaic", help="Sensor name used for metadata and object keys")
     parser.add_argument("--asset-version", default="v1", help="Raw asset version used for ingest")
@@ -290,10 +291,13 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     source_assets = build_manifest(
         input_dir,
         product_family=args.product_family,
+        data_type=str(getattr(args, "data_type", "optical") or "optical"),
         manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
     )
     if not source_assets:
-        raise RuntimeError(f"No .TIF assets found under: {input_dir}")
+        data_type = str(getattr(args, "data_type", "optical") or "optical")
+        suffix_hint = ".dat/.TIF" if data_type == "radar" else ".TIF"
+        raise RuntimeError(f"No {suffix_hint} assets found under: {input_dir}")
     check_cancelled(args)
     backend_requested = args.partition_backend
     if backend_requested == "auto":
@@ -548,6 +552,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         "cog_input_dir": str(Path(args.cog_input_dir).resolve()),
         "source_asset_count": len(source_assets),
         "asset_count": len(assets),
+        "data_type": str(getattr(args, "data_type", "optical") or "optical"),
         "product_family": args.product_family,
         "grid_task_count": len(grid_tasks),
         "grid_type": args.grid_type,

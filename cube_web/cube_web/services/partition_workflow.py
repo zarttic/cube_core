@@ -66,7 +66,10 @@ class PartitionWorkflowService:
         batch = self.get_batch(batch_id)
         payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
         task_id = f"partition-{uuid4().hex[:12]}"
-        cancellation_check = lambda: self.store.is_cancel_requested(task_id)
+
+        def cancellation_check() -> bool:
+            return self.store.is_cancel_requested(task_id)
+
         self.store.create_attempt(
             task_id=task_id,
             batch_id=batch_id,

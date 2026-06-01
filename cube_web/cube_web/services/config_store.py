@@ -242,9 +242,15 @@ def optical_quality_defaults() -> dict[str, Any]:
 
 def runtime_info() -> dict[str, Any]:
     postgres = _postgres_dsn()
+    minio = runtime_config.minio_settings()
     return {
         "postgres_dsn": _masked_dsn(postgres) if postgres else "",
         "ray_address": runtime_config.ray_address(),
+        "minio": {
+            "endpoint": minio.endpoint,
+            "bucket": minio.bucket,
+            "secure": minio.secure,
+        },
         "config_scope": CONFIG_SCOPE,
     }
 
@@ -255,6 +261,8 @@ def _postgres_dsn() -> str:
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     for key, value in override.items():
+        if key not in base:
+            continue
         if isinstance(value, dict) and isinstance(base.get(key), dict):
             base[key] = _deep_merge(dict(base[key]), value)
         else:

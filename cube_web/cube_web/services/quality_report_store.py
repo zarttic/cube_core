@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from cube_split.runtime_config import require_postgres_dsn
+
 
 class QualityReportStore:
     def ensure_schema(self) -> None:
@@ -180,8 +182,6 @@ class PostgresQualityReportStore(QualityReportStore):
 
 
 _store: QualityReportStore | None = None
-
-from cube_split.runtime_config import require_postgres_dsn
 
 
 def get_quality_report_store() -> QualityReportStore:

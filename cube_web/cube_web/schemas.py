@@ -77,7 +77,7 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
 class PartitionSchemaImportRequest(CubeWebModel):
     batch_id: str = Field(min_length=1)
     batch_name: str | None = None
-    data_type: Literal["optical", "product", "carbon"] = "optical"
+    data_type: Literal["optical", "product", "carbon", "radar"] = "optical"
     source_system: str | None = None
     assets: list[dict[str, Any]] | None = None
     observations: list[dict[str, Any]] | None = None

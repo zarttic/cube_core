@@ -4,7 +4,6 @@ from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
 
 from grid_core.app.core.exceptions import ValidationError
 
-
 GEOMETRY_TYPES = {"Point", "LineString", "Polygon", "MultiPolygon"}
 
 

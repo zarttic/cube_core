@@ -56,6 +56,20 @@ def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):
     assert records[0].sensor == "sentinel2_msi"
 
 
+def test_build_manifest_supports_sentinel1_radar_dat_filenames(tmp_path: Path):
+    source = tmp_path / "20180615_VV.dat"
+    source.write_bytes(b"")
+
+    records = build_manifest(tmp_path, data_type="radar")
+
+    assert len(records) == 1
+    assert records[0].scene_id == "S1_20180615"
+    assert records[0].band == "vv"
+    assert records[0].acq_time == "2018-06-15T00:00:00Z"
+    assert records[0].product_family == "sentinel1"
+    assert records[0].sensor == "sentinel1_sar"
+
+
 def test_build_manifest_supports_landsat_l1tp_filenames(tmp_path: Path):
     source = tmp_path / "LO81200292021293BJC00_B1.TIF"
     _write_tif(source)

@@ -15,22 +15,11 @@ import h3
 import numpy as np
 import rasterio
 import rasterio.mask
+from grid_core.sdk import CubeEncoderSDK
 from pyproj import Geod
 from rasterio.warp import transform_geom
 
-from grid_core.sdk import CubeEncoderSDK
 from cube_split import runtime_config
-from cube_split.jobs.ray_partition_core import (
-    AssetRecord,
-    _dataset_bounds_wgs84,
-    asset_record_to_dict,
-    build_grid_tasks_driver,
-    build_manifest,
-    cog_creation_options,
-    convert_asset_to_cog,
-    upload_cog_to_minio,
-    resolve_asset_source_path,
-)
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_tasks_for_ray,
@@ -42,7 +31,15 @@ from cube_split.jobs.ray_logical_partition_job import (
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
 )
-
+from cube_split.jobs.ray_partition_core import (
+    AssetRecord,
+    _dataset_bounds_wgs84,
+    asset_record_to_dict,
+    build_grid_tasks_driver,
+    build_manifest,
+    cog_creation_options,
+    resolve_asset_source_path,
+)
 
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 
@@ -406,8 +403,8 @@ def _write_entity_tile_chunks_ray(
                     break
 
             try:
-                from cube_split.jobs.entity_partition_job import _write_entity_tiles as writer
                 from cube_split.jobs.entity_partition_job import _rows_with_asset_uris as rows_with_asset_uris
+                from cube_split.jobs.entity_partition_job import _write_entity_tiles as writer
             except ModuleNotFoundError:
                 if not entity_module_path:
                     raise
@@ -462,8 +459,9 @@ def _write_entity_tile_chunks_ray(
                 partition_prefix_len=prefix_len,
             )
             if tile_upload_options_value:
-                from cube_split.jobs.entity_partition_job import _upload_entity_tiles_to_minio
                 import argparse
+
+                from cube_split.jobs.entity_partition_job import _upload_entity_tiles_to_minio
 
                 asset_uri_map = _upload_entity_tiles_to_minio(rows, argparse.Namespace(**tile_upload_options_value))
                 rows = rows_with_asset_uris(rows, asset_uri_map)

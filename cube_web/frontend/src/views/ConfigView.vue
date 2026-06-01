@@ -64,23 +64,16 @@ function emptyConfig() {
 }
 
 function mergeConfig(nextConfig) {
+  const defaults = emptyConfig();
   config.value = {
-    ...emptyConfig(),
-    ...nextConfig,
     partition: {
-      ...emptyConfig().partition,
-      ...(nextConfig?.partition || {}),
-      optical: { ...emptyConfig().partition.optical, ...(nextConfig?.partition?.optical || {}) },
+      optical: { ...defaults.partition.optical, ...(nextConfig?.partition?.optical || {}) },
     },
     ingest: {
-      ...emptyConfig().ingest,
-      ...(nextConfig?.ingest || {}),
-      optical: { ...emptyConfig().ingest.optical, ...(nextConfig?.ingest?.optical || {}) },
+      optical: { ...defaults.ingest.optical, ...(nextConfig?.ingest?.optical || {}) },
     },
     quality: {
-      ...emptyConfig().quality,
-      ...(nextConfig?.quality || {}),
-      optical: { ...emptyConfig().quality.optical, ...(nextConfig?.quality?.optical || {}) },
+      optical: { ...defaults.quality.optical, ...(nextConfig?.quality?.optical || {}) },
     },
   };
 }
@@ -333,6 +326,14 @@ onMounted(loadConfig);
             <span>Ray 地址</span>
             <strong>{{ runtime.ray_address || '未设置环境变量' }}</strong>
             <small>剖分后端为 ray 时使用</small>
+          </div>
+        </div>
+        <div class="config-status-card">
+          <div class="status-icon"><Connection /></div>
+          <div>
+            <span>MinIO 存储</span>
+            <strong>{{ runtime.minio?.endpoint || '未设置环境变量' }}</strong>
+            <small>Bucket: {{ runtime.minio?.bucket || '-' }} · TLS: {{ runtime.minio?.secure ? '启用' : '关闭' }}</small>
           </div>
         </div>
         <div class="config-kv-list">

@@ -1,0 +1,17 @@
+[tool.mypy]
+python_version = "3.8"
+ignore_missing_imports = true
+check_untyped_defs = false
+follow_imports = "skip"
+disable_error_code = [
+  "arg-type",
+  "assignment",
+  "attr-defined",
+  "call-overload",
+  "import-untyped",
+  "misc",
+  "no-redef",
+  "return",
+  "return-value",
+  "var-annotated",
+]

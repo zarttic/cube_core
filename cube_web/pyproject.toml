@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
   "fastapi>=0.115.0",
+  "eval-type-backport>=0.2.0",
   "uvicorn>=0.30.0",
   "httpx>=0.27.0",
   "psycopg[binary]>=3.2.0",
@@ -21,7 +22,7 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
   "ruff>=0.6.0",
-  "mypy>=1.11.0",
+  "mypy>=1.11.0,<1.12.0",
 ]
 
 [tool.setuptools.packages.find]

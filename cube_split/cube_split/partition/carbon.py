@@ -17,13 +17,13 @@ from typing import Any
 
 from grid_core.sdk import CubeEncoderSDK
 
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs
 from cube_split.partition.base import PartitionResult
 from cube_split.partition.carbon_products import (
     get_carbon_product_adapter,
     normalize_carbon_product_type,
     supported_carbon_product_types,
 )
-from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs
 
 UTC = timezone.utc
 
