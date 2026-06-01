@@ -5,6 +5,7 @@ class GridType(str, Enum):
     GEOHASH = "geohash"
     MGRS = "mgrs"
     ISEA4H = "isea4h"
+    TILE_MATRIX = "tile_matrix"
 
 
 class CoverMode(str, Enum):

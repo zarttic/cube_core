@@ -682,8 +682,8 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         )
 
     grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
     grid_level_default = default_grid_level_from_assets(
         payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
@@ -820,8 +820,8 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
     grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
     grid_level_default = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
@@ -965,8 +965,8 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
     grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
+    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
     grid_level_default = default_grid_level_for_grid_type(grid_type)
     if mode == "partition_test_no_ingest" and grid_type == "isea4h":
         grid_level_default = DEFAULT_ENTITY_TEST_GRID_LEVEL

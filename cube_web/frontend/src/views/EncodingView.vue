@@ -72,6 +72,7 @@ const emptyText = computed(() => {
 const gridTypeBadges = {
   geohash: '经纬度',
   mgrs: 'UTM 分带',
+  tile_matrix: '平面瓦片',
   isea4h: '离散全球',
 };
 
@@ -90,11 +91,19 @@ const contextualMapHint = computed(() => {
         ? 'MGRS 为 UTM 带内平面格网；拖拽圈画后会按经纬度面展示覆盖单元并自动聚焦。'
         : 'MGRS 为 UTM 带内平面格网；点击地图后会自动定位到当前分带单元并放大显示。';
     }
+    if (division.value.gridType === 'tile_matrix') {
+      return division.value.inputType === 'draw'
+        ? 'Tile Matrix 为 CRS84 规则行列瓦片；拖拽圈画后会展示覆盖的 z/x/y 单元。'
+        : 'Tile Matrix 为 CRS84 规则行列瓦片；点击地图后会定位到当前 z/x/y 单元。';
+    }
     return division.value.inputType === 'draw'
       ? '选择“圈画”后按住拖拽绘制范围'
       : '选择“点”后点击地图选点';
   }
   if (activeModule.value === 'operations') {
+    if (topology.value.gridType === 'tile_matrix') {
+      return '点击地图选择 Tile Matrix 基准点；结果会按 CRS84 规则瓦片展示。';
+    }
     return topology.value.gridType === 'mgrs'
       ? '点击地图选择 MGRS 基准点；结果会按 WGS84 面显示，跨分带时编码会自动切换。'
       : '点击地图选择基准点';
@@ -104,6 +113,8 @@ const contextualMapHint = computed(() => {
   }
   return encoding.value.gridType === 'mgrs'
     ? '点击地图选择 MGRS 编码点；结果会展示当前分带下的空间编码。'
+    : encoding.value.gridType === 'tile_matrix'
+      ? '点击地图选择 Tile Matrix 编码点；结果会展示 level/x/y 空间编码。'
     : '点击地图选择编码点';
 });
 
@@ -111,11 +122,13 @@ const legendItems = computed(() => {
   if (activeModule.value === 'encoding') return [];
   const primaryLabel = activeGridType.value === 'mgrs'
     ? 'MGRS 单元'
+    : activeGridType.value === 'tile_matrix'
+      ? 'Tile Matrix 单元'
     : activeModule.value === 'operations'
       ? '中心单元'
       : '选中单元';
   return [
-    { colorClass: activeGridType.value === 'mgrs' ? 'mgrs' : 'active', label: primaryLabel },
+    { colorClass: activeGridType.value === 'mgrs' ? 'mgrs' : activeGridType.value === 'tile_matrix' ? 'tile-matrix' : 'active', label: primaryLabel },
     { colorClass: 'neighbor', label: '邻接单元' },
     { colorClass: 'covered', label: activeModule.value === 'operations' ? '父单元' : '覆盖区域' },
   ];
@@ -123,19 +136,26 @@ const legendItems = computed(() => {
 
 function gridGeometryStyle(gridType, variant) {
   const isMgrs = gridType === 'mgrs';
+  const isTileMatrix = gridType === 'tile_matrix';
   if (variant === 'focus') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.24, weight: 3 }
+      : isTileMatrix
+        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.2, weight: 2.5 }
       : { color: '#1a5fb4', fillColor: '#1a5fb4', fillOpacity: 0.18, weight: 2 };
   }
   if (variant === 'cover') {
     return isMgrs
       ? { color: '#c061cb', fillColor: '#c061cb', fillOpacity: 0.2, weight: 2.5 }
+      : isTileMatrix
+        ? { color: '#e5a50a', fillColor: '#e5a50a', fillOpacity: 0.16, weight: 2 }
       : { color: '#f5c211', fillColor: '#f5c211', fillOpacity: 0.16, weight: 2 };
   }
   if (variant === 'base') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.16, weight: 3 }
+      : isTileMatrix
+        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.14, weight: 3 }
       : { color: '#1a5fb4', fillColor: '#1a5fb4', fillOpacity: 0.12, weight: 3 };
   }
   if (variant === 'parent') {
@@ -144,6 +164,8 @@ function gridGeometryStyle(gridType, variant) {
   if (variant === 'conversion') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.18, weight: 3 }
+      : isTileMatrix
+        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.16, weight: 3 }
       : { color: '#26a269', fillColor: '#26a269', fillOpacity: 0.16, weight: 3 };
   }
   return { color: '#26a269', fillColor: '#26a269', fillOpacity: 0.16, weight: 2 };
@@ -308,6 +330,9 @@ async function runGridDivision() {
       ...(config.gridType === 'mgrs' && data.cell.metadata?.precision !== undefined
         ? [{ label: 'MGRS 精度', value: String(data.cell.metadata.precision) }]
         : []),
+      ...(config.gridType === 'tile_matrix'
+        ? [{ label: '瓦片行列', value: `x=${data.cell.metadata?.x}, y=${data.cell.metadata?.y}` }]
+        : []),
       { label: '中心坐标', value: `${data.cell.center[1].toFixed(6)}, ${data.cell.center[0].toFixed(6)}` },
       { label: '时间', value: new Date().toLocaleString('zh-CN') },
     ]);
@@ -397,6 +422,9 @@ async function runGridEncoding() {
     { label: '空间编码', value: located.cell.space_code, code: true },
     ...(config.gridType === 'mgrs' && located.cell.metadata?.zone
       ? [{ label: 'MGRS 分带', value: located.cell.metadata.zone }]
+      : []),
+    ...(config.gridType === 'tile_matrix'
+      ? [{ label: '瓦片行列', value: `x=${located.cell.metadata?.x}, y=${located.cell.metadata?.y}` }]
       : []),
     { label: '完整时空编码', value: codeResp.st_code, code: true },
     { label: '时间粒度', value: config.timeGranularity },
@@ -607,6 +635,7 @@ async function runDemo() {
                     <div class="radio-group">
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>Geohash 经纬度格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS 平面格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>Tile Matrix 平面瓦片</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>ISEA4H 六边形格网</span></label>
                     </div>
                   </div>
@@ -633,6 +662,7 @@ async function runDemo() {
                     <select v-model="encoding.gridType" class="form-select">
                       <option value="geohash">Geohash 经纬度格网</option>
                       <option value="mgrs">MGRS 平面格网</option>
+                      <option value="tile_matrix">Tile Matrix 平面瓦片</option>
                       <option value="isea4h">ISEA4H 六边形格网</option>
                     </select>
                   </div>
@@ -661,7 +691,7 @@ async function runDemo() {
                   </div>
                   <div v-else class="form-group">
                     <label>格网编码</label>
-                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: gh:6:wx4g0b:202603091530:v1">
+                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: tm:8:8/420/71:202603091530:v1">
                   </div>
                 </template>
 
@@ -673,6 +703,7 @@ async function runDemo() {
                       <div class="radio-group">
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>Geohash 经纬度格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS 平面格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>Tile Matrix 平面瓦片</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>ISEA4H 六边形格网</span></label>
                       </div>
                     </div>

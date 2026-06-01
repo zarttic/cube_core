@@ -4,6 +4,7 @@ from grid_core.app.core.enums import GridType
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.tile_matrix_engine import TileMatrixEngine
 
 
 class GridEngineRegistry:
@@ -11,6 +12,7 @@ class GridEngineRegistry:
         self._engines = {
             GridType.GEOHASH: GeohashEngine(),
             GridType.MGRS: MGRSEngine(),
+            GridType.TILE_MATRIX: TileMatrixEngine(),
         }
 
     def get_engine(self, grid_type: GridType):

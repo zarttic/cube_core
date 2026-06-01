@@ -7,7 +7,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from cube_split.jobs.ray_partition_core import AssetRecord, build_manifest, convert_assets_to_cog
+from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, convert_assets_to_cog
 from cube_split.partition.optical_products import get_optical_product_adapter, supported_optical_product_families
 
 
@@ -40,6 +40,28 @@ def test_build_manifest_supports_landsat_collection_filenames(tmp_path: Path):
     assert records[0].acq_time == "2024-04-24T00:00:00Z"
     assert records[0].product_family == "landsat"
     assert records[0].sensor == "landsat9_oli_tirs"
+
+
+def test_build_grid_tasks_driver_supports_tile_matrix_with_asset_bbox():
+    tasks = build_grid_tasks_driver(
+        assets=[
+            AssetRecord(
+                scene_id="scene-a",
+                band="b1",
+                path="/tmp/scene-a.tif",
+                acq_time="2026-03-09T00:00:00Z",
+                bbox=[116.38, 39.90, 116.40, 39.91],
+            )
+        ],
+        grid_type="tile_matrix",
+        grid_level=8,
+        cover_mode="intersect",
+        max_cells_per_asset=20000,
+    )
+
+    assert len(tasks) > 0
+    assert {task["grid_type"] for task in tasks} == {"tile_matrix"}
+    assert all(task["space_code"].count("/") == 2 for task in tasks)
 
 
 def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):

@@ -50,6 +50,13 @@ def test_locate_endpoint_function_isea4h():
     assert h3.get_resolution(resp.cell.space_code) == 7
 
 
+def test_locate_endpoint_function_tile_matrix():
+    req = LocateRequest(grid_type="tile_matrix", level=3, point=[116.391, 39.907])
+    resp = locate(req)
+    assert resp.cell.grid_type == "tile_matrix"
+    assert resp.cell.space_code == "3/13/2"
+
+
 def test_st_code_functions():
     code = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
     gen_req = STCodeGenerateRequest(
@@ -132,6 +139,14 @@ def test_cover_with_bbox_input_mgrs_minimal():
 
     assert minimal_resp.grid_type == "mgrs"
     assert minimal_resp.statistics["cell_count"] <= intersect_resp.statistics["cell_count"]
+
+
+def test_cover_with_bbox_input_tile_matrix():
+    req = CoverRequest(grid_type="tile_matrix", level=8, cover_mode="intersect", bbox=[116.38, 39.90, 116.40, 39.91])
+    resp = cover(req)
+    assert resp.grid_type == "tile_matrix"
+    assert resp.statistics["cell_count"] > 0
+    assert all(cell.grid_type == "tile_matrix" for cell in resp.cells)
 
 
 def test_topology_parent_children_functions():

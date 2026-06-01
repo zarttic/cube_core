@@ -1205,6 +1205,11 @@ section {
     color: #6f2e86;
 }
 
+.grid-type-badge--tile_matrix {
+    background: rgba(165, 81, 0, 0.12);
+    color: #8a4b00;
+}
+
 .grid-type-badge--isea4h {
     background: rgba(38, 162, 105, 0.12);
     color: #1d7b4f;
@@ -1546,6 +1551,10 @@ section {
 
 .legend-color.mgrs {
     background: var(--accent);
+}
+
+.legend-color.tile-matrix {
+    background: #a55100;
 }
 
 .legend-color.neighbor {
