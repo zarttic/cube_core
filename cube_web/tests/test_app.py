@@ -249,6 +249,7 @@ def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
     monkeypatch.delenv("CUBE_WEB_POSTGRES_DSN", raising=False)
     monkeypatch.delenv("POSTGRES_DSN", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/tmp/cube-web-missing-env-file")
     monkeypatch.setattr(
         quality_report_store_module,
         "PostgresQualityReportStore",
@@ -305,15 +306,16 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "main_system_url": "http://10.136.1.14:5177",
         "auth_required": False,
         "navigation": [
-            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
+            {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
             {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
             {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
+            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
             {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
         ],
     }
 
 
-def test_auth_config_uses_saved_navigation_when_portal_env_is_empty(monkeypatch):
+def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch):
     monkeypatch.delenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_MAIN_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_DATA_INGEST_URL", raising=False)
@@ -339,8 +341,11 @@ def test_auth_config_uses_saved_navigation_when_portal_env_is_empty(monkeypatch)
 
     assert resp.status_code == 200
     assert resp.json()["navigation"] == [
-        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:9001"},
-        {"label": "剖分数据服务", "kind": "internal", "path": "/partition"},
+        {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
+        {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
+        {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
+        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
+        {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
     ]
 
 
@@ -439,6 +444,11 @@ def test_config_get_returns_defaults():
     assert body["config"]["ingest"]["optical"]["minio_bucket"] == "cube"
     assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@127.0.0.1:55432/cube"
     assert body["runtime"]["ray_address"] == "ray://10.136.1.13:10001"
+    assert body["runtime"]["minio"] == {
+        "endpoint": "10.136.1.14:9000",
+        "bucket": "cube",
+        "secure": False,
+    }
 
 
 def test_config_update_persists_normalized_values():
@@ -456,6 +466,8 @@ def test_config_update_persists_normalized_values():
                 },
                 "ingest": {"optical": {"dataset": "customer_demo", "sensor": "landsat", "quality_rule": "latest_wins"}},
                 "quality": {"optical": {"history_limit": 50}},
+                "runtime": {"portal": {"navigation": [{"label": "unused", "kind": "external", "url": "http://example.test"}]}},
+                "unused": {"value": True},
             }
         },
     )
@@ -468,9 +480,12 @@ def test_config_update_persists_normalized_values():
     assert body["config"]["partition"]["optical"]["cover_mode"] == "contain"
     assert body["config"]["ingest"]["optical"]["dataset"] == "customer_demo"
     assert body["config"]["quality"]["optical"]["history_limit"] == 50
+    assert "runtime" not in body["config"]
+    assert "unused" not in body["config"]
 
     get_resp = client.post("/v1/config/get", json={})
     assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+    assert "runtime" not in get_resp.json()["config"]
 
 
 def test_config_update_rejects_invalid_values():

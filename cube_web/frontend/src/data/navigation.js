@@ -7,9 +7,11 @@ const defaultNavItems = [
 ];
 
 export function navItems() {
+  const runtimeItems = runtimeNavigation();
+  const includeLocalHome = !runtimeItems.some((item) => item?.label === '首页');
   return [
-    ...defaultNavItems.slice(0, 1),
-    ...runtimeNavigation(),
+    ...(includeLocalHome ? defaultNavItems.slice(0, 1) : []),
+    ...runtimeItems,
     ...defaultNavItems.slice(1),
   ];
 }

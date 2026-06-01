@@ -56,31 +56,7 @@ def create_auth_router() -> APIRouter:
 
 
 def _navigation_items() -> list[dict[str, str]]:
-    runtime_items = runtime_config.navigation_items()
-    if runtime_items:
-        return runtime_items
-    try:
-        from cube_web.services import config_store
-
-        config = config_store.get_app_config()
-    except Exception:
-        return []
-    configured = ((config.get("runtime") or {}).get("portal") or {}).get("navigation")
-    if not isinstance(configured, list):
-        return []
-    items: list[dict[str, str]] = []
-    for raw_item in configured:
-        if not isinstance(raw_item, dict):
-            continue
-        label = str(raw_item.get("label") or "").strip()
-        kind = str(raw_item.get("kind") or "external").strip() or "external"
-        url = str(raw_item.get("url") or "").strip()
-        path = str(raw_item.get("path") or "").strip()
-        if kind == "internal" and label and path.startswith("/") and not path.startswith("//"):
-            items.append({"label": label, "kind": "internal", "path": path})
-        elif label and url:
-            items.append({"label": label, "kind": "external", "url": url})
-    return items
+    return runtime_config.navigation_items()
 
 
 async def require_auth_for_api(request: Request, call_next):

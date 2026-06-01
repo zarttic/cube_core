@@ -9,6 +9,7 @@ dist/
 .vscode/
 .codex
 .codegraph/
+.cube_web.env
 *.egg-info/
 
 # Local remote-sensing samples and uploaded reference projects.
