@@ -2674,6 +2674,7 @@ onUnmounted(() => {
                     <el-select v-model="opticalGridType" class="legacy-control">
                       <el-option label="Geohash (逻辑剖分)" value="geohash" />
                       <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
                       <el-option label="ISEA4H (实体剖分)" value="isea4h" />
                     </el-select>
                   </div>
@@ -2701,6 +2702,7 @@ onUnmounted(() => {
                     <el-select v-model="radarGridType" class="legacy-control">
                       <el-option label="Geohash (逻辑剖分)" value="geohash" />
                       <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
                     </el-select>
                   </div>
                 </template>
@@ -2727,6 +2729,7 @@ onUnmounted(() => {
                     <el-select v-model="radarGridType" class="legacy-control">
                       <el-option label="Geohash (逻辑剖分)" value="geohash" />
                       <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
                       <el-option label="ISEA4H (实体剖分)" value="isea4h" />
                     </el-select>
                   </div>
@@ -2754,6 +2757,7 @@ onUnmounted(() => {
                     <el-select v-model="productGridType" class="legacy-control">
                       <el-option label="Geohash (逻辑剖分)" value="geohash" />
                       <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
                       <el-option label="ISEA4H (实体剖分)" value="isea4h" />
                     </el-select>
                   </div>

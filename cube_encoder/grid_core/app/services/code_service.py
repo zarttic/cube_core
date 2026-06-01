@@ -15,6 +15,7 @@ PREFIX_MAP = {
     GridType.GEOHASH: "gh",
     GridType.MGRS: "mgrs",
     GridType.ISEA4H: "hx",
+    GridType.TILE_MATRIX: "tm",
 }
 PREFIX_MAP_REVERSE = {v: k for k, v in PREFIX_MAP.items()}
 MGRS_CONVERTER = mgrs.MGRS()
@@ -158,6 +159,21 @@ class CodeService:
                 raise ValidationError("ISEA4H space_code level does not match level")
             if level > 12:
                 raise ValidationError("ISEA4H level must be in [1, 12]")
+            return
+
+        if grid_type == GridType.TILE_MATRIX:
+            try:
+                actual_level, x, y = [int(part) for part in space_code.split("/")]
+            except Exception as exc:
+                raise ValidationError("Invalid tile_matrix space_code") from exc
+            if actual_level != level:
+                raise ValidationError("tile_matrix space_code level does not match level")
+            if level > 12:
+                raise ValidationError("tile_matrix level must be in [1, 12]")
+            matrix_width = 2 ** (level + 1)
+            matrix_height = 2**level
+            if x < 0 or x >= matrix_width or y < 0 or y >= matrix_height:
+                raise ValidationError("tile_matrix space_code row or column out of range")
             return
 
         raise ValidationError(f"Unsupported grid_type: {grid_type}")

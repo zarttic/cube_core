@@ -9,6 +9,7 @@ from grid_core.app.core.enums import GridType, TimeGranularity
 from grid_core.app.core.exceptions import ParseError, ValidationError
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.tile_matrix_engine import TileMatrixEngine
 from grid_core.app.services.code_service import CodeService
 
 
@@ -90,6 +91,25 @@ def test_generate_and_parse_st_code_for_isea4h():
     assert parsed.grid_type == "isea4h"
     assert parsed.level == 4
     assert parsed.space_code == cell
+
+
+def test_generate_and_parse_st_code_for_tile_matrix():
+    service = CodeService()
+    tile_code = TileMatrixEngine().locate_point(lon=116.391, lat=39.907, level=3).space_code
+    result = service.generate_st_code(
+        grid_type=GridType.TILE_MATRIX,
+        level=3,
+        space_code=tile_code,
+        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        time_granularity=TimeGranularity.DAY,
+        version="v1",
+    )
+    assert result.st_code == f"tm:3:{tile_code}:20260309:v1"
+
+    parsed = service.parse_st_code(result.st_code)
+    assert parsed.grid_type == "tile_matrix"
+    assert parsed.level == 3
+    assert parsed.space_code == tile_code
 
 
 def test_parse_st_code_rejects_unknown_prefix():

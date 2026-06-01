@@ -18,6 +18,13 @@ def test_grid_service_mgrs_route_works_for_locate():
     assert cell.space_code.startswith("50S")
 
 
+def test_grid_service_tile_matrix_route_works_for_locate():
+    service = GridService()
+    cell = service.locate(GridType.TILE_MATRIX, level=3, point=[116.391, 39.907])
+    assert cell.grid_type == "tile_matrix"
+    assert cell.space_code == "3/13/2"
+
+
 def test_topology_service_isea4h_route_works():
     service = TopologyService()
     cell = GridService().locate(GridType.ISEA4H, level=6, point=[116.391, 39.907])

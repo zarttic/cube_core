@@ -6,7 +6,7 @@
 
 ## Capabilities
 
-- Grid locate and cover for `geohash`, `mgrs`, and H3-backed `isea4h`.
+- Grid locate and cover for `geohash`, `mgrs`, `tile_matrix`, and H3-backed `isea4h`.
 - Space-time code generation and parsing.
 - Topology operations: neighbors, parent, children, geometry, and batch geometry.
 - Python SDK entry point: `grid_core.sdk.CubeEncoderSDK`.

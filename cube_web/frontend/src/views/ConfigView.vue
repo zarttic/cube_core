@@ -166,6 +166,7 @@ onMounted(loadConfig);
                   <el-select v-model="optical.grid_type">
                     <el-option label="Geohash" value="geohash" />
                     <el-option label="MGRS" value="mgrs" />
+                    <el-option label="Tile Matrix" value="tile_matrix" />
                     <el-option label="ISEA4H" value="isea4h" />
                   </el-select>
                 </el-form-item>

@@ -192,6 +192,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
     assert '<el-option label="ISEA4H (实体剖分)" value="isea4h" />' in source
+    assert '<el-option label="Tile Matrix (平面格网)" value="tile_matrix" />' in source
     assert 'v-model="radarGridType"' in source
     assert 'v-model="productGridType"' in source
     assert "grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto'" in source
@@ -241,6 +242,19 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "观测足迹匹配" not in source
     assert "面积加权" not in source
     assert "最近邻" not in source
+
+
+def test_encoding_view_exposes_tile_matrix_grid_type():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "EncodingView.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tile_matrix: '平面瓦片'" in source
+    assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
+    assert '<option value="tile_matrix">Tile Matrix 平面瓦片</option>' in source
+    assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
+    assert "tm:8:8/420/71:202603091530:v1" in source
+    assert "level/x/y" in source
 
 
 def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
@@ -490,6 +504,16 @@ def test_config_update_persists_normalized_values():
     get_resp = client.post("/v1/config/get", json={})
     assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "mgrs"
     assert "runtime" not in get_resp.json()["config"]
+
+
+def test_config_update_accepts_tile_matrix_grid_type():
+    resp = client.post(
+        "/v1/config/update",
+        json={"config": {"partition": {"optical": {"grid_type": "tile_matrix", "grid_level": 5}}}},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "tile_matrix"
 
 
 def test_config_update_rejects_invalid_values():
@@ -827,6 +851,48 @@ def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypa
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 9
     assert captured["target_pixels_per_hex_edge"] == 512
+
+
+def test_optical_partition_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "logical-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "thread",
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "total_index_rows": 0,
+            "ray_parallelism": 0,
+        }
+
+    def fail_entity_partition(_args):
+        raise AssertionError("tile_matrix optical partition should use logical partition")
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "tile_matrix",
+            "grid_level": 5,
+            "partition_backend": "thread",
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert result["status"] == "completed"
+    assert captured["grid_type"] == "tile_matrix"
+    assert captured["grid_level"] == 5
+    assert result["output_path"].endswith("index_rows.jsonl")
 
 
 def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_path):
