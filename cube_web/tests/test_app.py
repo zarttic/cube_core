@@ -192,6 +192,10 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
     assert '<el-option label="ISEA4H (实体剖分)" value="isea4h" />' in source
+    assert 'v-model="radarGridType"' in source
+    assert 'v-model="productGridType"' in source
+    assert "grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto'" in source
+    assert "grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto'" in source
     assert "const carbonObservationSchema = [" in source
     assert "const selectedCarbonObservations = computed(() => {" in source
     assert "selected_observations: selectedObservations" in source
@@ -217,7 +221,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule.value === 'radar'" in source
     assert "? selectedRadarAssets.value" in source
     assert "? radarGridType.value" in source
-    assert "const defaultEntityGridLevel = 3;" in source
+    assert "const defaultEntityGridLevel = 6;" in source
     assert "const entityGridLevel = ref(defaultEntityGridLevel);" in source
     assert "activeModule.value === 'radar' ? radarGridLevel.value" in source
     assert "activeModule === 'product' ? '产品范围地图预览'" in source
@@ -742,6 +746,43 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
     assert captured["ray_parallelism"] == 0
 
 
+def test_optical_partition_runner_infers_grid_level_from_selected_asset_resolution(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        return {
+            "run_dir": str(run_dir),
+            "execution_engine": args.partition_backend,
+            "total_index_rows": 0,
+            "ray_parallelism": args.ray_parallelism,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "selected_assets": [
+                {
+                    "source_uri": "s3://cube/cube/source/optocal/scene_10m.tif",
+                    "scene_id": "scene-10m",
+                    "acq_time": "2026-05-30T00:00:00Z",
+                    "bands": ["b1"],
+                    "resolution": 10,
+                }
+            ],
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert captured["grid_type"] == "geohash"
+    assert captured["grid_level"] == 6
+
+
 def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypatch, tmp_path):
     captured = {}
 
@@ -1038,6 +1079,57 @@ def test_radar_partition_schema_import_lists_batches_and_assets():
     assets = assets_resp.json()["assets"]
     assert len(assets) == 1
     assert assets[0]["scene_id"] == "S1_20180615"
+
+
+def test_partition_schema_import_infers_non_carbon_grid_level_from_resolution():
+    optical_resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_RESOLUTION_OPTICAL",
+            "data_type": "optical",
+            "assets": [
+                {
+                    "source_uri": "s3://cube/cube/source/optocal/10m.tif",
+                    "scene_id": "scene-10m",
+                    "resolution": "10m",
+                }
+            ],
+        },
+    )
+    radar_resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_RESOLUTION_RADAR",
+            "data_type": "radar",
+            "assets": [{"source_uri": "/data/radar/20180615_VV.dat", "scene_id": "S1_20180615", "resolution": 10}],
+        },
+    )
+    product_resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_RESOLUTION_PRODUCT",
+            "data_type": "product",
+            "assets": [{"source_uri": "s3://cube/cube/source/product/30m.tif", "product_year": 2020, "resolution": 30}],
+        },
+    )
+    carbon_resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_RESOLUTION_CARBON",
+            "data_type": "carbon",
+            "observations": [{"observation_id": "obs-a", "resolution": 10}],
+        },
+    )
+
+    assert optical_resp.status_code == 200
+    assert radar_resp.status_code == 200
+    assert product_resp.status_code == 200
+    assert carbon_resp.status_code == 200
+    assert optical_resp.json()["normalized_payload"]["grid_level"] == 6
+    assert radar_resp.json()["normalized_payload"]["grid_level"] == 6
+    assert product_resp.json()["normalized_payload"]["grid_level"] == 5
+    assert optical_resp.json()["normalized_payload"]["grid_level_mode"] == "auto"
+    assert "grid_level" not in carbon_resp.json()["normalized_payload"]
 
 
 def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
@@ -1643,6 +1735,60 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
     assert manifest["assets"][0]["corners"] == [[100.0, 27.0], [105.0, 27.0], [105.0, 23.0], [100.0, 23.0]]
 
 
+def test_product_partition_test_runner_dispatches_isea4h_to_entity_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "product",
+            "partition_type": "entity",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": "isea4h",
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    def fail_product_partition(_args):
+        raise AssertionError("isea4h product partition should use entity partition")
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fail_product_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
+
+    result = partition_runners._run_product_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "isea4h",
+            "grid_level": 6,
+            "grid_level_mode": "manual",
+            "target_pixels_per_hex_edge": 512,
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["data_type"] == "product"
+    assert result["partition_type"] == "entity"
+    assert result["output_path"].endswith("entity_index_rows.jsonl")
+    assert captured["data_type"] == "product"
+    assert captured["product_family"] == "product"
+    assert captured["grid_type"] == "isea4h"
+    assert captured["grid_level"] == 6
+    assert captured["target_pixels_per_hex_edge"] == 512
+    assert captured["time_granularity"] == "year"
+    assert captured["ingest_enabled"] is False
+
+
 def test_product_partition_retry_endpoint(monkeypatch):
     def fake_run_product_partition_retry(payload=None):
         assert payload == {"request": {"endpoint": "product", "payload": {}}, "last_result": {"status": "completed"}}
@@ -1709,6 +1855,7 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
         captured["files"] = sorted(path.name for path in Path(args.input_dir).iterdir())
         captured["data_type"] = args.data_type
         captured["product_family"] = args.product_family
+        captured["grid_level"] = args.grid_level
         captured["partition_backend"] = args.partition_backend
         captured["metadata_backend"] = args.metadata_backend
         captured["asset_storage_backend"] = args.asset_storage_backend
@@ -1741,6 +1888,7 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
                     "scene_id": "S1_20180615",
                     "band": "vv",
                     "polarization": "vv",
+                    "resolution": 10,
                     "acq_time": "2018-06-15T00:00:00Z",
                     "bbox": [119.2, 32.2, 119.5, 32.7],
                     "corners": [[119.2, 32.7], [119.5, 32.7], [119.5, 32.2], [119.2, 32.2]],
@@ -1754,6 +1902,7 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert result["selected_asset_count"] == 1
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
+    assert captured["grid_level"] == 6
     assert captured["partition_backend"] == "thread"
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"
@@ -1763,6 +1912,62 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert manifest["data_type"] == "radar"
     assert manifest["assets"][0]["source_uri"] == str(captured["input_dir"] / "20180615_VV.dat")
     assert manifest["assets"][0]["band"] == "vv"
+
+
+def test_radar_partition_test_runner_dispatches_isea4h_to_entity_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_entity_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "entity-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "entity_index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "radar",
+            "partition_type": "entity",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": "isea4h",
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    def fail_logical_partition(_args):
+        raise AssertionError("isea4h radar partition should use entity partition")
+
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fail_logical_partition)
+
+    result = partition_runners._run_radar_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "isea4h",
+            "grid_level": 6,
+            "grid_level_mode": "manual",
+            "partition_backend": "thread",
+            "target_pixels_per_hex_edge": 512,
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["data_type"] == "radar"
+    assert result["partition_type"] == "entity"
+    assert result["output_path"].endswith("entity_index_rows.jsonl")
+    assert captured["data_type"] == "radar"
+    assert captured["product_family"] == "sentinel1"
+    assert captured["grid_type"] == "isea4h"
+    assert captured["grid_level"] == 6
+    assert captured["target_pixels_per_hex_edge"] == 512
+    assert captured["partition_backend"] == "thread"
+    assert captured["metadata_backend"] == "none"
+    assert captured["asset_storage_backend"] == "local"
+    assert captured["ingest_enabled"] is False
 
 
 def test_radar_partition_retry_endpoint(monkeypatch):

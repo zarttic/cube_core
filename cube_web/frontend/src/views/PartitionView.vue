@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { CircleCloseFilled, Document, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
+import { CircleCloseFilled, Document, EditPen, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
 import LeafletMap from '@/components/LeafletMap.vue';
 import ConfigView from '@/views/ConfigView.vue';
@@ -38,7 +38,21 @@ const selectedProductBatchIds = ref(['PRODUCT_BATCH_DIANZHONG_1980_2020']);
 const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
 const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
-const defaultEntityGridLevel = 3;
+const defaultEntityGridLevel = 6;
+const resolutionGridLevelRules = {
+  logical: [
+    { max: 10, level: 6 },
+    { max: 30, level: defaultLogicalGridLevel },
+    { max: 250, level: 4 },
+    { max: 1000, level: 3 },
+  ],
+  isea4h: [
+    { max: 10, level: 7 },
+    { max: 30, level: defaultEntityGridLevel },
+    { max: 250, level: 5 },
+    { max: 1000, level: 4 },
+  ],
+};
 const partitionTaskPollIntervalMs = 1500;
 const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('geohash');
@@ -48,6 +62,12 @@ const radarGridType = ref('geohash');
 const radarGridLevel = ref(5);
 const productGridType = ref('geohash');
 const productGridLevel = ref(5);
+const gridLevelManualOverrides = ref({
+  optical: false,
+  entity: false,
+  radar: false,
+  product: false,
+});
 const mapGridLoading = ref(false);
 const mapGridGeometries = ref([]);
 const resultLoading = ref(false);
@@ -84,6 +104,66 @@ const ingestDefaults = ref({
   quality_rule: 'best_quality_wins',
   allow_failed_quality: false,
 });
+
+function parseResolution(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === 'string') {
+    const match = value.match(/(\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const parsed = Number(match[1]);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  if (Array.isArray(value)) {
+    const values = value.map(parseResolution).filter((item) => item !== null);
+    return values.length ? Math.min(...values) : null;
+  }
+  if (value && typeof value === 'object') {
+    const keys = ['resolution', 'resolution_m', 'spatial_resolution', 'spatial_resolution_m', 'x', 'y', 'width', 'height'];
+    const values = keys.map((key) => parseResolution(value[key])).filter((item) => item !== null);
+    return values.length ? Math.min(...values) : null;
+  }
+  return null;
+}
+
+function assetResolution(asset) {
+  const keys = [
+    'resolution',
+    'resolution_m',
+    'spatial_resolution',
+    'spatial_resolution_m',
+    'ground_resolution',
+    'pixel_size',
+    'pixel_size_m',
+    'gsd',
+    'gsd_m',
+    'resolution_x',
+    'resolution_y',
+    'pixel_size_x',
+    'pixel_size_y',
+  ];
+  const values = keys.map((key) => parseResolution(asset?.[key])).filter((item) => item !== null);
+  return values.length ? Math.min(...values) : null;
+}
+
+function defaultGridLevelForGridType(gridType) {
+  return gridType === 'isea4h' ? defaultEntityGridLevel : defaultLogicalGridLevel;
+}
+
+function defaultGridLevelForResolution(resolution, gridType, fallback = defaultGridLevelForGridType(gridType)) {
+  if (!Number.isFinite(resolution) || resolution <= 0) return fallback;
+  const rules = gridType === 'isea4h' ? resolutionGridLevelRules.isea4h : resolutionGridLevelRules.logical;
+  const match = rules.find((rule) => resolution <= rule.max);
+  if (match) return match.level;
+  return gridType === 'isea4h' ? 3 : 2;
+}
+
+function defaultGridLevelFromAssets(assets, gridType, fallback = defaultGridLevelForGridType(gridType)) {
+  const resolutions = (Array.isArray(assets) ? assets : [])
+    .map(assetResolution)
+    .filter((resolution) => resolution !== null);
+  if (!resolutions.length) return fallback;
+  return defaultGridLevelForResolution(Math.min(...resolutions), gridType, fallback);
+}
 
 const minioSourcePrefix = 's3://cube/cube/source';
 const opticalSourcePrefix = `${minioSourcePrefix}/optocal`;
@@ -182,6 +262,7 @@ const radarAssetSchema = [
   { field: 'product_family', type: 'string', meaning: '雷达产品族' },
   { field: 'band / polarization', type: 'string', meaning: '极化方式' },
   { field: 'acq_time', type: 'datetime', meaning: '采集时间' },
+  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
   { field: 'bbox', type: 'float[4]', meaning: '覆盖范围 bbox（WGS84）' },
   { field: 'corners', type: 'float[4][2]', meaning: '覆盖范围四角点（WGS84 lon/lat）' },
 ];
@@ -238,6 +319,7 @@ const productAssetSchema = [
   { field: 'sensor', type: 'string', meaning: '数据来源/产品传感器' },
   { field: 'band', type: 'string', meaning: '产品值波段' },
   { field: 'acq_time', type: 'datetime', meaning: '产品时间' },
+  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
   { field: 'target_crs', type: 'string', meaning: '标准化目标参考系统' },
   { field: 'bbox', type: 'float[4]', meaning: '产品覆盖范围 bbox（WGS84: min_lon, min_lat, max_lon, max_lat）' },
   { field: 'corners', type: 'float[4][2]', meaning: '产品覆盖范围四角点（WGS84 lon/lat）' },
@@ -363,6 +445,10 @@ function buildLocalPartitionBatchDetail(batch, dataType = activeModule.value) {
     : Array.isArray(batch?.observations)
       ? batch.observations
       : [];
+  const detailGridType = dataType === 'product' ? productGridType.value : dataType === 'radar' ? radarGridType.value : opticalGridType.value;
+  const detailGridLevel = dataType === 'carbon'
+    ? 5
+    : defaultGridLevelFromAssets(rawAssets, detailGridType, defaultGridLevelForGridType(detailGridType));
   const assets = rawAssets.map((item, index) => ({
     asset_id: item.asset_id || item.observation_id || `${batch?.id || batch?.batch_id || 'local'}:${index}`,
     batch_id: batch?.id || batch?.batch_id || '',
@@ -384,8 +470,9 @@ function buildLocalPartitionBatchDetail(batch, dataType = activeModule.value) {
     normalized_payload: batch?.normalized_payload || {
       selected_assets: dataType === 'carbon' ? [] : rawAssets,
       selected_observations: dataType === 'carbon' ? rawAssets : [],
-      grid_type: dataType === 'product' ? productGridType.value : opticalGridType.value,
-      grid_level: dataType === 'product' ? Number(productGridLevel.value) : Number(selectedMapGridLevel.value),
+      grid_type: detailGridType,
+      grid_level: detailGridLevel,
+      grid_level_mode: 'auto',
       target_crs: batch?.target_crs || 'EPSG:4326',
       product_type: batch?.product_type || 'xco2',
       source_uri: batch?.source_uri || '',
@@ -449,12 +536,21 @@ function partitionBatchConfigOverride(batch) {
     return {
       grid_type: opticalGridType.value,
       grid_level: Number(selectedMapGridLevel.value),
+      grid_level_mode: isGridLevelManual('optical') || opticalGridType.value === 'isea4h' ? 'manual' : 'auto',
+    };
+  }
+  if (batch?.data_type === 'radar') {
+    return {
+      grid_type: radarGridType.value,
+      grid_level: Number(radarGridLevel.value),
+      grid_level_mode: isGridLevelManual('radar') ? 'manual' : 'auto',
     };
   }
   if (batch?.data_type === 'product') {
     return {
       grid_type: productGridType.value,
       grid_level: Number(productGridLevel.value),
+      grid_level_mode: isGridLevelManual('product') ? 'manual' : 'auto',
       target_crs: batch.normalized_payload?.target_crs || 'EPSG:4326',
     };
   }
@@ -1157,6 +1253,85 @@ const selectedMapGridType = computed(() => (
 const selectedMapGridLevel = computed(() => (
   activeModule.value === 'product' ? productGridLevel.value : activeModule.value === 'radar' ? radarGridLevel.value : opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value
 ));
+function gridLevelManualKeyFor(moduleName = activeModule.value) {
+  if (moduleName === 'optical' && opticalGridType.value === 'isea4h') return 'entity';
+  return moduleName;
+}
+
+function gridTypeForModule(moduleName = activeModule.value) {
+  if (moduleName === 'product') return productGridType.value;
+  if (moduleName === 'radar') return radarGridType.value;
+  return opticalGridType.value;
+}
+
+function selectedAssetsForModule(moduleName = activeModule.value) {
+  if (moduleName === 'product') return selectedProductAssets.value;
+  if (moduleName === 'radar') return selectedRadarAssets.value;
+  if (moduleName === 'optical') return selectedOpticalAssets.value;
+  return [];
+}
+
+function isGridLevelManual(moduleName = activeModule.value) {
+  const key = gridLevelManualKeyFor(moduleName);
+  return Boolean(gridLevelManualOverrides.value[key]);
+}
+
+function setGridLevelManual(moduleName, value) {
+  const key = gridLevelManualKeyFor(moduleName);
+  gridLevelManualOverrides.value = { ...gridLevelManualOverrides.value, [key]: value };
+}
+
+function setGridLevelForModule(moduleName, level) {
+  if (moduleName === 'product') {
+    productGridLevel.value = level;
+  } else if (moduleName === 'radar') {
+    radarGridLevel.value = level;
+  } else if (opticalGridType.value === 'isea4h') {
+    entityGridLevel.value = level;
+  } else {
+    opticalGridLevel.value = level;
+  }
+}
+
+function defaultGridLevelForModule(moduleName = activeModule.value) {
+  const gridType = gridTypeForModule(moduleName);
+  return defaultGridLevelFromAssets(selectedAssetsForModule(moduleName), gridType, defaultGridLevelForGridType(gridType));
+}
+
+function applyDefaultGridLevel(moduleName = activeModule.value) {
+  if (!['optical', 'radar', 'product'].includes(moduleName) || isGridLevelManual(moduleName)) return;
+  setGridLevelForModule(moduleName, defaultGridLevelForModule(moduleName));
+}
+
+function applyDefaultGridLevels() {
+  applyDefaultGridLevel('optical');
+  applyDefaultGridLevel('radar');
+  applyDefaultGridLevel('product');
+}
+
+const activeGridLevelManual = computed(() => isGridLevelManual(activeModule.value));
+
+async function confirmGridLevelManualEdit() {
+  if (!['optical', 'radar', 'product'].includes(activeModule.value)) return;
+  try {
+    await ElMessageBox.confirm(
+      '当前剖分层级由数据分辨率自动推荐。确认后可手动修改。',
+      '修改剖分层级',
+      { confirmButtonText: '确认修改', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  setGridLevelManual(activeModule.value, true);
+}
+
+function restoreDefaultGridLevel() {
+  if (!['optical', 'radar', 'product'].includes(activeModule.value)) return;
+  setGridLevelManual(activeModule.value, false);
+  applyDefaultGridLevel(activeModule.value);
+  mapGridGeometries.value = [];
+}
+
 const mapPreviewGeometries = computed(() => (
   activeModule.value === 'product' ? productMapGeometries.value : activeModule.value === 'radar' ? radarMapGeometries.value : mapBatchGeometries.value
 ));
@@ -1607,8 +1782,10 @@ async function loadPartitionBatches() {
         expandedProductBatchId.value = batchId;
       }
     }
+    applyDefaultGridLevels();
   } catch (error) {
     ElMessage.warning(`剖分批次加载失败，使用页面演示数据：${error.message}`);
+    applyDefaultGridLevels();
   } finally {
     partitionBatchLoading.value = false;
   }
@@ -1623,7 +1800,7 @@ function partitionPayloadForActiveModule() {
       payload: {
         grid_type: opticalGridType.value,
         grid_level: Number(selectedMapGridLevel.value),
-        grid_level_mode: useEntityPartition ? 'manual' : 'auto',
+        grid_level_mode: isGridLevelManual('optical') || useEntityPartition ? 'manual' : 'auto',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
         selected_assets: selectedAssets,
@@ -1649,10 +1826,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'radar') {
     const selectedBatch = visibleRadarBatches.value.find((batch) => selectedRadarBatchIds.value.includes(batch.id));
     const selectedAssets = selectedRadarAssets.value;
+    const useEntityPartition = radarGridType.value === 'isea4h';
     return {
       payload: {
         grid_type: radarGridType.value,
         grid_level: Number(radarGridLevel.value),
+        grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto',
         target_crs: selectedBatch?.target_crs || 'EPSG:4326',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
@@ -1664,10 +1843,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'product') {
     const selectedBatch = visibleProductBatches.value.find((batch) => selectedProductBatchIds.value.includes(batch.id));
     const selectedAssets = selectedProductAssets.value;
+    const useEntityPartition = productGridType.value === 'isea4h';
     return {
       payload: {
         grid_type: productGridType.value,
         grid_level: Number(productGridLevel.value),
+        grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto',
         target_crs: selectedBatch?.target_crs || 'EPSG:4326',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
@@ -2391,14 +2572,22 @@ watch(qualityDataType, () => {
   }
 });
 
-watch(opticalGridType, (gridType) => {
-  if (gridType === 'isea4h') {
-    entityGridLevel.value = defaultEntityGridLevel;
-  } else {
-    opticalGridLevel.value = defaultLogicalGridLevel;
-  }
+watch(opticalGridType, () => {
+  applyDefaultGridLevel('optical');
   mapGridGeometries.value = [];
 });
+
+watch([selectedOpticalAssets, opticalGridType], () => {
+  applyDefaultGridLevel('optical');
+}, { deep: true });
+
+watch([selectedRadarAssets, radarGridType], () => {
+  applyDefaultGridLevel('radar');
+}, { deep: true });
+
+watch([selectedProductAssets, productGridType], () => {
+  applyDefaultGridLevel('product');
+}, { deep: true });
 
 watch([
   selectedOpticalBatchIds,
@@ -2421,6 +2610,7 @@ watch([
 onMounted(async () => {
   await loadManagedConfig();
   await loadPartitionBatches();
+  applyDefaultGridLevels();
   if (activeModule.value === 'quality') {
     refreshQuality();
   }
@@ -2532,6 +2722,14 @@ onUnmounted(() => {
                       <div class="queue-selected-summary">当前选择：<span>{{ selectedDataName }}</span></div>
                     </div>
                   </div>
+                  <div class="form-group">
+                    <label>剖分格网</label>
+                    <el-select v-model="radarGridType" class="legacy-control">
+                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
+                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="ISEA4H (实体剖分)" value="isea4h" />
+                    </el-select>
+                  </div>
                 </template>
 
                 <template v-else-if="activeModule === 'product'">
@@ -2550,6 +2748,14 @@ onUnmounted(() => {
                       </button>
                       <div class="queue-selected-summary">当前选择：<span>{{ selectedDataName }}</span></div>
                     </div>
+                  </div>
+                  <div class="form-group">
+                    <label>剖分格网</label>
+                    <el-select v-model="productGridType" class="legacy-control">
+                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
+                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
+                      <el-option label="ISEA4H (实体剖分)" value="isea4h" />
+                    </el-select>
                   </div>
                 </template>
 
@@ -2645,10 +2851,13 @@ onUnmounted(() => {
                 <div class="panel-header">
                   <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : activeModule === 'product' ? '产品范围地图预览' : '地图预览' }}</h3>
                   <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="map-actions">
-                    <el-input-number v-if="activeModule === 'product'" v-model="productGridLevel" :min="1" :max="15" size="small" />
-                    <el-input-number v-else-if="activeModule === 'radar'" v-model="radarGridLevel" :min="1" :max="15" size="small" />
-                    <el-input-number v-else-if="opticalGridType === 'isea4h'" v-model="entityGridLevel" :min="1" :max="15" size="small" />
-                    <el-input-number v-else v-model="opticalGridLevel" :min="1" :max="15" size="small" />
+                    <el-input-number v-if="activeModule === 'product'" v-model="productGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                    <el-input-number v-else-if="activeModule === 'radar'" v-model="radarGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                    <el-input-number v-else-if="opticalGridType === 'isea4h'" v-model="entityGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                    <el-input-number v-else v-model="opticalGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                    <el-button size="small" :icon="activeGridLevelManual ? Refresh : EditPen" @click="activeGridLevelManual ? restoreDefaultGridLevel() : confirmGridLevelManualEdit()">
+                      {{ activeGridLevelManual ? '恢复默认' : '修改层级' }}
+                    </el-button>
                     <el-button size="small" :loading="mapGridLoading" @click="loadMapGridForSelectedAssets">加载格网</el-button>
                     <el-button size="small" @click="clearMapGrid">清空格网</el-button>
                   </div>

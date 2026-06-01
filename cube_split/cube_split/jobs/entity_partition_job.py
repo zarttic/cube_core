@@ -42,6 +42,14 @@ from cube_split.jobs.ray_partition_core import (
 )
 
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
+ENTITY_DATA_TYPES = {"optical", "product", "radar"}
+
+
+def _normalize_data_type(value: Any) -> str:
+    data_type = str(value or "optical").strip().lower()
+    if data_type not in ENTITY_DATA_TYPES:
+        raise ValueError("data_type must be one of: optical, product, radar")
+    return data_type
 
 
 def infer_isea4h_level_for_assets(
@@ -90,6 +98,13 @@ def _time_bucket(acq_time: str, granularity: str) -> str:
         "minute": "%Y%m%d%H%M",
     }[granularity]
     return datetime.fromisoformat(acq_time.replace("Z", "+00:00")).strftime(time_format)
+
+
+def _st_time_granularity(granularity: str) -> str:
+    # Product outputs use annual buckets, while the grid-core ST encoder supports
+    # month/day/hour/minute/second. Match product logical partitioning by encoding
+    # the concrete acquisition day and storing the annual bucket separately.
+    return "day" if granularity == "year" else granularity
 
 
 def _ensure_center_cell_tasks(
@@ -162,7 +177,9 @@ def _write_entity_tiles(
     run_dir: Path,
     time_granularity: str,
     partition_prefix_len: int,
+    data_type: str = "optical",
 ) -> list[dict[str, Any]]:
+    data_type = _normalize_data_type(data_type)
     sdk = CubeEncoderSDK()
     st_cache: dict[str, str] = {}
     rows: list[dict[str, Any]] = []
@@ -201,7 +218,7 @@ def _write_entity_tiles(
                     tile_dir = (
                         run_dir
                         / "entity_tiles"
-                        / "optical"
+                        / _safe_name(data_type)
                         / _safe_name(str(task["scene_id"]))
                         / "isea4h"
                         / f"L{int(task['grid_level'])}"
@@ -222,13 +239,14 @@ def _write_entity_tiles(
                         out_ds.write(filled, 1)
 
                     acq_time = str(task["acq_time"])
+                    st_time_granularity = _st_time_granularity(time_granularity)
                     st_key = "|".join(
                         [
                             "isea4h",
                             str(int(task["grid_level"])),
                             str(task["space_code"]),
                             acq_time,
-                            time_granularity,
+                            st_time_granularity,
                         ]
                     )
                     if st_key not in st_cache:
@@ -237,13 +255,14 @@ def _write_entity_tiles(
                             level=int(task["grid_level"]),
                             space_code=str(task["space_code"]),
                             timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
-                            time_granularity=time_granularity,
+                            time_granularity=st_time_granularity,
                             version="v1",
                         ).st_code
 
                     rows.append(
                         {
                             "partition_type": "entity",
+                            "data_type": data_type,
                             "scene_id": task["scene_id"],
                             "band": band_name,
                             "asset_path": str(tile_path.resolve()),
@@ -256,6 +275,7 @@ def _write_entity_tiles(
                             "space_code_prefix": str(task["space_code"])[: max(1, int(partition_prefix_len))],
                             "st_code": st_cache[st_key],
                             "time_bucket": _time_bucket(acq_time, time_granularity),
+                            "st_time_granularity": st_time_granularity,
                             "cover_mode": task["cover_mode"],
                             "cell_min_lon": float(task["cell_min_lon"]),
                             "cell_min_lat": float(task["cell_min_lat"]),
@@ -294,9 +314,16 @@ def _write_entity_tile_chunks_thread(
     time_granularity: str,
     partition_prefix_len: int,
     workers: int,
+    data_type: str = "optical",
 ) -> list[dict[str, Any]]:
     def process_chunk(chunk: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-        return _write_entity_tiles(_flatten_task_groups(chunk), run_dir, time_granularity, partition_prefix_len)
+        return _write_entity_tiles(
+            _flatten_task_groups(chunk),
+            run_dir,
+            time_granularity,
+            partition_prefix_len,
+            data_type=data_type,
+        )
 
     rows: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -312,6 +339,7 @@ def _write_entity_tile_chunks_ray(
     partition_prefix_len: int,
     parallelism: int,
     ray_address: str,
+    data_type: str = "optical",
     assets_by_path: dict[str, dict[str, Any]] | None = None,
     cog_input_dir: str = "",
     cog_overwrite: bool = False,
@@ -350,6 +378,7 @@ def _write_entity_tile_chunks_ray(
             run_dir_text: str,
             time_granularity_text: str,
             prefix_len: int,
+            data_type_text: str,
             assets_by_path_value: dict[str, dict[str, Any]] | None,
             cog_input_dir_value: str,
             cog_overwrite_value: bool,
@@ -457,6 +486,7 @@ def _write_entity_tile_chunks_ray(
                 run_dir=Path(run_dir_text),
                 time_granularity=time_granularity_text,
                 partition_prefix_len=prefix_len,
+                data_type=data_type_text,
             )
             if tile_upload_options_value:
                 import argparse
@@ -475,6 +505,7 @@ def _write_entity_tile_chunks_ray(
             str(run_dir),
             time_granularity,
             partition_prefix_len,
+            data_type,
             assets_by_path,
             cog_input_dir,
             cog_overwrite,
@@ -652,6 +683,7 @@ def _upsert_entity_tiles_postgres(
     for row in rows:
         metadata = {
             "partition_type": row.get("partition_type"),
+            "data_type": row.get("data_type"),
             "source_asset_path": row.get("source_asset_path"),
             "window_col_off": row.get("window_col_off"),
             "window_row_off": row.get("window_row_off"),
@@ -766,14 +798,17 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    data_type = _normalize_data_type(getattr(args, "data_type", "optical"))
 
     source_assets = build_manifest(
         input_dir,
         product_family=args.product_family,
+        data_type=data_type,
         manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
     )
     if not source_assets:
-        raise RuntimeError(f"No .TIF assets found under: {input_dir}")
+        suffix_hint = ".dat/.TIF" if data_type == "radar" else ".TIF"
+        raise RuntimeError(f"No {suffix_hint} assets found under: {input_dir}")
     check_cancelled(args)
 
     assets = source_assets
@@ -832,6 +867,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             partition_prefix_len=args.partition_prefix_len,
             parallelism=parallelism,
             ray_address=ray_address,
+            data_type=data_type,
             assets_by_path=assets_by_path,
             cog_input_dir=str(getattr(args, "cog_input_dir", "") or "/tmp/cube_entity_cog"),
             cog_overwrite=bool(getattr(args, "cog_overwrite", False)),
@@ -877,6 +913,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             time_granularity=args.time_granularity,
             partition_prefix_len=args.partition_prefix_len,
             workers=parallelism,
+            data_type=data_type,
         )
     partition_elapsed = time.perf_counter() - partition_start
     check_cancelled(args)
@@ -924,6 +961,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         rows_by_band[row["band"]] = rows_by_band.get(row["band"], 0) + 1
 
     report = {
+        "status": "completed",
         "run_dir": str(run_dir.resolve()),
         "input_dir": str(input_dir.resolve()),
         "cog_input_dir": "",
@@ -932,6 +970,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "source_asset_count": len(source_assets),
         "asset_count": len(assets),
         "product_family": args.product_family,
+        "data_type": data_type,
         "partition_type": "entity",
         "grid_task_count": len(grid_tasks),
         "grid_type": "isea4h",
@@ -945,6 +984,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "partition_backend_used": backend,
         "time_granularity": args.time_granularity,
         "partition_prefix_len": max(1, int(args.partition_prefix_len)),
+        "rows": len(rows),
         "total_index_rows": len(rows),
         "entity_tile_count": len(rows),
         "distinct_space_codes": len({row["space_code"] for row in rows}),
@@ -976,11 +1016,12 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local entity partition job for ISEA4H optical raster tiles")
+    parser = argparse.ArgumentParser(description="Local entity partition job for ISEA4H raster tiles")
     minio = runtime_config.minio_settings()
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--product-family", default="auto")
+    parser.add_argument("--data-type", default="optical", choices=sorted(ENTITY_DATA_TYPES))
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--cog-input-dir", required=True)
     parser.add_argument("--cog-overwrite", action="store_true")

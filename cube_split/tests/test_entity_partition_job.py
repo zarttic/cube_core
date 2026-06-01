@@ -68,20 +68,26 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
     entity_rows_path = run_dir / "entity_index_rows.jsonl"
     rows = [json.loads(line) for line in entity_rows_path.read_text(encoding="utf-8").splitlines()]
 
+    assert report["status"] == "completed"
     assert report["partition_type"] == "entity"
+    assert report["data_type"] == "optical"
     assert report["grid_type"] == "isea4h"
     assert report["requested_grid_level"] is None
     assert report["grid_level"] == report["inferred_grid_level"]
+    assert report["rows"] == len(rows)
     assert report["entity_tile_count"] == len(rows) >= 1
     assert (run_dir / "index_rows.jsonl").exists()
 
     row = rows[0]
     tile_path = Path(row["output_path"])
     assert row["partition_type"] == "entity"
+    assert row["data_type"] == "optical"
     assert row["asset_path"] == str(tile_path)
     assert row["source_asset_path"] == str(source.resolve())
+    assert "entity_tiles/optical" in tile_path.as_posix()
     assert row["space_code"]
     assert row["st_code"].startswith("hx:")
+    assert row["st_time_granularity"] == "day"
     assert tile_path.exists()
     with rasterio.open(tile_path) as ds:
         assert ds.count == 1
@@ -272,7 +278,7 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
             },
         ]
 
-    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers):
+    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
         rows = []
         for chunk in task_chunks:
             for group in chunk:
@@ -280,13 +286,14 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
                 rows.append(
                     {
                         "partition_type": "entity",
+                        "data_type": data_type,
                         **task,
                         "asset_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
                         "source_asset_path": task["asset_path"],
                         "output_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
-                        "st_code": f"hx:1:{task['space_code']}:19700101:v1",
-                        "window_col_off": 0,
-                        "window_row_off": 0,
+                "st_code": f"hx:1:{task['space_code']}:19700101:v1",
+                "window_col_off": 0,
+                "window_row_off": 0,
                         "window_width": 1,
                         "window_height": 1,
                         "nodata": 0,
@@ -330,6 +337,126 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
     assert captured["max_cells_per_asset"] == 0
     assert report["grid_task_count"] == 2
     assert report["entity_tile_count"] == 2
+
+
+def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    asset_path = input_dir / "product_1980.tif"
+    captured: dict[str, object] = {}
+
+    def fake_build_manifest(input_dir_arg, product_family, data_type, manifest_path):
+        captured["manifest_data_type"] = data_type
+        captured["manifest_product_family"] = product_family
+        captured["manifest_path"] = manifest_path
+        return [
+            entity_partition_job.AssetRecord(
+                scene_id="product_1980",
+                band="product_value",
+                path=str(asset_path),
+                acq_time="1980-01-01T00:00:00Z",
+                product_family="product",
+                sensor="data_product",
+                resolution=30.0,
+            )
+        ]
+
+    def fake_build_grid_tasks_driver(**kwargs):
+        asset = kwargs["assets"][0]
+        return [
+            {
+                "scene_id": asset.scene_id,
+                "band": asset.band,
+                "asset_path": asset.path,
+                "acq_time": asset.acq_time,
+                "grid_type": "isea4h",
+                "grid_level": kwargs["grid_level"],
+                "space_code": "832830fffffffff",
+                "cover_mode": "intersect",
+                "cell_min_lon": 100.0,
+                "cell_min_lat": 20.0,
+                "cell_max_lon": 101.0,
+                "cell_max_lat": 21.0,
+            }
+        ]
+
+    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
+        captured["writer_data_type"] = data_type
+        task = task_chunks[0][0][0]
+        tile_path = run_dir / "entity_tiles" / data_type / task["scene_id"] / "fake.tif"
+        return [
+            {
+                "partition_type": "entity",
+                "data_type": data_type,
+                "scene_id": task["scene_id"],
+                "band": task["band"],
+                "asset_path": str(tile_path.resolve()),
+                "source_asset_path": task["asset_path"],
+                "output_path": str(tile_path.resolve()),
+                "acq_time": task["acq_time"],
+                "grid_type": "isea4h",
+                "grid_level": task["grid_level"],
+                "space_code": task["space_code"],
+                "space_code_prefix": "832",
+                "st_code": "hx:6:832830fffffffff:1980:v1",
+                "time_bucket": "1980",
+                "st_time_granularity": "day",
+                "cover_mode": task["cover_mode"],
+                "cell_min_lon": task["cell_min_lon"],
+                "cell_min_lat": task["cell_min_lat"],
+                "cell_max_lon": task["cell_max_lon"],
+                "cell_max_lat": task["cell_max_lat"],
+                "window_col_off": 0,
+                "window_row_off": 0,
+                "window_width": 1,
+                "window_height": 1,
+                "nodata": 0,
+                "valid_pixel_ratio": 1.0,
+            }
+        ]
+
+    monkeypatch.setattr(entity_partition_job, "build_manifest", fake_build_manifest)
+    monkeypatch.setattr(entity_partition_job, "build_grid_tasks_driver", fake_build_grid_tasks_driver)
+    monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_thread", fake_writer)
+
+    report = run_entity_partition(
+        SimpleNamespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            product_family="product",
+            data_type="product",
+            output_dir=str(tmp_path / "output"),
+            cog_input_dir=str(tmp_path / "cog"),
+            cog_overwrite=True,
+            cog_workers=1,
+            cog_compress="LZW",
+            cog_predictor=2,
+            cog_level=0,
+            cog_num_threads="ALL_CPUS",
+            target_crs="EPSG:4326",
+            grid_level=6,
+            target_pixels_per_hex_edge=768,
+            cover_mode="intersect",
+            time_granularity="year",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            partition_backend="thread",
+            ray_address="",
+            ray_parallelism=0,
+            chunk_size=0,
+            asset_storage_backend="local",
+            metadata_backend="none",
+        )
+    )
+
+    rows = [json.loads(line) for line in Path(report["rows_path"]).read_text(encoding="utf-8").splitlines()]
+    assert captured["manifest_data_type"] == "product"
+    assert captured["manifest_product_family"] == "product"
+    assert captured["writer_data_type"] == "product"
+    assert report["data_type"] == "product"
+    assert rows[0]["data_type"] == "product"
+    assert rows[0]["time_bucket"] == "1980"
+    assert rows[0]["st_time_granularity"] == "day"
 
 
 def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):

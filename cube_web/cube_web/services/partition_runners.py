@@ -13,6 +13,7 @@ from cube_split import runtime_config
 
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
+from cube_web.services.partition_defaults import default_grid_level_for_grid_type, default_grid_level_from_assets
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
@@ -433,6 +434,11 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
     default_grid_level = DEFAULT_ENTITY_TEST_GRID_LEVEL if mode == "partition_test_no_ingest" else DEFAULT_ENTITY_GRID_LEVEL
+    default_grid_level = default_grid_level_from_assets(
+        raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
+        grid_type="isea4h",
+        fallback=default_grid_level,
+    )
     grid_level = _int_payload_value(raw_payload, "grid_level", default_grid_level)
     if grid_level < 0:
         raise ValueError("grid_level must be greater than or equal to 0")
@@ -647,6 +653,7 @@ def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_product_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
     from cube_split.jobs.product_partition_job import run_product_partition
 
     payload = payload or {}
@@ -677,23 +684,40 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in {"geohash", "mgrs", "isea4h"}:
         raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
-    grid_level = _int_payload_value(payload, "grid_level", 5)
+    grid_level_default = default_grid_level_from_assets(
+        payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
+        grid_type=grid_type,
+        fallback=default_grid_level_for_grid_type(grid_type),
+    )
+    grid_level = _int_payload_value(payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
+    grid_level_mode = str(payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
+    if grid_level_mode not in {"auto", "manual"}:
+        raise ValueError("grid_level_mode must be one of: auto, manual")
+    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
 
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
         manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
+        product_family=str(payload.get("product_family") or "product"),
+        data_type="product",
         output_dir=str(root / "output"),
         cog_input_dir=str(root / "cog"),
-        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
-        grid_type=grid_type,
-        grid_level=grid_level,
-        cover_mode=str(payload.get("cover_mode") or "intersect"),
-        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
-        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         cog_overwrite=True,
         cog_workers=_int_payload_value(payload, "cog_workers", 2),
+        cog_compress=str(payload.get("cog_compress") or "LZW"),
+        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
+        cog_level=_int_payload_value(payload, "cog_level", 0),
+        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
+        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_type=grid_type,
+        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
+        cover_mode=str(payload.get("cover_mode") or "intersect"),
+        time_granularity=str(payload.get("time_granularity") or "year"),
+        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         partition_workers=_int_payload_value(payload, "partition_workers", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
         ray_address=str(payload.get("ray_address") or _ray_address()),
@@ -721,7 +745,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
         cancellation_check=cancellation_check,
     )
-    result = run_product_partition(args)
+    result = run_entity_partition(args) if grid_type == "isea4h" else run_product_partition(args)
     result["mode"] = mode
     result["output_path"] = result.get("rows_path")
     result["workers"] = result.get("ray_parallelism") or args.partition_workers
@@ -759,6 +783,7 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
+    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
     raw_payload = payload or {}
@@ -797,9 +822,18 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in {"geohash", "mgrs", "isea4h"}:
         raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
-    grid_level = _int_payload_value(raw_payload, "grid_level", 5)
+    grid_level_default = default_grid_level_from_assets(
+        raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
+        grid_type=grid_type,
+        fallback=default_grid_level_for_grid_type(grid_type),
+    )
+    grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
+    grid_level_mode = str(raw_payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
+    if grid_level_mode not in {"auto", "manual"}:
+        raise ValueError("grid_level_mode must be one of: auto, manual")
+    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
     partition_backend = str(payload.get("partition_backend") or "thread")
     ray_address = str(payload.get("ray_address") or (_ray_address() if partition_backend in {"auto", "ray"} else ""))
     metadata_backend = str(payload.get("metadata_backend") or "none")
@@ -820,7 +854,8 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
         grid_type=grid_type,
-        grid_level=grid_level,
+        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
@@ -850,7 +885,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         ingest_enabled=False if mode == "partition_test_no_ingest" else None,
         cancellation_check=cancellation_check,
     )
-    report = run_logical_partition(args)
+    report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])
     rows_path = Path(str(report.get("rows_path") or run_dir / "index_rows.jsonl"))
     response = {
@@ -932,9 +967,14 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in {"geohash", "mgrs", "isea4h"}:
         raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
-    grid_level_default = DEFAULT_ENTITY_GRID_LEVEL if grid_type == "isea4h" else 5
+    grid_level_default = default_grid_level_for_grid_type(grid_type)
     if mode == "partition_test_no_ingest" and grid_type == "isea4h":
         grid_level_default = DEFAULT_ENTITY_TEST_GRID_LEVEL
+    grid_level_default = default_grid_level_from_assets(
+        raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
+        grid_type=grid_type,
+        fallback=grid_level_default,
+    )
     grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")

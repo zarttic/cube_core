@@ -6,6 +6,8 @@ from typing import Any
 
 from cube_split.runtime_config import postgres_dsn
 
+from cube_web.services.partition_defaults import apply_resolution_grid_defaults
+
 BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_requested"}
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
 
@@ -685,6 +687,7 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("batch_name", batch_name)
     if data_type in {"optical", "product", "radar"}:
         payload.setdefault("selected_assets", copy.deepcopy(schema.get("assets") or schema.get("selected_assets") or []))
+        apply_resolution_grid_defaults(payload, data_type=data_type)
     elif data_type == "carbon":
         payload.setdefault("selected_observations", copy.deepcopy(schema.get("observations") or schema.get("selected_observations") or []))
     return {
