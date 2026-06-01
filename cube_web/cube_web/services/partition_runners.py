@@ -19,6 +19,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = 6
 DEFAULT_ENTITY_TEST_GRID_LEVEL = 3
+PARTITION_GRID_TYPES = {"geohash", "tile_matrix", "isea4h"}
 
 
 def _demo_run_dir(name: str) -> Path:
@@ -289,6 +290,13 @@ def _int_payload_value(payload: dict, key: str, default: int) -> int:
         raise ValueError(f"{key} must be an integer") from None
 
 
+def _partition_grid_type(payload: dict) -> str:
+    grid_type = str(payload.get("grid_type") or "geohash").lower()
+    if grid_type not in PARTITION_GRID_TYPES:
+        raise ValueError("grid_type must be one of: geohash, tile_matrix, isea4h")
+    return grid_type
+
+
 def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
     result = dict(defaults)
     for key, value in (payload or {}).items():
@@ -474,6 +482,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         dataset=str(ingest_payload.get("dataset") or "demo_optical"),
         sensor=str(ingest_payload.get("sensor") or "optical_mosaic"),
         asset_version=str(ingest_payload.get("asset_version") or "v1"),
+        cube_version=str(ingest_payload.get("cube_version") or "v1"),
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
         postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
@@ -681,9 +690,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
             encoding="utf-8",
         )
 
-    grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
+    grid_type = _partition_grid_type(payload)
     grid_level_default = default_grid_level_from_assets(
         payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
@@ -819,9 +826,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         default_manifest = input_dir / "manifest.json"
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
-    grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
+    grid_type = _partition_grid_type(payload)
     grid_level_default = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
@@ -872,8 +877,10 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         sensor=str(payload.get("sensor") or "sentinel1_sar"),
         asset_version=str(payload.get("asset_version") or "v1"),
         cube_version=str(payload.get("cube_version") or "radar_v1"),
+        quality_rule=str(payload.get("quality_rule") or "best_quality_wins"),
         metadata_backend=metadata_backend,
         postgres_dsn=postgres_dsn,
+        db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(payload.get("asset_storage_backend") or "local"),
         minio_endpoint=_minio_settings(payload).endpoint,
         minio_access_key=_minio_access_key(payload),
@@ -882,6 +889,8 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         minio_prefix=str(payload.get("minio_prefix") or "cube/radar"),
         minio_secure=bool(payload.get("minio_secure", False)),
         minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
+        cog_output_root=str(payload.get("cog_output_root") or root / "radar_cog_store"),
+        cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
         ingest_enabled=False if mode == "partition_test_no_ingest" else None,
         cancellation_check=cancellation_check,
     )
@@ -964,9 +973,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         default_manifest = input_dir / "manifest.json"
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
-    grid_type = str(payload.get("grid_type") or "geohash").lower()
-    if grid_type not in {"geohash", "mgrs", "tile_matrix", "isea4h"}:
-        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
+    grid_type = _partition_grid_type(payload)
     grid_level_default = default_grid_level_for_grid_type(grid_type)
     if mode == "partition_test_no_ingest" and grid_type == "isea4h":
         grid_level_default = DEFAULT_ENTITY_TEST_GRID_LEVEL
@@ -1014,8 +1021,11 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         dataset=str(ingest_payload.get("dataset") or "demo_optical"),
         sensor=str(ingest_payload.get("sensor") or "optical_mosaic"),
         asset_version=str(ingest_payload.get("asset_version") or "v1"),
+        cube_version=str(ingest_payload.get("cube_version") or "v1"),
+        quality_rule=str(ingest_payload.get("quality_rule") or "best_quality_wins"),
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
         postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
         minio_endpoint=_minio_settings(payload, ingest_payload).endpoint,
         minio_access_key=_minio_access_key(payload),
@@ -1024,6 +1034,8 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
         minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
+        cog_output_root=str(payload.get("cog_output_root") or root / "optical_cog_store"),
+        cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
         cancellation_check=cancellation_check,
     )

@@ -9,7 +9,7 @@ class CubeWebModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-GridType = Literal["geohash", "mgrs", "isea4h"]
+GridType = Literal["geohash", "tile_matrix", "isea4h"]
 
 
 class OpticalAssetSelection(CubeWebModel):

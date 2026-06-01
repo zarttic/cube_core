@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Partition carbon satellite observations into cube observation rows")
     parser.add_argument("--input-dir", default="data/carbon", help="Input directory containing carbon observation files")
     parser.add_argument("--output-dir", default="data/ray_output/carbon", help="Output directory")
-    parser.add_argument("--grid-type", default="isea4h", choices=["geohash", "mgrs", "tile_matrix", "isea4h"], help="Grid type")
+    parser.add_argument("--grid-type", default="isea4h", choices=["geohash", "tile_matrix", "isea4h"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"])
     parser.add_argument("--product-type", default="xco2", help="Carbon product type")

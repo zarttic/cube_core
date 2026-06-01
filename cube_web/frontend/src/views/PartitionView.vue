@@ -39,6 +39,11 @@ const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
 const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
 const defaultEntityGridLevel = 6;
+const gridTypeLabels = {
+  geohash: '四边形格网',
+  tile_matrix: '平面格网',
+  isea4h: '六边形格网',
+};
 const resolutionGridLevelRules = {
   logical: [
     { max: 10, level: 6 },
@@ -147,6 +152,10 @@ function assetResolution(asset) {
 
 function defaultGridLevelForGridType(gridType) {
   return gridType === 'isea4h' ? defaultEntityGridLevel : defaultLogicalGridLevel;
+}
+
+function formatGridType(gridType) {
+  return gridTypeLabels[gridType] || gridType || '-';
 }
 
 function defaultGridLevelForResolution(resolution, gridType, fallback = defaultGridLevelForGridType(gridType)) {
@@ -631,7 +640,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'optical') {
     rows.splice(2, 0,
-      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '选择资产', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
     );
@@ -644,7 +653,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'product') {
     rows.splice(2, 0,
-      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '目标参考系统', value: payload.target_crs || '-' },
       { label: '选择年份', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
@@ -652,7 +661,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'radar') {
     rows.splice(2, 0,
-      { label: '格网类型', value: payload.grid_type || '-' },
+      { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '目标参考系统', value: payload.target_crs || '-' },
       { label: '选择资产', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
@@ -1418,9 +1427,9 @@ const partitionContextRows = computed(() => {
     { label: '输出目录', value: result.run_dir || '-' },
   ];
   if (testModules.has(activeModule.value)) {
-    const gridText = activeModule.value === 'carbon'
-      ? 'isea4h / 5 级'
-      : `${payload.grid_type || opticalGridType.value} / ${payload.grid_level || opticalGridLevel.value} 级`;
+    const gridType = activeModule.value === 'carbon' ? 'isea4h' : payload.grid_type || opticalGridType.value;
+    const gridLevel = activeModule.value === 'carbon' ? 5 : payload.grid_level || opticalGridLevel.value;
+    const gridText = `${formatGridType(gridType)} / ${gridLevel} 级`;
     rows.splice(
       5,
       0,
@@ -2672,10 +2681,9 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="opticalGridType" class="legacy-control">
-                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
-                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
-                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
-                      <el-option label="ISEA4H (实体剖分)" value="isea4h" />
+                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                 </template>
@@ -2700,9 +2708,8 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
-                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
-                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
-                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
+                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="平面格网" value="tile_matrix" />
                     </el-select>
                   </div>
                 </template>
@@ -2727,10 +2734,9 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
-                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
-                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
-                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
-                      <el-option label="ISEA4H (实体剖分)" value="isea4h" />
+                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                 </template>
@@ -2755,10 +2761,9 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="productGridType" class="legacy-control">
-                      <el-option label="Geohash (逻辑剖分)" value="geohash" />
-                      <el-option label="MGRS (逻辑剖分)" value="mgrs" />
-                      <el-option label="Tile Matrix (平面格网)" value="tile_matrix" />
-                      <el-option label="ISEA4H (实体剖分)" value="isea4h" />
+                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                 </template>

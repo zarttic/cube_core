@@ -191,8 +191,10 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
-    assert '<el-option label="ISEA4H (实体剖分)" value="isea4h" />' in source
-    assert '<el-option label="Tile Matrix (平面格网)" value="tile_matrix" />' in source
+    assert '<el-option label="四边形格网" value="geohash" />' in source
+    assert '<el-option label="平面格网" value="tile_matrix" />' in source
+    assert '<el-option label="六边形格网" value="isea4h" />' in source
+    assert '<el-option label="MGRS (逻辑剖分)" value="mgrs" />' not in source
     assert 'v-model="radarGridType"' in source
     assert 'v-model="productGridType"' in source
     assert "grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto'" in source
@@ -244,17 +246,32 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "最近邻" not in source
 
 
-def test_encoding_view_exposes_tile_matrix_grid_type():
+def test_config_view_does_not_expose_mgrs_partition_grid_type():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "ConfigView.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert '<el-option label="四边形格网" value="geohash" />' in source
+    assert '<el-option label="平面格网" value="tile_matrix" />' in source
+    assert '<el-option label="六边形格网" value="isea4h" />' in source
+    assert '<el-option label="MGRS" value="mgrs" />' not in source
+
+
+def test_encoding_view_displays_generic_grid_type_names():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "EncodingView.vue").read_text(
         encoding="utf-8"
     )
 
-    assert "tile_matrix: '平面瓦片'" in source
+    assert "tile_matrix: '平面格网'" in source
     assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
-    assert '<option value="tile_matrix">Tile Matrix 平面瓦片</option>' in source
+    assert '<option value="tile_matrix">平面格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
+    assert "Geohash" not in source
+    assert "MGRS" not in source
+    assert "Tile Matrix" not in source
+    assert "ISEA4H" not in source
     assert "tm:8:8/420/71:202603091530:v1" in source
-    assert "level/x/y" in source
+    assert "层级与空间编码" in source
 
 
 def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
@@ -476,7 +493,7 @@ def test_config_update_persists_normalized_values():
             "config": {
                 "partition": {
                     "optical": {
-                        "grid_type": "mgrs",
+                        "grid_type": "tile_matrix",
                         "grid_level": 8,
                         "ray_parallelism": 0,
                         "cover_mode": "contain",
@@ -492,7 +509,7 @@ def test_config_update_persists_normalized_values():
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+    assert body["config"]["partition"]["optical"]["grid_type"] == "tile_matrix"
     assert body["config"]["partition"]["optical"]["grid_level"] == 8
     assert body["config"]["partition"]["optical"]["ray_parallelism"] == 0
     assert body["config"]["partition"]["optical"]["cover_mode"] == "contain"
@@ -502,7 +519,7 @@ def test_config_update_persists_normalized_values():
     assert "unused" not in body["config"]
 
     get_resp = client.post("/v1/config/get", json={})
-    assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "mgrs"
+    assert get_resp.json()["config"]["partition"]["optical"]["grid_type"] == "tile_matrix"
     assert "runtime" not in get_resp.json()["config"]
 
 
@@ -514,6 +531,24 @@ def test_config_update_accepts_tile_matrix_grid_type():
 
     assert resp.status_code == 200
     assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "tile_matrix"
+
+
+def test_config_update_rejects_mgrs_partition_grid_type():
+    resp = client.post(
+        "/v1/config/update",
+        json={"config": {"partition": {"optical": {"grid_type": "mgrs", "grid_level": 5}}}},
+    )
+
+    assert resp.status_code == 422
+    assert "grid_type" in resp.json()["detail"]
+
+
+def test_stored_config_migrates_legacy_mgrs_grid_type():
+    config = config_store_module.normalized_stored_config(
+        {"partition": {"optical": {"grid_type": "mgrs", "grid_level": 5}}}
+    )
+
+    assert config["partition"]["optical"]["grid_type"] == "tile_matrix"
 
 
 def test_config_update_rejects_invalid_values():
@@ -731,7 +766,7 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
         {
             "partition": {
                 "optical": {
-                    "grid_type": "mgrs",
+                    "grid_type": "tile_matrix",
                     "grid_level": 9,
                     "target_crs": "EPSG:3857",
                     "partition_backend": "thread",
@@ -758,16 +793,21 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
     monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_from_payload(
-        {"input_dir": str(tmp_path), "grid_level": 4},
+        {"input_dir": str(tmp_path), "grid_level": 4, "cube_version": "cube-smoke"},
         mode="partition_test_no_ingest",
     )
 
     assert result["status"] == "completed"
-    assert captured["grid_type"] == "mgrs"
+    assert captured["grid_type"] == "tile_matrix"
     assert captured["grid_level"] == 4
     assert captured["target_crs"] == "EPSG:3857"
     assert captured["partition_backend"] == "thread"
     assert captured["ray_parallelism"] == 0
+    assert captured["cube_version"] == "cube-smoke"
+    assert captured["quality_rule"] == "best_quality_wins"
+    assert captured["db_path"] == ""
+    assert captured["cog_materialize_mode"] == "copy"
+    assert captured["cog_output_root"].endswith("optical_cog_store")
 
 
 def test_optical_partition_runner_infers_grid_level_from_selected_asset_resolution(monkeypatch, tmp_path):
@@ -1012,6 +1052,12 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
 
 def test_partition_demo_rejects_invalid_grid_level():
     resp = client.post("/v1/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 0})
+
+    assert resp.status_code == 422
+
+
+def test_partition_demo_rejects_mgrs_grid_type():
+    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "mgrs", "grid_level": 5})
 
     assert resp.status_code == 422
 
@@ -1899,6 +1945,56 @@ def test_product_partition_test_runner_dispatches_isea4h_to_entity_partition(mon
     assert captured["ingest_enabled"] is False
 
 
+def test_product_partition_test_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_product_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "logical-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "product",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    def fail_entity_partition(_args):
+        raise AssertionError("tile_matrix product partition should use logical partition")
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
+
+    result = partition_runners._run_product_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "tile_matrix",
+            "grid_level": 5,
+            "partition_backend": "thread",
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["data_type"] == "product"
+    assert result["output_path"].endswith("index_rows.jsonl")
+    assert captured["data_type"] == "product"
+    assert captured["product_family"] == "product"
+    assert captured["grid_type"] == "tile_matrix"
+    assert captured["grid_level"] == 5
+    assert captured["partition_backend"] == "thread"
+    assert captured["ingest_enabled"] is False
+
+
 def test_product_partition_retry_endpoint(monkeypatch):
     def fake_run_product_partition_retry(payload=None):
         assert payload == {"request": {"endpoint": "product", "payload": {}}, "last_result": {"status": "completed"}}
@@ -1970,6 +2066,11 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
         captured["metadata_backend"] = args.metadata_backend
         captured["asset_storage_backend"] = args.asset_storage_backend
         captured["ingest_enabled"] = args.ingest_enabled
+        captured["cube_version"] = args.cube_version
+        captured["quality_rule"] = args.quality_rule
+        captured["db_path"] = args.db_path
+        captured["cog_materialize_mode"] = args.cog_materialize_mode
+        captured["cog_output_root"] = args.cog_output_root
         run_dir = tmp_path / "run-root" / "output" / "run"
         run_dir.mkdir(parents=True)
         rows_path = run_dir / "index_rows.jsonl"
@@ -2017,6 +2118,11 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"
     assert captured["ingest_enabled"] is False
+    assert captured["cube_version"] == "radar_v1"
+    assert captured["quality_rule"] == "best_quality_wins"
+    assert captured["db_path"] == ""
+    assert captured["cog_materialize_mode"] == "copy"
+    assert captured["cog_output_root"].endswith("radar_cog_store")
     assert captured["files"] == ["20180615_VV.dat", "20180615_VV.hdr"]
     manifest = json.loads(captured["manifest_path"].read_text(encoding="utf-8"))
     assert manifest["data_type"] == "radar"
@@ -2074,6 +2180,57 @@ def test_radar_partition_test_runner_dispatches_isea4h_to_entity_partition(monke
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 6
     assert captured["target_pixels_per_hex_edge"] == 512
+    assert captured["partition_backend"] == "thread"
+    assert captured["metadata_backend"] == "none"
+    assert captured["asset_storage_backend"] == "local"
+    assert captured["ingest_enabled"] is False
+
+
+def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "logical-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "radar",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    def fail_entity_partition(_args):
+        raise AssertionError("tile_matrix radar partition should use logical partition")
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+
+    result = partition_runners._run_radar_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "tile_matrix",
+            "grid_level": 5,
+            "partition_backend": "thread",
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["data_type"] == "radar"
+    assert result["output_path"].endswith("index_rows.jsonl")
+    assert captured["data_type"] == "radar"
+    assert captured["product_family"] == "sentinel1"
+    assert captured["grid_type"] == "tile_matrix"
+    assert captured["grid_level"] == 5
     assert captured["partition_backend"] == "thread"
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"

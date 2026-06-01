@@ -7,6 +7,7 @@ from typing import Any
 from cube_split import runtime_config
 
 CONFIG_SCOPE = "cube_web"
+LEGACY_PARTITION_GRID_TYPE_ALIASES = {"mgrs": "tile_matrix"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "partition": {
@@ -106,7 +107,7 @@ class PostgresConfigStore(ConfigStore):
         if row is None:
             config = default_config()
             return {"config": config, "updated_at": None}
-        return {"config": normalized_config(row[0]), "updated_at": _iso_datetime(row[1])}
+        return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
 
     def update_config(self, config: dict[str, Any]) -> dict[str, Any]:
         self.ensure_schema()
@@ -177,7 +178,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("config must be an object")
     merged = _deep_merge(default_config(), config or {})
     optical = merged["partition"]["optical"]
-    optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "mgrs", "tile_matrix", "isea4h"}, "grid_type")
+    optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "tile_matrix", "isea4h"}, "grid_type")
     optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=1)
     optical["grid_level_mode"] = _choice(optical.get("grid_level_mode"), {"auto", "manual"}, "grid_level_mode")
     optical["target_pixels_per_hex_edge"] = _int_value(
@@ -220,6 +221,16 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     quality["target_crs"] = _text_value(quality.get("target_crs"), "quality.target_crs")
     quality["history_limit"] = _int_value(quality.get("history_limit"), "history_limit", minimum=1, maximum=200)
     return merged
+
+
+def normalized_stored_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    stored = copy.deepcopy(config or {})
+    optical = stored.get("partition", {}).get("optical", {})
+    if isinstance(optical, dict):
+        grid_type = str(optical.get("grid_type") or "").strip().lower()
+        if grid_type in LEGACY_PARTITION_GRID_TYPE_ALIASES:
+            optical["grid_type"] = LEGACY_PARTITION_GRID_TYPE_ALIASES[grid_type]
+    return normalized_config(stored)
 
 
 def optical_partition_defaults() -> dict[str, Any]:

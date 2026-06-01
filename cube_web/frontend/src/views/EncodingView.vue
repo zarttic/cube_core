@@ -69,12 +69,16 @@ const emptyText = computed(() => {
   return '请在左侧分别执行拓扑运算或坐标转换';
 });
 
-const gridTypeBadges = {
-  geohash: '经纬度',
-  mgrs: 'UTM 分带',
-  tile_matrix: '平面瓦片',
-  isea4h: '离散全球',
+const gridTypeLabels = {
+  geohash: '四边形格网',
+  mgrs: '平面格网',
+  tile_matrix: '平面格网',
+  isea4h: '六边形格网',
 };
+
+function formatGridType(gridType) {
+  return gridTypeLabels[gridType] || gridType || '-';
+}
 
 const activeGridType = computed(() => {
   if (activeModule.value === 'division') return division.value.gridType;
@@ -82,19 +86,19 @@ const activeGridType = computed(() => {
   return topology.value.gridType;
 });
 
-const activeGridBadge = computed(() => gridTypeBadges[activeGridType.value] || gridTypeBadges.geohash);
+const activeGridBadge = computed(() => formatGridType(activeGridType.value));
 
 const contextualMapHint = computed(() => {
   if (activeModule.value === 'division') {
     if (division.value.gridType === 'mgrs') {
       return division.value.inputType === 'draw'
-        ? 'MGRS 为 UTM 带内平面格网；拖拽圈画后会按经纬度面展示覆盖单元并自动聚焦。'
-        : 'MGRS 为 UTM 带内平面格网；点击地图后会自动定位到当前分带单元并放大显示。';
+        ? '平面格网会按覆盖范围展示单元；拖拽圈画后会自动聚焦。'
+        : '点击地图后会自动定位到当前平面格网单元并放大显示。';
     }
     if (division.value.gridType === 'tile_matrix') {
       return division.value.inputType === 'draw'
-        ? 'Tile Matrix 为 CRS84 规则行列瓦片；拖拽圈画后会展示覆盖的 z/x/y 单元。'
-        : 'Tile Matrix 为 CRS84 规则行列瓦片；点击地图后会定位到当前 z/x/y 单元。';
+        ? '平面格网会按规则行列单元展示；拖拽圈画后会自动聚焦。'
+        : '点击地图后会定位到当前平面格网单元。';
     }
     return division.value.inputType === 'draw'
       ? '选择“圈画”后按住拖拽绘制范围'
@@ -102,31 +106,31 @@ const contextualMapHint = computed(() => {
   }
   if (activeModule.value === 'operations') {
     if (topology.value.gridType === 'tile_matrix') {
-      return '点击地图选择 Tile Matrix 基准点；结果会按 CRS84 规则瓦片展示。';
+      return '点击地图选择平面格网基准点；结果会按格网单元展示。';
     }
     return topology.value.gridType === 'mgrs'
-      ? '点击地图选择 MGRS 基准点；结果会按 WGS84 面显示，跨分带时编码会自动切换。'
+      ? '点击地图选择平面格网基准点；结果会按格网单元展示。'
       : '点击地图选择基准点';
   }
   if (encoding.value.operation === 'decode') {
     return '输入完整编码后执行解码';
   }
   return encoding.value.gridType === 'mgrs'
-    ? '点击地图选择 MGRS 编码点；结果会展示当前分带下的空间编码。'
+    ? '点击地图选择平面格网编码点；结果会展示空间编码。'
     : encoding.value.gridType === 'tile_matrix'
-      ? '点击地图选择 Tile Matrix 编码点；结果会展示 level/x/y 空间编码。'
+      ? '点击地图选择平面格网编码点；结果会展示层级与空间编码。'
     : '点击地图选择编码点';
 });
 
 const legendItems = computed(() => {
   if (activeModule.value === 'encoding') return [];
   const primaryLabel = activeGridType.value === 'mgrs'
-    ? 'MGRS 单元'
+    ? '平面格网单元'
     : activeGridType.value === 'tile_matrix'
-      ? 'Tile Matrix 单元'
+      ? '平面格网单元'
     : activeModule.value === 'operations'
       ? '中心单元'
-      : '选中单元';
+      : `${formatGridType(activeGridType.value)}单元`;
   return [
     { colorClass: activeGridType.value === 'mgrs' ? 'mgrs' : activeGridType.value === 'tile_matrix' ? 'tile-matrix' : 'active', label: primaryLabel },
     { colorClass: 'neighbor', label: '邻接单元' },
@@ -321,14 +325,14 @@ async function runGridDivision() {
     }] : [];
     setRows([
       { label: '操作', value: 'locate' },
-      { label: '格网类型', value: config.gridType },
+      { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '格网编码', value: data.cell.space_code, code: true },
       { label: '层级', value: String(data.cell.level) },
       ...(config.gridType === 'mgrs' && data.cell.metadata?.zone
-        ? [{ label: 'MGRS 分带', value: data.cell.metadata.zone }]
+        ? [{ label: '分带', value: data.cell.metadata.zone }]
         : []),
       ...(config.gridType === 'mgrs' && data.cell.metadata?.precision !== undefined
-        ? [{ label: 'MGRS 精度', value: String(data.cell.metadata.precision) }]
+        ? [{ label: '精度', value: String(data.cell.metadata.precision) }]
         : []),
       ...(config.gridType === 'tile_matrix'
         ? [{ label: '瓦片行列', value: `x=${data.cell.metadata?.x}, y=${data.cell.metadata?.y}` }]
@@ -358,7 +362,7 @@ async function runGridDivision() {
     .filter((item) => item.geometry);
   setRows([
     { label: '操作', value: '圈画 cover' },
-    { label: '格网类型', value: config.gridType },
+    { label: '格网类型', value: formatGridType(config.gridType) },
     { label: '层级', value: String(config.level) },
     { label: '单元数量', value: String(data.statistics?.cell_count || data.cells.length) },
     { label: '示例编码', value: data.cells.slice(0, 8).map((cell) => cell.space_code).join(', '), code: true },
@@ -387,7 +391,7 @@ async function runGridEncoding() {
     setRows([
       { label: '操作', value: '解码' },
       { label: '完整编码', value: config.decodeInput.trim(), code: true },
-      { label: '格网类型', value: parsed.grid_type },
+      { label: '格网类型', value: formatGridType(parsed.grid_type) },
       { label: '空间编码', value: parsed.space_code, code: true },
       { label: '时间编码', value: parsed.time_code },
       { label: '版本', value: parsed.version },
@@ -417,11 +421,11 @@ async function runGridEncoding() {
   };
   setRows([
     { label: '操作', value: '点选编码' },
-    { label: '格网类型', value: config.gridType },
+    { label: '格网类型', value: formatGridType(config.gridType) },
     { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
     { label: '空间编码', value: located.cell.space_code, code: true },
     ...(config.gridType === 'mgrs' && located.cell.metadata?.zone
-      ? [{ label: 'MGRS 分带', value: located.cell.metadata.zone }]
+      ? [{ label: '分带', value: located.cell.metadata.zone }]
       : []),
     ...(config.gridType === 'tile_matrix'
       ? [{ label: '瓦片行列', value: `x=${located.cell.metadata?.x}, y=${located.cell.metadata?.y}` }]
@@ -529,7 +533,7 @@ async function runTopologyOperation() {
     }
 
     const rows = [
-      { label: '格网类型', value: config.gridType },
+      { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
       { label: '基准编码数', value: String(originalBaseCount) },
       { label: '运算类型', value: config.operation },
@@ -565,7 +569,7 @@ async function runCoordinateConversion() {
     const selection = await resolveTopologySelection(gridPrefix);
     const baseCode = selection.baseCodes[0];
     const rows = [
-      { label: '格网类型', value: config.gridType },
+      { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
       { label: '基准编码', value: baseCode, code: true },
     ];
@@ -633,10 +637,9 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <div class="radio-group">
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>Geohash 经纬度格网</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS 平面格网</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>Tile Matrix 平面瓦片</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>ISEA4H 六边形格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>四边形格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
                   </div>
                   <div class="form-group">
@@ -660,10 +663,9 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
-                      <option value="geohash">Geohash 经纬度格网</option>
-                      <option value="mgrs">MGRS 平面格网</option>
-                      <option value="tile_matrix">Tile Matrix 平面瓦片</option>
-                      <option value="isea4h">ISEA4H 六边形格网</option>
+                      <option value="geohash">四边形格网</option>
+                      <option value="tile_matrix">平面格网</option>
+                      <option value="isea4h">六边形格网</option>
                     </select>
                   </div>
                   <div class="form-group">
@@ -701,10 +703,9 @@ async function runDemo() {
                     <div class="form-group">
                       <label>格网类型</label>
                       <div class="radio-group">
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>Geohash 经纬度格网</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS 平面格网</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>Tile Matrix 平面瓦片</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>ISEA4H 六边形格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>四边形格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>
                     </div>
                     <div class="form-group">

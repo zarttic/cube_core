@@ -15,6 +15,15 @@ const config = ref(emptyConfig());
 const optical = computed(() => config.value.partition.optical);
 const ingest = computed(() => config.value.ingest.optical);
 const quality = computed(() => config.value.quality.optical);
+const gridTypeLabels = {
+  geohash: '四边形格网',
+  tile_matrix: '平面格网',
+  isea4h: '六边形格网',
+};
+
+function formatGridType(gridType) {
+  return gridTypeLabels[gridType] || gridType || '-';
+}
 
 function emptyConfig() {
   return {
@@ -164,10 +173,9 @@ onMounted(loadConfig);
               <div class="config-form-grid">
                 <el-form-item label="格网类型">
                   <el-select v-model="optical.grid_type">
-                    <el-option label="Geohash" value="geohash" />
-                    <el-option label="MGRS" value="mgrs" />
-                    <el-option label="Tile Matrix" value="tile_matrix" />
-                    <el-option label="ISEA4H" value="isea4h" />
+                    <el-option label="四边形格网" value="geohash" />
+                    <el-option label="平面格网" value="tile_matrix" />
+                    <el-option label="六边形格网" value="isea4h" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="格网层级">
@@ -348,7 +356,7 @@ onMounted(loadConfig);
           </div>
           <div class="config-kv">
             <span>当前格网</span>
-            <strong>{{ optical.grid_type }} / {{ optical.grid_level }} 级</strong>
+            <strong>{{ formatGridType(optical.grid_type) }} / {{ optical.grid_level }} 级</strong>
           </div>
         </div>
       </aside>

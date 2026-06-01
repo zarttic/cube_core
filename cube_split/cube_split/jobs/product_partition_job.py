@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
     parser.add_argument("--cog-input-dir", default="data/cog/product_epsg4326", help="Directory for standardized product COGs")
     parser.add_argument("--target-crs", default="EPSG:4326", help="Target CRS for standardized COG assets")
-    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs", "tile_matrix", "isea4h"], help="Grid type")
+    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "tile_matrix"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--max-cells-per-asset", type=int, default=20000, help="Safety limit for cover cells per asset")
