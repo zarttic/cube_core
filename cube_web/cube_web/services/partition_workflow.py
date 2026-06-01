@@ -143,8 +143,13 @@ class PartitionWorkflowService:
         batch = self.get_batch(attempt["batch_id"])
         attempt_no = int(attempt.get("attempt_no") or 1)
         max_auto_retries = int(batch.get("max_auto_retries") or 1)
-        should_auto_retry = attempt_no <= max_auto_retries and attempt.get("operation") in {"auto_run", "auto_retry"}
-        self.store.fail_attempt(task_id, error, manual_required=not should_auto_retry)
+        error_type = classify_partition_error(error)
+        should_auto_retry = (
+            is_retryable_partition_error(error_type)
+            and attempt_no <= max_auto_retries
+            and attempt.get("operation") in {"auto_run", "auto_retry"}
+        )
+        self.store.fail_attempt(task_id, error, manual_required=not should_auto_retry, error_type=error_type)
         if should_auto_retry:
             self.run_batch(attempt["batch_id"], operation="auto_retry", requested_by="system")
 
@@ -164,3 +169,20 @@ class PartitionWorkflowService:
         if config_override:
             payload.update(config_override)
         return payload
+
+
+def classify_partition_error(error: str) -> str:
+    normalized = error.lower()
+    if any(token in normalized for token in ("timed out", "timeout", "temporarily", "temporary", "connection reset", "connection refused", "network", "503", "502", "504")):
+        return "transient"
+    if any(token in normalized for token in ("not found", "no such file", "no such key", "missing", "does not exist", "source missing")):
+        return "source_missing"
+    if any(token in normalized for token in ("invalid", "validation", "bad request", "unsupported", "must be", "required")):
+        return "validation"
+    if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
+        return "permission"
+    return "unknown"
+
+
+def is_retryable_partition_error(error_type: str) -> bool:
+    return error_type in {"transient", "unknown"}

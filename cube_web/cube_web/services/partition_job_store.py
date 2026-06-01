@@ -54,7 +54,14 @@ class PartitionJobStore:
     def succeed_attempt(self, task_id: str, result: dict[str, Any]) -> None:
         raise NotImplementedError
 
-    def fail_attempt(self, task_id: str, error: str, *, manual_required: bool = False) -> None:
+    def fail_attempt(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        manual_required: bool = False,
+        error_type: str | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def mark_batch_queued(self, batch_id: str, task_id: str, *, operation: str) -> None:
@@ -161,6 +168,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt_no = int(batch.get("attempt_count") or 0) + 1
         batch["attempt_count"] = attempt_no
         batch["updated_at"] = _utc_now_iso()
+        self._increment_asset_attempts(batch_id, asset_ids)
         attempt = {
             "task_id": task_id,
             "batch_id": batch_id,
@@ -170,6 +178,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "attempt_no": attempt_no,
             "payload": copy.deepcopy(payload),
             "runner_result": None,
+            "error_type": None,
             "error_message": None,
             "requested_by": requested_by,
             "started_at": None,
@@ -198,18 +207,21 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt["runner_result"] = copy.deepcopy(result)
         attempt["finished_at"] = now
         attempt["updated_at"] = now
-        batch = self.batches[attempt["batch_id"]]
-        batch["status"] = "succeeded"
-        batch["last_error"] = None
-        batch["partitioned_at"] = now
-        batch["manual_required_at"] = None
-        batch["updated_at"] = now
         self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
+        self._refresh_batch_from_assets(attempt["batch_id"], now=now)
 
-    def fail_attempt(self, task_id: str, error: str, *, manual_required: bool = False) -> None:
+    def fail_attempt(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        manual_required: bool = False,
+        error_type: str | None = None,
+    ) -> None:
         attempt = self.attempts[task_id]
         now = _utc_now_iso()
         attempt["status"] = "failed"
+        attempt["error_type"] = error_type
         attempt["error_message"] = error
         attempt["finished_at"] = now
         attempt["updated_at"] = now
@@ -287,6 +299,46 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             for key, value in updates.items():
                 asset[key] = value
 
+    def _increment_asset_attempts(self, batch_id: str, asset_ids: list[str] | None) -> None:
+        now = _utc_now_iso()
+        for asset_id in self._target_asset_ids(batch_id, asset_ids):
+            asset = self.assets.get(asset_id)
+            if asset is None:
+                continue
+            asset["attempt_count"] = int(asset.get("attempt_count") or 0) + 1
+            asset["updated_at"] = now
+
+    def _target_asset_ids(self, batch_id: str, asset_ids: list[str] | None) -> list[str]:
+        if asset_ids:
+            return list(asset_ids)
+        return [asset_id for asset_id, asset in self.assets.items() if asset["batch_id"] == batch_id]
+
+    def _refresh_batch_from_assets(self, batch_id: str, *, now: str) -> None:
+        batch = self.batches[batch_id]
+        assets = [asset for asset in self.assets.values() if asset["batch_id"] == batch_id]
+        if not assets or all(asset["status"] == "succeeded" for asset in assets):
+            batch["status"] = "succeeded"
+            batch["last_error"] = None
+            batch["partitioned_at"] = now
+            batch["manual_required_at"] = None
+        else:
+            status = _summarize_asset_statuses(asset["status"] for asset in assets)
+            batch["status"] = status
+            failed_asset = next(
+                (
+                    asset
+                    for asset in assets
+                    if asset["status"] in {"manual_required", "failed"} and asset.get("last_error")
+                ),
+                None,
+            )
+            batch["last_error"] = failed_asset.get("last_error") if failed_asset else batch.get("last_error")
+            if status == "manual_required" and not batch.get("manual_required_at"):
+                batch["manual_required_at"] = now
+            elif status != "manual_required":
+                batch["manual_required_at"] = None
+        batch["updated_at"] = now
+
 
 class PostgresPartitionJobStore(PartitionJobStore):
     def __init__(self, dsn: str) -> None:
@@ -349,6 +401,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       attempt_no INT NOT NULL,
                       payload JSONB NOT NULL,
                       runner_result JSONB,
+                      error_type TEXT,
                       error_message TEXT,
                       requested_by TEXT NOT NULL DEFAULT 'system',
                       started_at TIMESTAMPTZ,
@@ -358,6 +411,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     )
                     """
                 )
+                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS error_type TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
@@ -480,10 +534,14 @@ class PostgresPartitionJobStore(PartitionJobStore):
         self.ensure_schema()
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE partition_batches SET attempt_count = attempt_count + 1, updated_at = now() WHERE batch_id = %s RETURNING attempt_count", (batch_id,))
+                cur.execute(
+                    "UPDATE partition_batches SET attempt_count = attempt_count + 1, updated_at = now() WHERE batch_id = %s RETURNING attempt_count",
+                    (batch_id,),
+                )
                 row = cur.fetchone()
                 if row is None:
                     raise KeyError(batch_id)
+                self._increment_asset_attempts(cur, batch_id, asset_ids)
                 cur.execute(
                     """
                     INSERT INTO partition_job_attempts (
@@ -513,21 +571,25 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if row is None:
                     return
                 batch_id, asset_ids = row
-                cur.execute(
-                    "UPDATE partition_batches SET status = 'succeeded', last_error = NULL, partitioned_at = now(), manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
-                    (batch_id,),
-                )
                 self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
+                self._refresh_batch_from_assets(cur, batch_id)
             conn.commit()
 
-    def fail_attempt(self, task_id: str, error: str, *, manual_required: bool = False) -> None:
+    def fail_attempt(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        manual_required: bool = False,
+        error_type: str | None = None,
+    ) -> None:
         status = "manual_required" if manual_required else "failed"
         self.ensure_schema()
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'failed', error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
-                    (error, task_id),
+                    "UPDATE partition_job_attempts SET status = 'failed', error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
+                    (error_type, error, task_id),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -625,11 +687,23 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if row is None:
                     return
                 batch_id, asset_ids = row
-                cur.execute("UPDATE partition_batches SET status = %s, last_task_id = %s, updated_at = now() WHERE batch_id = %s", (batch_status, task_id, batch_id))
+                cur.execute(
+                    "UPDATE partition_batches SET status = %s, last_task_id = %s, updated_at = now() WHERE batch_id = %s",
+                    (batch_status, task_id, batch_id),
+                )
                 self._update_assets(cur, batch_id, asset_ids, batch_status)
             conn.commit()
 
-    def _update_assets(self, cur, batch_id: str, asset_ids: list[str], status: str, *, partitioned: bool = False, last_error: str | None | object = ...) -> None:
+    def _update_assets(
+        self,
+        cur,
+        batch_id: str,
+        asset_ids: list[str],
+        status: str,
+        *,
+        partitioned: bool = False,
+        last_error: str | None | object = ...,
+    ) -> None:
         partitioned_sql = ", partitioned_at = now()" if partitioned else ""
         error_sql = "" if last_error is ... else ", last_error = %s"
         params: list[Any] = [status]
@@ -641,6 +715,38 @@ class PostgresPartitionJobStore(PartitionJobStore):
         else:
             params.append(batch_id)
             cur.execute(f"UPDATE partition_assets SET status = %s{partitioned_sql}{error_sql}, updated_at = now() WHERE batch_id = %s", params)
+
+    def _increment_asset_attempts(self, cur, batch_id: str, asset_ids: list[str] | None) -> None:
+        if asset_ids:
+            cur.execute(
+                "UPDATE partition_assets SET attempt_count = attempt_count + 1, updated_at = now() WHERE asset_id = ANY(%s)",
+                (asset_ids,),
+            )
+        else:
+            cur.execute(
+                "UPDATE partition_assets SET attempt_count = attempt_count + 1, updated_at = now() WHERE batch_id = %s",
+                (batch_id,),
+            )
+
+    def _refresh_batch_from_assets(self, cur, batch_id: str) -> None:
+        cur.execute("SELECT status, last_error FROM partition_assets WHERE batch_id = %s", (batch_id,))
+        rows = cur.fetchall()
+        if not rows or all(row[0] == "succeeded" for row in rows):
+            cur.execute(
+                "UPDATE partition_batches SET status = 'succeeded', last_error = NULL, partitioned_at = now(), manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
+                (batch_id,),
+            )
+            return
+        status = _summarize_asset_statuses(row[0] for row in rows)
+        last_error = next(
+            (row[1] for row in rows if row[0] in {"manual_required", "failed"} and row[1]),
+            None,
+        )
+        manual_required_sql = "COALESCE(manual_required_at, now())" if status == "manual_required" else "NULL"
+        cur.execute(
+            f"UPDATE partition_batches SET status = %s, last_error = COALESCE(%s, last_error), manual_required_at = {manual_required_sql}, updated_at = now() WHERE batch_id = %s",
+            (status, last_error, batch_id),
+        )
 
     def _connect(self):
         try:
@@ -737,6 +843,16 @@ def _stable_asset_key(value: str, idx: int) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _summarize_asset_statuses(statuses: Any) -> str:
+    values = {str(status) for status in statuses if status}
+    if not values or values <= {"succeeded"}:
+        return "succeeded"
+    for status in ("manual_required", "failed", "cancel_requested", "running", "queued", "retrying", "cancelled"):
+        if status in values:
+            return status
+    return "pending"
 
 
 def _jsonb_record(record: dict[str, Any], *json_keys: str) -> dict[str, Any]:

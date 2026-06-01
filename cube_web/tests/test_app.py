@@ -1282,7 +1282,7 @@ def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
     )
 
     def fail_optical(_payload=None):
-        raise RuntimeError("source missing")
+        raise RuntimeError("temporary network timeout")
 
     monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
 
@@ -1300,7 +1300,44 @@ def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
     assert batch["status"] == "manual_required"
     assert batch["attempt_count"] == 2
     assert batch["last_task_id"] != first_task_id
-    assert "source missing" in batch["last_error"]
+    assert "temporary network timeout" in batch["last_error"]
+    attempts = client.get("/v1/partition/batches/BATCH_FAIL_RETRY/attempts").json()["attempts"]
+    assert attempts[0]["error_type"] == "transient"
+
+
+def test_partition_batch_source_missing_requires_manual_without_auto_retry(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_SOURCE_MISSING",
+            "batch_name": "Source missing",
+            "data_type": "optical",
+            "max_auto_retries": 1,
+            "assets": [{"source_uri": "s3://cube/cube/source/optocal/missing.tif", "scene_id": "missing"}],
+        },
+    )
+
+    def fail_optical(_payload=None):
+        raise RuntimeError("source missing")
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_SOURCE_MISSING/run", json={})
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+
+    for _ in range(50):
+        batch = client.get("/v1/partition/batches/BATCH_SOURCE_MISSING").json()
+        if batch["status"] == "manual_required":
+            break
+        time.sleep(0.02)
+
+    batch = client.get("/v1/partition/batches/BATCH_SOURCE_MISSING").json()
+    attempts = client.get("/v1/partition/batches/BATCH_SOURCE_MISSING/attempts").json()["attempts"]
+    assert batch["status"] == "manual_required"
+    assert batch["attempt_count"] == 1
+    assert batch["last_task_id"] == task_id
+    assert attempts[0]["error_type"] == "source_missing"
 
 
 def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
@@ -1333,6 +1370,13 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
         time.sleep(0.01)
 
     assert [asset["asset_id"] for asset in captured["payload"]["selected_assets"]] == ["asset-b"]
+    batch = client.get("/v1/partition/batches/BATCH_ASSET_RETRY").json()
+    assets = client.get("/v1/partition/batches/BATCH_ASSET_RETRY/assets").json()["assets"]
+    statuses = {asset["asset_id"]: asset["status"] for asset in assets}
+    attempt_counts = {asset["asset_id"]: asset["attempt_count"] for asset in assets}
+    assert batch["status"] == "pending"
+    assert statuses == {"asset-a": "pending", "asset-b": "succeeded"}
+    assert attempt_counts == {"asset-a": 0, "asset-b": 1}
 
 
 def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
