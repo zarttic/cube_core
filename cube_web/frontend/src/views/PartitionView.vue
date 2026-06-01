@@ -626,7 +626,7 @@ function partitionBatchDetailPayloadRows(batch) {
     { label: '数据类型', value: dataLabelsByModule[batch.data_type] || batch.data_type || '-' },
     { label: '状态', value: partitionStatusText(batch.status) },
     { label: '尝试次数', value: batch.attempt_count ?? 0 },
-    { label: '最大自动重试', value: batch.max_auto_retries ?? 0 },
+    { label: '自动重试次数', value: batch.max_auto_retries ?? 0 },
     { label: '最后任务', value: batch.last_task_id || '-' },
     { label: '最后错误', value: batch.last_error || '-' },
     { label: '创建时间', value: formatPartitionTimestamp(batch.created_at) },

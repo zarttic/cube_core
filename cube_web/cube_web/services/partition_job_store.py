@@ -207,7 +207,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt["runner_result"] = copy.deepcopy(result)
         attempt["finished_at"] = now
         attempt["updated_at"] = now
-        self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
+        if _asset_results(result):
+            self._apply_asset_results(attempt, result, now=now)
+        else:
+            self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
         self._refresh_batch_from_assets(attempt["batch_id"], now=now)
 
     def fail_attempt(
@@ -307,6 +310,41 @@ class InMemoryPartitionJobStore(PartitionJobStore):
                 continue
             asset["attempt_count"] = int(asset.get("attempt_count") or 0) + 1
             asset["updated_at"] = now
+
+    def _apply_asset_results(self, attempt: dict[str, Any], result: dict[str, Any], *, now: str) -> None:
+        attempt_asset_ids = set(attempt.get("asset_ids") or [])
+        self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
+        for item in _asset_results(result):
+            asset = self._find_asset_for_result(attempt["batch_id"], item)
+            if asset is None:
+                continue
+            if attempt_asset_ids and asset["asset_id"] not in attempt_asset_ids:
+                continue
+            status = _normalized_asset_result_status(item)
+            asset["status"] = status
+            asset["updated_at"] = now
+            if status == "succeeded":
+                asset["partitioned_at"] = item.get("partitioned_at") or now
+                asset["last_error"] = None
+            elif item.get("last_error") or item.get("error") or item.get("error_message"):
+                asset["last_error"] = str(item.get("last_error") or item.get("error") or item.get("error_message"))
+            if item.get("last_run_dir") or result.get("run_dir"):
+                asset["last_run_dir"] = str(item.get("last_run_dir") or result.get("run_dir"))
+
+    def _find_asset_for_result(self, batch_id: str, item: dict[str, Any]) -> dict[str, Any] | None:
+        asset_id = str(item.get("asset_id") or "").strip()
+        if asset_id and self.assets.get(asset_id, {}).get("batch_id") == batch_id:
+            return self.assets[asset_id]
+        source_uri = str(item.get("source_uri") or "").strip()
+        scene_id = str(item.get("scene_id") or "").strip()
+        for asset in self.assets.values():
+            if asset["batch_id"] != batch_id:
+                continue
+            if source_uri and str(asset.get("source_uri") or "") == source_uri:
+                return asset
+            if scene_id and str(asset.get("scene_id") or "") == scene_id:
+                return asset
+        return None
 
     def _target_asset_ids(self, batch_id: str, asset_ids: list[str] | None) -> list[str]:
         if asset_ids:
@@ -571,7 +609,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if row is None:
                     return
                 batch_id, asset_ids = row
-                self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
+                if _asset_results(result):
+                    self._apply_asset_results(cur, batch_id, asset_ids, result)
+                else:
+                    self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
                 self._refresh_batch_from_assets(cur, batch_id)
             conn.commit()
 
@@ -728,6 +769,29 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 (batch_id,),
             )
 
+    def _apply_asset_results(self, cur, batch_id: str, asset_ids: list[str], result: dict[str, Any]) -> None:
+        self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
+        for item in _asset_results(result):
+            status = _normalized_asset_result_status(item)
+            last_error = None if status == "succeeded" else item.get("last_error") or item.get("error") or item.get("error_message")
+            partitioned_sql = ", partitioned_at = COALESCE(partitioned_at, now())" if status == "succeeded" else ""
+            last_run_dir = item.get("last_run_dir") or result.get("run_dir")
+            run_dir_sql = ", last_run_dir = %s" if last_run_dir else ""
+            params: list[Any] = [status, None if last_error is None else str(last_error)]
+            if last_run_dir:
+                params.append(str(last_run_dir))
+            where, where_params = _asset_result_where_clause(item, batch_id)
+            if where is None:
+                continue
+            if asset_ids:
+                where = f"{where} AND asset_id = ANY(%s)"
+                where_params.append(asset_ids)
+            params.extend(where_params)
+            cur.execute(
+                f"UPDATE partition_assets SET status = %s, last_error = %s{partitioned_sql}{run_dir_sql}, updated_at = now() WHERE {where}",
+                params,
+            )
+
     def _refresh_batch_from_assets(self, cur, batch_id: str) -> None:
         cur.execute("SELECT status, last_error FROM partition_assets WHERE batch_id = %s", (batch_id,))
         rows = cur.fetchall()
@@ -853,6 +917,41 @@ def _summarize_asset_statuses(statuses: Any) -> str:
         if status in values:
             return status
     return "pending"
+
+
+def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
+    items = result.get("asset_results") if isinstance(result, dict) else None
+    if items is None and isinstance(result, dict):
+        items = result.get("partition_asset_results")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _normalized_asset_result_status(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or "succeeded").strip().lower()
+    if status in {"completed", "complete", "success", "ok", "passed"}:
+        return "succeeded"
+    if status in {"error", "failed", "fail"}:
+        return "failed"
+    if status in {"manual", "manual_required"}:
+        return "manual_required"
+    if status in {"queued", "running", "retrying", "cancel_requested", "cancelled", "succeeded"}:
+        return status
+    return "failed"
+
+
+def _asset_result_where_clause(item: dict[str, Any], batch_id: str) -> tuple[str | None, list[Any]]:
+    asset_id = str(item.get("asset_id") or "").strip()
+    if asset_id:
+        return "batch_id = %s AND asset_id = %s", [batch_id, asset_id]
+    source_uri = str(item.get("source_uri") or "").strip()
+    if source_uri:
+        return "batch_id = %s AND source_uri = %s", [batch_id, source_uri]
+    scene_id = str(item.get("scene_id") or "").strip()
+    if scene_id:
+        return "batch_id = %s AND scene_id = %s", [batch_id, scene_id]
+    return None, []
 
 
 def _jsonb_record(record: dict[str, Any], *json_keys: str) -> dict[str, Any]:

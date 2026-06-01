@@ -1425,6 +1425,122 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
     assert attempt_counts == {"asset-a": 0, "asset-b": 1}
 
 
+def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_ASSET_LEVEL_RETRY",
+            "batch_name": "Asset level retry",
+            "data_type": "optical",
+            "max_auto_retries": 1,
+            "assets": [
+                {"asset_id": "asset-a", "source_uri": "s3://cube/cube/source/optocal/a.tif", "scene_id": "a"},
+                {"asset_id": "asset-b", "source_uri": "s3://cube/cube/source/optocal/b.tif", "scene_id": "b"},
+            ],
+        },
+    )
+    calls = []
+
+    def fake_run_optical_partition_demo(payload=None):
+        selected_asset_ids = [asset["asset_id"] for asset in payload["selected_assets"]]
+        calls.append(selected_asset_ids)
+        if len(calls) == 1:
+            return {
+                "status": "completed",
+                "mode": "partition_demo",
+                "data_type": "optical",
+                "rows": 1,
+                "run_dir": "/tmp/asset-level-run-1",
+                "asset_results": [
+                    {"asset_id": "asset-a", "status": "succeeded"},
+                    {
+                        "asset_id": "asset-b",
+                        "status": "failed",
+                        "error_type": "transient",
+                        "last_error": "temporary network timeout",
+                    },
+                ],
+            }
+        if len(calls) == 2:
+            assert selected_asset_ids == ["asset-b"]
+            return {
+                "status": "completed",
+                "mode": "partition_demo",
+                "data_type": "optical",
+                "rows": 0,
+                "run_dir": "/tmp/asset-level-run-2",
+                "asset_results": [
+                    {
+                        "asset_id": "asset-b",
+                        "status": "failed",
+                        "error_type": "transient",
+                        "last_error": "temporary network timeout",
+                    }
+                ],
+            }
+        assert selected_asset_ids == ["asset-b"]
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "optical",
+            "rows": 1,
+            "run_dir": "/tmp/asset-level-run-3",
+            "asset_results": [
+                {"asset_id": "asset-b", "status": "succeeded"},
+                {
+                    "asset_id": "asset-a",
+                    "status": "failed",
+                    "error_type": "transient",
+                    "last_error": "ignored extra asset result",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY/run", json={})
+    assert submit_resp.status_code == 202
+    for _ in range(80):
+        batch = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY").json()
+        if batch["status"] == "manual_required":
+            break
+        time.sleep(0.02)
+
+    batch = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY").json()
+    assets = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY/assets").json()["assets"]
+    statuses = {asset["asset_id"]: asset["status"] for asset in assets}
+    attempt_counts = {asset["asset_id"]: asset["attempt_count"] for asset in assets}
+
+    assert calls[:2] == [["asset-a", "asset-b"], ["asset-b"]]
+    assert batch["status"] == "manual_required"
+    assert batch["attempt_count"] == 2
+    assert statuses == {"asset-a": "succeeded", "asset-b": "manual_required"}
+    assert attempt_counts == {"asset-a": 1, "asset-b": 2}
+    assert "temporary network timeout" in batch["last_error"]
+
+    retry_resp = client.post("/v1/partition/assets/retry", json={"asset_ids": ["asset-b"]})
+    assert retry_resp.status_code == 202
+    retry_task_id = retry_resp.json()["task_id"]
+    for _ in range(40):
+        task = client.get(f"/v1/partition/tasks/{retry_task_id}").json()
+        if task["status"] == "completed":
+            break
+        time.sleep(0.02)
+
+    batch = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY").json()
+    assets = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY/assets").json()["assets"]
+    statuses = {asset["asset_id"]: asset["status"] for asset in assets}
+    attempt_counts = {asset["asset_id"]: asset["attempt_count"] for asset in assets}
+    attempts = client.get("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY/attempts").json()["attempts"]
+
+    assert calls == [["asset-a", "asset-b"], ["asset-b"], ["asset-b"]]
+    assert batch["status"] == "succeeded"
+    assert batch["attempt_count"] == 3
+    assert statuses == {"asset-a": "succeeded", "asset-b": "succeeded"}
+    assert attempt_counts == {"asset-a": 1, "asset-b": 3}
+    assert [attempt["operation"] for attempt in attempts] == ["manual_asset_retry", "auto_retry", "auto_run"]
+
+
 def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
     client.post(
         "/v1/partition/schemas/import",

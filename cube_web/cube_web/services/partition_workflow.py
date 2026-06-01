@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 from uuid import uuid4
 
@@ -131,7 +132,25 @@ class PartitionWorkflowService:
     def on_task_succeeded(self, task_id: str, result: dict[str, Any]) -> None:
         attempt = self.store.get_attempt(task_id)
         if attempt is not None:
-            self.store.succeed_attempt(task_id, result)
+            batch = self.get_batch(attempt["batch_id"])
+            attempt_no = int(attempt.get("attempt_no") or 1)
+            max_auto_retries = int(batch.get("max_auto_retries") or 1)
+            retryable_asset_ids = _retryable_failed_asset_ids(result)
+            all_failed_asset_ids = _failed_asset_ids(result)
+            should_auto_retry = (
+                bool(retryable_asset_ids)
+                and attempt_no <= max_auto_retries
+                and attempt.get("operation") in {"auto_run", "auto_retry"}
+            )
+            result_to_store = result if should_auto_retry else _manual_required_asset_result(result, set(all_failed_asset_ids))
+            self.store.succeed_attempt(task_id, result_to_store)
+            if should_auto_retry:
+                self.run_batch(
+                    attempt["batch_id"],
+                    operation="auto_retry",
+                    asset_ids=retryable_asset_ids,
+                    requested_by="system",
+                )
 
     def on_task_failed(self, task_id: str, error: str) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -161,9 +180,14 @@ class PartitionWorkflowService:
         asset_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = dict(batch.get("normalized_payload") or {})
-        if asset_ids:
-            assets = self.store.list_assets(batch["batch_id"])
-            selected = [asset["asset_payload"] for asset in assets if asset["asset_id"] in set(asset_ids)]
+        assets = self.store.list_assets(batch["batch_id"])
+        if assets:
+            target_asset_ids = set(asset_ids) if asset_ids else None
+            selected = [
+                _payload_asset_with_identity(asset)
+                for asset in assets
+                if target_asset_ids is None or asset["asset_id"] in target_asset_ids
+            ]
             key = "selected_observations" if batch["data_type"] == "carbon" else "selected_assets"
             payload[key] = selected
         if config_override:
@@ -186,3 +210,65 @@ def classify_partition_error(error: str) -> str:
 
 def is_retryable_partition_error(error_type: str) -> bool:
     return error_type in {"transient", "unknown"}
+
+
+def _payload_asset_with_identity(asset: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(asset.get("asset_payload") or {})
+    payload.setdefault("asset_id", asset.get("asset_id"))
+    payload.setdefault("source_uri", asset.get("source_uri"))
+    if asset.get("scene_id") is not None:
+        payload.setdefault("scene_id", asset.get("scene_id"))
+    return payload
+
+
+def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
+    items = result.get("asset_results") if isinstance(result, dict) else None
+    if items is None and isinstance(result, dict):
+        items = result.get("partition_asset_results")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _asset_result_failed(item: dict[str, Any]) -> bool:
+    return str(item.get("status") or "").strip().lower() in {"failed", "manual_required", "error"}
+
+
+def _asset_result_id(item: dict[str, Any]) -> str:
+    return str(item.get("asset_id") or "").strip()
+
+
+def _asset_result_error_type(item: dict[str, Any]) -> str:
+    explicit = str(item.get("error_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    error = str(item.get("last_error") or item.get("error") or item.get("error_message") or "")
+    return classify_partition_error(error)
+
+
+def _failed_asset_ids(result: dict[str, Any]) -> list[str]:
+    return [_asset_result_id(item) for item in _asset_results(result) if _asset_result_failed(item) and _asset_result_id(item)]
+
+
+def _retryable_failed_asset_ids(result: dict[str, Any]) -> list[str]:
+    return [
+        _asset_result_id(item)
+        for item in _asset_results(result)
+        if _asset_result_failed(item)
+        and _asset_result_id(item)
+        and is_retryable_partition_error(_asset_result_error_type(item))
+    ]
+
+
+def _manual_required_asset_result(result: dict[str, Any], asset_ids: set[str]) -> dict[str, Any]:
+    if not asset_ids:
+        return result
+    next_result = copy.deepcopy(result)
+    for key in ("asset_results", "partition_asset_results"):
+        items = next_result.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and _asset_result_id(item) in asset_ids and _asset_result_failed(item):
+                item["status"] = "manual_required"
+    return next_result
