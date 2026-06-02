@@ -18,7 +18,7 @@
 
 - 托管 SPA 页面和静态资源。
 - 提供 `/health`。
-- 在 `/v1` 下暴露 SDK facade、剖分 demo、异步任务和质检报告接口。
+- 在 `/v1` 下暴露 SDK facade、剖分执行、异步任务和质检报告接口。
 - 将前端请求转换为 `cube_split` 作业参数。
 - 扫描 `cube_split/data/ray_output/*/run_*` 下的质检历史。
 
@@ -72,9 +72,11 @@ npm run build
 
 ### 4.2 剖分接口
 
-- `POST /v1/partition/{data_type}/demo`
+- `POST /v1/partition/{data_type}/run`
+- `POST /v1/partition/{data_type}/demo`（兼容旧演示客户端）
 - `POST /v1/partition/{data_type}/retry`
-- `POST /v1/partition/{data_type}/tasks/demo`
+- `POST /v1/partition/{data_type}/tasks/run`
+- `POST /v1/partition/{data_type}/tasks/demo`（兼容旧演示客户端）
 - `POST /v1/partition/{data_type}/tasks/retry`
 - `GET /v1/partition/tasks/{task_id}`
 - `POST /v1/partition/optical/test`
@@ -84,9 +86,14 @@ npm run build
 - `optical`
 - `carbon`
 - `product`
-- `radar` 为占位，返回 501。
+- `radar`
 
-异步任务保存在进程内 `PartitionTaskStore`，适合演示和联调，不是持久任务队列。
+异步执行状态保存在进程内 `PartitionTaskStore`。批次、资产和尝试记录由
+`PartitionJobStore` 持久化到 PostgreSQL。
+
+内置演示批次默认不会写入生产库。只在演示环境设置
+`CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1` 时，启动时才会自动装载光学、产品、
+雷达和碳卫星示例批次。
 
 ### 4.3 质检接口
 

@@ -30,3 +30,15 @@ def test_environment_overrides_local_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "ray://from-env:10001")
 
     assert runtime_config.ray_address() == "ray://from-env:10001"
+
+
+def test_demo_partition_schema_loading_defaults_to_disabled(monkeypatch):
+    monkeypatch.delenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", raising=False)
+
+    assert runtime_config.load_demo_partition_schemas() is False
+
+
+def test_demo_partition_schema_loading_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", "1")
+
+    assert runtime_config.load_demo_partition_schemas() is True

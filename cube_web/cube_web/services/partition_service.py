@@ -18,6 +18,7 @@ TaskErrorHook = Callable[[str, str], None]
 @dataclass(frozen=True)
 class PartitionBackend:
     data_type: str
+    run: Optional[PartitionRunner] = None
     demo: Optional[PartitionRunner] = None
     retry: Optional[PartitionRunner] = None
     test: Optional[PartitionRunner] = None
@@ -134,6 +135,9 @@ class PartitionService:
         self.registry = registry
         self.task_store = task_store or PartitionTaskStore()
 
+    def run(self, data_type: str, payload: Optional[dict] = None) -> dict:
+        return self._run(data_type, "run", payload)
+
     def demo(self, data_type: str, payload: Optional[dict] = None) -> dict:
         return self._run(data_type, "demo", payload)
 
@@ -227,30 +231,35 @@ def build_partition_registry(
     return {
         "optical": PartitionBackend(
             data_type="optical",
+            run=optical_demo,
             demo=optical_demo,
             test=optical_test,
             retry=optical_retry,
         ),
         "carbon": PartitionBackend(
             data_type="carbon",
+            run=carbon_demo,
             demo=carbon_demo,
             test=carbon_test,
             retry=carbon_retry,
         ),
         "product": PartitionBackend(
             data_type="product",
+            run=product_demo,
             demo=product_demo,
             test=product_test,
             retry=product_retry,
         ),
         "radar": PartitionBackend(
             data_type="radar",
+            run=radar_demo,
             demo=radar_demo,
             test=radar_test,
             retry=radar_retry,
         ),
         "entity": PartitionBackend(
             data_type="entity",
+            run=entity_demo,
             demo=entity_demo,
             test=entity_test,
             retry=entity_retry,

@@ -64,6 +64,10 @@ def create_partition_router(service: PartitionService | None = None, workflow: P
     def partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
         return service.demo(data_type, payload_from_model(payload))
 
+    @router.post("/{data_type}/run", response_model=PartitionResult)
+    def partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+        return service.run(data_type, payload_from_model(payload))
+
     @router.post("/{data_type}/retry", response_model=PartitionResult)
     def partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
         return service.retry(data_type, payload_from_model(payload))
@@ -75,6 +79,10 @@ def create_partition_router(service: PartitionService | None = None, workflow: P
     @router.post("/{data_type}/tasks/demo", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
         return service.submit(data_type, "demo", payload_from_model(payload)).to_dict()
+
+    @router.post("/{data_type}/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    def submit_partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+        return service.submit(data_type, "run", payload_from_model(payload)).to_dict()
 
     @router.post("/{data_type}/tasks/retry", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:

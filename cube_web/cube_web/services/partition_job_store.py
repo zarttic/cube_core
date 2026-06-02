@@ -4,7 +4,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any
 
-from cube_split.runtime_config import postgres_dsn
+from cube_split import runtime_config
 
 from cube_web.services.partition_defaults import apply_resolution_grid_defaults
 
@@ -943,10 +943,11 @@ _store: PartitionJobStore | None = None
 def get_partition_job_store() -> PartitionJobStore:
     global _store
     if _store is None:
-        _store = PostgresPartitionJobStore(postgres_dsn())
-        from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas
+        _store = PostgresPartitionJobStore(runtime_config.postgres_dsn())
+        if runtime_config.load_demo_partition_schemas():
+            from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas
 
-        ensure_standard_partition_schemas(_store)
+            ensure_standard_partition_schemas(_store)
     return _store
 
 

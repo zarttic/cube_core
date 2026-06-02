@@ -47,6 +47,16 @@ Use Python 3.11+, 4-space indentation, type hints for public functions, and focu
 - Before adding dependencies, confirm an existing dependency cannot solve the need.
 - Do not casually move directories or rename public modules.
 
+## Production vs Demo Separation
+
+Keep `master`/`main` as the production development baseline. Production code owns the reusable partition execution path, managed batch workflow, retry/cancel/quality behavior, runtime configuration, and tests.
+
+- Use `run` as the production partition operation and API name. Existing `demo` endpoints may remain only as backwards-compatible aliases for older clients; do not add new production call sites that submit `demo` operations.
+- Bundled demo partition batches must be runtime opt-in. Production startup must not seed demo batches unless `CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1` is explicitly set.
+- Keep demo-only docs, local `.cube_web.env` examples, seed-data manifests, smoke orchestration, and presentation scripts on `demo/*` branches, for example `demo/partition-chain-202606`.
+- Do not merge demo data, local absolute data paths, credentials, or demo-specific hard-coded source manifests back into the production branch.
+- General bug fixes and reusable partition capability flow from production branches into demo branches. Demo-only adjustments stay on the demo branch. If a demo run exposes a real production bug, extract the smallest fix and cherry-pick or PR it back to production.
+
 ## Testing Guidelines
 
 The project uses `pytest`. Add or update tests beside the package being changed. For SDK/API changes, cover service behavior and FastAPI endpoints where applicable. Before pushing, run the full cross-package pytest command above; for narrow web changes, also run:
@@ -100,6 +110,12 @@ Current runtime endpoints:
 - **MinIO**: `10.136.1.14:9000`, bucket `cube`, `secure=false`.
 
 The configuration page must display runtime startup information for PostgreSQL, Ray, and MinIO, but must not persist those values back into `cube_web_configs`.
+
+Demo partition seed batches are not production configuration. Only demo environments should set:
+
+```bash
+CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
+```
 
 Portal navigation is runtime configuration, not configuration-management data. Defaults are:
 

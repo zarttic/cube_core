@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from cube_web.services.partition_job_store import PartitionJobStore, get_partition_job_store
 from cube_web.services.partition_service import PartitionService, PartitionTask
 
-
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 
@@ -99,7 +98,7 @@ class PartitionWorkflowService:
         data_type = str(batch["data_type"])
         return self.partition_service.submit(
             data_type,
-            "demo",
+            "run",
             payload,
             task_id=task_id,
             on_started=self.on_task_started,

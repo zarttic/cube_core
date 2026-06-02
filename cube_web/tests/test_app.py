@@ -19,12 +19,13 @@ import cube_web.routes.partition_adapters as partition_adapters
 import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
+from cube_web.services import partition_job_store as partition_job_store_module
 from cube_web.services import partition_runners
 from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
 from cube_web.services.partition_defaults import default_grid_level_for_resolution
-from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
+from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
 from cube_web.services.quality_report_store import set_quality_report_store
 
 client = TestClient(app)
@@ -175,6 +176,7 @@ def quality_store(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
     monkeypatch.setenv("CUBE_WEB_MINIO_BUCKET", "cube")
     monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
+    monkeypatch.delenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", raising=False)
     store = FakeQualityReportStore()
     set_quality_report_store(store)
     config_store = FakeConfigStore()
@@ -243,7 +245,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
     assert "const testModules = new Set(['optical', 'carbon', 'radar', 'product']);" in source
-    assert "const operation = testModules.has(activeModule.value) ? 'test' : 'demo';" in source
+    assert "const operation = testModules.has(activeModule.value) ? 'test' : 'run';" in source
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
@@ -1147,7 +1149,7 @@ def test_partition_demo_rejects_mgrs_grid_type():
     assert resp.status_code == 422
 
 
-def test_partition_demo_can_run_as_async_task(monkeypatch):
+def test_partition_run_can_run_as_async_task(monkeypatch):
     def fake_run_product_partition_demo(payload=None):
         assert payload == {"grid_type": "geohash", "grid_level": 5}
         return {
@@ -1159,13 +1161,13 @@ def test_partition_demo_can_run_as_async_task(monkeypatch):
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
-    submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "geohash", "grid_level": 5})
+    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
 
     assert submit_resp.status_code == 202
     submitted = submit_resp.json()
     assert submitted["status"] in {"queued", "running", "completed"}
     assert submitted["data_type"] == "product"
-    assert submitted["operation"] == "demo"
+    assert submitted["operation"] == "run"
 
     task_body = None
     for _ in range(20):
@@ -1179,6 +1181,21 @@ def test_partition_demo_can_run_as_async_task(monkeypatch):
     assert task_body is not None
     assert task_body["status"] == "completed"
     assert task_body["result"]["rows"] == 20
+
+
+def test_partition_demo_task_endpoint_remains_compatible(monkeypatch):
+    def fake_run_product_partition_demo(payload=None):
+        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 20}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
+
+    submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "geohash", "grid_level": 5})
+
+    assert submit_resp.status_code == 202
+    submitted = submit_resp.json()
+    assert submitted["data_type"] == "product"
+    assert submitted["operation"] == "demo"
 
 
 def test_partition_test_can_run_as_async_task(monkeypatch):
@@ -1268,6 +1285,44 @@ def test_standard_loaded_schemas_do_not_overwrite_existing_batch_state():
     assert batch["status"] == "manual_required"
     assert batch["attempt_count"] == 1
     assert batch["last_error"] == "existing failure"
+
+
+def test_partition_job_store_does_not_seed_demo_schemas_by_default(monkeypatch):
+    class DummyPostgresPartitionJobStore(InMemoryPartitionJobStore):
+        def __init__(self, dsn):
+            super().__init__()
+            self.dsn = dsn
+
+    monkeypatch.setattr(partition_job_store_module, "PostgresPartitionJobStore", DummyPostgresPartitionJobStore)
+    set_partition_job_store(None)
+
+    try:
+        store = partition_job_store_module.get_partition_job_store()
+
+        assert store.list_batches(include_succeeded=True) == []
+        assert store.dsn == "postgresql://postgres:postgres@127.0.0.1:55432/cube"
+    finally:
+        set_partition_job_store(None)
+
+
+def test_partition_job_store_seeds_demo_schemas_when_enabled(monkeypatch):
+    class DummyPostgresPartitionJobStore(InMemoryPartitionJobStore):
+        def __init__(self, dsn):
+            super().__init__()
+            self.dsn = dsn
+
+    monkeypatch.setenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", "1")
+    monkeypatch.setattr(partition_job_store_module, "PostgresPartitionJobStore", DummyPostgresPartitionJobStore)
+    set_partition_job_store(None)
+
+    try:
+        store = partition_job_store_module.get_partition_job_store()
+
+        expected_ids = {schema["batch_id"] for schema in standard_partition_schemas()}
+        batches = store.list_batches(include_succeeded=True, limit=20)
+        assert {batch["batch_id"] for batch in batches} == expected_ids
+    finally:
+        set_partition_job_store(None)
 
 
 def test_partition_schema_import_lists_batches_and_assets():

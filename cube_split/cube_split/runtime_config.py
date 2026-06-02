@@ -66,6 +66,10 @@ def ray_address() -> str:
     return env_text("CUBE_WEB_RAY_ADDRESS") or env_text("RAY_ADDRESS") or DEFAULT_RAY_ADDRESS
 
 
+def load_demo_partition_schemas() -> bool:
+    return bool_option(env_text("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS"), False)
+
+
 def require_postgres_dsn() -> str:
     value = postgres_dsn()
     if not value:

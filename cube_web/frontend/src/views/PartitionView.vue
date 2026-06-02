@@ -1169,7 +1169,7 @@ const partitionContextRows = computed(() => {
   const request = lastPartitionRequest.value || {};
   const payload = request.payload || {};
   const result = lastPartitionResult.value || {};
-  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'demo');
+  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'run');
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
   const status = resultLoading.value ? '执行中' : result.status === 'failed' ? '失败' : lastPartitionResult.value ? '已完成' : '待执行';
@@ -1649,7 +1649,7 @@ function errorText(error) {
 function buildPartitionFailureResult(error, request = {}) {
   const payload = request.payload || {};
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
-  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'demo');
+  const operation = request.operation || (testModules.has(activeModule.value) ? 'test' : 'run');
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
   return {
     status: 'failed',
@@ -2121,7 +2121,7 @@ async function runDemo() {
       throw new Error(`不支持的剖分模块: ${activeModule.value}`);
     }
     const { payload, selectedCount } = partitionPayloadForActiveModule();
-    const operation = testModules.has(activeModule.value) ? 'test' : 'demo';
+    const operation = testModules.has(activeModule.value) ? 'test' : 'run';
     lastPartitionRequest.value = { endpoint, payload, operation, apiPath: `/v1/partition/${endpoint}/tasks/${operation}` };
     if (activeModule.value === 'optical' && selectedCount <= 0) {
       throw new Error('请至少选择一条影像资产');

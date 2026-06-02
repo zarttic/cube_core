@@ -1,7 +1,7 @@
 # cube_core
 
 Python monorepo for grid encoding, remote-sensing partitioning, ingest/readback,
-and the web demo shell.
+and the web management shell.
 
 ## Packages
 
@@ -10,7 +10,7 @@ and the web demo shell.
 - `cube_split`: optical/product/carbon partitioning, Ray/local execution,
   ingest to PostgreSQL/MinIO or local backends, quality checks, and AOI readback.
 - `cube_web`: FastAPI host, Vue-built static UI, in-process SDK API facade,
-  partition demo endpoints, and quality-report endpoints.
+  managed partition endpoints, and quality-report endpoints.
 
 `cube_encoder` owns grid logic. Other packages consume it through
 `grid_core.sdk.CubeEncoderSDK` or the web SDK facade.
