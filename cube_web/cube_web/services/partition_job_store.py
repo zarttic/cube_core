@@ -45,6 +45,9 @@ class PartitionJobStore:
         payload: dict[str, Any],
         asset_ids: list[str] | None = None,
         requested_by: str = "system",
+        source_task_id: str | None = None,
+        retry_strategy: str | None = None,
+        failure_reason: str | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -104,6 +107,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "max_auto_retries": int(record.get("max_auto_retries") or existing.get("max_auto_retries") or 1),
             "last_task_id": existing.get("last_task_id"),
             "last_error": existing.get("last_error"),
+            "quality_status": existing.get("quality_status"),
+            "quality_report_id": existing.get("quality_report_id"),
+            "quality_failure_reason": existing.get("quality_failure_reason"),
             "partitioned_at": existing.get("partitioned_at"),
             "manual_required_at": existing.get("manual_required_at"),
             "created_at": existing.get("created_at") or now,
@@ -163,6 +169,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         payload: dict[str, Any],
         asset_ids: list[str] | None = None,
         requested_by: str = "system",
+        source_task_id: str | None = None,
+        retry_strategy: str | None = None,
+        failure_reason: str | None = None,
     ) -> dict[str, Any]:
         batch = self.batches[batch_id]
         attempt_no = int(batch.get("attempt_count") or 0) + 1
@@ -181,6 +190,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "error_type": None,
             "error_message": None,
             "requested_by": requested_by,
+            "source_task_id": source_task_id,
+            "retry_strategy": retry_strategy,
+            "failure_reason": failure_reason,
             "started_at": None,
             "finished_at": None,
             "created_at": _utc_now_iso(),
@@ -212,6 +224,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         else:
             self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
         self._refresh_batch_from_assets(attempt["batch_id"], now=now)
+        self._apply_quality_result(attempt["batch_id"], result, now=now)
 
     def fail_attempt(
         self,
@@ -239,6 +252,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch = self.batches[batch_id]
         batch["status"] = "retrying" if "retry" in operation else "queued"
         batch["last_task_id"] = task_id
+        batch["quality_status"] = None
+        batch["quality_report_id"] = None
+        batch["quality_failure_reason"] = None
         batch["updated_at"] = _utc_now_iso()
 
     def request_cancel(self, task_id: str) -> dict[str, Any] | None:
@@ -377,6 +393,21 @@ class InMemoryPartitionJobStore(PartitionJobStore):
                 batch["manual_required_at"] = None
         batch["updated_at"] = now
 
+    def _apply_quality_result(self, batch_id: str, result: dict[str, Any], *, now: str) -> None:
+        quality = _quality_result_summary(result)
+        if quality is None:
+            return
+        batch = self.batches[batch_id]
+        batch["quality_status"] = quality["quality_status"]
+        batch["quality_report_id"] = quality.get("quality_report_id")
+        batch["quality_failure_reason"] = quality.get("quality_failure_reason")
+        if quality["quality_status"] == "FAIL":
+            reason = quality.get("quality_failure_reason") or "Quality status is FAIL"
+            batch["status"] = "manual_required"
+            batch["last_error"] = reason
+            batch["manual_required_at"] = batch.get("manual_required_at") or now
+        batch["updated_at"] = now
+
 
 class PostgresPartitionJobStore(PartitionJobStore):
     def __init__(self, dsn: str) -> None:
@@ -402,6 +433,9 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       max_auto_retries INT NOT NULL DEFAULT 1,
                       last_task_id TEXT,
                       last_error TEXT,
+                      quality_status TEXT,
+                      quality_report_id TEXT,
+                      quality_failure_reason TEXT,
                       partitioned_at TIMESTAMPTZ,
                       manual_required_at TIMESTAMPTZ,
                       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -442,6 +476,9 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       error_type TEXT,
                       error_message TEXT,
                       requested_by TEXT NOT NULL DEFAULT 'system',
+                      source_task_id TEXT,
+                      retry_strategy TEXT,
+                      failure_reason TEXT,
                       started_at TIMESTAMPTZ,
                       finished_at TIMESTAMPTZ,
                       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -450,6 +487,12 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     """
                 )
                 cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS error_type TEXT")
+                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS source_task_id TEXT")
+                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS retry_strategy TEXT")
+                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS failure_reason TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_status TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_report_id TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_failure_reason TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
@@ -568,6 +611,9 @@ class PostgresPartitionJobStore(PartitionJobStore):
         payload: dict[str, Any],
         asset_ids: list[str] | None = None,
         requested_by: str = "system",
+        source_task_id: str | None = None,
+        retry_strategy: str | None = None,
+        failure_reason: str | None = None,
     ) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as conn:
@@ -583,12 +629,24 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 cur.execute(
                     """
                     INSERT INTO partition_job_attempts (
-                      task_id, batch_id, asset_ids, operation, status, attempt_no, payload, requested_by
+                      task_id, batch_id, asset_ids, operation, status, attempt_no, payload, requested_by,
+                      source_task_id, retry_strategy, failure_reason
                     )
-                    VALUES (%s, %s, %s, %s, 'queued', %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, 'queued', %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (task_id, batch_id, asset_ids or [], operation, row[0], self._jsonb(payload), requested_by),
+                    (
+                        task_id,
+                        batch_id,
+                        asset_ids or [],
+                        operation,
+                        row[0],
+                        self._jsonb(payload),
+                        requested_by,
+                        source_task_id,
+                        retry_strategy,
+                        failure_reason,
+                    ),
                 )
                 attempt = _dict_row(cur)
             conn.commit()
@@ -614,6 +672,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 else:
                     self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
                 self._refresh_batch_from_assets(cur, batch_id)
+                self._apply_quality_result(cur, batch_id, result)
             conn.commit()
 
     def fail_attempt(
@@ -649,7 +708,16 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_batches SET status = %s, last_task_id = %s, updated_at = now() WHERE batch_id = %s",
+                    """
+                    UPDATE partition_batches
+                    SET status = %s,
+                        last_task_id = %s,
+                        quality_status = NULL,
+                        quality_report_id = NULL,
+                        quality_failure_reason = NULL,
+                        updated_at = now()
+                    WHERE batch_id = %s
+                    """,
                     (status, task_id, batch_id),
                 )
             conn.commit()
@@ -812,6 +880,50 @@ class PostgresPartitionJobStore(PartitionJobStore):
             (status, last_error, batch_id),
         )
 
+    def _apply_quality_result(self, cur, batch_id: str, result: dict[str, Any]) -> None:
+        quality = _quality_result_summary(result)
+        if quality is None:
+            return
+        if quality["quality_status"] == "FAIL":
+            reason = quality.get("quality_failure_reason") or "Quality status is FAIL"
+            cur.execute(
+                """
+                UPDATE partition_batches
+                SET quality_status = %s,
+                    quality_report_id = %s,
+                    quality_failure_reason = %s,
+                    status = 'manual_required',
+                    last_error = %s,
+                    manual_required_at = COALESCE(manual_required_at, now()),
+                    updated_at = now()
+                WHERE batch_id = %s
+                """,
+                (
+                    quality["quality_status"],
+                    quality.get("quality_report_id"),
+                    quality.get("quality_failure_reason"),
+                    reason,
+                    batch_id,
+                ),
+            )
+            return
+        cur.execute(
+            """
+            UPDATE partition_batches
+            SET quality_status = %s,
+                quality_report_id = %s,
+                quality_failure_reason = %s,
+                updated_at = now()
+            WHERE batch_id = %s
+            """,
+            (
+                quality["quality_status"],
+                quality.get("quality_report_id"),
+                quality.get("quality_failure_reason"),
+                batch_id,
+            ),
+        )
+
     def _connect(self):
         try:
             import psycopg
@@ -832,6 +944,9 @@ def get_partition_job_store() -> PartitionJobStore:
     global _store
     if _store is None:
         _store = PostgresPartitionJobStore(postgres_dsn())
+        from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas
+
+        ensure_standard_partition_schemas(_store)
     return _store
 
 
@@ -860,6 +975,7 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
         apply_resolution_grid_defaults(payload, data_type=data_type)
     elif data_type == "carbon":
         payload.setdefault("selected_observations", copy.deepcopy(schema.get("observations") or schema.get("selected_observations") or []))
+    _validate_ard_payload(payload, data_type=data_type)
     return {
         "batch_id": batch_id,
         "batch_name": batch_name,
@@ -898,6 +1014,117 @@ def _assets_from_record(record: dict[str, Any]) -> list[dict[str, Any]]:
     return assets
 
 
+def _validate_ard_payload(payload: dict[str, Any], *, data_type: str) -> None:
+    if data_type == "carbon":
+        _validate_carbon_observations(payload.get("selected_observations"))
+        return
+    _validate_raster_assets(payload.get("selected_assets"), data_type=data_type)
+
+
+def _validate_raster_assets(value: Any, *, data_type: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{data_type} schema requires non-empty selected_assets/assets")
+    for idx, asset in enumerate(value, start=1):
+        if not isinstance(asset, dict):
+            raise ValueError(f"{data_type} asset #{idx} must be an object")
+        prefix = f"{data_type} asset #{idx}"
+        for field in ("source_uri", "scene_id", "acq_time", "sensor", "product_family"):
+            _require_text(asset, field, prefix)
+        _parse_iso_datetime(asset["acq_time"], f"{prefix}.acq_time")
+        _validate_bands(asset, prefix)
+        _validate_corners(asset.get("corners"), f"{prefix}.corners")
+        _validate_resolution(asset.get("resolution"), f"{prefix}.resolution")
+
+
+def _validate_carbon_observations(value: Any) -> None:
+    if not isinstance(value, list) or not value:
+        raise ValueError("carbon schema requires non-empty selected_observations/observations")
+    for idx, observation in enumerate(value, start=1):
+        if not isinstance(observation, dict):
+            raise ValueError(f"carbon observation #{idx} must be an object")
+        prefix = f"carbon observation #{idx}"
+        for field in ("source_uri", "observation_id", "acq_time", "sensor", "product_family"):
+            _require_text(observation, field, prefix)
+        _parse_iso_datetime(observation["acq_time"], f"{prefix}.acq_time")
+        _validate_resolution(observation.get("resolution"), f"{prefix}.resolution")
+        _validate_location(observation, prefix)
+
+
+def _require_text(row: dict[str, Any], field: str, prefix: str) -> str:
+    value = str(row.get(field) or "").strip()
+    if not value:
+        raise ValueError(f"{prefix}.{field} is required")
+    return value
+
+
+def _parse_iso_datetime(value: Any, label: str) -> None:
+    try:
+        datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be an ISO8601 datetime") from None
+
+
+def _validate_bands(asset: dict[str, Any], prefix: str) -> None:
+    bands = asset.get("bands")
+    if isinstance(bands, list):
+        if any(str(item).strip() for item in bands):
+            return
+    elif bands is not None and str(bands).strip():
+        return
+    for field in ("band", "polarization", "variable"):
+        if str(asset.get(field) or "").strip():
+            return
+    raise ValueError(f"{prefix}.bands or polarization is required")
+
+
+def _validate_corners(value: Any, label: str) -> None:
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError(f"{label} must contain 4 [lon, lat] points")
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"{label} must contain 4 [lon, lat] points")
+        lon = _float_value(point[0], label)
+        lat = _float_value(point[1], label)
+        if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+            raise ValueError(f"{label} coordinate out of range")
+
+
+def _validate_resolution(value: Any, label: str) -> None:
+    resolution = _resolution_value(value, label)
+    if resolution <= 0:
+        raise ValueError(f"{label} must be greater than 0")
+
+
+def _validate_location(observation: dict[str, Any], prefix: str) -> None:
+    if "corners" in observation:
+        _validate_corners(observation.get("corners"), f"{prefix}.corners")
+        return
+    if "footprint" in observation or "footprint_geojson" in observation:
+        return
+    lon = observation.get("lon", observation.get("center_lon"))
+    lat = observation.get("lat", observation.get("center_lat"))
+    lon_value = _float_value(lon, f"{prefix}.lon")
+    lat_value = _float_value(lat, f"{prefix}.lat")
+    if not (-180.0 <= lon_value <= 180.0 and -90.0 <= lat_value <= 90.0):
+        raise ValueError(f"{prefix} coordinates out of range")
+
+
+def _float_value(value: Any, label: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be numeric") from None
+
+
+def _resolution_value(value: Any, label: str) -> float:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text.endswith("m"):
+            text = text[:-1].strip()
+        value = text
+    return _float_value(value, label)
+
+
 def _stable_asset_key(value: str, idx: int) -> str:
     import hashlib
 
@@ -926,6 +1153,45 @@ def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
     return [item for item in items if isinstance(item, dict)]
+
+
+def _quality_result_summary(result: dict[str, Any]) -> dict[str, str | None] | None:
+    if not isinstance(result, dict):
+        return None
+    report = result.get("quality_report")
+    if not isinstance(report, dict):
+        report = {}
+    status = str(result.get("quality_status") or report.get("status") or "").strip().upper()
+    if not status:
+        return None
+    report_id = str(result.get("quality_report_id") or report.get("report_id") or "").strip() or None
+    reason = str(
+        result.get("quality_failure_reason")
+        or result.get("quality_error")
+        or _quality_failure_reason(report)
+        or ""
+    ).strip() or None
+    return {
+        "quality_status": status,
+        "quality_report_id": report_id,
+        "quality_failure_reason": reason,
+    }
+
+
+def _quality_failure_reason(report: dict[str, Any]) -> str | None:
+    checks = report.get("checks")
+    if not isinstance(checks, list):
+        return None
+    failed: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict) or str(check.get("status") or "").upper() != "FAIL":
+            continue
+        name = str(check.get("name") or "quality").strip()
+        message = str(check.get("message") or "").strip()
+        failed.append(f"{name}: {message}" if message else name)
+    if not failed:
+        return None
+    return "; ".join(failed[:3])[:500]
 
 
 def _normalized_asset_result_status(item: dict[str, Any]) -> str:

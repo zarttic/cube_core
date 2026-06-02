@@ -44,6 +44,9 @@ def test_isea4h_cover_modes():
         "type": "Polygon",
         "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
     }
+    center_candidates = set(
+        h3.h3shape_to_cells_experimental(h3.geo_to_h3shape(geometry), 6, contain="center")
+    )
     intersect = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="intersect")}
     contain = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="contain")}
     minimal = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="minimal")}
@@ -54,6 +57,8 @@ def test_isea4h_cover_modes():
             expanded_minimal.add(code)
         else:
             expanded_minimal.update(h3.cell_to_children(code, 6))
+    assert center_candidates.issubset(intersect)
+    assert len(intersect) > len(center_candidates)
     assert contain.issubset(intersect)
     assert expanded_minimal.issubset(intersect)
     assert len(minimal) <= len(expanded_minimal)

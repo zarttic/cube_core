@@ -50,7 +50,7 @@ function emptyConfig() {
     },
     ingest: {
       optical: {
-        dataset: 'demo_optical',
+        dataset: 'optical',
         sensor: 'optical_mosaic',
         quality_rule: 'best_quality_wins',
         allow_failed_quality: false,

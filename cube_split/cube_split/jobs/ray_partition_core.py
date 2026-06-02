@@ -207,6 +207,9 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
         source_uri = str(row.get("source_uri") or "").strip()
         scene_id = str(row.get("scene_id") or "").strip()
         acq_time = str(row.get("acq_time") or "").strip()
+        sensor = str(row.get("sensor") or "").strip()
+        product_family = str(row.get("product_family") or row.get("product_type") or "").strip()
+        resolution = _manifest_resolution(row)
         bands_raw = row.get("bands")
         bands: list[str] = []
         if isinstance(bands_raw, list):
@@ -216,9 +219,9 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
             if fallback_band:
                 bands = [fallback_band]
         corners = row.get("corners")
-        if not source_uri or not scene_id or not acq_time or not bands:
+        if not source_uri or not scene_id or not acq_time or not bands or not sensor or not product_family or resolution is None:
             raise ValueError(
-                f"Invalid manifest row #{idx}: required fields are source_uri, scene_id, acq_time, and one of bands/band/variable/polarization"
+                f"Invalid manifest row #{idx}: required fields are source_uri, scene_id, acq_time, sensor, product_family, resolution, and one of bands/band/variable/polarization"
             )
         if not isinstance(corners, list) or len(corners) != 4:
             raise ValueError(f"Invalid manifest row #{idx}: `corners` must be a list of 4 [lon, lat] points")
@@ -246,15 +249,14 @@ def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[
         if data_type not in {"optical", "product", "radar"}:
             raise ValueError(f"Invalid manifest row #{idx}: unsupported data_type={data_type!r}")
         for band in bands:
-            resolution = _manifest_resolution(row)
             records.append(
                 AssetRecord(
                     scene_id=scene_id,
                     band=band,
                     path=path_text,
                     acq_time=acq_time,
-                    product_family=str(row.get("product_family") or row.get("product_type") or "manifest").strip().lower(),
-                    sensor=str(row.get("sensor") or "unknown").strip().lower(),
+                    product_family=product_family.lower(),
+                    sensor=sensor.lower(),
                     bbox=bbox,
                     corners=parsed_corners,
                     resolution=resolution,

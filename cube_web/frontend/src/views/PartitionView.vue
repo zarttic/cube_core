@@ -19,26 +19,20 @@ const qualityHistoryDrawerVisible = ref(false);
 const dataSearch = ref('');
 const qualityHistorySearch = ref('');
 const qualityHistoryStatus = ref('');
-const selectedBatches = ref({
-  optical: 'OPTICAL_BATCH_20260522_135546',
-  carbon: 'CARBON_BATCH_20201231_A',
-  radar: 'R20240307001',
-  product: 'P20240307001',
-});
-const selectedOpticalBatchIds = ref(['OPTICAL_BATCH_20260522_135546']);
-const expandedOpticalBatchId = ref('OPTICAL_BATCH_20260522_135546');
+const selectedOpticalBatchIds = ref([]);
+const expandedOpticalBatchId = ref('');
 const deselectedOpticalAssetKeys = ref({});
-const selectedCarbonBatchIds = ref(['CARBON_BATCH_20201231_A']);
-const expandedCarbonBatchId = ref('CARBON_BATCH_20201231_A');
+const selectedCarbonBatchIds = ref([]);
+const expandedCarbonBatchId = ref('');
 const deselectedCarbonObservationKeys = ref({});
-const selectedRadarBatchIds = ref(['RADAR_BATCH_YANGZHOU_S1_2018_2020']);
-const expandedRadarBatchId = ref('RADAR_BATCH_YANGZHOU_S1_2018_2020');
+const selectedRadarBatchIds = ref([]);
+const expandedRadarBatchId = ref('');
 const deselectedRadarAssetKeys = ref({});
-const selectedProductBatchIds = ref(['PRODUCT_BATCH_DIANZHONG_1980_2020']);
-const expandedProductBatchId = ref('PRODUCT_BATCH_DIANZHONG_1980_2020');
+const selectedProductBatchIds = ref([]);
+const expandedProductBatchId = ref('');
 const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
-const defaultEntityGridLevel = 6;
+const defaultEntityGridLevel = 4;
 const gridTypeLabels = {
   geohash: '四边形格网',
   tile_matrix: '平面格网',
@@ -52,9 +46,9 @@ const resolutionGridLevelRules = {
     { max: 1000, level: 3 },
   ],
   isea4h: [
-    { max: 10, level: 7 },
+    { max: 10, level: defaultEntityGridLevel },
     { max: 30, level: defaultEntityGridLevel },
-    { max: 250, level: 5 },
+    { max: 250, level: defaultEntityGridLevel },
     { max: 1000, level: 4 },
   ],
 };
@@ -103,8 +97,9 @@ const qualityTargetCrs = ref('EPSG:4326');
 const qualityHistoryLimit = ref(30);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
+const qualityReportDataTypes = new Set(['optical', 'product', 'carbon']);
 const ingestDefaults = ref({
-  dataset: 'demo_optical',
+  dataset: 'optical',
   sensor: 'optical_mosaic',
   quality_rule: 'best_quality_wins',
   allow_failed_quality: false,
@@ -163,7 +158,7 @@ function defaultGridLevelForResolution(resolution, gridType, fallback = defaultG
   const rules = gridType === 'isea4h' ? resolutionGridLevelRules.isea4h : resolutionGridLevelRules.logical;
   const match = rules.find((rule) => resolution <= rule.max);
   if (match) return match.level;
-  return gridType === 'isea4h' ? 3 : 2;
+  return gridType === 'isea4h' ? defaultEntityGridLevel : 2;
 }
 
 function defaultGridLevelFromAssets(assets, gridType, fallback = defaultGridLevelForGridType(gridType)) {
@@ -173,202 +168,6 @@ function defaultGridLevelFromAssets(assets, gridType, fallback = defaultGridLeve
   if (!resolutions.length) return fallback;
   return defaultGridLevelForResolution(Math.min(...resolutions), gridType, fallback);
 }
-
-const minioSourcePrefix = 's3://cube/cube/source';
-const opticalSourcePrefix = `${minioSourcePrefix}/optocal`;
-const productSourcePrefix = `${minioSourcePrefix}/product`;
-const radarSourceRoot = '/home/lyjdev/projects/cube_project/cube_split/data/2018-2020年6月-8月江苏扬州10米Sentinel-1影像数据-01';
-
-const opticalBatches = [
-  {
-    id: 'OPTICAL_BATCH_20260522_135546',
-    name: 'Shandong_mosaic_optocal',
-    status: '就绪',
-    assets: [
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2015Q3_sr_band3_cut/Shandong_mosaic_2015Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2015Q3', acq_time: '2015-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q2_sr_band2_cut/Shandong_mosaic_2017Q2_sr_band2_cut.tif`, scene_id: 'Shandong_mosaic_2017Q2', acq_time: '2017-04-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_202008_sr_band2/Shandong_mosaic_202008_sr_band2.tif`, scene_id: 'Shandong_mosaic_202008', acq_time: '2020-08-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[108.227954, 38.75], [128.544672, 38.75], [128.544672, 33.499766], [108.227954, 33.499766]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-    ],
-  },
-  {
-    id: 'OPTICAL_BATCH_20260522_091000',
-    name: 'Shandong_mosaic_2020Q3_rgb_batch',
-    status: '就绪',
-    assets: [
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band2_cut/Shandong_mosaic_2020Q3_sr_band2_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band2'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band3_cut/Shandong_mosaic_2020Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2020Q3_sr_band4_cut/Shandong_mosaic_2020Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2020Q3', acq_time: '2020-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-    ],
-  },
-  {
-    id: 'OPTICAL_BATCH_20260521_181500',
-    name: 'Shandong_mosaic_2017Q3_batch',
-    status: '就绪',
-    assets: [
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q3_sr_band3_cut/Shandong_mosaic_2017Q3_sr_band3_cut.tif`, scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band3'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-      { source_uri: `${opticalSourcePrefix}/Shandong_mosaic_2017Q3_sr_band4_cut/Shandong_mosaic_2017Q3_sr_band4_cut.tif`, scene_id: 'Shandong_mosaic_2017Q3', acq_time: '2017-07-01T00:00:00Z', bands: ['sr_band4'], resolution: 30, corners: [[114.757377, 38.503521], [122.774914, 38.503521], [122.774914, 33.857041], [114.757377, 33.857041]] },
-    ],
-  },
-];
-const opticalRows = opticalBatches.map((batch) => ({
-  id: batch.id,
-  name: batch.name,
-  params: `${batch.assets.length} 条资产`,
-  status: batch.status,
-}));
-
-const carbonObservationSchema = [
-  { field: 'sounding_id / observation_id', type: 'string', meaning: '观测唯一标识' },
-  { field: 'time', type: 'datetime', meaning: '观测时间' },
-  { field: 'longitude / latitude', type: 'float', meaning: '观测中心点' },
-  { field: 'xco2', type: 'float', meaning: '柱平均 CO2 浓度' },
-  { field: 'xco2_quality_flag', type: 'int', meaning: '质量标记' },
-  { field: 'vertex_longitude / vertex_latitude', type: 'float[4]', meaning: '观测足迹四角点' },
-];
-
-const carbonBatches = [
-  {
-    id: 'CARBON_BATCH_20201231_A',
-    name: 'OCO-2_XCO2_20201231_sample',
-    status: '就绪',
-    product_type: 'xco2',
-    source_uri: 'oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4',
-    schema: carbonObservationSchema,
-    observations: [
-      { source_index: 0, observation_id: '2020123100010671', acq_time: '2020-12-31T00:01:06.700Z', lon: -167.413, lat: 41.1686, xco2: 417.384, quality_flag: '1' },
-      { source_index: 1, observation_id: '2020123100010673', acq_time: '2020-12-31T00:01:06.700Z', lon: -167.384, lat: 41.1405, xco2: 418.669, quality_flag: '1' },
-      { source_index: 2, observation_id: '2020123100040904', acq_time: '2020-12-31T00:04:09Z', lon: -172.399, lat: 50.5473, xco2: 414.811, quality_flag: '1' },
-      { source_index: 3, observation_id: '2020123100041037', acq_time: '2020-12-31T00:04:10.300Z', lon: -172.381, lat: 50.5635, xco2: 413.485, quality_flag: '1' },
-    ],
-  },
-  {
-    id: 'CARBON_BATCH_20201231_B',
-    name: 'OCO-2_XCO2_20201231_high_latitude',
-    status: '就绪',
-    product_type: 'xco2',
-    source_uri: 'oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4',
-    schema: carbonObservationSchema,
-    observations: [
-      { source_index: 4, observation_id: '2020123100041077', acq_time: '2020-12-31T00:04:10.700Z', lon: -172.392, lat: 50.581, xco2: 413.266, quality_flag: '1' },
-      { source_index: 5, observation_id: '2020123100041078', acq_time: '2020-12-31T00:04:10.700Z', lon: -172.372, lat: 50.5631, xco2: 414.058, quality_flag: '1' },
-      { source_index: 6, observation_id: '2020123100041108', acq_time: '2020-12-31T00:04:11Z', lon: -172.383, lat: 50.5802, xco2: 415.684, quality_flag: '1' },
-      { source_index: 7, observation_id: '2020123100041138', acq_time: '2020-12-31T00:04:11.300Z', lon: -172.393, lat: 50.5973, xco2: 414.073, quality_flag: '1' },
-    ],
-  },
-];
-const carbonRows = carbonBatches.map((batch) => ({
-  id: batch.id,
-  name: batch.name,
-  params: `${batch.observations.length} 条观测 | ${batch.product_type}`,
-  status: batch.status,
-}));
-
-const radarAssetSchema = [
-  { field: 'source_uri', type: 'string', meaning: '雷达栅格源文件路径' },
-  { field: 'scene_id', type: 'string', meaning: 'Sentinel-1 场景标识' },
-  { field: 'sensor', type: 'string', meaning: '雷达传感器' },
-  { field: 'product_family', type: 'string', meaning: '雷达产品族' },
-  { field: 'band / polarization', type: 'string', meaning: '极化方式' },
-  { field: 'acq_time', type: 'datetime', meaning: '采集时间' },
-  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
-  { field: 'bbox', type: 'float[4]', meaning: '覆盖范围 bbox（WGS84）' },
-  { field: 'corners', type: 'float[4][2]', meaning: '覆盖范围四角点（WGS84 lon/lat）' },
-];
-
-const yangzhouRadarDates = [
-  '20180603', '20180615', '20180627', '20180709', '20180721', '20180802', '20180814', '20180826',
-  '20190604', '20190616', '20190628', '20190710', '20190722', '20190803', '20190815', '20190827',
-  '20200604', '20200616', '20200628', '20200710', '20200722', '20200803', '20200815', '20200827',
-];
-const yangzhouRadarCorners = [[119.249917, 32.640053], [119.490233, 32.635514], [119.48019, 32.26987], [119.240841, 32.274346]];
-const yangzhouRadarBbox = [119.240841, 32.26987, 119.490233, 32.640053];
-const radarBatches = [
-  {
-    id: 'RADAR_BATCH_YANGZHOU_S1_2018_2020',
-    name: '江苏扬州 Sentinel-1 10m 2018-2020 夏季',
-    status: '就绪',
-    product_family: 'sentinel1',
-    sensor: 'sentinel1_sar',
-    target_crs: 'EPSG:4326',
-    schema: radarAssetSchema,
-    assets: yangzhouRadarDates.flatMap((date) => ['vh', 'vv'].map((polarization) => ({
-      source_uri: `${radarSourceRoot}/Data/${date}_${polarization.toUpperCase()}.dat`,
-      scene_id: `S1_${date}`,
-      acq_time: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T00:00:00Z`,
-      bands: [polarization],
-      band: polarization,
-      polarization,
-      resolution: 10,
-      bbox: yangzhouRadarBbox,
-      corners: yangzhouRadarCorners,
-    }))),
-  },
-];
-const radarRows = radarBatches.map((batch) => ({
-  id: batch.id,
-  name: batch.name,
-  params: `${batch.assets.length} 条资产 | VV/VH | 10m`,
-  status: batch.status,
-}));
-
-const dianzhongProductCorners = [
-  [100.644783, 27.061367],
-  [104.829333, 27.061367],
-  [104.829333, 23.28638],
-  [100.644783, 23.28638],
-];
-const dianzhongProductBbox = [100.644783, 23.28638, 104.829333, 27.061367];
-
-const productAssetSchema = [
-  { field: 'source_uri', type: 'string', meaning: '产品栅格 MinIO 对象 URL' },
-  { field: 'product_name', type: 'string', meaning: '信息产品名称' },
-  { field: 'product_year', type: 'int', meaning: '产品年份' },
-  { field: 'product_family', type: 'string', meaning: '产品族' },
-  { field: 'sensor', type: 'string', meaning: '数据来源/产品传感器' },
-  { field: 'band', type: 'string', meaning: '产品值波段' },
-  { field: 'acq_time', type: 'datetime', meaning: '产品时间' },
-  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
-  { field: 'target_crs', type: 'string', meaning: '标准化目标参考系统' },
-  { field: 'bbox', type: 'float[4]', meaning: '产品覆盖范围 bbox（WGS84: min_lon, min_lat, max_lon, max_lat）' },
-  { field: 'corners', type: 'float[4][2]', meaning: '产品覆盖范围四角点（WGS84 lon/lat）' },
-  { field: 'grid_type / grid_level', type: 'string / int', meaning: '剖分格网参数' },
-  { field: 'asset_path', type: 'string', meaning: '标准化 COG 输出路径' },
-  { field: 'window_*', type: 'int', meaning: '格网窗口偏移与尺寸' },
-  { field: 'st_code', type: 'string', meaning: '时空编码' },
-];
-
-const productBatches = [
-  {
-    id: 'PRODUCT_BATCH_DIANZHONG_1980_2020',
-    name: '滇中生态安全评价_1980_2020',
-    status: '就绪',
-    product_family: 'product',
-    sensor: 'data_product',
-    target_crs: 'EPSG:4326',
-    schema: productAssetSchema,
-    assets: [
-      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1980, band: 'product_value', acq_time: '1980-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_1990年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 1990, band: 'product_value', acq_time: '1990-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2000年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2000, band: 'product_value', acq_time: '2000-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2010年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2010, band: 'product_value', acq_time: '2010-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-      { source_uri: `${productSourcePrefix}/1980-2020年滇中地区30米生态安全评价数据集（第一版）_2020年.tif`, product_name: '1980-2020年滇中地区30米生态安全评价数据集（第一版）', product_year: 2020, band: 'product_value', acq_time: '2020-01-01T00:00:00Z', resolution: 30, bbox: dianzhongProductBbox, corners: dianzhongProductCorners },
-    ],
-  },
-];
-const productRows = productBatches.map((batch) => ({
-  id: batch.id,
-  name: batch.name,
-  params: `${batch.assets.length} 个年份 | ${batch.target_crs}`,
-  status: batch.status,
-}));
-
-const dataRowsByModule = {
-  optical: opticalRows,
-  carbon: carbonRows,
-  radar: radarRows,
-  product: productRows,
-};
 
 const managedOpticalBatches = ref([]);
 const managedCarbonBatches = ref([]);
@@ -384,10 +183,10 @@ const partitionBatchDetailSearch = ref('');
 const partitionBatchDetailAssetStatus = ref('all');
 const partitionBatchDetailSelectedAssetIds = ref([]);
 
-const visibleOpticalBatches = computed(() => (managedOpticalBatches.value.length ? managedOpticalBatches.value : opticalBatches));
-const visibleCarbonBatches = computed(() => (managedCarbonBatches.value.length ? managedCarbonBatches.value : carbonBatches));
-const visibleRadarBatches = computed(() => (managedRadarBatches.value.length ? managedRadarBatches.value : radarBatches));
-const visibleProductBatches = computed(() => (managedProductBatches.value.length ? managedProductBatches.value : productBatches));
+const visibleOpticalBatches = computed(() => managedOpticalBatches.value);
+const visibleCarbonBatches = computed(() => managedCarbonBatches.value);
+const visibleRadarBatches = computed(() => managedRadarBatches.value);
+const visibleProductBatches = computed(() => managedProductBatches.value);
 
 function setBatchSelection(batchId, dataType) {
   if (dataType === 'carbon') {
@@ -448,49 +247,6 @@ function partitionAttemptStatusType(status) {
   return partitionStatusType(status);
 }
 
-function buildLocalPartitionBatchDetail(batch, dataType = activeModule.value) {
-  const rawAssets = Array.isArray(batch?.assets)
-    ? batch.assets
-    : Array.isArray(batch?.observations)
-      ? batch.observations
-      : [];
-  const detailGridType = dataType === 'product' ? productGridType.value : dataType === 'radar' ? radarGridType.value : opticalGridType.value;
-  const detailGridLevel = dataType === 'carbon'
-    ? 5
-    : defaultGridLevelFromAssets(rawAssets, detailGridType, defaultGridLevelForGridType(detailGridType));
-  const assets = rawAssets.map((item, index) => ({
-    asset_id: item.asset_id || item.observation_id || `${batch?.id || batch?.batch_id || 'local'}:${index}`,
-    batch_id: batch?.id || batch?.batch_id || '',
-    data_type: dataType,
-    scene_id: item.scene_id || item.product_year || item.observation_id || item.source_index || '',
-    source_uri: item.source_uri || batch?.source_uri || '',
-    status: item.status || 'pending',
-    asset_payload: item,
-    last_error: item.last_error || '',
-  }));
-  return {
-    ...batch,
-    batch_id: batch?.batch_id || batch?.id || '',
-    batch_name: batch?.batch_name || batch?.name || batch?.id || '',
-    id: batch?.batch_id || batch?.id || '',
-    data_type: batch?.data_type || dataType,
-    is_local_demo: true,
-    status: batch?.status || 'pending',
-    normalized_payload: batch?.normalized_payload || {
-      selected_assets: dataType === 'carbon' ? [] : rawAssets,
-      selected_observations: dataType === 'carbon' ? rawAssets : [],
-      grid_type: detailGridType,
-      grid_level: detailGridLevel,
-      grid_level_mode: 'auto',
-      target_crs: batch?.target_crs || 'EPSG:4326',
-      product_type: batch?.product_type || 'xco2',
-      source_uri: batch?.source_uri || '',
-    },
-    assets,
-    attempts: Array.isArray(batch?.attempts) ? batch.attempts : [],
-  };
-}
-
 function partitionAssetStatusText(status) {
   return partitionStatusText(status);
 }
@@ -505,7 +261,7 @@ function partitionOperationText(operation) {
     auto_retry: '自动重试',
     manual_retry: '人工重试',
     manual_asset_retry: '失败资产重试',
-    demo: '演示执行',
+    demo: '批次执行',
     retry: '重试',
     test: '测试',
     run: '执行',
@@ -764,7 +520,6 @@ async function loadPartitionBatchDetail(batchId) {
   return {
     ...batch,
     id: batch.batch_id || batch.id || batchId,
-    is_local_demo: false,
     assets: assetsResp.assets || [],
     attempts: attemptsResp.attempts || [],
   };
@@ -772,11 +527,10 @@ async function loadPartitionBatchDetail(batchId) {
 
 async function openPartitionBatchDetail(batch) {
   const resolved = typeof batch === 'string'
-    ? [...visibleOpticalBatches.value, ...visibleCarbonBatches.value, ...visibleProductBatches.value].find((item) => (item.id || item.batch_id) === batch)
+    ? [...visibleOpticalBatches.value, ...visibleCarbonBatches.value, ...visibleRadarBatches.value, ...visibleProductBatches.value].find((item) => (item.id || item.batch_id) === batch)
     : batch;
   const batchId = resolved?.id || resolved?.batch_id || batch;
   if (!batchId) return;
-  const isManagedBatch = Boolean(resolved?.batch_id);
   partitionBatchDetailVisible.value = true;
   partitionBatchDetailLoading.value = true;
   partitionBatchDetailAction.value = '';
@@ -785,17 +539,11 @@ async function openPartitionBatchDetail(batch) {
   clearPartitionBatchDetailSelection();
   partitionBatchDetailTab.value = 'overview';
   try {
-    const detail = isManagedBatch ? await loadPartitionBatchDetail(batchId) : buildLocalPartitionBatchDetail(resolved, resolved?.data_type || activeModule.value);
+    const detail = await loadPartitionBatchDetail(batchId);
     partitionBatchDetail.value = detail;
     selectManagedBatchByDetail(detail);
     return detail;
   } catch (error) {
-    if (!isManagedBatch && resolved) {
-      const detail = buildLocalPartitionBatchDetail(resolved, resolved?.data_type || activeModule.value);
-      partitionBatchDetail.value = detail;
-      selectManagedBatchByDetail(detail);
-      return detail;
-    }
     partitionBatchDetail.value = null;
     ElMessage.error(error.message);
     return null;
@@ -805,10 +553,6 @@ async function openPartitionBatchDetail(batch) {
 }
 
 async function refreshPartitionBatchDetail() {
-  if (partitionBatchDetail.value?.is_local_demo) {
-    partitionBatchDetail.value = buildLocalPartitionBatchDetail(partitionBatchDetail.value, partitionBatchDetail.value.data_type);
-    return;
-  }
   const batchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
   if (!batchId) return;
   partitionBatchDetailLoading.value = true;
@@ -826,10 +570,6 @@ async function runPartitionBatchFromDetail() {
   const batch = partitionBatchDetail.value;
   const batchId = batch?.id || batch?.batch_id;
   if (!batchId) return;
-  if (batch?.is_local_demo) {
-    await runDemoForBatch(batchId);
-    return;
-  }
   const operation = partitionBatchExecutionOperation(batch);
   const configOverride = partitionBatchConfigOverride(batch);
   partitionBatchDetailAction.value = operation;
@@ -862,6 +602,15 @@ async function runPartitionBatchFromDetail() {
     setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
+    if (activeModule.value === 'quality') {
+      if (result.quality_report) {
+        qualityReport.value = result.quality_report;
+        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+        await loadQualityHistory();
+      } else {
+        await refreshQuality();
+      }
+    }
     ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
     await loadPartitionBatches();
     await refreshPartitionBatchDetail();
@@ -920,6 +669,15 @@ async function retrySelectedPartitionAssetsFromDetail() {
     setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
     lastPartitionResult.value = result;
     resultRows.value = formatRows(result);
+    if (activeModule.value === 'quality') {
+      if (result.quality_report) {
+        qualityReport.value = result.quality_report;
+        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+        await loadQualityHistory();
+      } else {
+        await refreshQuality();
+      }
+    }
     clearPartitionBatchDetailSelection();
     ElMessage.success('失败资产重试完成');
     await loadPartitionBatches();
@@ -942,10 +700,6 @@ async function cancelPartitionBatchFromDetail() {
   const batch = partitionBatchDetail.value;
   const batchId = batch?.id || batch?.batch_id;
   if (!batchId) return;
-  if (batch?.is_local_demo) {
-    ElMessage.warning('演示批次只能执行测试，不能发起取消');
-    return;
-  }
   try {
     await ElMessageBox.confirm(
       '取消会立即请求执行层中断当前任务，适用于参数配置错误或任务无需继续执行的场景。',
@@ -974,10 +728,6 @@ async function cancelPartitionBatchFromDetail() {
 }
 
 async function handlePartitionBatchPrimaryAction(batch) {
-  if (!batch?.batch_id) {
-    await runDemoForBatch(batch.id);
-    return;
-  }
   const detail = await openPartitionBatchDetail(batch);
   if (!detail) return;
   if (partitionBatchCanCancel(detail)) {
@@ -1030,9 +780,30 @@ const partitionEndpointsByModule = {
 
 const testModules = new Set(['optical', 'carbon', 'radar', 'product']);
 
-const activeDataRows = computed(() => visibleDataRowsByModule.value[activeModule.value] || dataRowsByModule[activeModule.value] || []);
+const activeDataRows = computed(() => visibleDataRowsByModule.value[activeModule.value] || []);
 
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
+
+const qualityManagedBatches = computed(() => {
+  if (qualityDataType.value === 'carbon') return managedCarbonBatches.value;
+  if (qualityDataType.value === 'radar') return managedRadarBatches.value;
+  if (qualityDataType.value === 'product') return managedProductBatches.value;
+  return managedOpticalBatches.value;
+});
+
+const qualityManualBatches = computed(() => (
+  qualityManagedBatches.value.filter((batch) => ['failed', 'manual_required', 'cancelled'].includes(batch.status))
+));
+
+const qualityManualBatchStats = computed(() => {
+  const batches = qualityManagedBatches.value;
+  const countByStatus = (status) => batches.filter((batch) => batch.status === status).length;
+  return [
+    { label: '失败批次', value: countByStatus('failed'), status: 'failed' },
+    { label: '人工确认', value: countByStatus('manual_required'), status: 'manual_required' },
+    { label: '运行中', value: batches.filter((batch) => ['queued', 'running', 'retrying'].includes(batch.status)).length, status: 'running' },
+  ];
+});
 
 const selectedDataName = computed(() => {
   if (activeModule.value === 'optical') {
@@ -1063,16 +834,7 @@ const selectedDataName = computed(() => {
       .map((batch) => batch.name);
     return names.join('，');
   }
-  const rows = activeDataRows.value;
-  const selectedId = selectedBatches.value[activeModule.value];
-  return rows.find((row) => row.id === selectedId)?.name || '未选择';
-});
-
-const filteredDataRows = computed(() => {
-  const keyword = dataSearch.value.trim().toLowerCase();
-  const rows = activeDataRows.value;
-  if (!keyword) return rows;
-  return rows.filter((row) => row.name.toLowerCase().includes(keyword) || row.id.toLowerCase().includes(keyword));
+  return '未选择';
 });
 
 const filteredQualityHistory = computed(() => {
@@ -1465,7 +1227,7 @@ const partitionResultDetailRows = computed(() => {
   return [
     { label: '执行引擎', value: result.execution_engine || result.partition_backend || '-' },
     { label: '后台任务 ID', value: result.partition_task_id || '-' },
-    { label: '演示任务 ID', value: result.demo_task_id || '-' },
+    { label: '执行任务 ID', value: result.demo_task_id || '-' },
     { label: 'Ray 任务 ID', value: result.ray_task_id || '-' },
     { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
     { label: '索引文件', value: result.rows_path || result.output_path || '-' },
@@ -1531,13 +1293,6 @@ function openQualityHistoryDrawer() {
 
 function qualityHistoryRowClass({ row }) {
   return row.report_id === selectedQualityReportId.value ? 'selected-quality-history-row' : '';
-}
-
-function selectData(row) {
-  if (activeModule.value === 'optical') return;
-  if (!dataRowsByModule[activeModule.value]) return;
-  selectedBatches.value[activeModule.value] = row.id;
-  dataDrawerVisible.value = false;
 }
 
 function assetKey(asset) {
@@ -1628,36 +1383,6 @@ function toggleProductBatchExpand(batchId) {
   expandedProductBatchId.value = expandedProductBatchId.value === batchId ? '' : batchId;
 }
 
-function selectSingleOpticalBatch(batchId) {
-  selectedOpticalBatchIds.value = [batchId];
-}
-
-function selectSingleCarbonBatch(batchId) {
-  selectedCarbonBatchIds.value = [batchId];
-}
-
-function selectSingleRadarBatch(batchId) {
-  selectedRadarBatchIds.value = [batchId];
-}
-
-function selectSingleProductBatch(batchId) {
-  selectedProductBatchIds.value = [batchId];
-}
-
-async function runDemoForBatch(batchId) {
-  if (activeModule.value === 'carbon') {
-    selectSingleCarbonBatch(batchId);
-  } else if (activeModule.value === 'radar') {
-    selectSingleRadarBatch(batchId);
-  } else if (activeModule.value === 'product') {
-    selectSingleProductBatch(batchId);
-  } else {
-    selectSingleOpticalBatch(batchId);
-  }
-  dataDrawerVisible.value = false;
-  await runDemo();
-}
-
 function toggleOpticalAssetSelect(batchId, asset) {
   const key = assetKey(asset);
   const current = deselectedOpticalAssetKeys.value[batchId] || [];
@@ -1723,7 +1448,7 @@ function normalizeManagedBatch(batch) {
       ...base,
       product_type: payload.product_type || 'xco2',
       source_uri: payload.source_uri || '',
-      schema: batch.source_schema?.schema || carbonObservationSchema,
+      schema: batch.source_schema?.schema || [],
       observations: payload.selected_observations || [],
     };
   }
@@ -1733,7 +1458,7 @@ function normalizeManagedBatch(batch) {
       product_family: payload.product_family || 'product',
       sensor: payload.sensor || 'data_product',
       target_crs: payload.target_crs || 'EPSG:4326',
-      schema: batch.source_schema?.schema || productAssetSchema,
+      schema: batch.source_schema?.schema || [],
       assets: payload.selected_assets || [],
     };
   }
@@ -1743,7 +1468,7 @@ function normalizeManagedBatch(batch) {
       product_family: payload.product_family || 'sentinel1',
       sensor: payload.sensor || 'sentinel1_sar',
       target_crs: payload.target_crs || 'EPSG:4326',
-      schema: batch.source_schema?.schema || radarAssetSchema,
+      schema: batch.source_schema?.schema || [],
       assets: payload.selected_assets || [],
     };
   }
@@ -1793,7 +1518,7 @@ async function loadPartitionBatches() {
     }
     applyDefaultGridLevels();
   } catch (error) {
-    ElMessage.warning(`剖分批次加载失败，使用页面演示数据：${error.message}`);
+    ElMessage.error(`剖分批次加载失败：${error.message}`);
     applyDefaultGridLevels();
   } finally {
     partitionBatchLoading.value = false;
@@ -2221,6 +1946,7 @@ function checkDetailRows(check) {
 function qualitySourceText() {
   if (qualityDataType.value === 'product') return '数据产品自动质检';
   if (qualityDataType.value === 'carbon') return '碳卫星自动质检';
+  if (qualityDataType.value === 'radar') return '雷达遥感自动质检';
   return '光学遥感自动质检';
 }
 
@@ -2240,6 +1966,7 @@ function qualityBreakdownRows() {
 function qualityDataTypeForEndpoint(endpoint) {
   if (endpoint === 'product') return 'product';
   if (endpoint === 'carbon') return 'carbon';
+  if (endpoint === 'radar') return 'radar';
   return 'optical';
 }
 
@@ -2251,6 +1978,10 @@ function formatQualityTime(value) {
 }
 
 async function loadQualityHistory() {
+  if (!qualityReportDataTypes.has(qualityDataType.value)) {
+    qualityHistory.value = [];
+    return;
+  }
   qualityHistoryLoading.value = true;
   try {
     const { qualityPrefix } = apiPrefixes();
@@ -2268,6 +1999,11 @@ async function loadQualityHistory() {
 }
 
 async function runQualityCheck(reportId = '') {
+  if (!qualityReportDataTypes.has(qualityDataType.value)) {
+    qualityReport.value = null;
+    qualityError.value = '';
+    return;
+  }
   qualityLoading.value = true;
   qualityError.value = '';
   try {
@@ -2289,6 +2025,13 @@ async function runQualityCheck(reportId = '') {
 async function refreshQuality() {
   await runQualityCheck();
   await loadQualityHistory();
+}
+
+async function refreshQualityWorkspace() {
+  await Promise.all([
+    refreshQuality(),
+    loadPartitionBatches(),
+  ]);
 }
 
 async function selectQualityRecord(row) {
@@ -2349,12 +2092,12 @@ async function changeQualityDataType() {
   qualityReport.value = null;
   qualityHistory.value = [];
   selectedQualityReportId.value = '';
-  await refreshQuality();
+  await refreshQualityWorkspace();
 }
 
 async function runDemo() {
   if (activeModule.value === 'quality') {
-    await refreshQuality();
+    await refreshQualityWorkspace();
     return;
   }
   resultLoading.value = true;
@@ -2452,7 +2195,7 @@ async function loadManagedConfig() {
     qualityHistoryLimit.value = Number(quality.history_limit || qualityHistoryLimit.value);
     ingestDefaults.value = { ...ingestDefaults.value, ...ingest };
   } catch (error) {
-    ElMessage.warning(`配置加载失败，使用页面默认值：${error.message}`);
+    ElMessage.warning(`配置加载失败，保留当前配置：${error.message}`);
   }
 }
 
@@ -2482,7 +2225,7 @@ async function confirmOpticalIngest() {
   }
   try {
     await ElMessageBox.confirm(
-      '确认后会将当前剖分结果写入演示版本，重复执行会按唯一键覆盖同版本记录。',
+      '确认后会将当前剖分结果写入生产版本，重复执行会按唯一键覆盖同版本记录。',
       '确认入库',
       { confirmButtonText: '确认入库', cancelButtonText: '取消', type: 'warning' },
     );
@@ -2494,7 +2237,7 @@ async function confirmOpticalIngest() {
   try {
     const { ingestPrefix } = apiPrefixes();
     ingestResult.value = await requestJson(`${ingestPrefix}/optical/confirm`, currentIngestPayload());
-    ElMessage.success('演示版本入库完成');
+    ElMessage.success('生产版本入库完成');
     if (!ingestPreview.value) {
       ingestPreview.value = {
         mode: 'pre_ingest_preview',
@@ -2571,7 +2314,7 @@ async function retryLastPartitionTask() {
 
 watch(activeModule, (moduleName) => {
   if (moduleName === 'quality' && !qualityReport.value && !qualityLoading.value) {
-    refreshQuality();
+    refreshQualityWorkspace();
   }
 });
 
@@ -2621,7 +2364,7 @@ onMounted(async () => {
   await loadPartitionBatches();
   applyDefaultGridLevels();
   if (activeModule.value === 'quality') {
-    refreshQuality();
+    refreshQualityWorkspace();
   }
 });
 
@@ -2657,10 +2400,9 @@ onUnmounted(() => {
                 <template v-if="activeModule === 'optical'">
                   <div class="form-group">
                     <label>数据源类型</label>
-                    <el-select model-value="loaded" class="legacy-control">
-                      <el-option label="从载入子系统获取" value="loaded" />
-                      <el-option label="本地数据源" value="local" />
-                    </el-select>
+                    <div class="task-note">
+                      <span>数据库载入批次</span>
+                    </div>
                   </div>
                   <div class="form-group">
                     <label>待剖分数据队列</label>
@@ -2775,11 +2517,12 @@ onUnmounted(() => {
 	                      <el-option label="光学遥感" value="optical" />
 	                      <el-option label="数据产品" value="product" />
 	                      <el-option label="碳卫星" value="carbon" />
+	                      <el-option label="雷达遥感" value="radar" />
 	                    </el-select>
 	                  </div>
                   <div class="form-group">
                     <label>目标参考系统</label>
-                    <el-select v-model="qualityTargetCrs" class="legacy-control" @change="refreshQuality">
+                    <el-select v-model="qualityTargetCrs" class="legacy-control" @change="refreshQualityWorkspace">
                       <el-option label="EPSG:4326" value="EPSG:4326" />
                     </el-select>
                   </div>
@@ -2823,14 +2566,6 @@ onUnmounted(() => {
 
                 <div class="form-group action-buttons">
                   <el-button>重置</el-button>
-                  <el-button
-                    v-if="activeModule === 'quality'"
-                    :disabled="!lastPartitionRequest || resultLoading"
-                    :type="partitionWarnNeedsRetry ? 'warning' : 'default'"
-                    @click="retryLastPartitionTask"
-                  >
-                    {{ partitionWarnNeedsRetry ? '告警后重试任务' : '手动重试' }}
-                  </el-button>
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
                     {{ activeModule === 'quality' ? '刷新结果' : testModules.has(activeModule) ? '剖分测试' : '开始剖分' }}
                   </el-button>
@@ -2877,54 +2612,95 @@ onUnmounted(() => {
                 <div class="panel-header">
                   <h3>质检总览</h3>
                 </div>
-                <div v-if="qualityReport" class="quality-dashboard">
-                  <div class="quality-status-band" :class="qualityReport.status.toLowerCase()">
-                    <div>
-                      <span>批次状态</span>
-                      <strong>{{ statusText(qualityReport.status) }}</strong>
+                <div class="quality-dashboard">
+                  <template v-if="qualityReport">
+                    <div class="quality-status-band" :class="qualityReport.status.toLowerCase()">
+                      <div>
+                        <span>批次状态</span>
+                        <strong>{{ statusText(qualityReport.status) }}</strong>
+                      </div>
+                      <el-tag :type="qualityStatusType" size="large">{{ qualityReport.target_crs }}</el-tag>
                     </div>
-                    <el-tag :type="qualityStatusType" size="large">{{ qualityReport.target_crs }}</el-tag>
+                    <div class="quality-metrics">
+                      <div v-for="item in qualitySummaryRows" :key="item.label" class="quality-metric">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                    <div class="quality-band-table">
+                      <div class="quality-section-title">当前批次</div>
+                      <div class="quality-kv">
+                        <span>报告 ID</span>
+                        <strong>{{ qualityReport.report_id }}</strong>
+                      </div>
+                      <div class="quality-kv">
+                        <span>来源</span>
+                        <strong>{{ qualitySourceText() }}</strong>
+                      </div>
+                    </div>
+                    <div class="quality-band-table">
+                      <div class="quality-section-title">{{ qualityBreakdownTitle() }}</div>
+                      <div
+                        v-for="(value, band) in qualityBreakdownRows()"
+                        :key="band"
+                        class="quality-kv"
+                      >
+                        <span>{{ band }}</span>
+                        <strong>{{ value }}</strong>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else-if="qualityLoading" class="quality-empty-state compact">
+                    <div class="quality-empty-icon">QC</div>
+                    <p>正在自动加载最新质检结果</p>
                   </div>
-                  <div class="quality-metrics">
-                    <div v-for="item in qualitySummaryRows" :key="item.label" class="quality-metric">
-                      <span>{{ item.label }}</span>
-                      <strong>{{ item.value }}</strong>
-                    </div>
+                  <div v-else-if="qualityError" class="quality-empty-state compact">
+                    <div class="quality-empty-icon">ERR</div>
+                    <p>{{ qualityError }}</p>
                   </div>
-                  <div class="quality-band-table">
-                    <div class="quality-section-title">当前批次</div>
-                    <div class="quality-kv">
-                      <span>报告 ID</span>
-                      <strong>{{ qualityReport.report_id }}</strong>
-                    </div>
-	                    <div class="quality-kv">
-	                      <span>来源</span>
-	                      <strong>{{ qualitySourceText() }}</strong>
-	                    </div>
-	                  </div>
-	                  <div class="quality-band-table">
-	                    <div class="quality-section-title">{{ qualityBreakdownTitle() }}</div>
-	                    <div
-	                      v-for="(value, band) in qualityBreakdownRows()"
-	                      :key="band"
-	                      class="quality-kv"
-                    >
-                      <span>{{ band }}</span>
-                      <strong>{{ value }}</strong>
-                    </div>
+                  <div v-else class="quality-empty-state compact">
+                    <div class="quality-empty-icon">QC</div>
+                    <p>等待自动质检结果</p>
                   </div>
-                </div>
-                <div v-else-if="qualityLoading" class="quality-empty-state">
-                  <div class="quality-empty-icon">QC</div>
-                  <p>正在自动加载最新质检结果</p>
-                </div>
-                <div v-else-if="qualityError" class="quality-empty-state">
-                  <div class="quality-empty-icon">ERR</div>
-                  <p>{{ qualityError }}</p>
-                </div>
-                <div v-else class="quality-empty-state">
-                  <div class="quality-empty-icon">QC</div>
-                  <p>等待自动质检结果</p>
+
+                  <div class="quality-manual-section">
+                    <div class="quality-section-heading">
+                      <div>
+                        <strong>人工处置队列</strong>
+                        <span>{{ dataLabelsByModule[qualityDataType] || qualitySourceText() }}</span>
+                      </div>
+                      <el-button size="small" :icon="Refresh" :loading="partitionBatchLoading" @click="loadPartitionBatches">刷新队列</el-button>
+                    </div>
+                    <div class="quality-manual-stats">
+                      <div v-for="item in qualityManualBatchStats" :key="item.label" class="quality-manual-stat" :class="item.status">
+                        <span>{{ item.label }}</span>
+                        <strong>{{ item.value }}</strong>
+                      </div>
+                    </div>
+                    <div v-if="qualityManualBatches.length" class="quality-manual-list">
+                      <div v-for="batch in qualityManualBatches" :key="batch.id" class="quality-manual-batch">
+                        <div class="quality-manual-batch-main">
+                          <div class="quality-manual-batch-head">
+                            <strong>{{ batch.name }}</strong>
+                            <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
+                          </div>
+                          <div class="quality-manual-batch-meta">
+                            <span>{{ batch.id }}</span>
+                            <span>尝试 {{ batch.attempt_count || 0 }} 次</span>
+                            <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
+                          </div>
+                          <div class="quality-manual-batch-error">{{ batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理' }}</div>
+                        </div>
+                        <div class="quality-manual-batch-actions">
+                          <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
+                          <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
+                            {{ partitionBatchActionLabel(batch) }}
+                          </el-button>
+                        </div>
+                      </div>
+                    </div>
+                    <div v-else class="quality-manual-empty">当前数据类型没有需要人工处置的失败批次</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2984,7 +2760,7 @@ onUnmounted(() => {
                       v-if="partitionWarnNeedsRetry"
                       type="warning"
                       :closable="false"
-                      title="质检出现告警，建议点击“告警后重试任务”重新执行剖分。"
+                      title="质检出现告警，可在“自动化质检”的人工处置队列中查看并重试。"
                       class="partition-warn-alert"
                     />
                     <div v-if="partitionMetricRows.length" class="partition-metrics">
@@ -3259,16 +3035,6 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
-        <el-table v-else :data="filteredDataRows" class="drawer-table" highlight-current-row @row-click="selectData">
-          <el-table-column prop="id" label="批次ID" min-width="190" />
-          <el-table-column prop="name" label="名称" min-width="260" />
-          <el-table-column prop="params" label="参数" min-width="180" />
-          <el-table-column prop="status" label="状态" width="90">
-            <template #default="{ row }">
-              <el-tag type="success">{{ row.status }}</el-tag>
-            </template>
-          </el-table-column>
-        </el-table>
       </div>
     </el-drawer>
 

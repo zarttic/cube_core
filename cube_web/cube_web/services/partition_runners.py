@@ -17,8 +17,8 @@ from cube_web.services.partition_defaults import default_grid_level_for_grid_typ
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
-DEFAULT_ENTITY_GRID_LEVEL = 6
-DEFAULT_ENTITY_TEST_GRID_LEVEL = 3
+DEFAULT_ENTITY_GRID_LEVEL = 4
+DEFAULT_ENTITY_TEST_GRID_LEVEL = 4
 PARTITION_GRID_TYPES = {"geohash", "tile_matrix", "isea4h"}
 
 
@@ -141,18 +141,20 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
     for idx, asset in enumerate(selected_assets, start=1):
         if not isinstance(asset, dict):
             raise ValueError(f"selected_assets[{idx}] must be an object")
+        _validate_selected_raster_asset(asset, idx=idx, data_type="optical")
         source = _resolve_optical_demo_source(str(asset.get("source_uri") or ""), input_dir)
+        band = _selected_asset_band(asset)
         manifest_assets.append(
             {
                 "data_type": "optical",
                 "source_uri": str(asset.get("source_uri") or source),
-                "scene_id": str(asset.get("scene_id") or source.stem),
-                "acq_time": str(asset.get("acq_time") or "1970-01-01T00:00:00Z"),
-                "bands": asset.get("bands") or ([asset["band"]] if asset.get("band") else [source.stem]),
+                "scene_id": str(asset["scene_id"]),
+                "acq_time": str(asset["acq_time"]),
+                "bands": asset.get("bands") or [band],
                 "corners": asset.get("corners"),
                 "resolution": asset.get("resolution"),
-                "sensor": str(asset.get("sensor") or "optical_mosaic"),
-                "product_family": str(asset.get("product_family") or "other"),
+                "sensor": str(asset["sensor"]),
+                "product_family": str(asset["product_family"]),
             }
         )
     return manifest_assets
@@ -195,26 +197,25 @@ def _selected_radar_manifest_assets(payload: dict, input_dir: Path, run_input_di
     for idx, asset in enumerate(selected_assets, start=1):
         if not isinstance(asset, dict):
             raise ValueError(f"selected_assets[{idx}] must be an object")
-        corners = asset.get("corners")
-        if not corners:
-            return []
+        _validate_selected_raster_asset(asset, idx=idx, data_type="radar")
         source = _resolve_radar_demo_source(str(asset.get("source_uri") or ""), input_dir)
         target = run_input_dir / source.name
         source_uri = str(asset.get("source_uri") or source)
+        band = _selected_asset_band(asset)
         manifest_assets.append(
             {
                 "data_type": "radar",
                 "source_uri": source_uri if _is_s3_uri(source_uri) else str(target),
-                "scene_id": str(asset.get("scene_id") or source.stem),
-                "acq_time": str(asset.get("acq_time") or "1970-01-01T00:00:00Z"),
-                "bands": asset.get("bands") or ([asset["band"]] if asset.get("band") else [str(asset.get("polarization") or source.stem).lower()]),
-                "band": str(asset.get("band") or asset.get("polarization") or "").lower() or None,
-                "polarization": str(asset.get("polarization") or asset.get("band") or "").lower() or None,
+                "scene_id": str(asset["scene_id"]),
+                "acq_time": str(asset["acq_time"]),
+                "bands": asset.get("bands") or [band],
+                "band": band,
+                "polarization": str(asset.get("polarization") or band).lower(),
                 "bbox": asset.get("bbox"),
-                "corners": corners,
+                "corners": asset.get("corners"),
                 "resolution": asset.get("resolution"),
-                "sensor": str(asset.get("sensor") or "sentinel1_sar"),
-                "product_family": str(asset.get("product_family") or "sentinel1"),
+                "sensor": str(asset["sensor"]),
+                "product_family": str(asset["product_family"]),
             }
         )
     return manifest_assets
@@ -252,32 +253,74 @@ def _selected_product_manifest_assets(payload: dict, input_dir: Path, run_input_
     for idx, asset in enumerate(selected_assets, start=1):
         if not isinstance(asset, dict):
             raise ValueError(f"selected_assets[{idx}] must be an object")
-        corners = asset.get("corners")
-        if not corners:
-            return []
+        _validate_selected_raster_asset(asset, idx=idx, data_type="product")
         source = _resolve_product_demo_source(str(asset.get("source_uri") or ""), input_dir)
         target = run_input_dir / source.name
         product_year = asset.get("product_year")
-        acq_time = str(asset.get("acq_time") or "").strip()
-        if not acq_time and product_year:
-            acq_time = f"{int(product_year):04d}-01-01T00:00:00Z"
+        band = _selected_asset_band(asset)
         manifest_assets.append(
             {
                 "data_type": "product",
                 "source_uri": str(asset.get("source_uri") if _is_s3_uri(str(asset.get("source_uri") or "")) else target),
-                "scene_id": str(asset.get("scene_id") or (f"dianzhong_ecological_security_{product_year}" if product_year else source.stem)),
+                "scene_id": str(asset["scene_id"]),
                 "product_name": str(asset.get("product_name") or source.stem),
                 "product_year": product_year,
-                "acq_time": acq_time or "1970-01-01T00:00:00Z",
-                "band": str(asset.get("band") or "product_value"),
+                "acq_time": str(asset["acq_time"]),
+                "band": band,
                 "bbox": asset.get("bbox"),
-                "corners": corners,
+                "corners": asset.get("corners"),
                 "resolution": asset.get("resolution"),
-                "sensor": str(asset.get("sensor") or "data_product"),
-                "product_family": str(asset.get("product_family") or "product"),
+                "sensor": str(asset["sensor"]),
+                "product_family": str(asset["product_family"]),
             }
         )
     return manifest_assets
+
+
+def _validate_selected_raster_asset(asset: dict, *, idx: int, data_type: str) -> None:
+    prefix = f"selected_assets[{idx}]"
+    for field in ("source_uri", "scene_id", "acq_time", "sensor", "product_family"):
+        if not str(asset.get(field) or "").strip():
+            raise ValueError(f"{prefix}.{field} is required for schema-first {data_type} partition")
+    _selected_asset_band(asset)
+    if not isinstance(asset.get("corners"), list) or len(asset["corners"]) != 4:
+        raise ValueError(f"{prefix}.corners must contain 4 [lon, lat] points")
+    for point in asset["corners"]:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"{prefix}.corners must contain 4 [lon, lat] points")
+        lon = _float_payload_value(point[0], f"{prefix}.corners")
+        lat = _float_payload_value(point[1], f"{prefix}.corners")
+        if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+            raise ValueError(f"{prefix}.corners coordinate out of range")
+    if _float_payload_value(asset.get("resolution"), f"{prefix}.resolution") <= 0:
+        raise ValueError(f"{prefix}.resolution must be greater than 0")
+
+
+def _selected_asset_band(asset: dict) -> str:
+    bands = asset.get("bands")
+    if isinstance(bands, list):
+        for item in bands:
+            text = str(item).strip().lower()
+            if text:
+                return text
+    elif bands is not None and str(bands).strip():
+        return str(bands).strip().lower()
+    for field in ("band", "polarization", "variable"):
+        text = str(asset.get(field) or "").strip().lower()
+        if text:
+            return text
+    raise ValueError("selected asset requires bands, band, polarization, or variable")
+
+
+def _float_payload_value(value: Any, label: str) -> float:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text.endswith("m"):
+            value = text[:-1].strip()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be numeric") from None
 
 
 def _int_payload_value(payload: dict, key: str, default: int) -> int:

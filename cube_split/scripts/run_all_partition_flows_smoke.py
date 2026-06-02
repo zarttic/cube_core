@@ -202,8 +202,16 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def _validate_result(label: str, grid_type: str, mode: str, result: dict[str, Any]) -> dict[str, Any]:
+def _validate_result(
+    label: str,
+    grid_type: str,
+    mode: str,
+    result: dict[str, Any],
+    *,
+    keep_quality: bool = False,
+) -> dict[str, Any]:
     rows = _row_count(result)
+    data_type = label.split(":", 1)[0]
     first_row = _first_jsonl_row(str(result.get("rows_path") or result.get("output_path") or ""))
     asset_path = str(first_row.get("asset_path") or "")
     source_asset_path = str(first_row.get("source_asset_path") or "")
@@ -229,6 +237,9 @@ def _validate_result(label: str, grid_type: str, mode: str, result: dict[str, An
         if mode == "demo":
             ingest_stats = result.get("ingest_stats") or {}
             _require(bool(ingest_stats), f"{label}: expected ingest_stats")
+    if keep_quality and data_type in {"optical", "product"}:
+        _require(str(result.get("quality_status") or ""), f"{label}: expected quality_status")
+        _require(str(result.get("quality_report_id") or ""), f"{label}: expected quality_report_id")
 
     return {
         "label": label,
@@ -249,6 +260,8 @@ def _validate_result(label: str, grid_type: str, mode: str, result: dict[str, An
         "metadata_rows": result.get("metadata_rows"),
         "ingest_stats": result.get("ingest_stats"),
         "total_elapsed_sec": result.get("total_elapsed_sec"),
+        "quality_status": result.get("quality_status"),
+        "quality_report_id": result.get("quality_report_id"),
     }
 
 
@@ -314,7 +327,7 @@ def main() -> None:
                 payload["time_granularity"] = "year"
             start = time.perf_counter()
             result = _runner(data_type, args.mode)(payload)
-            item = _validate_result(label, grid_type, args.mode, result)
+            item = _validate_result(label, grid_type, args.mode, result, keep_quality=args.keep_quality)
             item["elapsed_sec"] = round(time.perf_counter() - start, 3)
             results.append(item)
             print(json.dumps(item, ensure_ascii=False))

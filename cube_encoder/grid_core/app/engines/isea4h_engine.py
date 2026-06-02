@@ -46,7 +46,7 @@ class ISEA4HEngine:
             raise ValidationError(f"Unsupported cover_mode: {cover_mode}")
 
         shp = to_shapely(geometry)
-        candidate_codes = set(h3.geo_to_cells(geometry, level))
+        candidate_codes = self._candidate_codes(geometry, level, cover_mode)
         selected: set[str] = set()
         boundary_cache: dict[str, list[list[float]]] = {}
         for code in candidate_codes:
@@ -146,6 +146,15 @@ class ISEA4HEngine:
         lons = [p[0] for p in boundary]
         lats = [p[1] for p in boundary]
         return [min(lons), min(lats), max(lons), max(lats)]
+
+    @staticmethod
+    def _candidate_codes(geometry: dict, level: int, cover_mode: str) -> set[str]:
+        h3shape = h3.geo_to_h3shape(geometry)
+        if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value}:
+            return set(h3.h3shape_to_cells_experimental(h3shape, level, contain="overlap"))
+        if cover_mode == CoverMode.CONTAIN.value:
+            return set(h3.h3shape_to_cells_experimental(h3shape, level, contain="full"))
+        return set(h3.h3shape_to_cells(h3shape, level))
 
     @staticmethod
     def _validate_level(level: int) -> None:

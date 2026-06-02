@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from typing import Any
 
 DEFAULT_LOGICAL_GRID_LEVEL = 5
-DEFAULT_ISEA4H_GRID_LEVEL = 6
+DEFAULT_ISEA4H_GRID_LEVEL = 4
 
 _RESOLUTION_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _RESOLUTION_KEYS = (
@@ -27,10 +27,10 @@ _LOGICAL_RESOLUTION_LEVELS = (
     (1000.0, 3),
 )
 _ISEA4H_RESOLUTION_LEVELS = (
-    (10.0, 7),
+    (10.0, DEFAULT_ISEA4H_GRID_LEVEL),
     (30.0, DEFAULT_ISEA4H_GRID_LEVEL),
-    (250.0, 5),
-    (1000.0, 4),
+    (250.0, DEFAULT_ISEA4H_GRID_LEVEL),
+    (1000.0, DEFAULT_ISEA4H_GRID_LEVEL),
 )
 
 
@@ -51,7 +51,7 @@ def default_grid_level_for_resolution(
     for max_resolution, level in table:
         if parsed <= max_resolution:
             return level
-    return 3 if str(grid_type or "").lower() == "isea4h" else 2
+    return DEFAULT_ISEA4H_GRID_LEVEL if str(grid_type or "").lower() == "isea4h" else 2
 
 
 def default_grid_level_from_assets(

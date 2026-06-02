@@ -237,7 +237,8 @@ def test_build_manifest_supports_batch_manifest_json_with_assets(tmp_path: Path)
             '{"batch_id":"optical_batch_xx","data_type":"optical","assets":['
             '{"scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4","acq_time":"2020-07-01T00:00:00Z",'
             '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","sensor":"optical_mosaic",'
-            '"resolution":30,"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}'
+            '"product_family":"other","resolution":30,'
+            '"corners":[[117.0,36.0],[117.2,36.0],[117.2,35.8],[117.0,35.8]]}'
             ']}'
         ),
         encoding="utf-8",
@@ -257,7 +258,8 @@ def test_build_manifest_manifest_requires_four_corners(tmp_path: Path):
     manifest.write_text(
         (
             '{"scene_id":"Shandong_mosaic_2020Q3","band":"sr_band4","acq_time":"2020-07-01T00:00:00Z",'
-            '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","corners":[[117.0,36.0],[117.2,36.0]]}\n'
+            '"source_uri":"Shandong_mosaic_2020Q3_sr_band4_cut.tif","sensor":"optical_mosaic",'
+            '"product_family":"other","resolution":30,"corners":[[117.0,36.0],[117.2,36.0]]}\n'
         ),
         encoding="utf-8",
     )
