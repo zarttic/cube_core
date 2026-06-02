@@ -1,18 +1,18 @@
 # cube_encoder
 
-`cube_encoder` is the core grid SDK and API provider for the cube project. It owns discrete grid encoding, space-time code generation, and topology operations. Other packages should consume these capabilities through `grid_core.sdk.CubeEncoderSDK` or the HTTP API, not by duplicating grid logic.
+`cube_encoder` 是 cube 项目的底层格网编码 SDK 与 API 提供方，负责离散格网编码、
+时空编码、拓扑元操作和统一能力输出。其他包应通过 `grid_core.sdk.CubeEncoderSDK`
+或 HTTP API 使用这些能力，不应复制格网实现逻辑。
 
-中文说明见 [README.zh-CN.md](README.zh-CN.md).
+## 核心能力
 
-## Capabilities
+- 支持 `geohash`、`mgrs`、`tile_matrix` 和 H3-backed `isea4h` 的点定位与几何覆盖。
+- 支持时空编码生成、批量生成与解析。
+- 支持邻接、父级、子级、编码转几何、批量编码转几何。
+- Python SDK 入口：`grid_core.sdk.CubeEncoderSDK`。
+- FastAPI 服务入口：`/v1`。
 
-- Grid locate and cover for `geohash`, `mgrs`, `tile_matrix`, and H3-backed `isea4h`.
-- Space-time code generation and parsing.
-- Topology operations: neighbors, parent, children, geometry, and batch geometry.
-- Python SDK entry point: `grid_core.sdk.CubeEncoderSDK`.
-- FastAPI service exposing the same core capabilities under `/v1`.
-
-## Run
+## 快速开始
 
 ```bash
 python -m venv .venv
@@ -21,7 +21,7 @@ pip install -e ".[dev]"
 uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 
-## SDK Usage
+## SDK 使用
 
 ```bash
 pip install -e .
@@ -45,14 +45,14 @@ st_code = sdk.generate_st_code(
 ).st_code
 ```
 
-Build/install as package:
+构建并安装 wheel：
 
 ```bash
 python -m build
 pip install dist/cube_encoder-*.whl
 ```
 
-## API Examples
+## API 示例
 
 ```bash
 curl -X POST http://127.0.0.1:50012/v1/grid/locate \
@@ -64,34 +64,34 @@ curl -X POST http://127.0.0.1:50012/v1/code/st \
   -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute","version":"v1"}'
 ```
 
-## Tests
+## 测试
 
-From this package:
+在本包内运行：
 
 ```bash
 python -m pytest -q tests
 python -m grid_core.app.perf_smoke
 ```
 
-From this workspace root:
+在仓库根目录运行跨包测试：
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
 
-## Documentation
+## 文档入口
 
-- [Documentation index](docs/README.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Ingest and storage design archive](docs/INGEST_STORAGE_DESIGN.md)
-- [Project history](docs/PROJECT_HISTORY.md)
-- [SDK release policy](docs/SDK_RELEASE.md)
-- [Development log](docs/DEVELOPMENT_LOG.md)
-- [Bug log](docs/BUG_LOG.md)
-- [Changelog](CHANGELOG.md)
+- [文档索引](docs/README.md)
+- [架构说明](docs/ARCHITECTURE.md)
+- [入库与存储设计归档](docs/INGEST_STORAGE_DESIGN.md)
+- [项目历史](docs/PROJECT_HISTORY.md)
+- [SDK 发布规范](docs/SDK_RELEASE.md)
+- [开发日志](docs/DEVELOPMENT_LOG.md)
+- [Bug 日志](docs/BUG_LOG.md)
+- [变更记录](CHANGELOG.md)
 
-## Package Boundary
+## 职责边界
 
-- `cube_encoder`: core grid, topology, and space-time coding capabilities.
-- `cube_split`: partition, ingest, and AOI readback workflows.
-- `cube_web`: web pages and visualization.
+- `cube_encoder`：底层格网、拓扑和时空编码能力。
+- `cube_split`：剖分、入库、质检和 AOI 读取链路。
+- `cube_web`：Web 管理入口、SDK facade、托管剖分 API 和质检报告展示。

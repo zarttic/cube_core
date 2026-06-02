@@ -1,14 +1,17 @@
 # cube_web 文档
 
-更新时间：2026-05-26
+更新时间：2026-06-02
 
-相关规划：
+历史设计稿：
 
-- [数据驱动剖分任务编排开发规划](partition-task-orchestration-plan.md)
+- [数据驱动剖分任务编排开发规划](archive/partition-task-orchestration-plan.md)：2026-05-30
+  阶段设计稿，已部分落地并归档；当前 API 和运行说明以本文为准。
 
 ## 1. 定位
 
-`cube_web` 提供 cube 项目的 Web 入口和 FastAPI API facade。它不实现格网算法，也不持久化入库数据；格网能力来自 `CubeEncoderSDK`，剖分和质检执行能力来自 `cube_split`。
+`cube_web` 提供 cube 项目的 Web 入口和 FastAPI API facade。它不实现格网算法、
+COG 转换或底层入库读取；格网能力来自 `CubeEncoderSDK`，剖分和质检执行能力来自
+`cube_split`。Web 侧负责持久化剖分任务元数据、批次状态和质检报告索引。
 
 当前前端是 Vue/Vite 构建产物，生产静态资源位于 `cube_web/cube_web/web/`。
 
@@ -20,20 +23,21 @@
 - 提供 `/health`。
 - 在 `/v1` 下暴露 SDK facade、剖分执行、异步任务和质检报告接口。
 - 将前端请求转换为 `cube_split` 作业参数。
-- 扫描 `cube_split/data/ray_output/*/run_*` 下的质检历史。
+- 通过 PostgreSQL `PartitionJobStore` 管理剖分批次、资产、attempt 和质量状态。
+- 通过 PostgreSQL `quality_reports` 管理质检报告、latest/history 和导出内容。
 
 `cube_web` 不负责：
 
 - 格网 locate/cover/topology 的算法实现。
 - COG 转换、剖分核心逻辑、入库或 AOI 读取。
-- 数据库和对象存储 schema 管理。
+- 底层数据库和对象存储 schema 管理。
 
 ## 3. 运行方式
 
 从仓库根目录运行：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 开发前端：
@@ -78,8 +82,19 @@ npm run build
 - `POST /v1/partition/{data_type}/tasks/run`
 - `POST /v1/partition/{data_type}/tasks/demo`（兼容旧演示客户端）
 - `POST /v1/partition/{data_type}/tasks/retry`
+- `POST /v1/partition/{data_type}/tasks/test`
 - `GET /v1/partition/tasks/{task_id}`
-- `POST /v1/partition/optical/test`
+- `POST /v1/partition/tasks/{task_id}/cancel`
+- `POST /v1/partition/{data_type}/test`
+- `POST /v1/partition/schemas/import`
+- `GET /v1/partition/batches`
+- `GET /v1/partition/batches/{batch_id}`
+- `GET /v1/partition/batches/{batch_id}/assets`
+- `GET /v1/partition/batches/{batch_id}/attempts`
+- `POST /v1/partition/batches/{batch_id}/run`
+- `POST /v1/partition/batches/{batch_id}/retry`
+- `POST /v1/partition/batches/{batch_id}/cancel`
+- `POST /v1/partition/assets/retry`
 
 `data_type` 当前支持：
 
@@ -88,8 +103,8 @@ npm run build
 - `product`
 - `radar`
 
-异步执行状态保存在进程内 `PartitionTaskStore`。批次、资产和尝试记录由
-`PartitionJobStore` 持久化到 PostgreSQL。
+短期异步执行状态保存在进程内 `PartitionTaskStore`。批次、资产、attempt、质量摘要
+和重试/取消状态由 `PartitionJobStore` 持久化到 PostgreSQL。
 
 内置演示批次默认不会写入生产库。只在演示环境设置
 `CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1` 时，启动时才会自动装载光学、产品、
@@ -116,7 +131,9 @@ npm run build
 - `POST /v1/quality/product/report/txt`
 - `POST /v1/quality/product/history`
 
-`latest` 和 `history` 会扫描 `cube_split/data/ray_output/*/run_*` 下包含 `index_rows.jsonl` 的批次目录。`product` 历史只取父目录名以 `product` 开头的批次；`optical` 历史排除这些产品批次。
+`run` 会先解析允许范围内的 `run_dir`，调用 `cube_split.quality` 生成报告，然后写入
+PostgreSQL `quality_reports`。`latest`、`history`、`report`、`pdf` 和 `txt` 都从
+`quality_reports` 读取，不再通过扫描 `cube_split/data/ray_output/*/run_*` 组织历史列表。
 
 ## 5. 静态路由
 
@@ -135,7 +152,7 @@ npm run build
 从 `cube_web/` 目录运行：
 
 ```bash
-PYTHONPATH=../cube_encoder:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
 ```
 
 涉及 API 契约变化时，同时检查：

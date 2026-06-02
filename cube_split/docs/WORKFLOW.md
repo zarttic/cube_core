@@ -155,7 +155,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 cube_split/scripts/run_all_partition_flows_smoke.py \
-  --mode demo \
+  --mode test \
   --ray-parallelism 2 \
   --chunk-size 1 \
   --max-cells-per-asset 50 \
@@ -171,6 +171,8 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 cube_split/scripts/run_all
 - MinIO 访问密钥，来自 `CUBE_WEB_MINIO_ACCESS_KEY` / `CUBE_WEB_MINIO_SECRET_KEY`、`MINIO_*`，或节点 `/etc/default/minio`
 
 默认不跑质量检查；需要同时验证质量报告写入时加 `--keep-quality`。
+生产文档推荐使用 `--mode test` 做剖分链路验证；演示环境需要完整入库冒烟时，在
+`demo/*` 分支的演示文档中维护 `--mode demo` 说明。
 
 Ray Client 需要 driver Python 与集群 Python 主版本一致；当前 Ray 集群为 Python 3.8.10，因此 smoke 建议使用 `python3.8`。如需指定其他兼容解释器，pytest 包装器支持 `CUBE_PARTITION_E2E_PYTHON=/path/to/python`。
 
@@ -284,7 +286,9 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.quality.product_quality \
   --target-crs EPSG:4326
 ```
 
-质检输出默认写入 `run_dir/quality_report.json`。Web 端会扫描 `cube_split/data/ray_output/*/run_*` 下带有 `index_rows.jsonl` 的目录，用于 latest/history/report 展示。
+质检输出默认写入 `run_dir/quality_report.json`。通过 Web API 触发质检时，报告会同步写入
+PostgreSQL `quality_reports`；Web 的 latest/history/report/pdf/txt 均从该表读取。直接运行
+`cube_split.quality` 命令只生成本地报告文件，不会自动写入 Web 报告库。
 
 Web 批处理会把剖分结果中的 `quality_status`、`quality_report_id`、`quality_failure_reason` 持久化到 `partition_batches`：
 

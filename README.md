@@ -1,46 +1,46 @@
 # cube_core
 
-Python monorepo for grid encoding, remote-sensing partitioning, ingest/readback,
-and the web management shell.
+本仓库是一个 Python monorepo，覆盖格网编码、遥感数据剖分、入库/回读、
+质检和 Web 管理入口。
 
-## Packages
+## 包结构
 
-- `cube_encoder`: grid locate/cover, topology, space-time code APIs, and the
-  `grid_core.sdk.CubeEncoderSDK` provider.
-- `cube_split`: optical/product/carbon partitioning, Ray/local execution,
-  ingest to PostgreSQL/MinIO or local backends, quality checks, and AOI readback.
-- `cube_web`: FastAPI host, Vue-built static UI, in-process SDK API facade,
-  managed partition endpoints, and quality-report endpoints.
+- `cube_encoder`：格网 locate/cover、拓扑、时空编码 API，以及
+  `grid_core.sdk.CubeEncoderSDK` SDK 提供方。
+- `cube_split`：光学/产品/碳卫星/雷达剖分，Ray 或本地执行，PostgreSQL/MinIO
+  或本地后端入库，质检和 AOI 回读。
+- `cube_web`：FastAPI 主机、Vue 构建后的静态 UI、进程内 SDK API facade、
+  托管剖分接口和质检报告接口。
 
-`cube_encoder` owns grid logic. Other packages consume it through
-`grid_core.sdk.CubeEncoderSDK` or the web SDK facade.
+`cube_encoder` 只负责格网能力。其他包必须通过
+`grid_core.sdk.CubeEncoderSDK` 或 Web SDK facade 使用 encoder 能力，不重复实现格网逻辑。
 
-## Documentation
+## 文档入口
 
-- `cube_encoder/docs/README.md`: encoder architecture, SDK/API boundary, release
-  notes, and historical design index.
-- `cube_split/docs/README.md`: partition, ingest, quality, manifest, and readback
-  documentation.
-- `cube_web/docs/README.md`: web host, routes, frontend build, and tests.
-- `AGENTS.md`: repository operating notes, default test commands, and local
-  infrastructure references.
+- `cube_encoder/docs/README.md`：encoder 架构、SDK/API 边界、发布规则和历史设计索引。
+- `cube_split/docs/README.md`：剖分、manifest、入库、质检和回读说明。
+- `cube_web/docs/README.md`：Web 主机、路由、前端构建、任务/质检存储和测试说明。
+- `AGENTS.md`：仓库协作规则、默认测试命令、生产/演示分离规则和本地基础设施说明。
 
-## Development Commands
+历史报告和一次性联调记录保留在各包 `docs/archive/` 或 `docs/test_reports/` 下。
+若归档内容与当前入口文档冲突，以当前入口文档和代码为准。
 
-Default cross-package tests from the repository root:
+## 开发命令
+
+在仓库根目录运行默认跨包测试：
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
 ```
 
-Run web tests after web/API changes:
+Web/API 变更后运行 Web 测试：
 
 ```bash
 cd cube_web
 PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
 ```
 
-Build Python packages:
+构建 Python 包：
 
 ```bash
 cd cube_encoder && python -m build
@@ -48,7 +48,7 @@ cd ../cube_split && python -m build
 cd ../cube_web && python -m build
 ```
 
-Build the frontend:
+构建前端：
 
 ```bash
 cd cube_web/frontend
@@ -56,22 +56,21 @@ npm ci
 npm run build
 ```
 
-Run the web UI with the in-repo SDK backend:
+使用仓库内 SDK 和剖分后端运行 Web UI：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-## Current Workflow Snapshot
+## 当前链路快照
 
-1. Use `cube_split` to standardize raster assets to COG where needed.
-2. Use `cube_encoder` through the SDK to generate `space_code`, `st_code`, and
-   cell/window metadata.
-3. Write partition outputs under `cube_split/data/ray_output/.../run_*`.
-4. Ingest metadata/assets into PostgreSQL + MinIO, or use SQLite/local storage
-   for local debugging.
-5. Run quality checks from `cube_split.quality` or the `cube_web` quality API.
-6. Query AOI readback through `cube_split.read`.
+1. 通过 Web API 或底层命令接收 ARD schema、manifest 或本地调试目录。
+2. `cube_split` 在需要时把栅格资产标准化为 COG。
+3. `cube_split` 通过 `CubeEncoderSDK` 生成 `space_code`、`st_code` 和 cell/window 元数据。
+4. 剖分产物写入 `cube_split/data/ray_output/.../run_*`，分布式链路使用 Ray 和 MinIO。
+5. 元数据和资产写入 PostgreSQL + MinIO；本地调试可使用 SQLite/local 后端。
+6. 质检报告由 `cube_split.quality` 生成，并由 `cube_web` 持久化到 PostgreSQL `quality_reports`。
+7. AOI、时间和波段回读通过 `cube_split.read` 完成。
 
-Historical and one-off run reports have been consolidated into the package docs;
-current commands in package README files take precedence over archived notes.
+生产剖分操作使用 `run` 命名；`demo` 接口仅作为旧客户端兼容别名。演示专用数据、
+运行配置示例和展示脚本只放在 `demo/*` 分支。

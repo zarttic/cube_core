@@ -1,6 +1,8 @@
 # cube_encoder 文档索引
 
-本文档目录只维护 `cube_encoder` 的 SDK、API、格网引擎和历史设计内容。剖分入库执行链路见 [cube_split/docs/README.md](../../cube_split/docs/README.md)，Web 演示见 [cube_web/docs/README.md](../../cube_web/docs/README.md)。
+本文档目录只维护 `cube_encoder` 的 SDK、API、格网引擎和历史设计内容。剖分入库执行链路见
+[cube_split/docs/README.md](../../cube_split/docs/README.md)，Web 管理入口、托管剖分 API
+和质检报告接口见 [cube_web/docs/README.md](../../cube_web/docs/README.md)。
 
 ## 主文档
 
@@ -11,7 +13,7 @@
 
 ## 过程记录
 
-- [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)：开发任务流水，保留 append-only 记录。
+- [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)：开发任务流水，保留 append-only 记录；历史条目保留原始语言，新条目必须使用中文。
 - [BUG_LOG.md](BUG_LOG.md)：问题排查记录。
 - [DOC_WORKFLOW.md](DOC_WORKFLOW.md)：文档维护规则。
 - [../CHANGELOG.md](../CHANGELOG.md)：对外变更记录。

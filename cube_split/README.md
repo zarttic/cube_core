@@ -1,21 +1,19 @@
 # cube_split
 
-`cube_split` owns partitioning, ingest, quality checks, and AOI readback. It
-does not implement grid algorithms; it consumes `cube_encoder` through
-`grid_core.sdk.CubeEncoderSDK`.
+`cube_split` 负责剖分、入库、质检和 AOI 回读。它不实现格网算法，而是通过
+`grid_core.sdk.CubeEncoderSDK` 使用 `cube_encoder` 能力。
 
-Current workflow documentation: [docs/README.md](docs/README.md).
+当前工作流说明见 [docs/README.md](docs/README.md)。
 
-## Boundary
+## 职责边界
 
-- `cube_split`: input parsing, COG conversion, grid/window partition rows,
-  metadata writes, quality checks, and AOI readback.
-- `cube_encoder`: grid locate, cover, topology, and space-time code generation.
-- `cube_web`: visualization, demo APIs, and web-hosted quality reports.
+- `cube_split`：输入解析、COG 转换、grid/window 剖分行、元数据写入、质检和 AOI 回读。
+- `cube_encoder`：格网 locate、cover、topology 和时空编码生成。
+- `cube_web`：可视化、托管剖分 API、任务编排和 Web 质检报告展示。
 
-## Common Commands
+## 常用命令
 
-Run optical logical partition:
+运行光学逻辑剖分：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_job \
@@ -24,7 +22,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_
   --output-dir data/ray_output/logical_partition
 ```
 
-Run product partition:
+运行产品剖分：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.product_partition_job \
@@ -32,7 +30,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.product_partition_job 
   --output-dir data/ray_output/product
 ```
 
-Run carbon satellite partition with ISEA4H and Ray:
+使用 ISEA4H 和 Ray 运行碳卫星剖分：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.carbon_partition_job \
@@ -44,18 +42,17 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.carbon_partition_job \
   --ray-address "$RAY_ADDRESS"
 ```
 
-Run optical ingest E2E:
+运行光学入库端到端检查：
 
 ```bash
 scripts/run_ray_ingest_e2e.sh
 ```
 
-The script reads PostgreSQL, Ray, and MinIO settings from `POSTGRES_DSN`,
-`RAY_ADDRESS`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, and
-`MINIO_BUCKET`. Missing required settings fail explicitly for distributed
-backends.
+脚本从 `POSTGRES_DSN`、`RAY_ADDRESS`、`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
+`MINIO_SECRET_KEY` 和 `MINIO_BUCKET` 读取 PostgreSQL、Ray 和 MinIO 配置。
+分布式后端缺少必需配置时会显式失败。
 
-Run optical Ray partition and ingest in one job:
+运行光学 Ray 剖分并在同一作业内入库：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_job \
@@ -64,7 +61,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_
   --output-dir data/ray_output/logical_partition
 ```
 
-Run AOI readback:
+运行 AOI 回读：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.read.aoi_reader \
@@ -74,15 +71,15 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.read.aoi_reader \
   --output .tmp/aoi_rgb.tif
 ```
 
-## Tests
+## 测试
 
-From this package:
+在本包内运行：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.8 -m pytest tests
 ```
 
-From the repository root:
+在仓库根目录运行：
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m pytest cube_encoder/tests cube_split/tests

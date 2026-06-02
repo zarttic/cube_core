@@ -1,15 +1,15 @@
-# Changelog
+# 变更记录
 
-All notable SDK/API changes are documented in this file.
+本文记录 SDK/API 的重要变更。
 
 ## [0.2.0] - 2026-03-11
-- Added installable Python SDK facade: `grid_core.sdk.CubeEncoderSDK`.
-- Implemented `mgrs` `cover_mode=minimal`.
-- Added minimal coarsening behavior for `geohash`/`mgrs`/`isea4h`.
-- Added engine stability tests for dateline, zone boundaries, and polar scenarios.
-- Added perf smoke JSON artifact export and CI artifact upload.
-- Added SDK package build + wheel/sdist install smoke jobs in CI.
+- 新增可安装 Python SDK facade：`grid_core.sdk.CubeEncoderSDK`。
+- 实现 `mgrs` 的 `cover_mode=minimal`。
+- 为 `geohash`、`mgrs`、`isea4h` 增加 minimal 合并降级行为。
+- 增加日期变更线、分区边界和极区场景的引擎稳定性测试。
+- 增加性能烟测 JSON 产物导出和 CI artifact 上传。
+- 在 CI 中增加 SDK 包构建、wheel 安装和 sdist 安装烟测。
 
 ## [0.1.0] - 2026-03-11
-- First installable package metadata (`pyproject.toml`).
-- Core capabilities: `geohash`/`mgrs`/`isea4h` grid, topology, and ST code APIs.
+- 首次增加可安装包元数据（`pyproject.toml`）。
+- 核心能力：`geohash`、`mgrs`、`isea4h` 格网、拓扑和 ST code API。

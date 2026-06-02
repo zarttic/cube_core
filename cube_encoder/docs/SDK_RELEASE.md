@@ -1,26 +1,30 @@
-# SDK Release Policy
+# SDK 发布规范
 
-## Versioning rule
-- Use SemVer: `MAJOR.MINOR.PATCH`.
-- `MAJOR`: backward-incompatible SDK/API contract change.
-- `MINOR`: backward-compatible feature (new engine capability, new SDK method, behavior extension).
-- `PATCH`: bug fix/performance/documentation changes without contract break.
+## 版本规则
 
-## Required release checklist
-1. Update `pyproject.toml` version.
-2. Add release note entry in `CHANGELOG.md`.
-3. Ensure tests pass:
+- 使用 SemVer：`MAJOR.MINOR.PATCH`。
+- `MAJOR`：不向后兼容的 SDK/API 契约变更。
+- `MINOR`：向后兼容的新能力，例如新增引擎能力、新 SDK 方法或行为扩展。
+- `PATCH`：不破坏契约的 bug 修复、性能优化或文档变更。
+
+## 发布检查清单
+
+1. 更新 `pyproject.toml` 版本号。
+2. 在 `CHANGELOG.md` 增加发布记录。
+3. 确认测试通过：
    - `python -m pytest -q tests`
    - `python -m grid_core.app.perf_smoke`
-4. Ensure package build/install checks pass in CI:
+4. 确认 CI 中的包构建和安装检查通过：
    - `python -m build`
-   - wheel install smoke test
-   - sdist install smoke test
+   - wheel 安装烟测
+   - sdist 安装烟测
 
-## Perf baseline governance
-- Thresholds are centralized in `.github/perf-thresholds.env`.
-- CI exports `perf-smoke.json` artifact for every run to support trend inspection.
+## 性能基线管理
 
-## API/SDK compatibility note
-- New optional fields are allowed in responses.
-- Existing field semantics must remain stable within the same MAJOR version.
+- 阈值集中维护在 `.github/perf-thresholds.env`。
+- CI 每次运行导出 `perf-smoke.json` artifact，用于趋势检查。
+
+## API/SDK 兼容性说明
+
+- 响应中允许新增可选字段。
+- 同一个 `MAJOR` 版本内，既有字段语义必须保持稳定。
