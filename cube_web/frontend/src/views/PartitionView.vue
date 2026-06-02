@@ -38,20 +38,6 @@ const gridTypeLabels = {
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
 };
-const resolutionGridLevelRules = {
-  logical: [
-    { max: 10, level: 6 },
-    { max: 30, level: defaultLogicalGridLevel },
-    { max: 250, level: 4 },
-    { max: 1000, level: 3 },
-  ],
-  isea4h: [
-    { max: 10, level: defaultEntityGridLevel },
-    { max: 30, level: defaultEntityGridLevel },
-    { max: 250, level: defaultEntityGridLevel },
-    { max: 1000, level: 4 },
-  ],
-};
 const partitionTaskPollIntervalMs = 1500;
 const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('geohash');
@@ -87,6 +73,13 @@ const partitionStages = ref([
   { key: 'partition', label: '执行剖分', detail: '生成 COG、按格网覆盖切分窗口并输出索引行。', status: 'pending' },
   { key: 'persist', label: '质检入库', detail: '执行自动质检并保存质检报告，正式入库需人工确认。', status: 'pending' },
 ]);
+const partitionStageDetailVisible = ref(false);
+const selectedPartitionStageKey = ref('');
+const selectedPartitionStage = computed(() => (
+  partitionStages.value.find((stage) => stage.key === selectedPartitionStageKey.value) || null
+));
+const partitionContextDetailVisible = ref(false);
+const selectedPartitionContextLabel = ref('');
 const qualityLoading = ref(false);
 const qualityHistoryLoading = ref(false);
 const qualityExportLoading = ref(false);
@@ -155,10 +148,10 @@ function formatGridType(gridType) {
 
 function defaultGridLevelForResolution(resolution, gridType, fallback = defaultGridLevelForGridType(gridType)) {
   if (!Number.isFinite(resolution) || resolution <= 0) return fallback;
-  const rules = gridType === 'isea4h' ? resolutionGridLevelRules.isea4h : resolutionGridLevelRules.logical;
-  const match = rules.find((rule) => resolution <= rule.max);
-  if (match) return match.level;
-  return gridType === 'isea4h' ? defaultEntityGridLevel : 2;
+  if (gridType === 'isea4h') return resolution < 10 ? 5 : defaultEntityGridLevel;
+  if (resolution < 10) return 8;
+  if (resolution <= 30) return 7;
+  return 6;
 }
 
 function defaultGridLevelFromAssets(assets, gridType, fallback = defaultGridLevelForGridType(gridType)) {
@@ -1220,6 +1213,9 @@ const partitionContextRows = computed(() => {
   }
   return rows;
 });
+const selectedPartitionContext = computed(() => (
+  partitionContextRows.value.find((item) => item.label === selectedPartitionContextLabel.value) || null
+));
 
 const partitionResultDetailRows = computed(() => {
   const result = lastPartitionResult.value;
@@ -1740,6 +1736,16 @@ function stageText(status) {
   if (status === 'running') return '进行中';
   if (status === 'failed') return '失败';
   return '待执行';
+}
+
+function openPartitionStageDetail(stage) {
+  selectedPartitionStageKey.value = stage.key;
+  partitionStageDetailVisible.value = true;
+}
+
+function openPartitionContextDetail(item) {
+  selectedPartitionContextLabel.value = item.label;
+  partitionContextDetailVisible.value = true;
 }
 
 function startPartitionTimer() {
@@ -2734,19 +2740,36 @@ onUnmounted(() => {
                     <div class="partition-progress-panel">
                       <div class="quality-section-title">剖分进程</div>
                       <div class="partition-context-grid">
-                        <div v-for="item in partitionContextRows" :key="item.label" class="partition-context-item">
+                        <button
+                          v-for="item in partitionContextRows"
+                          :key="item.label"
+                          type="button"
+                          class="partition-context-item"
+                          :title="String(item.value)"
+                          @click="openPartitionContextDetail(item)"
+                        >
                           <span>{{ item.label }}</span>
                           <strong>{{ item.value }}</strong>
-                        </div>
+                        </button>
                       </div>
                       <div class="partition-stage-list">
-                        <div v-for="stage in partitionStages" :key="stage.key" class="partition-stage-item">
+                        <button
+                          v-for="stage in partitionStages"
+                          :key="stage.key"
+                          type="button"
+                          class="partition-stage-item"
+                          :title="stage.detail"
+                          @click="openPartitionStageDetail(stage)"
+                        >
                           <div class="partition-stage-main">
                             <strong>{{ stage.label }}</strong>
                             <span>{{ stage.detail }}</span>
                           </div>
-                          <el-tag :type="stageTagType(stage.status)" size="small">{{ stageText(stage.status) }}</el-tag>
-                        </div>
+                          <div class="partition-stage-actions">
+                            <el-tag :type="stageTagType(stage.status)" size="small">{{ stageText(stage.status) }}</el-tag>
+                            <span class="partition-stage-open">详情</span>
+                          </div>
+                        </button>
                       </div>
                     </div>
                     <el-alert
@@ -3081,6 +3104,32 @@ onUnmounted(() => {
         </el-table-column>
       </el-table>
     </el-drawer>
+
+    <el-dialog v-model="partitionStageDetailVisible" title="剖分进程详情" width="520px">
+      <div v-if="selectedPartitionStage" class="partition-stage-detail">
+        <div class="partition-stage-detail-row">
+          <span>阶段</span>
+          <strong>{{ selectedPartitionStage.label }}</strong>
+        </div>
+        <div class="partition-stage-detail-row">
+          <span>状态</span>
+          <el-tag :type="stageTagType(selectedPartitionStage.status)" size="small">
+            {{ stageText(selectedPartitionStage.status) }}
+          </el-tag>
+        </div>
+        <div class="partition-stage-detail-message">{{ selectedPartitionStage.detail }}</div>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="partitionContextDetailVisible" title="剖分信息详情" width="520px">
+      <div v-if="selectedPartitionContext" class="partition-stage-detail">
+        <div class="partition-stage-detail-row">
+          <span>字段</span>
+          <strong>{{ selectedPartitionContext.label }}</strong>
+        </div>
+        <div class="partition-stage-detail-message">{{ selectedPartitionContext.value }}</div>
+      </div>
+    </el-dialog>
 
     <el-drawer
       v-model="partitionBatchDetailVisible"

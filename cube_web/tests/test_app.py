@@ -22,6 +22,7 @@ from cube_web.services import config_store as config_store_module
 from cube_web.services import partition_runners
 from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
+from cube_web.services.partition_defaults import default_grid_level_for_resolution
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.quality_report_store import set_quality_report_store
@@ -254,6 +255,18 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert 'v-model="productGridType"' in source
     assert "grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto'" in source
     assert "grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto'" in source
+    assert "if (gridType === 'isea4h') return resolution < 10 ? 5 : defaultEntityGridLevel;" in source
+    assert "if (resolution < 10) return 8;" in source
+    assert "if (resolution <= 30) return 7;" in source
+    assert "const partitionStageDetailVisible = ref(false);" in source
+    assert "function openPartitionStageDetail(stage)" in source
+    assert '@click="openPartitionStageDetail(stage)"' in source
+    assert 'title="剖分进程详情"' in source
+    assert "const partitionContextDetailVisible = ref(false);" in source
+    assert "function openPartitionContextDetail(item)" in source
+    assert '@click="openPartitionContextDetail(item)"' in source
+    assert 'title="剖分信息详情"' in source
+    assert "partition-stage-detail-message" in source
     assert "const selectedCarbonObservations = computed(() => {" in source
     assert "selected_observations: selectedObservations" in source
     assert "selectedRadarAssets" in source
@@ -307,6 +320,23 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "观测足迹匹配" not in source
     assert "面积加权" not in source
     assert "最近邻" not in source
+
+
+@pytest.mark.parametrize(
+    ("resolution", "grid_type", "expected_level"),
+    [
+        (5, "geohash", 8),
+        ("9.9m", "tile_matrix", 8),
+        ("10m", "geohash", 7),
+        (30, "tile_matrix", 7),
+        (31, "geohash", 6),
+        (5, "isea4h", 5),
+        ("10m", "isea4h", 4),
+        (30, "isea4h", 4),
+    ],
+)
+def test_partition_resolution_grid_level_defaults(resolution, grid_type, expected_level):
+    assert default_grid_level_for_resolution(resolution, grid_type=grid_type) == expected_level
 
 
 def test_config_view_does_not_expose_mgrs_partition_grid_type():
@@ -899,7 +929,7 @@ def test_optical_partition_runner_infers_grid_level_from_selected_asset_resoluti
     )
 
     assert captured["grid_type"] == "geohash"
-    assert captured["grid_level"] == 6
+    assert captured["grid_level"] == 7
 
 
 def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypatch, tmp_path):
@@ -1392,9 +1422,9 @@ def test_partition_schema_import_infers_non_carbon_grid_level_from_resolution():
     assert radar_resp.status_code == 200
     assert product_resp.status_code == 200
     assert carbon_resp.status_code == 200
-    assert optical_resp.json()["normalized_payload"]["grid_level"] == 6
-    assert radar_resp.json()["normalized_payload"]["grid_level"] == 6
-    assert product_resp.json()["normalized_payload"]["grid_level"] == 5
+    assert optical_resp.json()["normalized_payload"]["grid_level"] == 7
+    assert radar_resp.json()["normalized_payload"]["grid_level"] == 7
+    assert product_resp.json()["normalized_payload"]["grid_level"] == 7
     assert optical_resp.json()["normalized_payload"]["grid_level_mode"] == "auto"
     assert "grid_level" not in carbon_resp.json()["normalized_payload"]
 
@@ -2652,7 +2682,7 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert result["selected_asset_count"] == 1
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
-    assert captured["grid_level"] == 6
+    assert captured["grid_level"] == 7
     assert captured["partition_backend"] == "thread"
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"

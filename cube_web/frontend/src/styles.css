@@ -3362,16 +3362,35 @@ section {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    width: 100%;
     padding: 9px 0;
+    border: none;
     border-bottom: 1px solid var(--border);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
 .partition-stage-item:last-child {
     border-bottom: none;
 }
 
+.partition-stage-item:hover .partition-stage-open,
+.partition-stage-item:focus-visible .partition-stage-open {
+    color: var(--primary-dark);
+}
+
+.partition-stage-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
 .partition-stage-main {
     min-width: 0;
+    flex: 1;
 }
 
 .partition-stage-main strong {
@@ -3386,6 +3405,59 @@ section {
     font-size: 12px;
     color: var(--gray);
     line-height: 1.45;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.partition-stage-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.partition-stage-open {
+    color: var(--primary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.partition-stage-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.partition-stage-detail-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+.partition-stage-detail-row span {
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.partition-stage-detail-row strong {
+    color: var(--dark);
+    font-size: 14px;
+}
+
+.partition-stage-detail-message {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fbfcfe;
+    color: var(--dark);
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .partition-context-grid {
@@ -3400,7 +3472,20 @@ section {
     border-radius: 6px;
     padding: 9px 10px;
     background: #fbfcfe;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
     min-width: 0;
+    text-align: left;
+}
+
+.partition-context-item:hover strong {
+    color: var(--primary);
+}
+
+.partition-context-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .partition-context-item span {

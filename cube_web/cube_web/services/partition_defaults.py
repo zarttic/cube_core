@@ -20,19 +20,6 @@ _RESOLUTION_KEYS = (
     "gsd_m",
 )
 
-_LOGICAL_RESOLUTION_LEVELS = (
-    (10.0, 6),
-    (30.0, DEFAULT_LOGICAL_GRID_LEVEL),
-    (250.0, 4),
-    (1000.0, 3),
-)
-_ISEA4H_RESOLUTION_LEVELS = (
-    (10.0, DEFAULT_ISEA4H_GRID_LEVEL),
-    (30.0, DEFAULT_ISEA4H_GRID_LEVEL),
-    (250.0, DEFAULT_ISEA4H_GRID_LEVEL),
-    (1000.0, DEFAULT_ISEA4H_GRID_LEVEL),
-)
-
 
 def default_grid_level_for_grid_type(grid_type: str | None) -> int:
     return DEFAULT_ISEA4H_GRID_LEVEL if str(grid_type or "").lower() == "isea4h" else DEFAULT_LOGICAL_GRID_LEVEL
@@ -47,11 +34,13 @@ def default_grid_level_for_resolution(
     parsed = _parse_resolution(resolution)
     if parsed is None:
         return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
-    table = _ISEA4H_RESOLUTION_LEVELS if str(grid_type or "").lower() == "isea4h" else _LOGICAL_RESOLUTION_LEVELS
-    for max_resolution, level in table:
-        if parsed <= max_resolution:
-            return level
-    return DEFAULT_ISEA4H_GRID_LEVEL if str(grid_type or "").lower() == "isea4h" else 2
+    if str(grid_type or "").lower() == "isea4h":
+        return 5 if parsed < 10 else DEFAULT_ISEA4H_GRID_LEVEL
+    if parsed < 10:
+        return 8
+    if parsed <= 30:
+        return 7
+    return 6
 
 
 def default_grid_level_from_assets(
