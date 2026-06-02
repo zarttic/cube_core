@@ -19,7 +19,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = 4
 DEFAULT_ENTITY_TEST_GRID_LEVEL = 4
-PARTITION_GRID_TYPES = {"geohash", "tile_matrix", "isea4h"}
+PARTITION_GRID_TYPES = {"geohash", "mgrs", "tile_matrix", "isea4h"}
 
 
 def _demo_run_dir(name: str) -> Path:
@@ -336,7 +336,7 @@ def _int_payload_value(payload: dict, key: str, default: int) -> int:
 def _partition_grid_type(payload: dict) -> str:
     grid_type = str(payload.get("grid_type") or "geohash").lower()
     if grid_type not in PARTITION_GRID_TYPES:
-        raise ValueError("grid_type must be one of: geohash, tile_matrix, isea4h")
+        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
     return grid_type
 
 

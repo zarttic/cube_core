@@ -217,3 +217,23 @@ def partition_optical_retry(payload: PartitionRetryRequest | dict | None = None)
         return run_optical_partition_retry(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
+
+
+def partition_optical_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    return partition_optical_demo(payload)
+
+
+def partition_carbon_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    return partition_carbon_demo(payload)
+
+
+def partition_product_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    return partition_product_demo(payload)
+
+
+def partition_radar_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    return partition_radar_demo(payload)
+
+
+def partition_entity_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+    return partition_entity_demo(payload)

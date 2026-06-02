@@ -52,10 +52,26 @@ def test_smoke_result_summary_includes_quality_metadata(tmp_path: Path) -> None:
             "quality_report_id": "quality-smoke-report",
         },
         keep_quality=True,
+        require_quality=True,
     )
 
+    assert item["status"] == "pass"
     assert item["quality_status"] == "PASS"
     assert item["quality_report_id"] == "quality-smoke-report"
+
+
+def test_smoke_acceptance_cases_are_fixed() -> None:
+    smoke = _load_smoke_module()
+
+    assert [case.case_id for case in smoke.ACCEPTANCE_CASES] == [
+        "optical_geohash",
+        "optical_mgrs",
+        "optical_isea4h_level1",
+        "product_geohash",
+        "carbon_satellite",
+    ]
+    assert smoke.ACCEPTANCE_CASES[1].grid_type == "mgrs"
+    assert smoke.ACCEPTANCE_CASES[2].grid_level == 1
 
 
 @pytest.mark.e2e
@@ -93,10 +109,19 @@ def test_run_all_partition_flows_smoke(tmp_path: Path) -> None:
     )
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    labels = {item["label"] for item in summary["results"]}
-    assert {"optical:geohash", "product:geohash", "radar:geohash", "optical:isea4h"} <= labels
-    assert all(item["status"] == "ok" for item in summary["results"])
-    quality_results = [item for item in summary["results"] if item["label"].split(":", 1)[0] in {"optical", "product"}]
+    ids = {item["id"] for item in summary["results"]}
+    assert {
+        "optical_geohash",
+        "optical_mgrs",
+        "optical_isea4h_level1",
+        "product_geohash",
+        "carbon_satellite",
+        "quality_checks",
+        "aoi_readback",
+    } <= ids
+    assert summary["status"] == "pass"
+    assert all(item["status"] == "pass" for item in summary["results"])
+    quality_results = [item for item in summary["results"] if item["id"] in {"optical_geohash", "product_geohash", "carbon_satellite"}]
     assert quality_results
     assert all(item["quality_status"] for item in quality_results)
     assert all(item["quality_report_id"] for item in quality_results)

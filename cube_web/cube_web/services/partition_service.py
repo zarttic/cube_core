@@ -264,38 +264,120 @@ def build_partition_registry(
     entity_test: PartitionRunner,
     entity_retry: PartitionRunner,
 ) -> Dict[str, PartitionBackend]:
+    registry = build_production_partition_registry(
+        optical_run=optical_demo,
+        carbon_run=carbon_demo,
+        product_run=product_demo,
+        radar_run=radar_demo,
+        entity_run=entity_demo,
+    )
+    legacy = build_legacy_partition_registry(
+        optical_demo=optical_demo,
+        optical_test=optical_test,
+        optical_retry=optical_retry,
+        carbon_demo=carbon_demo,
+        carbon_test=carbon_test,
+        carbon_retry=carbon_retry,
+        product_demo=product_demo,
+        product_test=product_test,
+        product_retry=product_retry,
+        radar_demo=radar_demo,
+        radar_test=radar_test,
+        radar_retry=radar_retry,
+        entity_demo=entity_demo,
+        entity_test=entity_test,
+        entity_retry=entity_retry,
+    )
+    return {
+        data_type: PartitionBackend(
+            data_type=backend.data_type,
+            run=backend.run,
+            demo=legacy[data_type].demo,
+            test=legacy[data_type].test,
+            retry=legacy[data_type].retry,
+            implemented=backend.implemented,
+        )
+        for data_type, backend in registry.items()
+    }
+
+
+def build_production_partition_registry(
+    *,
+    optical_run: PartitionRunner,
+    carbon_run: PartitionRunner,
+    product_run: PartitionRunner,
+    radar_run: PartitionRunner,
+    entity_run: PartitionRunner,
+) -> Dict[str, PartitionBackend]:
     return {
         "optical": PartitionBackend(
             data_type="optical",
-            run=optical_demo,
+            run=optical_run,
+        ),
+        "carbon": PartitionBackend(
+            data_type="carbon",
+            run=carbon_run,
+        ),
+        "product": PartitionBackend(
+            data_type="product",
+            run=product_run,
+        ),
+        "radar": PartitionBackend(
+            data_type="radar",
+            run=radar_run,
+        ),
+        "entity": PartitionBackend(
+            data_type="entity",
+            run=entity_run,
+        ),
+    }
+
+
+def build_legacy_partition_registry(
+    *,
+    optical_demo: PartitionRunner,
+    optical_test: PartitionRunner,
+    optical_retry: PartitionRunner,
+    carbon_demo: PartitionRunner,
+    carbon_test: PartitionRunner,
+    carbon_retry: PartitionRunner,
+    product_demo: PartitionRunner,
+    product_test: PartitionRunner,
+    product_retry: PartitionRunner,
+    radar_demo: PartitionRunner,
+    radar_test: PartitionRunner,
+    radar_retry: PartitionRunner,
+    entity_demo: PartitionRunner,
+    entity_test: PartitionRunner,
+    entity_retry: PartitionRunner,
+) -> Dict[str, PartitionBackend]:
+    return {
+        "optical": PartitionBackend(
+            data_type="optical",
             demo=optical_demo,
             test=optical_test,
             retry=optical_retry,
         ),
         "carbon": PartitionBackend(
             data_type="carbon",
-            run=carbon_demo,
             demo=carbon_demo,
             test=carbon_test,
             retry=carbon_retry,
         ),
         "product": PartitionBackend(
             data_type="product",
-            run=product_demo,
             demo=product_demo,
             test=product_test,
             retry=product_retry,
         ),
         "radar": PartitionBackend(
             data_type="radar",
-            run=radar_demo,
             demo=radar_demo,
             test=radar_test,
             retry=radar_retry,
         ),
         "entity": PartitionBackend(
             data_type="entity",
-            run=entity_demo,
             demo=entity_demo,
             test=entity_test,
             retry=entity_retry,

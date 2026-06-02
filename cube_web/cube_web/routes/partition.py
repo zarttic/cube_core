@@ -23,7 +23,21 @@ def create_partition_service() -> PartitionService:
     partition_adapters = import_module("cube_web.routes.partition_adapters")
     partition_service_module = import_module("cube_web.services.partition_service")
     return PartitionService(
-        partition_service_module.build_partition_registry(
+        partition_service_module.build_production_partition_registry(
+            optical_run=partition_adapters.partition_optical_run,
+            carbon_run=partition_adapters.partition_carbon_run,
+            product_run=partition_adapters.partition_product_run,
+            radar_run=partition_adapters.partition_radar_run,
+            entity_run=partition_adapters.partition_entity_run,
+        )
+    )
+
+
+def create_legacy_partition_service(source_service: PartitionService | None = None) -> PartitionService:
+    partition_adapters = import_module("cube_web.routes.partition_adapters")
+    partition_service_module = import_module("cube_web.services.partition_service")
+    return PartitionService(
+        partition_service_module.build_legacy_partition_registry(
             optical_demo=partition_adapters.partition_optical_demo,
             optical_test=partition_adapters.partition_optical_test,
             optical_retry=partition_adapters.partition_optical_retry,
@@ -39,16 +53,23 @@ def create_partition_service() -> PartitionService:
             entity_demo=partition_adapters.partition_entity_demo,
             entity_test=partition_adapters.partition_entity_test,
             entity_retry=partition_adapters.partition_entity_retry,
-        )
+        ),
+        task_store=(source_service.task_store if source_service is not None else None),
     )
 
 
 partition_service = create_partition_service()
+legacy_partition_service = create_legacy_partition_service(partition_service)
 partition_workflow_service = PartitionWorkflowService(partition_service)
 
 
-def create_partition_router(service: PartitionService | None = None, workflow: PartitionWorkflowService | None = None) -> APIRouter:
+def create_partition_router(
+    service: PartitionService | None = None,
+    workflow: PartitionWorkflowService | None = None,
+    legacy_service: PartitionService | None = None,
+) -> APIRouter:
     service = service or partition_service
+    legacy_service = legacy_service or legacy_partition_service
     router = APIRouter(prefix="/partition", tags=["partition"])
     workflow_service = workflow or (partition_workflow_service if service is partition_service else PartitionWorkflowService(service))
 
@@ -62,7 +83,7 @@ def create_partition_router(service: PartitionService | None = None, workflow: P
 
     @router.post("/{data_type}/demo", response_model=PartitionResult)
     def partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return service.demo(data_type, payload_from_model(payload))
+        return legacy_service.demo(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/run", response_model=PartitionResult)
     def partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
@@ -70,15 +91,15 @@ def create_partition_router(service: PartitionService | None = None, workflow: P
 
     @router.post("/{data_type}/retry", response_model=PartitionResult)
     def partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
-        return service.retry(data_type, payload_from_model(payload))
+        return legacy_service.retry(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/test", response_model=PartitionResult)
     def partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return service.test(data_type, payload_from_model(payload))
+        return legacy_service.test(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/tasks/demo", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return service.submit(data_type, "demo", payload_from_model(payload)).to_dict()
+        return legacy_service.submit(data_type, "demo", payload_from_model(payload)).to_dict()
 
     @router.post("/{data_type}/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
@@ -86,11 +107,11 @@ def create_partition_router(service: PartitionService | None = None, workflow: P
 
     @router.post("/{data_type}/tasks/retry", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
-        return service.submit(data_type, "retry", payload_from_model(payload)).to_dict()
+        return legacy_service.submit(data_type, "retry", payload_from_model(payload)).to_dict()
 
     @router.post("/{data_type}/tasks/test", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return service.submit(data_type, "test", payload_from_model(payload)).to_dict()
+        return legacy_service.submit(data_type, "test", payload_from_model(payload)).to_dict()
 
     @router.get("/tasks/{task_id}", response_model=PartitionTaskResponse)
     def get_partition_task(task_id: str) -> dict:

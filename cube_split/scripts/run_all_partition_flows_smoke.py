@@ -5,7 +5,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Dict
 
 import numpy as np
 import rasterio
@@ -14,12 +14,76 @@ from minio.error import S3Error
 from rasterio.transform import from_origin
 
 from cube_split import runtime_config
-from cube_web.services import quality_checks
 from cube_web.services import partition_runners
 
 
-DATA_TYPES = ("optical", "radar", "product")
-GRID_TYPES = ("geohash", "tile_matrix", "isea4h")
+PartitionRunner = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+
+class AcceptanceCase:
+    __slots__ = ("case_id", "label", "data_type", "grid_type", "grid_level", "require_quality", "aoi_readback")
+
+    def __init__(
+        self,
+        case_id: str,
+        label: str,
+        data_type: str,
+        grid_type: str,
+        grid_level: int,
+        *,
+        require_quality: bool = False,
+        aoi_readback: bool = False,
+    ) -> None:
+        self.case_id = case_id
+        self.label = label
+        self.data_type = data_type
+        self.grid_type = grid_type
+        self.grid_level = grid_level
+        self.require_quality = require_quality
+        self.aoi_readback = aoi_readback
+
+
+ACCEPTANCE_CASES = (
+    AcceptanceCase(
+        "optical_geohash",
+        "small optical geohash partition",
+        "optical",
+        "geohash",
+        4,
+        require_quality=True,
+        aoi_readback=True,
+    ),
+    AcceptanceCase(
+        "optical_mgrs",
+        "small optical MGRS partition",
+        "optical",
+        "mgrs",
+        2,
+    ),
+    AcceptanceCase(
+        "optical_isea4h_level1",
+        "optical ISEA4H level 1 entity partition",
+        "optical",
+        "isea4h",
+        1,
+    ),
+    AcceptanceCase(
+        "product_geohash",
+        "product geohash partition",
+        "product",
+        "geohash",
+        4,
+        require_quality=True,
+    ),
+    AcceptanceCase(
+        "carbon_satellite",
+        "carbon satellite partition",
+        "carbon",
+        "isea4h",
+        5,
+        require_quality=True,
+    ),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +97,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ray-parallelism", type=int, default=2, help="Small Ray parallelism for smoke runs")
     parser.add_argument("--chunk-size", type=int, default=1, help="Ray chunk size")
     parser.add_argument("--max-cells-per-asset", type=int, default=50, help="Safety limit for logical cover cells")
-    parser.add_argument("--keep-quality", action="store_true", help="Run web quality checks after partition")
+    parser.add_argument(
+        "--keep-quality",
+        action="store_true",
+        help="Compatibility flag; quality checks are part of the fixed smoke acceptance.",
+    )
     return parser.parse_args()
 
 
@@ -157,19 +225,25 @@ def _prepare_assets(work_dir: Path, prefix: str, client: Minio, bucket: str) -> 
     return selected
 
 
-def _runner(data_type: str, mode: str):
+def _runner(data_type: str, mode: str) -> PartitionRunner:
     if data_type == "optical":
         return partition_runners._run_optical_partition_test if mode == "test" else partition_runners._run_optical_partition_demo
     if data_type == "radar":
         return partition_runners._run_radar_partition_test if mode == "test" else partition_runners._run_radar_partition_demo
     if data_type == "product":
         return partition_runners._run_product_partition_test if mode == "test" else partition_runners._run_product_partition_demo
+    if data_type == "carbon":
+        if mode == "test":
+            return partition_runners._run_carbon_partition_test
+        return lambda payload: partition_runners._run_carbon_partition_demo(payload=payload)
     raise ValueError(f"Unsupported data_type: {data_type}")
 
 
 def _grid_level(grid_type: str) -> int:
     if grid_type == "geohash":
         return 4
+    if grid_type == "mgrs":
+        return 2
     if grid_type == "tile_matrix":
         return 6
     if grid_type == "isea4h":
@@ -202,6 +276,10 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def _pass_check(name: str, **details: Any) -> dict[str, Any]:
+    return {"name": name, "status": "pass", **details}
+
+
 def _validate_result(
     label: str,
     grid_type: str,
@@ -209,9 +287,11 @@ def _validate_result(
     result: dict[str, Any],
     *,
     keep_quality: bool = False,
+    data_type: str | None = None,
+    require_quality: bool = False,
 ) -> dict[str, Any]:
     rows = _row_count(result)
-    data_type = label.split(":", 1)[0]
+    data_type = data_type or label.split(":", 1)[0]
     first_row = _first_jsonl_row(str(result.get("rows_path") or result.get("output_path") or ""))
     asset_path = str(first_row.get("asset_path") or "")
     source_asset_path = str(first_row.get("source_asset_path") or "")
@@ -223,11 +303,13 @@ def _validate_result(
     _require(rows > 0, f"{label}: expected rows > 0")
     _require(execution_engine == "ray", f"{label}: expected execution_engine=ray, got {execution_engine!r}")
     _require(str(result.get("grid_type")) == grid_type, f"{label}: unexpected grid_type={result.get('grid_type')!r}")
-    if mode == "demo":
+    if mode == "demo" and data_type != "carbon":
         _require(ingest_enabled, f"{label}: demo mode should enable ingest")
         _require(metadata_backend == "postgres", f"{label}: expected postgres metadata backend")
         _require(asset_storage_backend == "minio", f"{label}: expected minio asset storage")
-    if grid_type == "isea4h":
+    if data_type == "carbon":
+        _require(int(result.get("distinct_space_codes") or 0) > 0, f"{label}: expected carbon distinct_space_codes")
+    elif grid_type == "isea4h":
         _require(asset_path.startswith("s3://"), f"{label}: entity tile asset_path should be s3:// after ingest")
         _require(source_asset_path.startswith("s3://"), f"{label}: entity source_asset_path should be s3://")
         _require(int(result.get("uploaded_tile_count") or 0) > 0 or mode == "test", f"{label}: expected uploaded entity tiles")
@@ -237,13 +319,18 @@ def _validate_result(
         if mode == "demo":
             ingest_stats = result.get("ingest_stats") or {}
             _require(bool(ingest_stats), f"{label}: expected ingest_stats")
-    if keep_quality and data_type in {"optical", "product"}:
+    if keep_quality and require_quality:
         _require(str(result.get("quality_status") or ""), f"{label}: expected quality_status")
         _require(str(result.get("quality_report_id") or ""), f"{label}: expected quality_report_id")
 
     return {
         "label": label,
-        "status": "ok",
+        "status": "pass",
+        "checks": [
+            _pass_check("rows", rows=rows),
+            _pass_check("execution_engine", execution_engine=execution_engine),
+            _pass_check("grid", grid_type=result.get("grid_type"), grid_level=result.get("grid_level")),
+        ],
         "rows": rows,
         "run_dir": result.get("run_dir"),
         "rows_path": result.get("rows_path") or result.get("output_path"),
@@ -265,6 +352,189 @@ def _validate_result(
     }
 
 
+def _failed_item(case_id: str, label: str, exc: Exception | str, *, elapsed_sec: float | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": case_id,
+        "label": label,
+        "status": "fail",
+        "checks": [],
+        "error": str(exc),
+    }
+    if elapsed_sec is not None:
+        item["elapsed_sec"] = round(elapsed_sec, 3)
+    return item
+
+
+def _partition_payload(
+    case: AcceptanceCase,
+    *,
+    base_payload: dict[str, Any],
+    selected_assets: dict[str, list[dict[str, Any]]],
+    run_id: str,
+) -> dict[str, Any]:
+    if case.data_type == "carbon":
+        return {
+            "batch_id": f"smoke-{run_id}-{case.case_id}",
+            "batch_name": case.label,
+            "selected_observations": [{"source_index": 0}],
+        }
+    payload = dict(base_payload)
+    payload.update(
+        {
+            "batch_id": f"smoke-{run_id}-{case.case_id}",
+            "job_id": f"smoke-{run_id}-{case.case_id}",
+            "dataset": f"smoke_{run_id}_{case.data_type}",
+            "sensor": selected_assets[case.data_type][0]["sensor"],
+            "grid_type": case.grid_type,
+            "grid_level": case.grid_level,
+            "grid_level_mode": "manual",
+            "selected_assets": selected_assets[case.data_type],
+        }
+    )
+    if case.data_type == "product":
+        payload["product_name"] = "smoke_product"
+        payload["time_granularity"] = "year"
+    return payload
+
+
+def _run_partition_case(
+    case: AcceptanceCase,
+    *,
+    mode: str,
+    base_payload: dict[str, Any],
+    selected_assets: dict[str, list[dict[str, Any]]],
+    run_id: str,
+    run_quality: bool,
+) -> dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        payload = _partition_payload(case, base_payload=base_payload, selected_assets=selected_assets, run_id=run_id)
+        result = _runner(case.data_type, mode)(payload)
+        item = _validate_result(
+            case.case_id,
+            case.grid_type,
+            mode,
+            result,
+            keep_quality=run_quality,
+            data_type=case.data_type,
+            require_quality=case.require_quality,
+        )
+        item.update(
+            {
+                "id": case.case_id,
+                "label": case.label,
+                "data_type": case.data_type,
+                "elapsed_sec": round(time.perf_counter() - start, 3),
+            }
+        )
+        if run_quality and case.require_quality:
+            item["checks"].append(
+                _pass_check(
+                    "quality",
+                    quality_status=item.get("quality_status"),
+                    quality_report_id=item.get("quality_report_id"),
+                )
+            )
+        return item
+    except Exception as exc:
+        return _failed_item(case.case_id, case.label, exc, elapsed_sec=time.perf_counter() - start)
+
+
+def _quality_acceptance(items: list[dict[str, Any]]) -> dict[str, Any]:
+    required = [case for case in ACCEPTANCE_CASES if case.require_quality]
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    by_id = {str(item.get("id")): item for item in items}
+    for case in required:
+        item = by_id.get(case.case_id)
+        if not item or item.get("status") != "pass":
+            message = f"{case.case_id}: partition step did not pass"
+            checks.append({"name": case.case_id, "status": "fail", "message": message})
+            errors.append(message)
+            continue
+        quality_status = str(item.get("quality_status") or "")
+        quality_report_id = str(item.get("quality_report_id") or "")
+        if not quality_status or not quality_report_id:
+            message = f"{case.case_id}: quality report metadata missing"
+            checks.append({"name": case.case_id, "status": "fail", "message": message})
+            errors.append(message)
+            continue
+        checks.append(
+            _pass_check(
+                case.case_id,
+                quality_status=quality_status,
+                quality_report_id=quality_report_id,
+            )
+        )
+    return {
+        "id": "quality_checks",
+        "label": "quality checks",
+        "status": "fail" if errors else "pass",
+        "checks": checks,
+        "error": "; ".join(errors) if errors else "",
+    }
+
+
+def _bbox_from_corners(corners: list[list[float]]) -> list[float]:
+    lons = [float(point[0]) for point in corners]
+    lats = [float(point[1]) for point in corners]
+    return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _aoi_readback_acceptance(
+    items: list[dict[str, Any]],
+    *,
+    selected_assets: dict[str, list[dict[str, Any]]],
+    base_payload: dict[str, Any],
+    minio: runtime_config.MinioSettings,
+    output_path: Path,
+) -> dict[str, Any]:
+    source = next((item for item in items if item.get("id") == "optical_geohash"), None)
+    if not source or source.get("status") != "pass":
+        return _failed_item("aoi_readback", "AOI readback", "optical_geohash did not pass")
+    start = time.perf_counter()
+    try:
+        from cube_split.read.aoi_reader import read_aoi_rgb
+
+        first_row = _first_jsonl_row(str(source.get("rows_path") or ""))
+        _require(bool(first_row), "AOI readback requires optical_geohash index rows")
+        asset = selected_assets["optical"][0]
+        band = str(first_row.get("band") or asset.get("band") or asset.get("bands", [""])[0])
+        _require(bool(band), "AOI readback requires a band")
+        read_path = read_aoi_rgb(
+            bbox=_bbox_from_corners(asset["corners"]),
+            time_bucket=str(first_row.get("time_bucket") or ""),
+            bands=[band],
+            output=str(output_path),
+            postgres_dsn=str(base_payload["postgres_dsn"]),
+            minio_endpoint=minio.endpoint,
+            minio_access_key=minio.access_key,
+            minio_secret_key=minio.secret_key,
+            grid_type=str(source.get("grid_type") or "geohash"),
+            grid_level=int(source.get("grid_level") or 4),
+            cover_mode="intersect",
+            cube_version=str(base_payload["cube_version"]),
+        )
+        with rasterio.open(read_path) as ds:
+            _require(ds.count >= 1, "AOI readback output should contain at least one band")
+            _require(ds.width > 0 and ds.height > 0, "AOI readback output should be non-empty")
+            checks = [
+                _pass_check("output_exists", output=str(read_path)),
+                _pass_check("raster_shape", width=ds.width, height=ds.height, bands=ds.count),
+            ]
+        return {
+            "id": "aoi_readback",
+            "label": "AOI readback",
+            "status": "pass",
+            "checks": checks,
+            "rows_path": source.get("rows_path"),
+            "output_path": str(read_path),
+            "elapsed_sec": round(time.perf_counter() - start, 3),
+        }
+    except Exception as exc:
+        return _failed_item("aoi_readback", "AOI readback", exc, elapsed_sec=time.perf_counter() - start)
+
+
 def main() -> None:
     args = parse_args()
     run_id = args.run_id or time.strftime("%Y%m%d%H%M%S")
@@ -275,10 +545,6 @@ def main() -> None:
     _ensure_bucket(client, minio.bucket)
     prefix = f"cube/smoke/all_partition_flows/{run_id}".strip("/")
     selected_assets = _prepare_assets(work_dir, prefix, client, minio.bucket)
-
-    if not args.keep_quality:
-        quality_checks.run_optical_quality_check = None
-        quality_checks.run_product_quality_check = None
 
     base_payload = {
         "input_dir": str(work_dir),
@@ -306,43 +572,51 @@ def main() -> None:
     }
 
     results: list[dict[str, Any]] = []
-    for grid_type in GRID_TYPES:
-        for data_type in DATA_TYPES:
-            label = f"{data_type}:{grid_type}"
-            payload = dict(base_payload)
-            payload.update(
-                {
-                    "batch_id": f"smoke-{run_id}-{data_type}-{grid_type}",
-                    "job_id": f"smoke-{run_id}-{data_type}-{grid_type}",
-                    "dataset": f"smoke_{run_id}_{data_type}",
-                    "sensor": selected_assets[data_type][0]["sensor"],
-                    "grid_type": grid_type,
-                    "grid_level": _grid_level(grid_type),
-                    "grid_level_mode": "manual",
-                    "selected_assets": selected_assets[data_type],
-                }
-            )
-            if data_type == "product":
-                payload["product_name"] = "smoke_product"
-                payload["time_granularity"] = "year"
-            start = time.perf_counter()
-            result = _runner(data_type, args.mode)(payload)
-            item = _validate_result(label, grid_type, args.mode, result, keep_quality=args.keep_quality)
-            item["elapsed_sec"] = round(time.perf_counter() - start, 3)
-            results.append(item)
-            print(json.dumps(item, ensure_ascii=False))
+    for case in ACCEPTANCE_CASES:
+        item = _run_partition_case(
+            case,
+            mode=args.mode,
+            base_payload=base_payload,
+            selected_assets=selected_assets,
+            run_id=run_id,
+            run_quality=True,
+        )
+        results.append(item)
+        print(json.dumps(item, ensure_ascii=False))
+
+    quality_item = _quality_acceptance(results)
+    results.append(quality_item)
+    print(json.dumps(quality_item, ensure_ascii=False))
+
+    aoi_item = _aoi_readback_acceptance(
+        results,
+        selected_assets=selected_assets,
+        base_payload=base_payload,
+        minio=minio,
+        output_path=work_dir / "aoi_readback" / "optical_geohash_aoi.tif",
+    )
+    results.append(aoi_item)
+    print(json.dumps(aoi_item, ensure_ascii=False))
+
+    failed = [item for item in results if item.get("status") != "pass"]
 
     summary = {
         "run_id": run_id,
         "mode": args.mode,
+        "status": "fail" if failed else "pass",
         "prefix": prefix,
         "work_dir": str(work_dir),
         "summary_path": str(summary_path),
+        "acceptance_count": len(results),
+        "failed_count": len(failed),
+        "acceptance": results,
         "results": results,
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import FastAPI
 from s2sphere import CellId
 
 import cube_web.app as web_app
@@ -19,6 +20,7 @@ import cube_web.routes.partition_adapters as partition_adapters
 import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
+from cube_web.services import health_service
 from cube_web.services import partition_job_store as partition_job_store_module
 from cube_web.services import partition_runners
 from cube_web.services import quality_report_store as quality_report_store_module
@@ -26,6 +28,7 @@ from cube_web.services.config_store import set_config_store
 from cube_web.services.partition_defaults import default_grid_level_for_resolution
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
+from cube_web.services.partition_service import PartitionBackend, PartitionService
 from cube_web.services.quality_report_store import set_quality_report_store
 
 client = TestClient(app)
@@ -401,6 +404,36 @@ def test_home_page_serves_index():
     assert "分析就绪数据剖分管理系统" in resp.text
 
 
+def test_health_reports_runtime_config_sources():
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    values = body["checks"]["config"]["values"]
+    assert values["postgres_dsn"]["source"] == "environment"
+    assert values["postgres_dsn"]["value"] == "postgresql://***:***@127.0.0.1:55432/cube"
+    assert values["ray_address"]["source"] == "environment"
+    assert values["minio_endpoint"]["value"] == "10.136.1.14:9000"
+    assert values["minio_bucket"]["value"] == "cube"
+    assert "value" not in values["minio_secret_key"]
+
+
+def test_health_selectively_runs_dependency_checks(monkeypatch):
+    monkeypatch.setattr(health_service, "_check_postgres", lambda: {"status": "ok", "latency_ms": 1})
+    monkeypatch.setattr(health_service, "_check_ray", lambda: {"status": "fail", "message": "ray down"})
+    monkeypatch.setattr(health_service, "_check_minio", lambda: {"status": "ok", "latency_ms": 2})
+    monkeypatch.setattr(health_service, "_check_minio_bucket", lambda: {"status": "ok", "bucket": "cube"})
+
+    resp = client.get("/health?checks=config,postgres,ray&check=minio&check=bucket")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["failed_checks"] == ["ray"]
+    assert set(body["checks"]) == {"service", "config", "postgres", "ray", "minio", "bucket"}
+
+
 def test_encoding_page_serves_html():
     resp = client.get("/encoding")
     assert resp.status_code == 200
@@ -559,6 +592,53 @@ def test_partition_openapi_exposes_contract_models():
     assert "PartitionRetryRequest" in schema["components"]["schemas"]
     assert "PartitionTaskResponse" in schema["components"]["schemas"]
     assert "ConfigResponse" in schema["components"]["schemas"]
+
+
+def test_partition_services_split_production_and_legacy_registries():
+    assert web_app.partition_service.registry["optical"].run is not None
+    assert web_app.partition_service.registry["optical"].demo is None
+    assert web_app.partition_service.registry["optical"].test is None
+    assert web_app.partition_service.registry["optical"].retry is None
+    assert web_app.legacy_partition_service.registry["optical"].run is None
+    assert web_app.legacy_partition_service.registry["optical"].demo is not None
+    assert web_app.legacy_partition_service.registry["optical"].test is not None
+    assert web_app.legacy_partition_service.registry["optical"].retry is not None
+    assert web_app.legacy_partition_service.task_store is web_app.partition_service.task_store
+
+
+def test_partition_router_dispatches_run_and_legacy_operations_to_separate_services():
+    production = PartitionService(
+        {
+            "optical": PartitionBackend(
+                data_type="optical",
+                run=lambda payload=None: {"status": "completed", "source": "production", "payload": payload or {}},
+            )
+        }
+    )
+    legacy = PartitionService(
+        {
+            "optical": PartitionBackend(
+                data_type="optical",
+                demo=lambda payload=None: {"status": "completed", "source": "legacy-demo", "payload": payload or {}},
+                test=lambda payload=None: {"status": "completed", "source": "legacy-test", "payload": payload or {}},
+            )
+        },
+        task_store=production.task_store,
+    )
+    route_app = FastAPI()
+    route_app.include_router(web_app.partition_route.create_partition_router(service=production, legacy_service=legacy))
+    route_client = TestClient(route_app)
+
+    run_resp = route_client.post("/partition/optical/run", json={"grid_type": "geohash", "grid_level": 4})
+    demo_resp = route_client.post("/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 4})
+    test_resp = route_client.post("/partition/optical/test", json={"grid_type": "geohash", "grid_level": 4})
+
+    assert run_resp.status_code == 200
+    assert run_resp.json()["source"] == "production"
+    assert demo_resp.status_code == 200
+    assert demo_resp.json()["source"] == "legacy-demo"
+    assert test_resp.status_code == 200
+    assert test_resp.json()["source"] == "legacy-test"
 
 
 def test_config_get_returns_defaults():

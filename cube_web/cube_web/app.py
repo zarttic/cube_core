@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, FastAPI, Request
+from typing import Any
+
+from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
 from grid_core.sdk import CubeEncoderSDK
@@ -13,6 +15,7 @@ from cube_web.routes.pages import create_pages_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
+from cube_web.services import health_service
 from cube_web.services import quality_service
 
 ENCODER_SDK_CLASS = CubeEncoderSDK
@@ -24,6 +27,7 @@ def _repo_root():
 
 create_partition_service = partition_route.create_partition_service
 partition_service = partition_route.partition_service
+legacy_partition_service = partition_route.legacy_partition_service
 partition_workflow_service = partition_route.partition_workflow_service
 
 
@@ -36,8 +40,11 @@ def create_app() -> FastAPI:
     web_app.add_exception_handler(GridCoreError, handle_grid_core_error)
 
     @web_app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health(
+        checks: list[str] | None = Query(default=None),
+        check: list[str] | None = Query(default=None),
+    ) -> dict[str, Any]:
+        return health_service.health_report([*(checks or []), *(check or [])])
 
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())
