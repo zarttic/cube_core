@@ -583,6 +583,8 @@ async function runPartitionBatchFromDetail() {
       throw new Error('批次执行任务未返回 task_id');
     }
     lastPartitionRequest.value = {
+      kind: 'batch',
+      batchId,
       endpoint: `batches/${batchId}`,
       payload: { config_override: configOverride },
       operation,
@@ -650,6 +652,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
       throw new Error('失败资产重试任务未返回 task_id');
     }
     lastPartitionRequest.value = {
+      kind: 'assets',
       endpoint: 'assets',
       operation: 'retry',
       payload: { asset_ids: selectedAssetIds, config_override: configOverride },
@@ -1714,6 +1717,28 @@ async function requestPartitionOperation(partitionPrefix, endpoint, operation, p
   return waitForPartitionTask(partitionPrefix, taskId);
 }
 
+async function requestRetryOperation(partitionPrefix, retryRequest, retryPayload) {
+  if (retryRequest.kind === 'batch') {
+    const submitted = await requestJson(`${partitionPrefix}/batches/${retryRequest.batchId}/retry`, retryRequest.payload || {});
+    const taskId = submitted.task_id;
+    if (!taskId) {
+      throw new Error('批次重试任务未返回 task_id');
+    }
+    setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
+    return waitForPartitionTask(partitionPrefix, taskId);
+  }
+  if (retryRequest.kind === 'assets') {
+    const submitted = await requestJson(`${partitionPrefix}/assets/retry`, retryRequest.payload || {});
+    const taskId = submitted.task_id;
+    if (!taskId) {
+      throw new Error('失败资产重试任务未返回 task_id');
+    }
+    setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
+    return waitForPartitionTask(partitionPrefix, taskId);
+  }
+  return requestPartitionOperation(partitionPrefix, retryRequest.endpoint, 'retry', retryPayload);
+}
+
 function resetPartitionStages() {
   partitionStages.value = partitionStages.value.map((item) => ({ ...item, status: 'pending' }));
 }
@@ -2292,8 +2317,13 @@ async function retryLastPartitionTask() {
       last_result: retryResult,
     };
     currentRetryRequest = { endpoint, operation, payload: retryPayload, apiPath: `/v1/partition/${endpoint}/tasks/retry` };
-    setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/tasks/retry 提交后台重试任务。`);
-    const result = await requestPartitionOperation(partitionPrefix, endpoint, operation, retryPayload);
+    if (retryRequest.kind === 'batch') {
+      currentRetryRequest = { ...retryRequest, operation, apiPath: `/v1/partition/batches/${retryRequest.batchId}/retry` };
+    } else if (retryRequest.kind === 'assets') {
+      currentRetryRequest = { ...retryRequest, operation, apiPath: '/v1/partition/assets/retry' };
+    }
+    setPartitionStage('partition', 'running', `调用 ${currentRetryRequest.apiPath} 提交后台重试任务。`);
+    const result = await requestRetryOperation(partitionPrefix, retryRequest, retryPayload);
     setPartitionStage('partition', 'done', `重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
     setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
     lastPartitionResult.value = result;

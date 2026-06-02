@@ -757,6 +757,35 @@ def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
     assert result["ingest_enabled"] is False
 
 
+def test_carbon_partition_retry_runner_reuses_request_payload(monkeypatch):
+    captured = {}
+
+    def fake_run_carbon_partition_demo(mode="partition_demo", payload=None):
+        captured["mode"] = mode
+        captured["payload"] = payload
+        return {
+            "status": "completed",
+            "mode": mode,
+            "data_type": "carbon_satellite",
+        }
+
+    monkeypatch.setattr(partition_runners, "_run_carbon_partition_demo", fake_run_carbon_partition_demo)
+
+    result = partition_runners._run_carbon_partition_retry(
+        {
+            "request": {
+                "payload": {
+                    "selected_observations": [{"source_index": 3}],
+                }
+            }
+        }
+    )
+
+    assert captured["mode"] == "partition_demo"
+    assert captured["payload"]["selected_observations"][0]["source_index"] == 3
+    assert result["mode"] == "partition_retry"
+
+
 def test_carbon_selected_source_indexes_are_normalized():
     payload = {
         "selected_observations": [
@@ -1714,6 +1743,84 @@ def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
     assert assets[0]["status"] == "succeeded"
 
 
+def test_partition_batch_quality_warn_enters_manual_queue_and_retries_warning_asset(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_QUALITY_WARN_RETRY",
+            "batch_name": "Quality warn retry",
+            "data_type": "optical",
+            "assets": [
+                ard_raster_asset("s3://cube/cube/source/optocal/a.tif", "warn-a", asset_id="asset-a"),
+                ard_raster_asset("s3://cube/cube/source/optocal/b.tif", "warn-b", asset_id="asset-b"),
+            ],
+        },
+    )
+    calls = []
+
+    def fake_run_optical_partition_demo(payload=None):
+        calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
+        if len(calls) == 1:
+            return {
+                "status": "completed",
+                "mode": "partition_demo",
+                "data_type": "optical",
+                "rows": 3,
+                "quality_status": "WARN",
+                "quality_report_id": "quality-warn-report",
+                "quality_report": {
+                    "report_id": "quality-warn-report",
+                    "status": "WARN",
+                    "checks": [
+                        {
+                            "name": "pixel_sample",
+                            "status": "WARN",
+                            "metrics": {"zero_assets": [{"path": "/tmp/demo/cog/b_cog.tif"}]},
+                        }
+                    ],
+                },
+            }
+        assert calls[-1] == ["asset-b"]
+        return {
+            "status": "completed",
+            "mode": "partition_demo",
+            "data_type": "optical",
+            "rows": 1,
+            "quality_status": "PASS",
+            "quality_report_id": "quality-warn-pass-report",
+        }
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/run", json={})
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(30):
+        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    warned_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY").json()
+    assert warned_batch["status"] == "manual_required"
+    assert warned_batch["quality_status"] == "WARN"
+    assert warned_batch["last_error"] == "pixel_sample"
+
+    retry_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/retry", json={})
+    retry_task_id = retry_resp.json()["task_id"]
+    for _ in range(30):
+        if client.get(f"/v1/partition/tasks/{retry_task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    passed_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY").json()
+    attempts = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/attempts").json()["attempts"]
+    assert calls == [["asset-a", "asset-b"], ["asset-b"]]
+    assert passed_batch["status"] == "succeeded"
+    assert passed_batch["quality_status"] == "PASS"
+    assert attempts[0]["operation"] == "manual_retry"
+    assert attempts[0]["asset_ids"] == ["asset-b"]
+    assert attempts[0]["retry_strategy"] == "quality_warning_assets"
+
+
 def test_partition_batch_retry_clears_stale_quality_result_then_persists_pass(monkeypatch):
     client.post(
         "/v1/partition/schemas/import",
@@ -1837,6 +1944,51 @@ def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
     assert "temporary network timeout" in attempts[0]["failure_reason"]
 
 
+def test_partition_manual_retry_gets_fresh_auto_retry_budget(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_MANUAL_RETRY_BUDGET",
+            "batch_name": "Manual retry budget",
+            "data_type": "optical",
+            "max_auto_retries": 1,
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/manual-budget.tif", "manual-budget")],
+        },
+    )
+    calls = []
+
+    def fail_optical(_payload=None):
+        calls.append(_payload)
+        raise RuntimeError("temporary network timeout")
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
+
+    first_resp = client.post("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET/run", json={})
+    assert first_resp.status_code == 202
+    for _ in range(50):
+        batch = client.get("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET").json()
+        if batch["status"] == "manual_required" and batch["attempt_count"] == 2:
+            break
+        time.sleep(0.02)
+
+    retry_resp = client.post("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET/retry", json={})
+    assert retry_resp.status_code == 202
+    for _ in range(50):
+        batch = client.get("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET").json()
+        if batch["status"] == "manual_required" and batch["attempt_count"] == 4:
+            break
+        time.sleep(0.02)
+
+    batch = client.get("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET").json()
+    attempts = client.get("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET/attempts").json()["attempts"]
+    assert batch["status"] == "manual_required"
+    assert batch["attempt_count"] == 4
+    assert len(calls) == 4
+    assert [attempt["operation"] for attempt in attempts] == ["auto_retry", "manual_retry", "auto_retry", "auto_run"]
+    assert attempts[0]["source_task_id"] == attempts[1]["task_id"]
+    assert attempts[1]["source_task_id"] == attempts[2]["task_id"]
+
+
 def test_partition_batch_source_missing_requires_manual_without_auto_retry(monkeypatch):
     client.post(
         "/v1/partition/schemas/import",
@@ -1879,19 +2031,40 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
             "batch_id": "BATCH_ASSET_RETRY",
             "batch_name": "Asset retry",
             "data_type": "optical",
+            "max_auto_retries": 0,
             "assets": [
                 ard_raster_asset("s3://cube/cube/source/optocal/a.tif", "a", asset_id="asset-a"),
                 ard_raster_asset("s3://cube/cube/source/optocal/b.tif", "b", asset_id="asset-b"),
             ],
         },
     )
-    captured = {}
+    calls = []
 
     def fake_run_optical_partition_demo(payload=None):
-        captured["payload"] = payload
+        calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
+        if len(calls) == 1:
+            return {
+                "status": "completed",
+                "mode": "partition_demo",
+                "data_type": "optical",
+                "rows": 1,
+                "asset_results": [
+                    {"asset_id": "asset-a", "status": "succeeded"},
+                    {"asset_id": "asset-b", "status": "failed", "error_type": "transient", "last_error": "temporary network timeout"},
+                ],
+            }
         return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
 
     monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+
+    run_resp = client.post("/v1/partition/batches/BATCH_ASSET_RETRY/run", json={})
+    run_task_id = run_resp.json()["task_id"]
+    for _ in range(20):
+        task_done = client.get(f"/v1/partition/tasks/{run_task_id}").json()["status"] == "completed"
+        batch = client.get("/v1/partition/batches/BATCH_ASSET_RETRY").json()
+        if task_done and batch["status"] == "manual_required":
+            break
+        time.sleep(0.01)
 
     submit_resp = client.post("/v1/partition/assets/retry", json={"asset_ids": ["asset-b"]})
     assert submit_resp.status_code == 202
@@ -1901,14 +2074,31 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
             break
         time.sleep(0.01)
 
-    assert [asset["asset_id"] for asset in captured["payload"]["selected_assets"]] == ["asset-b"]
+    assert calls == [["asset-a", "asset-b"], ["asset-b"]]
     batch = client.get("/v1/partition/batches/BATCH_ASSET_RETRY").json()
     assets = client.get("/v1/partition/batches/BATCH_ASSET_RETRY/assets").json()["assets"]
     statuses = {asset["asset_id"]: asset["status"] for asset in assets}
     attempt_counts = {asset["asset_id"]: asset["attempt_count"] for asset in assets}
-    assert batch["status"] == "pending"
-    assert statuses == {"asset-a": "pending", "asset-b": "succeeded"}
-    assert attempt_counts == {"asset-a": 0, "asset-b": 1}
+    assert batch["status"] == "succeeded"
+    assert statuses == {"asset-a": "succeeded", "asset-b": "succeeded"}
+    assert attempt_counts == {"asset-a": 1, "asset-b": 2}
+
+
+def test_partition_asset_retry_rejects_non_retryable_assets():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_ASSET_RETRY_REJECT",
+            "batch_name": "Asset retry reject",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/pending.tif", "pending", asset_id="asset-pending")],
+        },
+    )
+
+    resp = client.post("/v1/partition/assets/retry", json={"asset_ids": ["asset-pending"]})
+
+    assert resp.status_code == 422
+    assert "not retryable" in resp.json()["detail"]
 
 
 def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch):

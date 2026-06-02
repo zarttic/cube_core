@@ -10,6 +10,11 @@ from cube_web.services.partition_defaults import apply_resolution_grid_defaults
 
 BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_requested"}
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
+BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
+
+
+class PartitionBatchAlreadyActiveError(RuntimeError):
+    pass
 
 
 class PartitionJobStore:
@@ -104,7 +109,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             **record,
             "status": existing.get("status") or "pending",
             "attempt_count": int(existing.get("attempt_count") or 0),
-            "max_auto_retries": int(record.get("max_auto_retries") or existing.get("max_auto_retries") or 1),
+            "max_auto_retries": _max_auto_retries_value(record.get("max_auto_retries"), existing.get("max_auto_retries")),
             "last_task_id": existing.get("last_task_id"),
             "last_error": existing.get("last_error"),
             "quality_status": existing.get("quality_status"),
@@ -174,8 +179,15 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         failure_reason: str | None = None,
     ) -> dict[str, Any]:
         batch = self.batches[batch_id]
+        if str(batch.get("status") or "") in BATCH_RUN_ACTIVE_STATUSES:
+            raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
         attempt_no = int(batch.get("attempt_count") or 0) + 1
         batch["attempt_count"] = attempt_no
+        batch["status"] = "retrying" if "retry" in operation else "queued"
+        batch["last_task_id"] = task_id
+        batch["quality_status"] = None
+        batch["quality_report_id"] = None
+        batch["quality_failure_reason"] = None
         batch["updated_at"] = _utc_now_iso()
         self._increment_asset_attempts(batch_id, asset_ids)
         attempt = {
@@ -401,8 +413,8 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["quality_status"] = quality["quality_status"]
         batch["quality_report_id"] = quality.get("quality_report_id")
         batch["quality_failure_reason"] = quality.get("quality_failure_reason")
-        if quality["quality_status"] == "FAIL":
-            reason = quality.get("quality_failure_reason") or "Quality status is FAIL"
+        if quality["quality_status"] in {"FAIL", "WARN"}:
+            reason = quality.get("quality_failure_reason") or f"Quality status is {quality['quality_status']}"
             batch["status"] = "manual_required"
             batch["last_error"] = reason
             batch["manual_required_at"] = batch.get("manual_required_at") or now
@@ -618,13 +630,29 @@ class PostgresPartitionJobStore(PartitionJobStore):
         self.ensure_schema()
         with self._connect() as conn:
             with conn.cursor() as cur:
+                batch_status = "retrying" if "retry" in operation else "queued"
                 cur.execute(
-                    "UPDATE partition_batches SET attempt_count = attempt_count + 1, updated_at = now() WHERE batch_id = %s RETURNING attempt_count",
-                    (batch_id,),
+                    """
+                    UPDATE partition_batches
+                    SET attempt_count = attempt_count + 1,
+                        status = %s,
+                        last_task_id = %s,
+                        quality_status = NULL,
+                        quality_report_id = NULL,
+                        quality_failure_reason = NULL,
+                        updated_at = now()
+                    WHERE batch_id = %s
+                      AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested')
+                    RETURNING attempt_count
+                    """,
+                    (batch_status, task_id, batch_id),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    raise KeyError(batch_id)
+                    cur.execute("SELECT status FROM partition_batches WHERE batch_id = %s", (batch_id,))
+                    if cur.fetchone() is None:
+                        raise KeyError(batch_id)
+                    raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
                 self._increment_asset_attempts(cur, batch_id, asset_ids)
                 cur.execute(
                     """
@@ -884,8 +912,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
         quality = _quality_result_summary(result)
         if quality is None:
             return
-        if quality["quality_status"] == "FAIL":
-            reason = quality.get("quality_failure_reason") or "Quality status is FAIL"
+        if quality["quality_status"] in {"FAIL", "WARN"}:
+            reason = quality.get("quality_failure_reason") or f"Quality status is {quality['quality_status']}"
             cur.execute(
                 """
                 UPDATE partition_batches
@@ -1137,6 +1165,13 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _max_auto_retries_value(primary: Any, fallback: Any = None) -> int:
+    value = primary if primary is not None else fallback
+    if value is None or value == "":
+        return 1
+    return max(0, int(value))
+
+
 def _summarize_asset_statuses(statuses: Any) -> str:
     values = {str(status) for status in statuses if status}
     if not values or values <= {"succeeded"}:
@@ -1185,7 +1220,7 @@ def _quality_failure_reason(report: dict[str, Any]) -> str | None:
         return None
     failed: list[str] = []
     for check in checks:
-        if not isinstance(check, dict) or str(check.get("status") or "").upper() != "FAIL":
+        if not isinstance(check, dict) or str(check.get("status") or "").upper() not in {"FAIL", "WARN"}:
             continue
         name = str(check.get("name") or "quality").strip()
         message = str(check.get("message") or "").strip()

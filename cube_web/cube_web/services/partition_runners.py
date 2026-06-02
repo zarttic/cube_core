@@ -693,7 +693,11 @@ def _run_carbon_partition_test(payload: dict | None = None) -> dict:
 
 
 def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
-    result = _run_carbon_partition_demo()
+    request = (payload or {}).get("request") or {}
+    request_payload = request.get("payload") if isinstance(request, dict) else {}
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    result = _run_carbon_partition_demo(payload=request_payload)
     result["mode"] = "partition_retry"
     result["retry"] = {
         "strategy": "full_request",

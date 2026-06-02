@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import copy
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException
 
-from cube_web.services.partition_job_store import PartitionJobStore, get_partition_job_store
+from cube_web.services.partition_job_store import (
+    PartitionBatchAlreadyActiveError,
+    PartitionJobStore,
+    get_partition_job_store,
+)
 from cube_web.services.partition_service import PartitionService, PartitionTask
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
@@ -17,6 +22,7 @@ class PartitionWorkflowService:
     def __init__(self, partition_service: PartitionService, store: PartitionJobStore | None = None) -> None:
         self.partition_service = partition_service
         self._store = store
+        self._run_lock = Lock()
 
     @property
     def store(self) -> PartitionJobStore:
@@ -73,49 +79,63 @@ class PartitionWorkflowService:
         retry_strategy: str | None = None,
         failure_reason: str | None = None,
     ) -> PartitionTask:
-        batch = self.get_batch(batch_id)
-        active_task = self._active_task_for_batch(batch)
-        if active_task is not None:
-            return active_task
-        payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
-        task_id = f"partition-{uuid4().hex[:12]}"
+        with self._run_lock:
+            batch = self.get_batch(batch_id)
+            active_task = self._active_task_for_batch(batch)
+            if active_task is not None:
+                return active_task
+            payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
+            task_id = f"partition-{uuid4().hex[:12]}"
 
-        def cancellation_check() -> bool:
-            return self.store.is_cancel_requested(task_id)
+            def cancellation_check() -> bool:
+                return self.store.is_cancel_requested(task_id)
 
-        self.store.create_attempt(
-            task_id=task_id,
-            batch_id=batch_id,
-            operation=operation,
-            payload=payload,
-            asset_ids=asset_ids,
-            requested_by=requested_by,
-            source_task_id=source_task_id,
-            retry_strategy=retry_strategy,
-            failure_reason=failure_reason,
-        )
-        self.store.mark_batch_queued(batch_id, task_id, operation=operation)
-        data_type = str(batch["data_type"])
-        return self.partition_service.submit(
-            data_type,
-            "run",
-            payload,
-            task_id=task_id,
-            on_started=self.on_task_started,
-            on_succeeded=self.on_task_succeeded,
-            on_failed=self.on_task_failed,
-            cancellation_check=cancellation_check,
-        )
+            try:
+                self.store.create_attempt(
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    operation=operation,
+                    payload=payload,
+                    asset_ids=asset_ids,
+                    requested_by=requested_by,
+                    source_task_id=source_task_id,
+                    retry_strategy=retry_strategy,
+                    failure_reason=failure_reason,
+                )
+            except PartitionBatchAlreadyActiveError as exc:
+                active_task = self._active_task_for_batch(self.get_batch(batch_id))
+                if active_task is not None:
+                    return active_task
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            self.store.mark_batch_queued(batch_id, task_id, operation=operation)
+            data_type = str(batch["data_type"])
+            return self.partition_service.submit(
+                data_type,
+                "run",
+                payload,
+                task_id=task_id,
+                on_started=self.on_task_started,
+                on_succeeded=self.on_task_succeeded,
+                on_failed=self.on_task_failed,
+                cancellation_check=cancellation_check,
+            )
 
     def retry_batch(self, batch_id: str, config_override: dict[str, Any] | None = None) -> PartitionTask:
         batch = self.get_batch(batch_id)
+        source_assets = self.store.list_assets(batch_id)
+        quality_asset_ids = _quality_warning_retry_asset_ids(
+            batch,
+            source_assets,
+            self.store.list_attempts(batch_id),
+        )
         return self.run_batch(
             batch_id,
             operation="manual_retry",
             config_override=config_override,
+            asset_ids=quality_asset_ids,
             requested_by="operator",
             source_task_id=_text_or_none(batch.get("last_task_id")),
-            retry_strategy="full_batch",
+            retry_strategy="quality_warning_assets" if quality_asset_ids else "full_batch",
             failure_reason=_batch_failure_reason(batch),
         )
 
@@ -133,6 +153,17 @@ class PartitionWorkflowService:
         if not first_batch:
             raise HTTPException(status_code=404, detail=f"Partition asset not found: {asset_ids[0]}")
         source_assets = self.store.list_assets(first_batch["batch_id"])
+        retryable_statuses = {"failed", "manual_required"}
+        non_retryable = [
+            asset["asset_id"]
+            for asset in source_assets
+            if asset["asset_id"] in set(asset_ids) and str(asset.get("status") or "") not in retryable_statuses
+        ]
+        if non_retryable:
+            raise HTTPException(
+                status_code=422,
+                detail=f"asset_ids are not retryable: {', '.join(non_retryable[:5])}",
+            )
         return self.run_batch(
             first_batch["batch_id"],
             operation="manual_asset_retry",
@@ -161,14 +192,15 @@ class PartitionWorkflowService:
         attempt = self.store.get_attempt(task_id)
         if attempt is not None:
             batch = self.get_batch(attempt["batch_id"])
-            attempt_no = int(attempt.get("attempt_no") or 1)
-            max_auto_retries = int(batch.get("max_auto_retries") or 1)
-            retryable_asset_ids = _retryable_failed_asset_ids(result)
-            all_failed_asset_ids = _failed_asset_ids(result)
+            max_auto_retries = _max_auto_retries(batch)
+            auto_retries_used = _auto_retries_used_in_chain(self.store.list_attempts(attempt["batch_id"]), task_id)
+            scoped_asset_ids = set(attempt.get("asset_ids") or [])
+            retryable_asset_ids = _retryable_failed_asset_ids(result, scoped_asset_ids or None)
+            all_failed_asset_ids = _failed_asset_ids(result, scoped_asset_ids or None)
             should_auto_retry = (
                 bool(retryable_asset_ids)
-                and attempt_no <= max_auto_retries
-                and attempt.get("operation") in {"auto_run", "auto_retry"}
+                and auto_retries_used < max_auto_retries
+                and attempt.get("operation") in {"auto_run", "auto_retry", "manual_retry", "manual_asset_retry"}
             )
             result_to_store = result if should_auto_retry else _manual_required_asset_result(result, set(all_failed_asset_ids))
             self.store.succeed_attempt(task_id, result_to_store)
@@ -191,13 +223,13 @@ class PartitionWorkflowService:
             self.store.mark_cancelled(task_id)
             return
         batch = self.get_batch(attempt["batch_id"])
-        attempt_no = int(attempt.get("attempt_no") or 1)
-        max_auto_retries = int(batch.get("max_auto_retries") or 1)
+        max_auto_retries = _max_auto_retries(batch)
+        auto_retries_used = _auto_retries_used_in_chain(self.store.list_attempts(attempt["batch_id"]), task_id)
         error_type = classify_partition_error(error)
         should_auto_retry = (
             is_retryable_partition_error(error_type)
-            and attempt_no <= max_auto_retries
-            and attempt.get("operation") in {"auto_run", "auto_retry"}
+            and auto_retries_used < max_auto_retries
+            and attempt.get("operation") in {"auto_run", "auto_retry", "manual_retry", "manual_asset_retry"}
         )
         self.store.fail_attempt(task_id, error, manual_required=not should_auto_retry, error_type=error_type)
         if should_auto_retry:
@@ -298,18 +330,134 @@ def _asset_result_error_type(item: dict[str, Any]) -> str:
     return classify_partition_error(error)
 
 
-def _failed_asset_ids(result: dict[str, Any]) -> list[str]:
-    return [_asset_result_id(item) for item in _asset_results(result) if _asset_result_failed(item) and _asset_result_id(item)]
-
-
-def _retryable_failed_asset_ids(result: dict[str, Any]) -> list[str]:
+def _failed_asset_ids(result: dict[str, Any], scoped_asset_ids: set[str] | None = None) -> list[str]:
     return [
         _asset_result_id(item)
         for item in _asset_results(result)
         if _asset_result_failed(item)
         and _asset_result_id(item)
+        and (scoped_asset_ids is None or _asset_result_id(item) in scoped_asset_ids)
+    ]
+
+
+def _retryable_failed_asset_ids(result: dict[str, Any], scoped_asset_ids: set[str] | None = None) -> list[str]:
+    return [
+        _asset_result_id(item)
+        for item in _asset_results(result)
+        if _asset_result_failed(item)
+        and _asset_result_id(item)
+        and (scoped_asset_ids is None or _asset_result_id(item) in scoped_asset_ids)
         and is_retryable_partition_error(_asset_result_error_type(item))
     ]
+
+
+def _auto_retries_used_in_chain(attempts: list[dict[str, Any]], task_id: str) -> int:
+    by_task_id = {str(attempt.get("task_id") or ""): attempt for attempt in attempts}
+    used = 0
+    current_id = task_id
+    seen: set[str] = set()
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        attempt = by_task_id.get(current_id)
+        if not attempt:
+            break
+        operation = str(attempt.get("operation") or "")
+        if operation in {"manual_retry", "manual_asset_retry"}:
+            break
+        if operation == "auto_retry":
+            used += 1
+        current_id = str(attempt.get("source_task_id") or "")
+    return used
+
+
+def _max_auto_retries(batch: dict[str, Any]) -> int:
+    value = batch.get("max_auto_retries")
+    if value is None or value == "":
+        return 1
+    return max(0, int(value))
+
+
+def _quality_warning_retry_asset_ids(
+    batch: dict[str, Any],
+    assets: list[dict[str, Any]],
+    attempts: list[dict[str, Any]],
+) -> list[str] | None:
+    if str(batch.get("quality_status") or "").strip().upper() != "WARN":
+        return None
+    report = _latest_quality_report(attempts)
+    warning_paths = _quality_warning_paths(report)
+    if not warning_paths:
+        return None
+    asset_ids = [
+        str(asset.get("asset_id") or "")
+        for asset in assets
+        if any(_asset_matches_warning_path(asset, warning_path) for warning_path in warning_paths)
+        and str(asset.get("asset_id") or "")
+    ]
+    return asset_ids or None
+
+
+def _latest_quality_report(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    for attempt in attempts:
+        result = attempt.get("runner_result")
+        if not isinstance(result, dict):
+            continue
+        report = result.get("quality_report")
+        if isinstance(report, dict):
+            return report
+    return {}
+
+
+def _quality_warning_paths(report: dict[str, Any]) -> set[str]:
+    checks = report.get("checks") if isinstance(report, dict) else None
+    if not isinstance(checks, list):
+        return set()
+    paths: set[str] = set()
+    for check in checks:
+        if not isinstance(check, dict) or str(check.get("status") or "").upper() != "WARN":
+            continue
+        metrics = check.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            continue
+        for item in metrics.get("zero_assets") or []:
+            if isinstance(item, dict) and item.get("path"):
+                paths.add(str(item["path"]))
+        for item in metrics.get("duplicates") or []:
+            if isinstance(item, dict):
+                paths.update(str(path) for path in item.get("asset_paths") or [] if path)
+    return paths
+
+
+def _asset_matches_warning_path(asset: dict[str, Any], warning_path: str) -> bool:
+    source_uri = str(asset.get("source_uri") or "")
+    if not source_uri:
+        return False
+    warning = _path_like_parts(warning_path)
+    source = _path_like_parts(source_uri)
+    if source_uri == warning_path or source[-1:] == warning[-1:]:
+        return True
+    if len(source) >= 1 and len(warning) >= 1:
+        source_name = source[-1]
+        warning_name = warning[-1]
+        source_stem, source_suffix = _split_name(source_name)
+        warning_stem, warning_suffix = _split_name(warning_name)
+        if warning_stem == f"{source_stem}_cog" and warning_suffix.lower() == source_suffix.lower():
+            return True
+    return len(source) <= len(warning) and tuple(warning[-len(source) :]) == tuple(source)
+
+
+def _path_like_parts(value: str) -> tuple[str, ...]:
+    text = str(value or "").strip().replace("\\", "/")
+    if text.startswith("s3://"):
+        text = text[5:]
+    return tuple(part for part in text.split("/") if part)
+
+
+def _split_name(name: str) -> tuple[str, str]:
+    if "." not in name:
+        return name, ""
+    stem, suffix = name.rsplit(".", 1)
+    return stem, f".{suffix}"
 
 
 def _text_or_none(value: Any) -> str | None:

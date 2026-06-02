@@ -55,6 +55,7 @@ class PartitionTaskStore:
         on_started: TaskHook | None = None,
         on_succeeded: TaskResultHook | None = None,
         on_failed: TaskErrorHook | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
     ) -> PartitionTask:
         now = time.time()
         task = PartitionTask(
@@ -67,7 +68,7 @@ class PartitionTaskStore:
         )
         with self._lock:
             self._tasks[task.task_id] = task
-        self._executor.submit(self._run, task.task_id, runner, on_started, on_succeeded, on_failed)
+        self._executor.submit(self._run, task.task_id, runner, on_started, on_succeeded, on_failed, cancellation_check)
         return task
 
     def get(self, task_id: str) -> Optional[PartitionTask]:
@@ -93,6 +94,15 @@ class PartitionTaskStore:
                 setattr(task, key, value)
             task.updated_at = time.time()
 
+    def _start_task(self, task_id: str) -> bool:
+        with self._lock:
+            task = self._tasks[task_id]
+            if task.status != "queued":
+                return False
+            task.status = "running"
+            task.updated_at = time.time()
+            return True
+
     def _run(
         self,
         task_id: str,
@@ -100,13 +110,38 @@ class PartitionTaskStore:
         on_started: TaskHook | None = None,
         on_succeeded: TaskResultHook | None = None,
         on_failed: TaskErrorHook | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
     ) -> None:
         task = self.get(task_id)
-        if task is not None and task.status == "cancelled":
+        if task is not None and (task.status == "cancelled" or (cancellation_check is not None and cancellation_check())):
+            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+            if on_failed is not None:
+                on_failed(task_id, "Partition task cancelled")
             return
-        self._set_task(task_id, status="running")
+        if not self._start_task(task_id):
+            task = self.get(task_id)
+            if task is not None and task.status == "cancelled":
+                if on_failed is not None:
+                    on_failed(task_id, "Partition task cancelled")
+                return
+        task = self.get(task_id)
+        if task is not None and task.status == "cancel_requested":
+            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+            if on_failed is not None:
+                on_failed(task_id, "Partition task cancelled")
+            return
+        if cancellation_check is not None and cancellation_check():
+            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+            if on_failed is not None:
+                on_failed(task_id, "Partition task cancelled")
+            return
         if on_started is not None:
             on_started(task_id)
+        if cancellation_check is not None and cancellation_check():
+            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+            if on_failed is not None:
+                on_failed(task_id, "Partition task cancelled")
+            return
         try:
             result = runner()
         except Exception as exc:  # pragma: no cover - covered through public task status.
@@ -120,7 +155,7 @@ class PartitionTaskStore:
                 on_failed(task_id, str(exc))
             return
         task = self.get(task_id)
-        if task is not None and task.status == "cancel_requested":
+        if task is not None and (task.status == "cancel_requested" or (cancellation_check is not None and cancellation_check())):
             self._set_task(task_id, status="cancelled", error="Partition task cancelled")
             if on_failed is not None:
                 on_failed(task_id, "Partition task cancelled")
@@ -175,6 +210,7 @@ class PartitionService:
             on_started=on_started,
             on_succeeded=on_succeeded,
             on_failed=on_failed,
+            cancellation_check=cancellation_check,
         )
 
     def get_task(self, task_id: str) -> PartitionTask:
