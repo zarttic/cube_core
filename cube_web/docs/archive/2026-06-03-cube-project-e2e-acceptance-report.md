@@ -10,7 +10,7 @@
 
 按要求完成了以下检查、修复和复验:
 
-1. 检查分支、工作区状态、Python 3.8 与运行时配置来源。
+1. 检查分支、工作区状态、Python 3.11 与运行时配置来源。
 2. 通过健康检查等价代码路径确认 PostgreSQL、Ray、MinIO、bucket、配置解析全部可用。
 3. 使用真实 Ray/PostgreSQL/MinIO 跑全链路 smoke，并在代码修复后再次复跑全量 smoke。
 4. 运行完整自动化测试:
@@ -55,7 +55,7 @@
 修复后重新执行:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 cube_split/scripts/run_all_partition_flows_smoke.py \
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_split/scripts/run_all_partition_flows_smoke.py \
   --mode demo \
   --ray-parallelism 2 \
   --chunk-size 1 \
@@ -164,7 +164,7 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
 命令:
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m pytest \
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest \
   cube_split/tests/test_quality_check.py \
   cube_split/tests/test_ray_partition_core.py \
   cube_web/tests/test_app.py \

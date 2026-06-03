@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3.8}"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 INPUT_DIR="${1:-$ROOT_DIR/data/landsat8}"
 RAY_OUTPUT_DIR="${2:-$ROOT_DIR/data/ray_output/e2e_ingest}"
 DB_PATH="${3:-$ROOT_DIR/data/ingest/e2e_ingest.db}"

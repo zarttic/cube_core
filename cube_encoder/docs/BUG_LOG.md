@@ -23,7 +23,7 @@
 - 现象：测试收集阶段出现 `ModuleNotFoundError: fastapi/shapely`。
 - 影响：测试无法运行。
 - 复现方式：`pytest -q`。
-- 根因：依赖安装到了 Python 3.8 site-packages，但测试使用 Python 3.11。
+- 根因：依赖安装到了非当前运行环境的 site-packages，但测试使用 Python 3.11。
 - 修复：使用 Python 3.11 pip 安装依赖（`/home/hadoop/anaconda3/bin/pip install -r requirements.txt`）。
 - 验证：后续测试可在 Python 3.11 下导入 fastapi/shapely。
 - 状态：已修复。
