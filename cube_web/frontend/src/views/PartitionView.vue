@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCloseFilled, Document, EditPen, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
-import LeafletMap from '@/components/LeafletMap.vue';
+import GlobeMap from '@/components/GlobeMap.vue';
 import ConfigView from '@/views/ConfigView.vue';
 import { apiPrefixes, requestGet, requestJson } from '@/api/client';
 
@@ -2642,7 +2642,7 @@ onUnmounted(() => {
                     <el-button size="small" @click="clearMapGrid">清空格网</el-button>
                   </div>
                 </div>
-                <LeafletMap :markers="[]" :geometries="['optical', 'radar', 'product'].includes(activeModule) ? mapGeometries : []" />
+                <GlobeMap :markers="[]" :geometries="['optical', 'radar', 'product'].includes(activeModule) ? mapGeometries : []" />
               </div>
               <div v-else class="quality-overview-panel">
                 <div class="panel-header">

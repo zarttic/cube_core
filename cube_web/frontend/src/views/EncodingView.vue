@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 
-import LeafletMap from '@/components/LeafletMap.vue';
+import GlobeMap from '@/components/GlobeMap.vue';
 import { apiPrefixes, requestJson } from '@/api/client';
 
 const activeModule = ref('division');
@@ -793,7 +793,7 @@ async function runDemo() {
                     {{ contextualMapHint }}
                   </span>
                 </div>
-                <LeafletMap
+                <GlobeMap
                   :markers="markers"
                   :geometries="activeModule === 'division' || activeModule === 'operations' ? gridGeometries : []"
                   :circle="activeModule === 'division' ? drawnCircle : null"

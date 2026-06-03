@@ -173,7 +173,7 @@ body {
     padding: 0 32px;
     min-height: 72px;
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 18px;
 }
@@ -236,6 +236,14 @@ body {
     display: flex;
     align-items: stretch;
     justify-self: center;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.portal-nav::-webkit-scrollbar {
+    display: none;
 }
 
 .portal-nav a {
@@ -248,6 +256,8 @@ body {
     min-height: 72px;
     display: flex;
     align-items: center;
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 
 .portal-nav a:hover {
@@ -311,6 +321,18 @@ body {
 
 .logout-btn:hover {
     background: rgba(255, 255, 255, 0.28);
+}
+
+@media (max-width: 1440px) {
+    .portal-header-inner {
+        padding: 0 28px;
+        gap: 12px;
+    }
+
+    .portal-nav a {
+        padding: 0 12px;
+        font-size: 13px;
+    }
 }
 
 .user-chip {
@@ -1514,10 +1536,106 @@ section {
     font-weight: normal;
 }
 
-.leaflet-map {
+.globe-map {
     flex: 1;
     min-height: 360px;
     z-index: 1;
+    position: relative;
+    overflow: hidden;
+    background: #071923;
+}
+
+.globe-map canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+}
+
+.globe-map.is-picking canvas {
+    cursor: crosshair;
+}
+
+.cesium-map .cesium-viewer,
+.cesium-map .cesium-viewer-cesiumWidgetContainer,
+.cesium-map .cesium-widget,
+.cesium-map .cesium-widget canvas {
+    width: 100%;
+    height: 100%;
+}
+
+.cesium-map .cesium-viewer,
+.cesium-map .cesium-widget {
+    position: absolute;
+    inset: 0;
+}
+
+.cesium-map .cesium-widget canvas {
+    image-rendering: auto;
+}
+
+.globe-fallback {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+}
+
+.globe-map.is-fallback-picking .globe-fallback {
+    cursor: crosshair;
+}
+
+.globe-fallback-sphere {
+    width: min(72%, 560px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    position: relative;
+    overflow: hidden;
+    background: #082131;
+    filter: drop-shadow(0 24px 48px rgba(0, 0, 0, 0.28));
+}
+
+.globe-fallback-texture {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.globe-fallback-shade {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.24), transparent 22%),
+        radial-gradient(circle at 68% 72%, rgba(0, 8, 16, 0.58), transparent 56%);
+    border: 2px solid rgba(150, 220, 255, 0.68);
+    box-shadow: inset -28px -34px 52px rgba(0, 11, 22, 0.58);
+}
+
+.globe-label-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.globe-label {
+    position: absolute;
+    max-width: min(220px, 38vw);
+    padding: 4px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.26);
+    border-radius: 4px;
+    background: rgba(7, 25, 35, 0.78);
+    color: white;
+    font-size: 11px;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
 }
 
 /* 图例 */
@@ -2868,6 +2986,77 @@ section {
 }
 
 @media (max-width: 768px) {
+    .portal-header-inner {
+        min-height: auto;
+        padding: 10px 16px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+            "brand side"
+            "nav nav";
+        align-items: center;
+        gap: 8px 12px;
+    }
+
+    .portal-brand {
+        grid-area: brand;
+    }
+
+    .portal-logo {
+        width: 40px;
+        height: 40px;
+    }
+
+    .portal-logo svg {
+        width: 24px;
+        height: 24px;
+    }
+
+    .portal-brand-title {
+        font-size: 16px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .portal-brand-subtitle {
+        display: none;
+    }
+
+    .portal-nav {
+        grid-area: nav;
+        justify-self: stretch;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+
+    .portal-nav::-webkit-scrollbar {
+        display: none;
+    }
+
+    .portal-nav a {
+        flex: 0 0 auto;
+        min-height: 42px;
+        padding: 0 14px;
+        font-size: 13px;
+        white-space: nowrap;
+    }
+
+    .portal-header-side {
+        grid-area: side;
+    }
+
+    .user-profile {
+        max-width: 132px;
+        gap: 6px;
+        padding: 0 6px 0 9px;
+    }
+
+    .user-info span {
+        max-width: 72px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
     .header-container {
         padding: 0 20px;
     }
@@ -2970,43 +3159,6 @@ section {
         transform: translateX(0);
     }
 }
-
-/* ========================================
-   Leaflet 覆盖层样式
-   ======================================== */
-
-.grid-overlay-rect {
-    stroke: var(--primary);
-    stroke-width: 2;
-    fill: rgba(26, 95, 180, 0.2);
-}
-
-.grid-overlay-rect.active {
-    fill: rgba(26, 95, 180, 0.5);
-    stroke-width: 3;
-}
-
-.grid-overlay-rect.neighbor {
-    stroke: var(--success);
-    fill: rgba(38, 162, 105, 0.3);
-}
-
-.h3-hexagon {
-    stroke: var(--accent);
-    stroke-width: 2;
-    fill: rgba(145, 65, 172, 0.2);
-}
-
-.h3-hexagon.active {
-    fill: rgba(145, 65, 172, 0.5);
-    stroke-width: 3;
-}
-
-.h3-hexagon.neighbor {
-    stroke: var(--success);
-    fill: rgba(38, 162, 105, 0.3);
-}
-
 
 /* 任务备注样式 */
 .task-note {
