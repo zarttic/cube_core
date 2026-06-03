@@ -5,9 +5,9 @@ import os
 import re
 import shutil
 import subprocess
-from io import BytesIO
 import tempfile
 from html import escape
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import HTTPException
