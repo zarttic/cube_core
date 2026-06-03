@@ -279,6 +279,7 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
         ]
 
     def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
+        _ = time_granularity, partition_prefix_len, workers
         rows = []
         for chunk in task_chunks:
             for group in chunk:
@@ -346,6 +347,7 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
     captured: dict[str, object] = {}
 
     def fake_build_manifest(input_dir_arg, product_family, data_type, manifest_path):
+        captured["manifest_input_dir"] = input_dir_arg
         captured["manifest_data_type"] = data_type
         captured["manifest_product_family"] = product_family
         captured["manifest_path"] = manifest_path
@@ -381,6 +383,7 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
         ]
 
     def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
+        _ = time_granularity, partition_prefix_len, workers
         captured["writer_data_type"] = data_type
         task = task_chunks[0][0][0]
         tile_path = run_dir / "entity_tiles" / data_type / task["scene_id"] / "fake.tif"
@@ -450,8 +453,10 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
     )
 
     rows = [json.loads(line) for line in Path(report["rows_path"]).read_text(encoding="utf-8").splitlines()]
+    assert captured["manifest_input_dir"] == input_dir
     assert captured["manifest_data_type"] == "product"
     assert captured["manifest_product_family"] == "product"
+    assert captured["manifest_path"] is None
     assert captured["writer_data_type"] == "product"
     assert report["data_type"] == "product"
     assert rows[0]["data_type"] == "product"
@@ -466,6 +471,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     captured: dict[str, object] = {}
 
     def fake_ray_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, parallelism, ray_address, **kwargs):
+        _ = time_granularity, partition_prefix_len
         captured["task_chunk_count"] = len(task_chunks)
         captured["parallelism"] = parallelism
         captured["ray_address"] = ray_address

@@ -375,6 +375,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     load_thread_ids: set[int] = set()
 
     def fake_load_observations_from_file(path, max_observations=None):
+        _ = max_observations
         load_thread_ids.add(threading.get_ident())
         time.sleep(0.02)
         idx = path.stem.rsplit("_", 1)[1]
@@ -391,6 +392,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
         ]
 
     def fake_partition_observation(observation, config, sdk=None):
+        _ = sdk
         return {
             "data_type": "carbon_satellite",
             "satellite": observation.satellite,
@@ -512,7 +514,7 @@ def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        def __exit__(self, *_exc_info):
             return False
 
         def map(self, fn, chunks, configs):

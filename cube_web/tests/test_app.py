@@ -51,9 +51,6 @@ class FakeQualityReportStore:
         self.reports = {}
         self.history = {"optical": [], "product": []}
 
-    def ensure_schema(self):
-        return None
-
     def upsert_report(self, data_type, run_dir, report):
         report = dict(report)
         report_id = str(report.get("report_id") or f"{data_type}-report-{len(self.reports) + 1}")
@@ -101,9 +98,6 @@ class FakeConfigStore:
     def __init__(self):
         self.config = config_store_module.default_config()
         self.updated_at = None
-
-    def ensure_schema(self):
-        return None
 
     def get_config_record(self):
         return {"config": config_store_module.normalized_config(self.config), "updated_at": self.updated_at}
@@ -2619,7 +2613,7 @@ def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
     monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fail_if_called)
     monkeypatch.setattr(
         "cube_web.services.ingest_service._existing_conflicts",
-        lambda raw_records, cube_records: {"raw_asset_rows": 0, "cube_fact_rows": 0},
+        lambda _raw_records, _cube_records: {"raw_asset_rows": 0, "cube_fact_rows": 0},
     )
 
     resp = client.post("/v1/ingest/optical/preview", json={"report_id": "optical-ingest-preview"})

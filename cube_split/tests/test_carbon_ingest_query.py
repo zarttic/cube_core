@@ -59,10 +59,11 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        def __exit__(self, *_exc_info):
             return False
 
         def execute(self, sql, params=None):
+            _ = params
             calls.append(("execute", sql))
             if "SELECT retry_count" in sql:
                 self._row = None
@@ -77,7 +78,7 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        def __exit__(self, *_exc_info):
             return False
 
         def cursor(self):
