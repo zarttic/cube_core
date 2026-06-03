@@ -49,7 +49,7 @@ def default_grid_level_from_assets(
     grid_type: str | None = None,
     fallback: int | None = None,
 ) -> int:
-    resolutions = [
+    resolutions: list[float] = [
         resolution
         for asset in assets or []
         if isinstance(asset, dict)
@@ -84,8 +84,8 @@ def apply_resolution_grid_defaults(
 def _asset_resolution(asset: dict[str, Any]) -> float | None:
     values = [_parse_resolution(asset.get(key)) for key in _RESOLUTION_KEYS if key in asset]
     values.extend(_parse_resolution(asset.get(key)) for key in ("resolution_x", "resolution_y", "pixel_size_x", "pixel_size_y"))
-    values = [value for value in values if value is not None]
-    return min(values) if values else None
+    parsed_values: list[float] = [value for value in values if value is not None]
+    return min(parsed_values) if parsed_values else None
 
 
 def _parse_resolution(value: Any) -> float | None:
@@ -102,10 +102,10 @@ def _parse_resolution(value: Any) -> float | None:
     if isinstance(value, dict):
         values = [_parse_resolution(value.get(key)) for key in _RESOLUTION_KEYS if key in value]
         values.extend(_parse_resolution(value.get(key)) for key in ("x", "y", "width", "height"))
-        values = [item for item in values if item is not None]
-        return min(values) if values else None
+        parsed_values: list[float] = [item for item in values if item is not None]
+        return min(parsed_values) if parsed_values else None
     if isinstance(value, Iterable):
         values = [_parse_resolution(item) for item in value]
-        values = [item for item in values if item is not None]
-        return min(values) if values else None
+        parsed_values: list[float] = [item for item in values if item is not None]
+        return min(parsed_values) if parsed_values else None
     return None

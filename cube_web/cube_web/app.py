@@ -15,8 +15,7 @@ from cube_web.routes.pages import create_pages_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
-from cube_web.services import health_service
-from cube_web.services import quality_service
+from cube_web.services import health_service, quality_service
 
 ENCODER_SDK_CLASS = CubeEncoderSDK
 

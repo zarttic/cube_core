@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from cube_split import runtime_config
+
 from cube_web.services.config_store import _masked_dsn
 
 ACTIVE_CHECKS = ("postgres", "ray", "minio", "bucket")

@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from s2sphere import CellId
 
 import cube_web.app as web_app
@@ -20,9 +20,8 @@ import cube_web.routes.partition_adapters as partition_adapters
 import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.app import ENCODER_SDK_CLASS, app
 from cube_web.services import config_store as config_store_module
-from cube_web.services import health_service
+from cube_web.services import health_service, partition_runners
 from cube_web.services import partition_job_store as partition_job_store_module
-from cube_web.services import partition_runners
 from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
 from cube_web.services.partition_defaults import default_grid_level_for_resolution

@@ -9,13 +9,12 @@ from typing import Any, Callable, Dict
 
 import numpy as np
 import rasterio
+from cube_web.services import partition_runners
 from minio import Minio
 from minio.error import S3Error
 from rasterio.transform import from_origin
 
 from cube_split import runtime_config
-from cube_web.services import partition_runners
-
 
 PartitionRunner = Callable[[Dict[str, Any]], Dict[str, Any]]
 
