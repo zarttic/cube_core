@@ -16,7 +16,7 @@
 运行光学逻辑剖分：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_job \
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
   --input-dir data/optocal \
   --manifest-path data/optocal/manifest.jsonl \
   --output-dir data/ray_output/logical_partition
@@ -25,7 +25,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_
 运行产品剖分：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.product_partition_job \
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.product_partition_job \
   --input-dir data/product \
   --output-dir data/ray_output/product
 ```
@@ -33,7 +33,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.product_partition_job 
 使用 ISEA4H 和 Ray 运行碳卫星剖分：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.carbon_partition_job \
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job \
   --input-dir data/carbon \
   --output-dir data/ray_output/carbon \
   --grid-type isea4h \
@@ -55,7 +55,7 @@ scripts/run_ray_ingest_e2e.sh
 运行光学 Ray 剖分并在同一作业内入库：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_job \
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
   --input-dir data/optocal \
   --manifest-path data/optocal/manifest.jsonl \
   --output-dir data/ray_output/logical_partition
@@ -64,7 +64,7 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.jobs.ray_logical_partition_
 运行 AOI 回读：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.read.aoi_reader \
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.read.aoi_reader \
   --bbox 120.8 44.0 122.2 44.6 \
   --time-bucket 20260204 \
   --bands sr_b2 sr_b3 sr_b4 \
@@ -76,11 +76,11 @@ PYTHONPATH=../cube_encoder:. python3.8 -m cube_split.read.aoi_reader \
 在本包内运行：
 
 ```bash
-PYTHONPATH=../cube_encoder:. python3.8 -m pytest tests
+PYTHONPATH=../cube_encoder:. python3.11 -m pytest tests
 ```
 
 在仓库根目录运行：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m pytest cube_encoder/tests cube_split/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests cube_split/tests
 ```

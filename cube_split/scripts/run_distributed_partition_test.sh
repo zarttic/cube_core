@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3.8}"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 cd "$ROOT_DIR"
 
 INPUT_DIR="${INPUT_DIR:-$ROOT_DIR/data/landsat8}"

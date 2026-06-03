@@ -171,6 +171,75 @@ def test_entity_partition_minio_updates_rows_and_postgres_metadata(monkeypatch, 
     assert Path(str(captured["metadata_local_asset_path"])).exists()
 
 
+def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path: Path):
+    captured_keys: list[str] = []
+
+    class FakeStat:
+        size = 4
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def stat_object(self, _bucket, key):
+            captured_keys.append(key)
+            return FakeStat()
+
+        def fput_object(self, _bucket, _key, _path):
+            raise AssertionError("stat hit should skip upload")
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+    first = tmp_path / "cell-a" / "sr_band2.tif"
+    second = tmp_path / "cell-b" / "sr_band2.tif"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"data")
+    second.write_bytes(b"data")
+    rows = [
+        {
+            "asset_path": str(first),
+            "scene_id": "scene-a",
+            "band": "sr_band2",
+            "acq_time": "2020-08-01T00:00:00Z",
+            "grid_level": 6,
+            "space_code": "86283082fffffff",
+        },
+        {
+            "asset_path": str(second),
+            "scene_id": "scene-a",
+            "band": "sr_band2",
+            "acq_time": "2020-08-01T00:00:00Z",
+            "grid_level": 6,
+            "space_code": "862830837ffffff",
+        },
+    ]
+
+    uploaded = entity_partition_job._upload_entity_tiles_to_minio(
+        rows,
+        SimpleNamespace(
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            minio_endpoint="127.0.0.1:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="entity-bucket",
+            minio_prefix="cube/entity",
+            minio_secure=False,
+            minio_upload_workers=1,
+        ),
+    )
+
+    assert len(uploaded) == 2
+    assert uploaded[str(first)] != uploaded[str(second)]
+    assert "space_code=86283082fffffff" in uploaded[str(first)]
+    assert "space_code=862830837ffffff" in uploaded[str(second)]
+    assert len(set(captured_keys)) == 2
+
+
 def test_entity_partition_ingest_disabled_skips_minio_and_postgres(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()

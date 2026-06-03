@@ -16,7 +16,7 @@ encoder SDK facade、托管剖分任务和质检报告 API。
 从仓库根目录运行：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 质检报告和托管剖分任务使用 PostgreSQL 持久化。使用这些链路前需要设置
@@ -62,7 +62,7 @@ npm run dev
 在本包内运行：
 
 ```bash
-PYTHONPATH=../cube_encoder:../cube_split:. python3.8 -m pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 ```
 
 在仓库根目录运行跨包测试命令，见 [../AGENTS.md](../AGENTS.md)。

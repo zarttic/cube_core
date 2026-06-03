@@ -128,9 +128,15 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
     target = _cache_target_for_uri(uri, cache_root)
     stat = client.stat_object(bucket, key)
     if not target.exists() or target.stat().st_size != stat.size:
-        tmp = target.with_suffix(target.suffix + ".part")
-        client.fget_object(bucket, key, str(tmp))
-        tmp.replace(target)
+        handle = tempfile.NamedTemporaryFile(prefix=f".{target.name}.", suffix=".part", dir=target.parent, delete=False)
+        tmp = Path(handle.name)
+        handle.close()
+        try:
+            client.fget_object(bucket, key, str(tmp))
+            tmp.replace(target)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
     sidecar_keys = [f"{key}.aux.xml", f"{key}.ovr"]
     if key.lower().endswith((".tif", ".tiff")):
@@ -146,9 +152,20 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
                 continue
             raise
         if not sidecar_target.exists() or sidecar_target.stat().st_size != sidecar_stat.size:
-            tmp = sidecar_target.with_suffix(sidecar_target.suffix + ".part")
-            client.fget_object(bucket, sidecar_key, str(tmp))
-            tmp.replace(sidecar_target)
+            handle = tempfile.NamedTemporaryFile(
+                prefix=f".{sidecar_target.name}.",
+                suffix=".part",
+                dir=sidecar_target.parent,
+                delete=False,
+            )
+            tmp = Path(handle.name)
+            handle.close()
+            try:
+                client.fget_object(bucket, sidecar_key, str(tmp))
+                tmp.replace(sidecar_target)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
     return target
 
 

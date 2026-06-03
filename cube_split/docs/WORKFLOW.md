@@ -154,7 +154,7 @@ PYTHONPATH=../cube_encoder:. python -m cube_split.jobs.carbon_partition_job \
 端到端试运行脚本覆盖 `optical`、`radar`、`product` 三类资产，以及 `geohash`、`tile_matrix`、`isea4h` 三种格网。脚本会生成小 TIF，上传到 MinIO，以 `selected_assets` 写入完整 ARD 字段，并通过 Ray 执行剖分：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 cube_split/scripts/run_all_partition_flows_smoke.py \
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_split/scripts/run_all_partition_flows_smoke.py \
   --mode test \
   --ray-parallelism 2 \
   --chunk-size 1 \
@@ -174,13 +174,13 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 cube_split/scripts/run_all
 生产文档推荐使用 `--mode test` 做剖分链路验证；演示环境需要完整入库冒烟时，在
 `demo/*` 分支的演示文档中维护 `--mode demo` 说明。
 
-Ray Client 需要 driver Python 与集群 Python 主版本一致；当前 Ray 集群为 Python 3.8.10，因此 smoke 建议使用 `python3.8`。如需指定其他兼容解释器，pytest 包装器支持 `CUBE_PARTITION_E2E_PYTHON=/path/to/python`。
+Ray Client 需要 driver Python 与集群 Python 主版本一致；当前 Ray 集群为 Python 3.11.6，因此 smoke 建议使用 `python3.11`。如需指定其他兼容解释器，pytest 包装器支持 `CUBE_PARTITION_E2E_PYTHON=/path/to/python`。
 
 也可以通过 pytest marker 运行同一个 smoke。默认会 skip，不影响本地单元测试；显式设置环境变量后才会连接 Ray、MinIO 和 PostgreSQL。pytest 包装器会启用 `--keep-quality`，并校验 optical/product 结果带有 `quality_status` 和 `quality_report_id`：
 
 ```bash
 CUBE_RUN_PARTITION_E2E_SMOKE=1 \
-CUBE_PARTITION_E2E_PYTHON=python3.8 \
+CUBE_PARTITION_E2E_PYTHON=python3.11 \
 PYTHONPATH=cube_encoder:cube_split:cube_web \
 pytest -m e2e cube_split/tests/test_partition_e2e_smoke.py
 ```

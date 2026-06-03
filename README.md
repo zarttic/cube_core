@@ -59,7 +59,7 @@ npm run build
 使用仓库内 SDK 和剖分后端运行 Web UI：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
 ## 当前链路快照

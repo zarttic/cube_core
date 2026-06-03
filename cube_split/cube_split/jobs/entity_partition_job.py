@@ -549,20 +549,66 @@ def _write_entity_tile_chunks_ray(
 
 
 def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, str]:
-    from cube_split.ingest.ray_ingest_job import upload_assets_to_minio
+    try:
+        from minio import Minio
+        from minio.error import S3Error
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("MinIO backend requires `minio` package") from exc
 
-    return upload_assets_to_minio(
-        rows=rows,
-        dataset=str(getattr(args, "dataset", "demo_optical")),
-        sensor=str(getattr(args, "sensor", "optical_mosaic")),
-        asset_version=str(getattr(args, "asset_version", getattr(args, "tile_version", "v1"))),
-        endpoint=str(getattr(args, "minio_endpoint", "")),
-        access_key=str(getattr(args, "minio_access_key", "")),
-        secret_key=str(getattr(args, "minio_secret_key", "")),
-        bucket=str(getattr(args, "minio_bucket", "")),
-        prefix=str(getattr(args, "minio_prefix", "cube/entity")),
-        secure=bool(getattr(args, "minio_secure", False)),
-        workers=max(1, int(getattr(args, "minio_upload_workers", 8) or 8)),
+    endpoint = str(getattr(args, "minio_endpoint", ""))
+    access_key = str(getattr(args, "minio_access_key", ""))
+    secret_key = str(getattr(args, "minio_secret_key", ""))
+    bucket = str(getattr(args, "minio_bucket", ""))
+    if not endpoint or not access_key or not secret_key or not bucket:
+        raise ValueError("minio endpoint/access-key/secret-key/bucket are required for entity tile upload")
+
+    client = Minio(endpoint, access_key=access_key, secret_key=secret_key, secure=bool(getattr(args, "minio_secure", False)))
+    if not client.bucket_exists(bucket):
+        client.make_bucket(bucket)
+
+    unique_tiles: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        unique_tiles.setdefault(str(row["asset_path"]), row)
+
+    def upload_one(item: tuple[str, dict[str, Any]]) -> tuple[str, str]:
+        source_uri, row = item
+        if source_uri.startswith("s3://"):
+            return source_uri, source_uri
+        source_path = Path(source_uri)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Entity tile file not found: {source_path}")
+        key = _entity_tile_object_key(row, source_path, args)
+        try:
+            stat = client.stat_object(bucket, key)
+            if stat.size == source_path.stat().st_size:
+                return source_uri, f"s3://{bucket}/{key}"
+        except S3Error as exc:
+            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
+        client.fput_object(bucket, key, str(source_path))
+        return source_uri, f"s3://{bucket}/{key}"
+
+    workers = max(1, int(getattr(args, "minio_upload_workers", 8) or 8))
+    if workers == 1:
+        return dict(upload_one(item) for item in unique_tiles.items())
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(upload_one, unique_tiles.items()))
+
+
+def _entity_tile_object_key(row: dict[str, Any], source_path: Path, args: argparse.Namespace) -> str:
+    prefix = str(getattr(args, "minio_prefix", "cube/entity") or "cube/entity").strip("/")
+    dataset = _safe_name(str(getattr(args, "dataset", "demo_optical") or "demo_optical"))
+    sensor = _safe_name(str(getattr(args, "sensor", "optical_mosaic") or "optical_mosaic"))
+    version = _safe_name(str(getattr(args, "asset_version", getattr(args, "tile_version", "v1")) or "v1"))
+    scene_id = _safe_name(str(row.get("scene_id") or "unknown_scene"))
+    band = _safe_name(str(row.get("band") or source_path.stem))
+    grid_level = int(row.get("grid_level") or 0)
+    space_code = _safe_name(str(row.get("space_code") or "unknown_cell"))
+    date_path = datetime.fromisoformat(str(row["acq_time"]).replace("Z", "+00:00")).strftime("%Y/%m/%d")
+    return (
+        f"{prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
+        f"scene_id={scene_id}/grid=isea4h/L{grid_level}/space_code={space_code}/"
+        f"band={band}/version={version}/{source_path.name}"
     )
 
 

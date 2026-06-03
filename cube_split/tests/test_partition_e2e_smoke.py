@@ -26,7 +26,7 @@ def _smoke_python_executable() -> str:
     configured = os.environ.get("CUBE_PARTITION_E2E_PYTHON")
     if configured:
         return configured
-    return shutil.which("python3.8") or sys.executable
+    return shutil.which("python3.11") or sys.executable
 
 
 def test_smoke_result_summary_includes_quality_metadata(tmp_path: Path) -> None:

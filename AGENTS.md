@@ -31,15 +31,15 @@ cd cube_encoder && python -m build
 构建 `cube-encoder` 分发包。
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
 ```
 
-使用 Python 3.8、仓库内 SDK 和剖分后端运行 Web UI。匹配环境变量未设置时，
+使用 Python 3.11、仓库内 SDK 和剖分后端运行 Web UI。匹配环境变量未设置时，
 运行时服务端点会从本地 `.cube_web.env` 自动加载。
 
 ## 代码风格与命名
 
-保持 Python 3.8 运行兼容，使用 4 空格缩进，公共函数提供类型标注，模块职责保持聚焦。
+保持 Python 3.11 运行兼容，使用 4 空格缩进，公共函数提供类型标注，模块职责保持聚焦。
 包名使用小写和下划线，例如 `grid_core`、`cube_split` 和 `cube_web`。测试文件使用
 `test_*.py`，测试函数使用描述性的 `test_*` 命名。前端代码保持 plain HTML/CSS/JS
 或现有 Vue/Vite 工程风格。
@@ -167,7 +167,7 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   - 前端 demo schema 的 `source_uri` 应使用上述 `s3://` URL，不要回退为某一台机器的本地绝对路径。
 - **源数据同步命令参考**:
   ```bash
-  PYTHONPATH=cube_encoder:cube_split:cube_web python3.8 - <<'PY'
+  PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 - <<'PY'
   from concurrent.futures import ThreadPoolExecutor, as_completed
   from pathlib import Path
   from minio import Minio
