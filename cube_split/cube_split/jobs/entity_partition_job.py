@@ -648,36 +648,77 @@ def _upsert_entity_tiles_postgres(
     from cube_split.ingest.ray_ingest_job import _parse_timestamp
 
     sql = """
-        INSERT INTO rs_entity_tile_asset (
+        MERGE INTO rs_entity_tile_asset target
+        USING (
+          SELECT
+            %s::text AS dataset,
+            %s::text AS sensor,
+            %s::text AS scene_id,
+            %s::text AS band,
+            %s::timestamptz AS acq_time,
+            %s::text AS grid_type,
+            %s::int AS grid_level,
+            %s::text AS space_code,
+            %s::text AS space_code_prefix,
+            %s::text AS st_code,
+            %s::text AS time_bucket,
+            %s::text AS tile_uri,
+            %s::text AS local_tile_path,
+            %s::text AS source_asset_path,
+            %s::text AS tile_version,
+            %s::text AS run_id,
+            %s::text AS cover_mode,
+            %s::double precision AS cell_min_lon,
+            %s::double precision AS cell_min_lat,
+            %s::double precision AS cell_max_lon,
+            %s::double precision AS cell_max_lat,
+            %s::int AS window_width,
+            %s::int AS window_height,
+            %s::double precision AS nodata,
+            %s::double precision AS valid_pixel_ratio,
+            %s::jsonb AS metadata_json
+        ) source
+        ON (
+          target.dataset = source.dataset
+          AND target.scene_id = source.scene_id
+          AND target.band = source.band
+          AND target.grid_type = source.grid_type
+          AND target.grid_level = source.grid_level
+          AND target.space_code = source.space_code
+          AND target.time_bucket = source.time_bucket
+          AND target.tile_version = source.tile_version
+        )
+        WHEN MATCHED THEN UPDATE SET
+          sensor = source.sensor,
+          acq_time = source.acq_time,
+          space_code_prefix = source.space_code_prefix,
+          st_code = source.st_code,
+          tile_uri = source.tile_uri,
+          local_tile_path = source.local_tile_path,
+          source_asset_path = source.source_asset_path,
+          run_id = source.run_id,
+          cover_mode = source.cover_mode,
+          cell_min_lon = source.cell_min_lon,
+          cell_min_lat = source.cell_min_lat,
+          cell_max_lon = source.cell_max_lon,
+          cell_max_lat = source.cell_max_lat,
+          window_width = source.window_width,
+          window_height = source.window_height,
+          nodata = source.nodata,
+          valid_pixel_ratio = source.valid_pixel_ratio,
+          metadata_json = source.metadata_json,
+          ingest_time = NOW()
+        WHEN NOT MATCHED THEN INSERT (
           dataset, sensor, scene_id, band, acq_time, grid_type, grid_level, space_code,
           space_code_prefix, st_code, time_bucket, tile_uri, local_tile_path, source_asset_path,
           tile_version, run_id, cover_mode, cell_min_lon, cell_min_lat, cell_max_lon, cell_max_lat,
           window_width, window_height, nodata, valid_pixel_ratio, metadata_json
         ) VALUES (
-          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-          %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+          source.dataset, source.sensor, source.scene_id, source.band, source.acq_time, source.grid_type, source.grid_level, source.space_code,
+          source.space_code_prefix, source.st_code, source.time_bucket, source.tile_uri, source.local_tile_path, source.source_asset_path,
+          source.tile_version, source.run_id, source.cover_mode, source.cell_min_lon, source.cell_min_lat, source.cell_max_lon, source.cell_max_lat,
+          source.window_width, source.window_height, source.nodata, source.valid_pixel_ratio, source.metadata_json
         )
-        ON CONFLICT(dataset, scene_id, band, grid_type, grid_level, space_code, time_bucket, tile_version)
-        DO UPDATE SET
-          sensor=excluded.sensor,
-          acq_time=excluded.acq_time,
-          space_code_prefix=excluded.space_code_prefix,
-          st_code=excluded.st_code,
-          tile_uri=excluded.tile_uri,
-          local_tile_path=excluded.local_tile_path,
-          source_asset_path=excluded.source_asset_path,
-          run_id=excluded.run_id,
-          cover_mode=excluded.cover_mode,
-          cell_min_lon=excluded.cell_min_lon,
-          cell_min_lat=excluded.cell_min_lat,
-          cell_max_lon=excluded.cell_max_lon,
-          cell_max_lat=excluded.cell_max_lat,
-          window_width=excluded.window_width,
-          window_height=excluded.window_height,
-          nodata=excluded.nodata,
-          valid_pixel_ratio=excluded.valid_pixel_ratio,
-          metadata_json=excluded.metadata_json,
-          ingest_time=NOW()
     """
     values = []
     for row in rows:
@@ -721,7 +762,6 @@ def _upsert_entity_tiles_postgres(
     with conn.cursor() as cur:
         cur.executemany(sql, values)
 
-
 def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
     from cube_split.ingest.ray_ingest_job import _upsert_job_status_postgres
 
@@ -755,7 +795,12 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
         "run_id": run_id,
     }
 
-    with psycopg.connect(dsn) as conn:
+    try:
+        conn_ctx = psycopg.connect(dsn, client_encoding="UTF8")
+    except TypeError:
+        conn_ctx = psycopg.connect(dsn)
+
+    with conn_ctx as conn:
         try:
             _ensure_entity_tables_postgres(conn)
             _upsert_job_status_postgres(conn, run_id, "running", params, started_at=started_at)
@@ -774,6 +819,7 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
             conn.commit()
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            conn.rollback()
             _upsert_job_status_postgres(
                 conn,
                 run_id,

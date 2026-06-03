@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -84,34 +85,54 @@ class PostgresQualityReportStore(QualityReportStore):
     def upsert_report(self, data_type: str, run_dir: Path | str, report: dict[str, Any]) -> dict[str, Any]:
         self.ensure_schema()
         record = _quality_report_record(data_type, run_dir, report)
+        params = _jsonb_record(record)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO quality_reports (
+                    MERGE INTO quality_reports target
+                    USING (
+                      SELECT
+                        %(report_id)s::uuid AS report_id,
+                        %(data_type)s::text AS data_type,
+                        %(run_dir)s::text AS run_dir,
+                        %(run_name)s::text AS run_name,
+                        %(dataset)s::text AS dataset,
+                        %(status)s::text AS status,
+                        %(target_crs)s::text AS target_crs,
+                        %(generated_at)s::timestamptz AS generated_at,
+                        %(summary)s::jsonb AS summary,
+                        %(checks)s::jsonb AS checks,
+                        %(assets)s::jsonb AS assets,
+                        %(report)s::jsonb AS report
+                    ) source
+                    ON (target.run_dir = source.run_dir)
+                    WHEN MATCHED THEN UPDATE SET
+                      report_id = source.report_id,
+                      data_type = source.data_type,
+                      run_name = source.run_name,
+                      dataset = source.dataset,
+                      status = source.status,
+                      target_crs = source.target_crs,
+                      generated_at = source.generated_at,
+                      summary = source.summary,
+                      checks = source.checks,
+                      assets = source.assets,
+                      report = source.report,
+                      updated_at = now()
+                    WHEN NOT MATCHED THEN INSERT (
                       report_id, data_type, run_dir, run_name, dataset, status,
                       target_crs, generated_at, summary, checks, assets, report
+                    ) VALUES (
+                      source.report_id, source.data_type, source.run_dir, source.run_name, source.dataset, source.status,
+                      source.target_crs, source.generated_at, source.summary, source.checks, source.assets, source.report
                     )
-                    VALUES (
-                      %(report_id)s, %(data_type)s, %(run_dir)s, %(run_name)s, %(dataset)s, %(status)s,
-                      %(target_crs)s, %(generated_at)s, %(summary)s, %(checks)s, %(assets)s, %(report)s
-                    )
-                    ON CONFLICT (run_dir) DO UPDATE SET
-                      report_id = EXCLUDED.report_id,
-                      data_type = EXCLUDED.data_type,
-                      run_name = EXCLUDED.run_name,
-                      dataset = EXCLUDED.dataset,
-                      status = EXCLUDED.status,
-                      target_crs = EXCLUDED.target_crs,
-                      generated_at = EXCLUDED.generated_at,
-                      summary = EXCLUDED.summary,
-                      checks = EXCLUDED.checks,
-                      assets = EXCLUDED.assets,
-                      report = EXCLUDED.report,
-                      updated_at = now()
-                    RETURNING report
                     """,
-                    _jsonb_record(record),
+                    params,
+                )
+                cur.execute(
+                    "SELECT report FROM quality_reports WHERE data_type = %s AND run_dir = %s",
+                    (record["data_type"], record["run_dir"]),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -178,7 +199,7 @@ class PostgresQualityReportStore(QualityReportStore):
             import psycopg
         except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
             raise RuntimeError("PostgreSQL quality report storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn)
+        return psycopg.connect(self.dsn, client_encoding="UTF8")
 
 
 _store: QualityReportStore | None = None
@@ -233,10 +254,10 @@ def _jsonb_record(record: dict[str, Any]) -> dict[str, Any]:
 
     return {
         **record,
-        "summary": Jsonb(record["summary"]),
-        "checks": Jsonb(record["checks"]),
-        "assets": Jsonb(record["assets"]),
-        "report": Jsonb(record["report"]),
+        "summary": Jsonb(record["summary"], dumps=lambda item: json.dumps(item, ensure_ascii=False)),
+        "checks": Jsonb(record["checks"], dumps=lambda item: json.dumps(item, ensure_ascii=False)),
+        "assets": Jsonb(record["assets"], dumps=lambda item: json.dumps(item, ensure_ascii=False)),
+        "report": Jsonb(record["report"], dumps=lambda item: json.dumps(item, ensure_ascii=False)),
     }
 
 

@@ -181,29 +181,63 @@ def build_carbon_facts(rows: list[dict[str, Any]], cube_version: str, run_id: st
 
 def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -> None:
     sql = """
-        INSERT INTO rs_carbon_observation_fact (
+        MERGE INTO rs_carbon_observation_fact target
+        USING (
+          SELECT
+            %s::text AS satellite,
+            %s::text AS product_type,
+            %s::text AS observation_id,
+            %s::timestamptz AS acq_time,
+            %s::text AS time_bucket,
+            %s::text AS grid_type,
+            %s::int AS grid_level,
+            %s::text AS space_code,
+            %s::text AS st_code,
+            %s::double precision AS xco2,
+            %s::text AS quality_flag,
+            %s::double precision AS center_lon,
+            %s::double precision AS center_lat,
+            %s::jsonb AS footprint_geojson,
+            %s::text AS source_uri,
+            %s::int AS source_index,
+            %s::jsonb AS metadata_json,
+            %s::text AS cube_version,
+            %s::text AS run_id
+        ) source
+        ON (
+          target.satellite = source.satellite
+          AND target.observation_id = source.observation_id
+          AND target.product_type = source.product_type
+          AND target.cube_version = source.cube_version
+        )
+        WHEN MATCHED THEN UPDATE SET
+          acq_time = source.acq_time,
+          time_bucket = source.time_bucket,
+          grid_type = source.grid_type,
+          grid_level = source.grid_level,
+          space_code = source.space_code,
+          st_code = source.st_code,
+          xco2 = source.xco2,
+          quality_flag = source.quality_flag,
+          center_lon = source.center_lon,
+          center_lat = source.center_lat,
+          footprint_geojson = source.footprint_geojson,
+          source_uri = source.source_uri,
+          source_index = source.source_index,
+          metadata_json = source.metadata_json,
+          run_id = source.run_id,
+          ingest_time = NOW()
+        WHEN NOT MATCHED THEN INSERT (
           satellite, product_type, observation_id, acq_time, time_bucket,
           grid_type, grid_level, space_code, st_code, xco2, quality_flag,
           center_lon, center_lat, footprint_geojson, source_uri, source_index,
           metadata_json, cube_version, run_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s)
-        ON CONFLICT(satellite, observation_id, product_type, cube_version) DO UPDATE SET
-          acq_time=excluded.acq_time,
-          time_bucket=excluded.time_bucket,
-          grid_type=excluded.grid_type,
-          grid_level=excluded.grid_level,
-          space_code=excluded.space_code,
-          st_code=excluded.st_code,
-          xco2=excluded.xco2,
-          quality_flag=excluded.quality_flag,
-          center_lon=excluded.center_lon,
-          center_lat=excluded.center_lat,
-          footprint_geojson=excluded.footprint_geojson,
-          source_uri=excluded.source_uri,
-          source_index=excluded.source_index,
-          metadata_json=excluded.metadata_json,
-          run_id=excluded.run_id,
-          ingest_time=NOW()
+        ) VALUES (
+          source.satellite, source.product_type, source.observation_id, source.acq_time, source.time_bucket,
+          source.grid_type, source.grid_level, source.space_code, source.st_code, source.xco2, source.quality_flag,
+          source.center_lon, source.center_lat, source.footprint_geojson, source.source_uri, source.source_index,
+          source.metadata_json, source.cube_version, source.run_id
+        )
     """
     values = [
         (
@@ -232,7 +266,6 @@ def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -
     with conn.cursor() as cur:
         cur.executemany(sql, values)
 
-
 def _upsert_job_status_postgres(
     conn: Any,
     *,
@@ -253,20 +286,37 @@ def _upsert_job_status_postgres(
             retry_count += 1
         cur.execute(
             """
-            INSERT INTO rs_ingest_job (
+            MERGE INTO rs_ingest_job target
+            USING (
+              SELECT
+                %s::text AS job_id,
+                %s::text AS status,
+                %s::jsonb AS params_json,
+                %s::jsonb AS stats_json,
+                %s::text AS error_msg,
+                %s::int AS retry_count,
+                %s::timestamptz AS started_at,
+                %s::timestamptz AS finished_at,
+                %s::text AS output_snapshot
+            ) source
+            ON (target.job_id = source.job_id)
+            WHEN MATCHED THEN UPDATE SET
+              status = source.status,
+              params_json = source.params_json,
+              stats_json = source.stats_json,
+              error_msg = source.error_msg,
+              retry_count = source.retry_count,
+              started_at = source.started_at,
+              finished_at = source.finished_at,
+              output_snapshot = source.output_snapshot,
+              updated_at = NOW()
+            WHEN NOT MATCHED THEN INSERT (
               job_id, status, params_json, stats_json, error_msg, retry_count,
-              started_at, finished_at, output_snapshot, updated_at
-            ) VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT(job_id) DO UPDATE SET
-              status=excluded.status,
-              params_json=excluded.params_json,
-              stats_json=excluded.stats_json,
-              error_msg=excluded.error_msg,
-              retry_count=excluded.retry_count,
-              started_at=excluded.started_at,
-              finished_at=excluded.finished_at,
-              output_snapshot=excluded.output_snapshot,
-              updated_at=NOW()
+              started_at, finished_at, output_snapshot
+            ) VALUES (
+              source.job_id, source.status, source.params_json, source.stats_json, source.error_msg, source.retry_count,
+              source.started_at, source.finished_at, source.output_snapshot
+            )
             """,
             (
                 job_id,
@@ -280,7 +330,6 @@ def _upsert_job_status_postgres(
                 output_snapshot,
             ),
         )
-
 
 def run_carbon_ingest(args: argparse.Namespace) -> dict[str, Any]:
     rows_path = _resolve_rows_path(args)
@@ -308,7 +357,12 @@ def run_carbon_ingest(args: argparse.Namespace) -> dict[str, Any]:
     except ModuleNotFoundError as exc:
         raise RuntimeError("Postgres backend requires `psycopg` package") from exc
 
-    with psycopg.connect(args.postgres_dsn) as conn:
+    try:
+        conn_ctx = psycopg.connect(args.postgres_dsn, client_encoding="UTF8")
+    except TypeError:
+        conn_ctx = psycopg.connect(args.postgres_dsn)
+
+    with conn_ctx as conn:
         try:
             ensure_carbon_tables_postgres(conn)
             _upsert_job_status_postgres(
@@ -334,6 +388,7 @@ def run_carbon_ingest(args: argparse.Namespace) -> dict[str, Any]:
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            conn.rollback()
             _upsert_job_status_postgres(
                 conn,
                 job_id=args.job_id,

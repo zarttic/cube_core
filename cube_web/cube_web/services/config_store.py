@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime
 from typing import Any
 
@@ -112,22 +113,27 @@ class PostgresConfigStore(ConfigStore):
     def update_config(self, config: dict[str, Any]) -> dict[str, Any]:
         self.ensure_schema()
         normalized = normalized_config(config)
+        stored = stored_config(normalized)
+        params = {"scope": CONFIG_SCOPE, "config": self._jsonb(stored)}
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO cube_web_configs (scope, config)
-                    VALUES (%(scope)s, %(config)s)
-                    ON CONFLICT (scope) DO UPDATE SET
-                      config = EXCLUDED.config,
+                    MERGE INTO cube_web_configs target
+                    USING (SELECT %(scope)s::text AS scope, %(config)s::jsonb AS config) source
+                    ON (target.scope = source.scope)
+                    WHEN MATCHED THEN UPDATE SET
+                      config = source.config,
                       updated_at = now()
-                    RETURNING config, updated_at
+                    WHEN NOT MATCHED THEN INSERT (scope, config)
+                      VALUES (source.scope, source.config)
                     """,
-                    {"scope": CONFIG_SCOPE, "config": self._jsonb(normalized)},
+                    params,
                 )
+                cur.execute("SELECT config, updated_at FROM cube_web_configs WHERE scope = %s", (CONFIG_SCOPE,))
                 row = cur.fetchone()
             conn.commit()
-        return {"config": normalized_config(row[0]), "updated_at": _iso_datetime(row[1])}
+        return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
 
     def reset_config(self) -> dict[str, Any]:
         return self.update_config(default_config())
@@ -137,12 +143,12 @@ class PostgresConfigStore(ConfigStore):
             import psycopg
         except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
             raise RuntimeError("PostgreSQL config storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn)
+        return psycopg.connect(self.dsn, client_encoding="UTF8")
 
     def _jsonb(self, value: dict[str, Any]):
         from psycopg.types.json import Jsonb
 
-        return Jsonb(value)
+        return Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False))
 
 
 _store: ConfigStore | None = None
@@ -231,6 +237,16 @@ def normalized_stored_config(config: dict[str, Any] | None) -> dict[str, Any]:
         if grid_type in LEGACY_PARTITION_GRID_TYPE_ALIASES:
             optical["grid_type"] = LEGACY_PARTITION_GRID_TYPE_ALIASES[grid_type]
     return normalized_config(stored)
+
+
+def stored_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    stored = copy.deepcopy(config or {})
+    optical = stored.get("ingest", {}).get("optical", {})
+    if isinstance(optical, dict):
+        optical.pop("minio_endpoint", None)
+        optical.pop("minio_bucket", None)
+        optical.pop("minio_secure", None)
+    return stored
 
 
 def optical_partition_defaults() -> dict[str, Any]:

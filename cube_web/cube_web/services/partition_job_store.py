@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -519,68 +520,91 @@ class PostgresPartitionJobStore(PartitionJobStore):
     def upsert_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
         self.ensure_schema()
         record = _normalized_schema_record(schema)
+        batch_params = _jsonb_record(record, "source_schema", "normalized_payload")
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO partition_batches (
+                    MERGE INTO partition_batches target
+                    USING (
+                      SELECT
+                        %(batch_id)s::text AS batch_id,
+                        %(batch_name)s::text AS batch_name,
+                        %(data_type)s::text AS data_type,
+                        %(source_system)s::text AS source_system,
+                        %(source_schema)s::jsonb AS source_schema,
+                        %(normalized_payload)s::jsonb AS normalized_payload,
+                        %(priority)s::int AS priority,
+                        %(max_auto_retries)s::int AS max_auto_retries
+                    ) source
+                    ON (target.batch_id = source.batch_id)
+                    WHEN MATCHED THEN UPDATE SET
+                      batch_name = source.batch_name,
+                      data_type = source.data_type,
+                      source_system = source.source_system,
+                      source_schema = source.source_schema,
+                      normalized_payload = source.normalized_payload,
+                      priority = source.priority,
+                      max_auto_retries = source.max_auto_retries,
+                      updated_at = now()
+                    WHEN NOT MATCHED THEN INSERT (
                       batch_id, batch_name, data_type, source_system, source_schema,
                       normalized_payload, priority, max_auto_retries
+                    ) VALUES (
+                      source.batch_id, source.batch_name, source.data_type, source.source_system, source.source_schema,
+                      source.normalized_payload, source.priority, source.max_auto_retries
                     )
-                    VALUES (
-                      %(batch_id)s, %(batch_name)s, %(data_type)s, %(source_system)s, %(source_schema)s,
-                      %(normalized_payload)s, %(priority)s, %(max_auto_retries)s
-                    )
-                    ON CONFLICT (batch_id) DO UPDATE SET
-                      batch_name = EXCLUDED.batch_name,
-                      data_type = EXCLUDED.data_type,
-                      source_system = EXCLUDED.source_system,
-                      source_schema = EXCLUDED.source_schema,
-                      normalized_payload = EXCLUDED.normalized_payload,
-                      priority = EXCLUDED.priority,
-                      max_auto_retries = EXCLUDED.max_auto_retries,
-                      updated_at = now()
-                    RETURNING *
                     """,
-                    _jsonb_record(record, "source_schema", "normalized_payload"),
+                    batch_params,
                 )
+                cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (record["batch_id"],))
                 batch = _dict_row(cur)
                 for asset in _assets_from_record(record):
                     cur.execute(
                         """
-                        INSERT INTO partition_assets (
-                          asset_id, batch_id, data_type, scene_id, source_uri, asset_payload
-                        )
-                        VALUES (
-                          %(asset_id)s, %(batch_id)s, %(data_type)s, %(scene_id)s, %(source_uri)s, %(asset_payload)s
-                        )
-                        ON CONFLICT (asset_id) DO UPDATE SET
-                          batch_id = EXCLUDED.batch_id,
-                          data_type = EXCLUDED.data_type,
-                          scene_id = EXCLUDED.scene_id,
-                          source_uri = EXCLUDED.source_uri,
-                          asset_payload = EXCLUDED.asset_payload,
+                        MERGE INTO partition_assets target
+                        USING (
+                          SELECT
+                            %(asset_id)s::text AS asset_id,
+                            %(batch_id)s::text AS batch_id,
+                            %(data_type)s::text AS data_type,
+                            %(scene_id)s::text AS scene_id,
+                            %(source_uri)s::text AS source_uri,
+                            %(asset_payload)s::jsonb AS asset_payload
+                        ) source
+                        ON (target.asset_id = source.asset_id)
+                        WHEN MATCHED THEN UPDATE SET
+                          batch_id = source.batch_id,
+                          data_type = source.data_type,
+                          scene_id = source.scene_id,
+                          source_uri = source.source_uri,
+                          asset_payload = source.asset_payload,
                           status = CASE
-                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.status
+                            WHEN target.batch_id = source.batch_id THEN target.status
                             ELSE 'pending'
                           END,
                           attempt_count = CASE
-                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.attempt_count
+                            WHEN target.batch_id = source.batch_id THEN target.attempt_count
                             ELSE 0
                           END,
                           last_error = CASE
-                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.last_error
+                            WHEN target.batch_id = source.batch_id THEN target.last_error
                             ELSE NULL
                           END,
                           last_run_dir = CASE
-                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.last_run_dir
+                            WHEN target.batch_id = source.batch_id THEN target.last_run_dir
                             ELSE NULL
                           END,
                           partitioned_at = CASE
-                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.partitioned_at
+                            WHEN target.batch_id = source.batch_id THEN target.partitioned_at
                             ELSE NULL
                           END,
                           updated_at = now()
+                        WHEN NOT MATCHED THEN INSERT (
+                          asset_id, batch_id, data_type, scene_id, source_uri, asset_payload
+                        ) VALUES (
+                          source.asset_id, source.batch_id, source.data_type, source.scene_id, source.source_uri, source.asset_payload
+                        )
                         """,
                         _jsonb_record(asset, "asset_payload"),
                     )
@@ -984,12 +1008,12 @@ class PostgresPartitionJobStore(PartitionJobStore):
             import psycopg
         except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
             raise RuntimeError("PostgreSQL partition job storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn)
+        return psycopg.connect(self.dsn, client_encoding="UTF8")
 
     def _jsonb(self, value: dict[str, Any]):
         from psycopg.types.json import Jsonb
 
-        return Jsonb(value)
+        return Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False))
 
 
 _store: PartitionJobStore | None = None
@@ -1286,7 +1310,10 @@ def _asset_result_where_clause(item: dict[str, Any], batch_id: str) -> tuple[str
 def _jsonb_record(record: dict[str, Any], *json_keys: str) -> dict[str, Any]:
     from psycopg.types.json import Jsonb
 
-    return {key: (Jsonb(value) if key in json_keys else value) for key, value in record.items()}
+    return {
+        key: (Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False)) if key in json_keys else value)
+        for key, value in record.items()
+    }
 
 
 def _row_to_dict(cur, row: tuple[Any, ...]) -> dict[str, Any]:

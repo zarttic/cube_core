@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from io import BytesIO
 import tempfile
 from html import escape
 from pathlib import Path
@@ -150,10 +151,57 @@ def _quality_report_html(lines: list[str]) -> str:
 </html>"""
 
 
+def _build_quality_report_pdf_with_reportlab(lines: list[str]) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfgen import canvas
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on runtime extras.
+        raise HTTPException(status_code=500, detail="LibreOffice or reportlab is required for PDF export") from exc
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    buffer = BytesIO()
+    doc = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin_x = 48
+    margin_y = 48
+    line_height = 16
+    body_font = "STSong-Light"
+    body_size = 11
+    title_size = 18
+    y = height - margin_y
+
+    def start_page() -> float:
+        doc.setFont(body_font, body_size)
+        return height - margin_y
+
+    y = start_page()
+    for line in lines:
+        chunks = _wrap_pdf_line(line, width=54) if line else [""]
+        for chunk in chunks:
+            needed = line_height * (1.5 if line == "质检报告" else 1)
+            if y <= margin_y + needed:
+                doc.showPage()
+                y = start_page()
+            if line == "质检报告":
+                doc.setFont(body_font, title_size)
+                doc.drawString(margin_x, y, chunk)
+                doc.setFont(body_font, body_size)
+                y -= line_height * 1.5
+            else:
+                doc.drawString(margin_x, y, chunk)
+                y -= line_height
+        if not line:
+            y -= line_height // 2
+    doc.save()
+    return buffer.getvalue()
+
+
 def _build_quality_report_pdf(lines: list[str]) -> bytes:
     libreoffice = shutil.which("libreoffice")
     if not libreoffice:
-        raise HTTPException(status_code=500, detail="LibreOffice is required for PDF export")
+        return _build_quality_report_pdf_with_reportlab(lines)
     with tempfile.TemporaryDirectory(prefix="cube-web-quality-pdf-") as tmp:
         tmp_dir = Path(tmp)
         html_path = tmp_dir / "quality_report.html"
@@ -188,7 +236,6 @@ def _build_quality_report_pdf(lines: list[str]) -> bytes:
             detail = (result.stderr or result.stdout or "PDF conversion failed").strip()
             raise HTTPException(status_code=500, detail=detail)
         return pdf_path.read_bytes()
-
 
 def quality_report_pdf_response(report: dict, data_type: str) -> Response:
     pdf = _build_quality_report_pdf(_quality_report_lines(report, data_type))

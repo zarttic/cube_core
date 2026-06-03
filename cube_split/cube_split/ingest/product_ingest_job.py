@@ -348,42 +348,96 @@ def upsert_product_facts(conn: sqlite3.Connection, rows: list[ProductFactRecord]
 
 def upsert_product_assets_postgres(conn: Any, rows: list[ProductAssetRecord]) -> None:
     sql = """
-        INSERT INTO rs_product_asset (
+        MERGE INTO rs_product_asset target
+        USING (
+          SELECT
+            %s::text AS dataset,
+            %s::text AS product_name,
+            %s::text AS scene_id,
+            %s::int AS product_year,
+            %s::timestamptz AS acq_time,
+            %s::text AS cog_uri,
+            %s::text AS version,
+            %s::text AS run_id
+        ) source
+        ON (
+          target.dataset = source.dataset
+          AND target.scene_id = source.scene_id
+          AND target.version = source.version
+        )
+        WHEN MATCHED THEN UPDATE SET
+          product_name = source.product_name,
+          product_year = source.product_year,
+          acq_time = source.acq_time,
+          cog_uri = source.cog_uri,
+          run_id = source.run_id,
+          ingest_time = NOW()
+        WHEN NOT MATCHED THEN INSERT (
           dataset, product_name, scene_id, product_year, acq_time, cog_uri, version, run_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT(dataset, scene_id, version) DO UPDATE SET
-          product_name=excluded.product_name,
-          product_year=excluded.product_year,
-          acq_time=excluded.acq_time,
-          cog_uri=excluded.cog_uri,
-          run_id=excluded.run_id,
-          ingest_time=NOW()
+        ) VALUES (
+          source.dataset, source.product_name, source.scene_id, source.product_year, source.acq_time, source.cog_uri, source.version, source.run_id
+        )
     """
-    values = [(row.dataset, row.product_name, row.scene_id, row.product_year, _parse_timestamp(row.acq_time), row.cog_uri, row.version, row.run_id) for row in rows]
+    values = [
+        (row.dataset, row.product_name, row.scene_id, row.product_year, _parse_timestamp(row.acq_time), row.cog_uri, row.version, row.run_id)
+        for row in rows
+    ]
     with conn.cursor() as cur:
         cur.executemany(sql, values)
 
-
 def upsert_product_facts_postgres(conn: Any, rows: list[ProductFactRecord]) -> None:
     sql = """
-        INSERT INTO rs_product_cell_fact (
+        MERGE INTO rs_product_cell_fact target
+        USING (
+          SELECT
+            %s::text AS dataset,
+            %s::text AS product_name,
+            %s::int AS product_year,
+            %s::text AS product_band,
+            %s::text AS grid_type,
+            %s::int AS grid_level,
+            %s::text AS space_code,
+            %s::text AS time_bucket,
+            %s::text AS st_code,
+            %s::double precision AS cell_min_lon,
+            %s::double precision AS cell_min_lat,
+            %s::double precision AS cell_max_lon,
+            %s::double precision AS cell_max_lat,
+            %s::text AS value_ref_uri,
+            %s::double precision AS sample_mean,
+            %s::text AS cube_version,
+            %s::text AS run_id
+        ) source
+        ON (
+          target.dataset = source.dataset
+          AND target.grid_type = source.grid_type
+          AND target.grid_level = source.grid_level
+          AND target.space_code = source.space_code
+          AND target.time_bucket = source.time_bucket
+          AND target.product_band = source.product_band
+          AND target.cube_version = source.cube_version
+        )
+        WHEN MATCHED THEN UPDATE SET
+          product_name = source.product_name,
+          product_year = source.product_year,
+          st_code = source.st_code,
+          cell_min_lon = source.cell_min_lon,
+          cell_min_lat = source.cell_min_lat,
+          cell_max_lon = source.cell_max_lon,
+          cell_max_lat = source.cell_max_lat,
+          value_ref_uri = source.value_ref_uri,
+          sample_mean = source.sample_mean,
+          run_id = source.run_id,
+          ingest_time = NOW()
+        WHEN NOT MATCHED THEN INSERT (
           dataset, product_name, product_year, product_band, grid_type, grid_level,
           space_code, time_bucket, st_code, cell_min_lon, cell_min_lat, cell_max_lon,
           cell_max_lat, value_ref_uri, sample_mean, cube_version, run_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT(dataset, grid_type, grid_level, space_code, time_bucket, product_band, cube_version)
-        DO UPDATE SET
-          product_name=excluded.product_name,
-          product_year=excluded.product_year,
-          st_code=excluded.st_code,
-          cell_min_lon=excluded.cell_min_lon,
-          cell_min_lat=excluded.cell_min_lat,
-          cell_max_lon=excluded.cell_max_lon,
-          cell_max_lat=excluded.cell_max_lat,
-          value_ref_uri=excluded.value_ref_uri,
-          sample_mean=excluded.sample_mean,
-          run_id=excluded.run_id,
-          ingest_time=NOW()
+        ) VALUES (
+          source.dataset, source.product_name, source.product_year, source.product_band, source.grid_type, source.grid_level,
+          source.space_code, source.time_bucket, source.st_code, source.cell_min_lon, source.cell_min_lat, source.cell_max_lon,
+          source.cell_max_lat, source.value_ref_uri, source.sample_mean, source.cube_version, source.run_id
+        )
     """
     values = [
         (
@@ -409,7 +463,6 @@ def upsert_product_facts_postgres(conn: Any, rows: list[ProductFactRecord]) -> N
     ]
     with conn.cursor() as cur:
         cur.executemany(sql, values)
-
 
 def run_product_ingest(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir)
@@ -504,7 +557,12 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
     except ModuleNotFoundError as exc:
         raise RuntimeError("Postgres backend requires `psycopg` package") from exc
 
-    with psycopg.connect(args.postgres_dsn) as conn:
+    try:
+        conn_ctx = psycopg.connect(args.postgres_dsn, client_encoding="UTF8")
+    except TypeError:
+        conn_ctx = psycopg.connect(args.postgres_dsn)
+
+    with conn_ctx as conn:
         try:
             ensure_product_tables_postgres(conn)
             _upsert_job_status_postgres(conn, args.job_id, "running", params, started_at=started_at)
@@ -525,6 +583,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            conn.rollback()
             _upsert_job_status_postgres(conn, args.job_id, "failed", params, error_msg=str(exc), started_at=started_at, finished_at=finished_at)
             conn.commit()
             raise
