@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -377,3 +379,39 @@ def test_download_s3_object_falls_back_to_user_writable_cache(tmp_path: Path, mo
     assert downloaded.exists()
     assert downloaded.read_bytes() == b"data"
     assert fallback_root in downloaded.parents
+
+
+def test_download_s3_object_uses_unique_temp_files_for_concurrent_downloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStat:
+        size = 4
+
+    barrier = threading.Barrier(2)
+    targets: list[str] = []
+
+    class FakeMinioClient:
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def fget_object(self, _bucket, _key, target):
+            targets.append(target)
+            Path(target).write_bytes(b"data")
+            barrier.wait(timeout=5)
+
+    monkeypatch.setattr(ray_partition_core, "_minio_client", lambda _options=None: FakeMinioClient())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _idx: ray_partition_core._download_s3_object("s3://cube/demo/source.tif", tmp_path / "cache", {}),
+                range(2),
+            )
+        )
+
+    assert results[0] == results[1]
+    assert results[0].read_bytes() == b"data"
+    main_download_targets = [
+        target
+        for target in targets
+        if Path(target).name.startswith(".source.tif.") and ".aux.xml." not in target and ".ovr." not in target
+    ]
+    assert len(set(main_download_targets)) == 2
