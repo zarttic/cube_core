@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +9,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
+import cube_split.jobs.ray_partition_core as ray_partition_core
 from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, convert_assets_to_cog
 from cube_split.partition.optical_products import get_optical_product_adapter, supported_optical_product_families
 
@@ -347,3 +350,30 @@ def test_convert_assets_to_cog_can_standardize_target_crs(tmp_path: Path):
         assert ds.crs.to_string() == "EPSG:4326"
         assert ds.width > 0
         assert ds.height > 0
+
+
+def test_download_s3_object_falls_back_to_user_writable_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStat:
+        size = 4
+
+    class FakeMinioClient:
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def fget_object(self, _bucket, _key, target):
+            Path(target).write_bytes(b"data")
+
+    cache_root = tmp_path / "readonly-cache"
+    cache_root.mkdir()
+    cache_root.chmod(0o555)
+    monkeypatch.setattr(ray_partition_core, "_minio_client", lambda _options=None: FakeMinioClient())
+
+    try:
+        downloaded = ray_partition_core._download_s3_object("s3://cube/demo/source.tif", cache_root, {})
+    finally:
+        cache_root.chmod(0o755)
+
+    fallback_root = Path(tempfile.gettempdir()) / f"{cache_root.name}_u{getattr(os, 'getuid', lambda: 0)()}"
+    assert downloaded.exists()
+    assert downloaded.read_bytes() == b"data"
+    assert fallback_root in downloaded.parents

@@ -122,12 +122,17 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         }
         self.batches[batch["batch_id"]] = batch
         for asset in _assets_from_record(batch):
+            existing_asset = self.assets.get(asset["asset_id"], {})
+            same_batch = existing_asset.get("batch_id") == asset["batch_id"]
             self.assets[asset["asset_id"]] = {
-                **self.assets.get(asset["asset_id"], {}),
+                **existing_asset,
                 **asset,
-                "status": self.assets.get(asset["asset_id"], {}).get("status") or "pending",
-                "attempt_count": int(self.assets.get(asset["asset_id"], {}).get("attempt_count") or 0),
-                "created_at": self.assets.get(asset["asset_id"], {}).get("created_at") or now,
+                "status": existing_asset.get("status") if same_batch else "pending",
+                "attempt_count": int(existing_asset.get("attempt_count") or 0) if same_batch else 0,
+                "last_error": existing_asset.get("last_error") if same_batch else None,
+                "last_run_dir": existing_asset.get("last_run_dir") if same_batch else None,
+                "partitioned_at": existing_asset.get("partitioned_at") if same_batch else None,
+                "created_at": existing_asset.get("created_at") or now,
                 "updated_at": now,
             }
         return copy.deepcopy(batch)
@@ -550,9 +555,31 @@ class PostgresPartitionJobStore(PartitionJobStore):
                           %(asset_id)s, %(batch_id)s, %(data_type)s, %(scene_id)s, %(source_uri)s, %(asset_payload)s
                         )
                         ON CONFLICT (asset_id) DO UPDATE SET
+                          batch_id = EXCLUDED.batch_id,
+                          data_type = EXCLUDED.data_type,
                           scene_id = EXCLUDED.scene_id,
                           source_uri = EXCLUDED.source_uri,
                           asset_payload = EXCLUDED.asset_payload,
+                          status = CASE
+                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.status
+                            ELSE 'pending'
+                          END,
+                          attempt_count = CASE
+                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.attempt_count
+                            ELSE 0
+                          END,
+                          last_error = CASE
+                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.last_error
+                            ELSE NULL
+                          END,
+                          last_run_dir = CASE
+                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.last_run_dir
+                            ELSE NULL
+                          END,
+                          partitioned_at = CASE
+                            WHEN partition_assets.batch_id = EXCLUDED.batch_id THEN partition_assets.partitioned_at
+                            ELSE NULL
+                          END,
                           updated_at = now()
                         """,
                         _jsonb_record(asset, "asset_payload"),

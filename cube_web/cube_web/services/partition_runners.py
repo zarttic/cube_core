@@ -402,7 +402,9 @@ def _asset_matches_warning_path(asset: dict, warning_path: str) -> bool:
     source = Path(source_uri)
     if source_uri == warning_path or source.name == warning.name:
         return True
-    if warning.stem == f"{source.stem}_cog" and warning.suffix.lower() == source.suffix.lower():
+    if warning.suffix.lower() == source.suffix.lower() and warning.stem == f"{source.stem}_cog":
+        return True
+    if warning.suffix.lower() == source.suffix.lower() and warning.stem.startswith(f"{source.stem}_") and warning.stem.endswith("_cog"):
         return True
     warning_parts = warning.parts
     source_parts = source.parts

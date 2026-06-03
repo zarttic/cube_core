@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -99,13 +100,32 @@ def _cache_path_for_uri(uri: str, cache_root: Path, suffix: str | None = None) -
     return cache_root / digest / name
 
 
+def _fallback_cache_root(cache_root: Path) -> Path:
+    uid = getattr(os, "getuid", lambda: 0)()
+    return Path(tempfile.gettempdir()) / f"{cache_root.name}_u{uid}"
+
+
+def _cache_target_for_uri(uri: str, cache_root: Path) -> Path:
+    target = _cache_path_for_uri(uri, cache_root)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        fallback = _cache_path_for_uri(uri, _fallback_cache_root(cache_root))
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
+    if os.access(target.parent, os.W_OK | os.X_OK):
+        return target
+    fallback = _cache_path_for_uri(uri, _fallback_cache_root(cache_root))
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | None = None) -> Path:
     from minio.error import S3Error
 
     bucket, key = _parse_s3_uri(uri)
     client = _minio_client(options)
-    target = _cache_path_for_uri(uri, cache_root)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target = _cache_target_for_uri(uri, cache_root)
     stat = client.stat_object(bucket, key)
     if not target.exists() or target.stat().st_size != stat.size:
         tmp = target.with_suffix(target.suffix + ".part")

@@ -28,6 +28,23 @@ def _write_tif(path: Path, *, crs: str = "EPSG:4326") -> None:
         ds.write(data)
 
 
+def _write_zero_tif(path: Path, *, crs: str = "EPSG:4326") -> None:
+    data = np.zeros((1, 10, 10), dtype=np.uint16)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=10,
+        height=10,
+        count=1,
+        dtype=data.dtype,
+        crs=crs,
+        transform=from_origin(116.0, 40.0, 0.01, 0.01),
+        nodata=0,
+    ) as ds:
+        ds.write(data)
+
+
 def test_quality_check_passes_valid_partition_rows(tmp_path: Path):
     asset = tmp_path / "asset_cog.tif"
     _write_tif(asset)
@@ -147,6 +164,42 @@ def test_quality_check_fails_invalid_window_and_crs(tmp_path: Path):
     failed_names = {check["name"] for check in report["checks"] if check["status"] == "FAIL"}
     assert "cog_crs" in failed_names
     assert "window_bounds" in failed_names
+
+
+def test_quality_check_marks_zero_masked_samples_as_warn_not_fail(tmp_path: Path):
+    asset = tmp_path / "zero_asset_cog.tif"
+    _write_zero_tif(asset)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    row = {
+        "scene_id": "scene-zero",
+        "band": "sr_band2",
+        "asset_path": str(asset),
+        "acq_time": "2020-07-01T00:00:00Z",
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "space_code": "wx4g0",
+        "st_code": "gh:5:wx4g0:20200701:v1",
+        "time_bucket": "20200701",
+        "cell_min_lon": 116.0,
+        "cell_min_lat": 39.9,
+        "cell_max_lon": 116.1,
+        "cell_max_lat": 40.0,
+        "window_col_off": 0,
+        "window_row_off": 0,
+        "window_width": 5,
+        "window_height": 5,
+    }
+    (run_dir / "index_rows.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    report = run_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326"))
+
+    assert report["status"] == "WARN"
+    asset_readability = next(check for check in report["checks"] if check["name"] == "asset_readability")
+    pixel_sample = next(check for check in report["checks"] if check["name"] == "pixel_sample")
+    assert asset_readability["status"] == "PASS"
+    assert pixel_sample["status"] == "WARN"
+    assert pixel_sample["metrics"]["zero_asset_count"] == 1
 
 
 def test_carbon_quality_check_passes_valid_observation_rows(tmp_path: Path):

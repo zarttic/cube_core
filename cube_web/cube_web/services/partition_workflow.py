@@ -443,6 +443,12 @@ def _asset_matches_warning_path(asset: dict[str, Any], warning_path: str) -> boo
         warning_stem, warning_suffix = _split_name(warning_name)
         if warning_stem == f"{source_stem}_cog" and warning_suffix.lower() == source_suffix.lower():
             return True
+        if (
+            warning_suffix.lower() == source_suffix.lower()
+            and warning_stem.startswith(f"{source_stem}_")
+            and warning_stem.endswith("_cog")
+        ):
+            return True
     return len(source) <= len(warning) and tuple(warning[-len(source) :]) == tuple(source)
 
 

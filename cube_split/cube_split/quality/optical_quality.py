@@ -142,7 +142,12 @@ def _asset_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
-def _validate_assets(rows: list[dict[str, Any]], target_crs: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _validate_assets(
+    rows: list[dict[str, Any]],
+    target_crs: str,
+    *,
+    source_cache_dir: str = "",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     checks: list[dict[str, Any]] = []
     assets: list[dict[str, Any]] = []
     missing_assets: list[str] = []
@@ -150,9 +155,10 @@ def _validate_assets(rows: list[dict[str, Any]], target_crs: str) -> tuple[list[
     crs_mismatches: list[dict[str, str | None]] = []
     window_errors: list[dict[str, Any]] = []
     valid_pixel_stats: list[dict[str, Any]] = []
+    resolve_options = {"source_cache_dir": source_cache_dir} if source_cache_dir else None
 
     for asset_path, asset_index_rows in _asset_rows(rows).items():
-        local_asset_path = resolve_asset_source_path(asset_path)
+        local_asset_path = resolve_asset_source_path(asset_path, resolve_options)
         path = Path(local_asset_path)
         if not path.exists():
             missing_assets.append(asset_path)
@@ -176,8 +182,13 @@ def _validate_assets(rows: list[dict[str, Any]], target_crs: str) -> tuple[list[
                     crs_mismatches.append({"path": asset_path, "crs": crs_text})
 
                 sample = ds.read(1, masked=True, out_shape=(1, min(ds.height, 512), min(ds.width, 512)))
-                valid_count = int(sample.count()) if hasattr(sample, "count") else int(sample.size)
-                nonzero_count = int((sample != 0).sum())
+                if hasattr(sample, "mask"):
+                    valid_mask = ~sample.mask
+                    valid_count = int(valid_mask.sum())
+                    nonzero_count = int(((sample.data != 0) & valid_mask).sum())
+                else:
+                    valid_count = int(sample.size)
+                    nonzero_count = int((sample != 0).sum())
                 valid_pixel_stats.append(
                     {
                         "path": asset_path,
@@ -297,6 +308,7 @@ def _summarize(rows: list[dict[str, Any]], assets: list[dict[str, Any]], checks:
 def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = Path(args.run_dir)
     target_crs = getattr(args, "target_crs", "EPSG:4326") or "EPSG:4326"
+    source_cache_dir = str(getattr(args, "source_cache_dir", "") or "")
     rows_path = run_dir / "index_rows.jsonl"
     checks: list[dict[str, Any]] = []
 
@@ -331,7 +343,7 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
         checks.append(_validate_time_buckets(rows))
         checks.append(_validate_cell_bboxes(rows))
         checks.append(_validate_duplicates(rows))
-        asset_checks, assets = _validate_assets(rows, target_crs)
+        asset_checks, assets = _validate_assets(rows, target_crs, source_cache_dir=source_cache_dir)
         checks.extend(asset_checks)
 
     report = {
