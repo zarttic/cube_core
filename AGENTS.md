@@ -15,17 +15,17 @@
 ## 构建、测试与开发命令
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests cube_split/tests
 ```
 
 运行默认 encoder 和 split 包测试。Web 相关变更还要运行：
 
 ```bash
-cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 ```
 
 ```bash
-cd cube_encoder && python -m build
+cd cube_encoder && python3.11 -m build
 ```
 
 构建 `cube-encoder` 分发包。
@@ -80,7 +80,7 @@ cd cube_web/frontend && npm run dev
 `cube_web/` 目录运行：
 
 ```bash
-PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 ```
 
 ## Commit 与 PR 规则

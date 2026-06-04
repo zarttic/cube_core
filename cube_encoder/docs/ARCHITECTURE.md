@@ -1,6 +1,6 @@
 # cube_encoder 架构说明
 
-更新时间：2026-04-24  
+更新时间：2026-06-04
 适用范围：`cube_encoder`
 
 ## 1. 定位
@@ -25,6 +25,7 @@
 
 - `geohash`：定位、覆盖、拓扑和几何反算。
 - `mgrs`：定位、覆盖、拓扑和几何反算。
+- `tile_matrix`：Web Mercator 平面瓦片格网定位、覆盖和几何反算。
 - `isea4h`：基于 Uber H3 的第一阶段可运行能力。
 
 ## 3. 分层结构
@@ -72,16 +73,18 @@ cells = sdk.cover(
 
 ## 5. 测试与质量
 
+当前运行基线为 Python 3.11；本机 `python3.11 --version` 为 Python 3.11.6。
+
 本包测试入口：
 
 ```bash
-python -m pytest -q tests
+python3.11 -m pytest -q tests
 ```
 
 性能烟测入口：
 
 ```bash
-python -m grid_core.app.perf_smoke
+python3.11 -m grid_core.app.perf_smoke
 ```
 
 涉及 SDK/API 行为变化时，应同时检查 `cube_split` 和 `cube_web` 的调用链。

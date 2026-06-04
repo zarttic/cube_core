@@ -3,6 +3,12 @@
 本仓库是一个 Python monorepo，覆盖格网编码、遥感数据剖分、入库/回读、
 质检和 Web 管理入口。
 
+## 当前运行版本
+
+- Python：`python3.11`，当前机器为 Python 3.11.6。命令示例均显式使用 `python3.11`。
+- Node.js：当前机器为 v24.16.0。
+- npm：当前机器为 11.13.0。
+
 ## 包结构
 
 - `cube_encoder`：格网 locate/cover、拓扑、时空编码 API，以及
@@ -22,30 +28,30 @@
 - `cube_web/docs/README.md`：Web 主机、路由、前端构建、任务/质检存储和测试说明。
 - `AGENTS.md`：仓库协作规则、默认测试命令、生产/演示分离规则和本地基础设施说明。
 
-历史报告和一次性联调记录保留在各包 `docs/archive/` 或 `docs/test_reports/` 下。
-若归档内容与当前入口文档冲突，以当前入口文档和代码为准。
+旧版运行基线、早期 demo 前端、历史大方案和一次性联调报告已经从当前文档集中清理。
+如需追溯历史，请使用 Git 历史查看旧文档；当前开发、运行和交付只以本文档入口和代码为准。
 
 ## 开发命令
 
 在仓库根目录运行默认跨包测试：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests cube_split/tests
 ```
 
 Web/API 变更后运行 Web 测试：
 
 ```bash
 cd cube_web
-PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 ```
 
 构建 Python 包：
 
 ```bash
-cd cube_encoder && python -m build
-cd ../cube_split && python -m build
-cd ../cube_web && python -m build
+cd cube_encoder && python3.11 -m build
+cd ../cube_split && python3.11 -m build
+cd ../cube_web && python3.11 -m build
 ```
 
 构建前端：

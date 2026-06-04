@@ -15,16 +15,16 @@
 ## 快速开始
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
+python3.11 -m pip install -e ".[dev]"
+python3.11 -m uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 
 ## SDK 使用
 
 ```bash
-pip install -e .
+python3.11 -m pip install -e .
 ```
 
 ```python
@@ -47,8 +47,8 @@ st_code = sdk.generate_st_code(
 构建并安装 wheel：
 
 ```bash
-python -m build
-pip install dist/cube_encoder-*.whl
+python3.11 -m build
+python3.11 -m pip install dist/cube_encoder-*.whl
 ```
 
 ## API 示例
@@ -68,25 +68,21 @@ curl -X POST http://127.0.0.1:50012/v1/code/st \
 在本包内运行：
 
 ```bash
-python -m pytest -q tests
-python -m grid_core.app.perf_smoke
+python3.11 -m pytest -q tests
+python3.11 -m grid_core.app.perf_smoke
 ```
 
 在仓库根目录运行跨包测试：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests cube_split/tests
 ```
 
 ## 文档入口
 
 - [文档索引](docs/README.md)
 - [架构说明](docs/ARCHITECTURE.md)
-- [入库与存储设计归档](docs/INGEST_STORAGE_DESIGN.md)
-- [项目历史](docs/PROJECT_HISTORY.md)
 - [SDK 发布规范](docs/SDK_RELEASE.md)
-- [开发日志](docs/DEVELOPMENT_LOG.md)
-- [Bug 日志](docs/BUG_LOG.md)
 - [变更记录](CHANGELOG.md)
 
 ## 职责边界

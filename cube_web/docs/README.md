@@ -1,11 +1,15 @@
 # cube_web 文档
 
-更新时间：2026-06-02
+更新时间：2026-06-04
 
-历史设计稿：
+当前运行基线：
 
-- [数据驱动剖分任务编排开发规划](archive/partition-task-orchestration-plan.md)：2026-05-30
-  阶段设计稿，已部分落地并归档；当前 API 和运行说明以本文为准。
+- Python：`python3.11`，当前机器为 Python 3.11.6。
+- Node.js：当前机器为 v24.16.0。
+- npm：当前机器为 11.13.0。
+
+旧版运行基线、早期 demo 前端、阶段规划稿和一次性验收报告已经清理出当前文档集。
+如需追溯历史，使用 Git 历史查看旧文档；当前 API 和运行说明以本文为准。
 
 ## 1. 定位
 
@@ -154,11 +158,11 @@ PostgreSQL `quality_reports`。`latest`、`history`、`report`、`pdf` 和 `txt`
 从 `cube_web/` 目录运行：
 
 ```bash
-PYTHONPATH=../cube_encoder:../cube_split:. pytest tests
+PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 ```
 
 涉及 API 契约变化时，同时检查：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web pytest cube_encoder/tests cube_split/tests
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests cube_split/tests
 ```

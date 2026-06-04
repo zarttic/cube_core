@@ -12,10 +12,10 @@
 1. 更新 `pyproject.toml` 版本号。
 2. 在 `CHANGELOG.md` 增加发布记录。
 3. 确认测试通过：
-   - `python -m pytest -q tests`
-   - `python -m grid_core.app.perf_smoke`
+   - `python3.11 -m pytest -q tests`
+   - `python3.11 -m grid_core.app.perf_smoke`
 4. 确认 CI 中的包构建和安装检查通过：
-   - `python -m build`
+   - `python3.11 -m build`
    - wheel 安装烟测
    - sdist 安装烟测
 
