@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
+  ArcGisMapServerImageryProvider,
   buildModuleUrl,
   Cartesian2,
   Cartesian3,
@@ -36,6 +37,8 @@ const props = defineProps({
 const emit = defineEmits(['point-selected', 'circle-drawn']);
 
 const EARTH_KM = 6371;
+const DEFAULT_PREVIEW_IMAGERY_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer';
+const PREVIEW_IMAGERY_URL = (import.meta.env.VITE_GLOBE_IMAGERY_URL || DEFAULT_PREVIEW_IMAGERY_URL).trim();
 
 const mapEl = ref(null);
 const fallbackSphere = ref(null);
@@ -425,6 +428,25 @@ function setupInteractions() {
   }, ScreenSpaceEventType.LEFT_UP);
 }
 
+function createNaturalEarthLayer() {
+  return ImageryLayer.fromProviderAsync(
+    TileMapServiceImageryProvider.fromUrl(buildModuleUrl('Assets/Textures/NaturalEarthII')),
+  );
+}
+
+async function createPreviewBaseLayer() {
+  if (!PREVIEW_IMAGERY_URL) return createNaturalEarthLayer();
+  try {
+    const provider = await ArcGisMapServerImageryProvider.fromUrl(PREVIEW_IMAGERY_URL, {
+      enablePickFeatures: false,
+    });
+    return new ImageryLayer(provider);
+  } catch (error) {
+    console.warn('Preview imagery unavailable, falling back to NaturalEarthII.', error);
+    return createNaturalEarthLayer();
+  }
+}
+
 async function initViewer() {
   if (!canCreateWebglContext()) {
     useFallback.value = true;
@@ -432,11 +454,10 @@ async function initViewer() {
   }
 
   try {
+    const baseLayer = await createPreviewBaseLayer();
     viewer = new Viewer(mapEl.value, {
       animation: false,
-      baseLayer: ImageryLayer.fromProviderAsync(
-        TileMapServiceImageryProvider.fromUrl(buildModuleUrl('Assets/Textures/NaturalEarthII')),
-      ),
+      baseLayer,
       baseLayerPicker: false,
       fullscreenButton: false,
       geocoder: false,
