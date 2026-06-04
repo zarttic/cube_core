@@ -16,7 +16,6 @@ def generate_st(req: STCodeGenerateRequest) -> STCodeGenerateResponse:
         space_code=req.space_code,
         timestamp=req.timestamp,
         time_granularity=req.time_granularity,
-        version=req.version,
     )
     return STCodeGenerateResponse(st_code=result.st_code)
 
@@ -29,7 +28,6 @@ def parse_st(req: STCodeParseRequest) -> STCodeParseResponse:
         level=result.level,
         space_code=result.space_code,
         time_code=result.time_code,
-        version=result.version,
     )
 
 
@@ -40,6 +38,5 @@ def batch_generate_st(req: STCodeBatchGenerateRequest) -> STCodeBatchGenerateRes
         level=req.level,
         items=[{"space_code": item.space_code, "timestamp": item.timestamp} for item in req.items],
         time_granularity=req.time_granularity,
-        version=req.version,
     )
     return STCodeBatchGenerateResponse(st_codes=st_codes, statistics={"count": len(st_codes)})

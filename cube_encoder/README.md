@@ -41,7 +41,6 @@ st_code = sdk.generate_st_code(
     space_code=cell.space_code,
     timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
     time_granularity="minute",
-    version="v1",
 ).st_code
 ```
 
@@ -61,7 +60,7 @@ curl -X POST http://127.0.0.1:50012/v1/grid/locate \
 
 curl -X POST http://127.0.0.1:50012/v1/code/st \
   -H 'Content-Type: application/json' \
-  -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute","version":"v1"}'
+  -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute"}'
 ```
 
 ## 测试

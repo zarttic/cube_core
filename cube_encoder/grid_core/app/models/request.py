@@ -45,7 +45,6 @@ class STCodeGenerateRequest(BaseModel):
     space_code: str
     timestamp: datetime
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
-    version: str = "v1"
 
 
 class STCodeParseRequest(BaseModel):
@@ -61,7 +60,6 @@ class STCodeBatchGenerateRequest(BaseModel):
     grid_type: GridType = GridType.GEOHASH
     level: int = Field(ge=1, le=12)
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
-    version: str = "v1"
     items: List[STCodeBatchItem] = Field(min_length=1, max_length=1000)
 
 

@@ -6,6 +6,7 @@ import { viteStaticCopy } from 'vite-plugin-static-copy';
 
 const cesiumSource = 'node_modules/cesium/Build/Cesium';
 const cesiumBaseUrl = 'cesiumStatic';
+const backendTarget = process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50039';
 
 export default defineConfig({
   define: {
@@ -28,14 +29,22 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../cube_web/web',
+    outDir: 'dist',
     emptyOutDir: true,
   },
   server: {
+    host: '0.0.0.0',
+    port: 50040,
+    strictPort: true,
     proxy: {
-      '/v1': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
-      '/api': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
-      '/health': process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:50040',
+      '/v1': backendTarget,
+      '/api': backendTarget,
+      '/health': backendTarget,
     },
+  },
+  preview: {
+    host: '0.0.0.0',
+    port: 50040,
+    strictPort: true,
   },
 });

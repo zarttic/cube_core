@@ -106,7 +106,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
 
     def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
         row = dict(group[0])
-        row["st_code"] = "gh:5:wtw3s:20260421:v1"
+        row["st_code"] = "gh:5:wtw3s:20260421"
         row["time_bucket"] = "20260421"
         row["space_code_prefix"] = "wtw"
         row["intersect_min_lon"] = row["cell_min_lon"]

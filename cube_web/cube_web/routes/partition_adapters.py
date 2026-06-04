@@ -21,6 +21,10 @@ def run_carbon_partition_demo(payload: dict | None = None) -> dict:
     return _partition_runners()._run_carbon_partition_demo(payload=payload)
 
 
+def run_carbon_partition_run(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_carbon_partition_demo(mode="partition_run", payload=payload)
+
+
 def run_carbon_partition_test(payload: dict | None = None) -> dict:
     return _partition_runners()._run_carbon_partition_test(payload)
 
@@ -31,6 +35,10 @@ def run_carbon_partition_retry(payload: dict | None = None) -> dict:
 
 def run_product_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
     return _partition_runners()._run_product_partition_demo(payload, mode=mode)
+
+
+def run_product_partition_run(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_product_partition_demo(payload, mode="partition_run")
 
 
 def run_product_partition_test(payload: dict | None = None) -> dict:
@@ -56,6 +64,10 @@ def run_radar_partition_demo(payload: dict | None = None, mode: str = "partition
     return _partition_runners()._run_radar_partition_demo(payload, mode=mode)
 
 
+def run_radar_partition_run(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_radar_partition_demo(payload, mode="partition_run")
+
+
 def run_radar_partition_test(payload: dict | None = None) -> dict:
     return _partition_runners()._run_radar_partition_test(payload)
 
@@ -66,6 +78,10 @@ def run_radar_partition_retry(payload: dict | None = None) -> dict:
 
 def run_entity_partition_demo(payload: dict | None = None) -> dict:
     return _partition_runners()._run_entity_partition_demo(payload)
+
+
+def run_entity_partition_run(payload: dict | None = None) -> dict:
+    return _partition_runners()._run_entity_partition_from_payload(payload, mode="partition_run")
 
 
 def run_entity_partition_test(payload: dict | None = None) -> dict:
@@ -82,6 +98,10 @@ def run_optical_partition_from_payload(payload: dict | None = None, mode: str = 
 
 def run_optical_partition_demo(payload: dict | None = None) -> dict:
     return _partition_runners()._run_optical_partition_demo(payload)
+
+
+def run_optical_partition_run(payload: dict | None = None) -> dict:
+    return run_optical_partition_from_payload(payload, mode="partition_run")
 
 
 def run_optical_partition_test(payload: dict | None = None) -> dict:
@@ -220,20 +240,35 @@ def partition_optical_retry(payload: PartitionRetryRequest | dict | None = None)
 
 
 def partition_optical_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    return partition_optical_demo(payload)
+    try:
+        return run_optical_partition_run(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_carbon_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    return partition_carbon_demo(payload)
+    try:
+        return run_carbon_partition_run(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_product_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    return partition_product_demo(payload)
+    try:
+        return run_product_partition_run(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_radar_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    return partition_radar_demo(payload)
+    try:
+        return run_radar_partition_run(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)
 
 
 def partition_entity_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
-    return partition_entity_demo(payload)
+    try:
+        return run_entity_partition_run(payload_from_model(payload) if payload is not None else None)
+    except Exception as exc:
+        raise_http_unless_cancelled(exc)

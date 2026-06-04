@@ -256,7 +256,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
                 {
                     "grid_level": kwargs["level"],
                     "space_code": item["point"][0],
-                    "st_code": f"gh:7:{item['point'][0]}:20260424:v1",
+                    "st_code": f"gh:7:{item['point'][0]}:20260424",
                     "time_code": "20260424",
                 }
                 for item in kwargs["items"]
@@ -342,7 +342,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
                 {
                     "grid_level": kwargs["level"],
                     "space_code": item["point"][0],
-                    "st_code": f"gh:7:{item['point'][0]}:20260424:v1",
+                    "st_code": f"gh:7:{item['point'][0]}:20260424",
                     "time_code": "20260424",
                 }
                 for item in kwargs["items"]
@@ -424,13 +424,13 @@ def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-a",
-                    "st_code": "gh:7:cell-a:20260424:v1",
+                    "st_code": "gh:7:cell-a:20260424",
                     "time_code": "20260424",
                 },
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-b",
-                    "st_code": "gh:7:cell-b:20260424:v1",
+                    "st_code": "gh:7:cell-b:20260424",
                     "time_code": "20260424",
                 },
             ]
@@ -472,7 +472,7 @@ def test_carbon_partition_chunk_rejects_mismatched_batch_locate_results(monkeypa
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-a",
-                    "st_code": "gh:7:cell-a:20260424:v1",
+                    "st_code": "gh:7:cell-a:20260424",
                     "time_code": "20260424",
                 }
             ]

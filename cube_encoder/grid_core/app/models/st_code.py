@@ -6,5 +6,4 @@ class STCode(BaseModel):
     level: int
     space_code: str
     time_code: str
-    version: str
     st_code: str

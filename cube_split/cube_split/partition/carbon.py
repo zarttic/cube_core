@@ -101,7 +101,6 @@ def partition_observation(
         space_code=cell.space_code,
         timestamp=_parse_time(observation.acq_time),
         time_granularity=config.time_granularity,
-        version="v1",
     ).st_code
     return {
         "data_type": "carbon_satellite",
@@ -403,7 +402,6 @@ def _partition_observation_chunk(
             for obs in observations
         ],
         time_granularity=config.time_granularity,
-        version="v1",
     )
     if len(located) != len(observations):
         raise RuntimeError(
@@ -541,7 +539,6 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "cube_split/results/**",
             "cube_web/frontend/node_modules/**",
             "cube_web/frontend/dist/**",
-            "cube_web/cube_web/web/assets/**",
         ],
         "env_vars": {
             "CUBE_PROJECT_ROOT": ".",

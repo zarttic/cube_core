@@ -1,13 +1,13 @@
 # cube_web
 
-`cube_web` 承载 FastAPI Web 主机、Vue 构建后的静态 UI，以及面向前端的
+`cube_web` 承载 FastAPI 后端、独立 Vue/Vite 前端，以及面向前端的
 encoder SDK facade、托管剖分任务和质检报告 API。
 
 详细说明见 [docs/README.md](docs/README.md)。
 
 ## 职责边界
 
-- `cube_web`：HTTP 托管、静态资源、可视化交互、API 请求适配、剖分任务编排和质检报告展示。
+- `cube_web`：HTTP API、可视化交互、API 请求适配、剖分任务编排和质检报告展示。
 - `cube_encoder`：格网 locate、cover、topology 和时空编码行为。
 - `cube_split`：剖分、入库、质检实现和 AOI 回读链路。
 
@@ -16,7 +16,7 @@ encoder SDK facade、托管剖分任务和质检报告 API。
 从仓库根目录运行：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50039
 ```
 
 质检报告和托管剖分任务使用 PostgreSQL 持久化。使用这些链路前需要设置
@@ -41,7 +41,8 @@ npm install
 npm run dev
 ```
 
-构建后的前端资产从 `cube_web/cube_web/web/` 提供服务。
+前端开发服务监听 `50040`，并把 `/v1`、`/api` 和 `/health` 代理到后端 `50039`。
+构建后的前端资产写入 `cube_web/frontend/dist/`，不再提交到后端包内。
 
 ## API 概览
 

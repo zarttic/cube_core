@@ -20,7 +20,7 @@ def _carbon_row(observation_id: str) -> dict:
         "grid_type": "isea4h",
         "grid_level": 5,
         "space_code": "85230a2ffffffff",
-        "st_code": "hx:5:85230a2ffffffff:20201231:v1",
+        "st_code": "hx:5:85230a2ffffffff:20201231",
         "xco2": 417.384,
         "quality_flag": "1",
         "center_lon": -167.413,

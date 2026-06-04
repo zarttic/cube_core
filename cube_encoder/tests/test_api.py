@@ -65,10 +65,9 @@ def test_st_code_functions():
         space_code=code,
         timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity="minute",
-        version="v1",
     )
     gen_resp = generate_st(gen_req)
-    assert gen_resp.st_code == f"gh:7:{code}:202603091530:v1"
+    assert gen_resp.st_code == f"gh:7:{code}:202603091530"
 
     parse_resp = parse_st(STCodeParseRequest(st_code=gen_resp.st_code))
     assert parse_resp.grid_type == "geohash"
@@ -82,7 +81,6 @@ def test_st_code_batch_function():
         grid_type="geohash",
         level=7,
         time_granularity="minute",
-        version="v1",
         items=[
             {"space_code": c1, "timestamp": "2026-03-09T15:30:00Z"},
             {"space_code": c2, "timestamp": "2026-03-09T15:31:00Z"},
@@ -90,7 +88,7 @@ def test_st_code_batch_function():
     )
     resp = batch_generate_st(req)
     assert resp.statistics["count"] == 2
-    assert resp.st_codes[0] == f"gh:7:{c1}:202603091530:v1"
+    assert resp.st_codes[0] == f"gh:7:{c1}:202603091530"
 
 
 def test_cover_with_bbox_input():

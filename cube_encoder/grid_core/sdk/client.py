@@ -129,7 +129,6 @@ class CubeEncoderSDK:
         space_code: str,
         timestamp: datetime,
         time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
-        version: str = "v1",
     ) -> STCode:
         parsed_grid_type = _parse_enum(grid_type, GridType)
         parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
@@ -139,7 +138,6 @@ class CubeEncoderSDK:
             space_code=space_code,
             timestamp=timestamp,
             time_granularity=parsed_time_granularity,
-            version=version,
         )
 
     def batch_generate_st_codes(
@@ -148,7 +146,6 @@ class CubeEncoderSDK:
         level: int,
         items: list[dict[str, Any]],
         time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
-        version: str = "v1",
     ) -> list[str]:
         parsed_grid_type = _parse_enum(grid_type, GridType)
         parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
@@ -157,7 +154,6 @@ class CubeEncoderSDK:
             level=level,
             items=items,
             time_granularity=parsed_time_granularity,
-            version=version,
         )
 
     def batch_locate_st_codes(
@@ -166,7 +162,6 @@ class CubeEncoderSDK:
         level: int,
         items: list[dict[str, Any]],
         time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
-        version: str = "v1",
     ) -> list[dict[str, Any]]:
         parsed_grid_type = _parse_enum(grid_type, GridType)
         parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
@@ -183,7 +178,6 @@ class CubeEncoderSDK:
                 level=level,
                 space_code=space_code,
                 time_code=time_code,
-                version=version,
             )
             results.append(
                 {

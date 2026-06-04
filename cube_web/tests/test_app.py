@@ -361,7 +361,7 @@ def test_encoding_view_displays_generic_grid_type_names():
     assert "MGRS" not in source
     assert "Tile Matrix" not in source
     assert "ISEA4H" not in source
-    assert "tm:8:8/420/71:202603091530:v1" in source
+    assert "tm:8:8/420/71:202603091530" in source
     assert "层级与空间编码" in source
 
 
@@ -391,10 +391,10 @@ def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
         quality_report_store_module.set_quality_report_store(None)
 
 
-def test_home_page_serves_index():
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert "分析就绪数据剖分管理系统" in resp.text
+@pytest.mark.parametrize("path", ["/", "/encoding", "/encoding.html", "/config", "/callback"])
+def test_backend_does_not_serve_frontend_routes(path):
+    resp = client.get(path)
+    assert resp.status_code == 404
 
 
 def test_health_reports_runtime_config_sources():
@@ -425,24 +425,6 @@ def test_health_selectively_runs_dependency_checks(monkeypatch):
     assert body["status"] == "degraded"
     assert body["failed_checks"] == ["ray"]
     assert set(body["checks"]) == {"service", "config", "postgres", "ray", "minio", "bucket"}
-
-
-def test_encoding_page_serves_html():
-    resp = client.get("/encoding")
-    assert resp.status_code == 200
-    assert "分析就绪数据剖分管理系统" in resp.text
-
-
-def test_legacy_encoding_html_serves_vue_app():
-    resp = client.get("/encoding.html")
-    assert resp.status_code == 200
-    assert "分析就绪数据剖分管理系统" in resp.text
-
-
-def test_config_page_serves_vue_app():
-    resp = client.get("/config")
-    assert resp.status_code == 200
-    assert "分析就绪数据剖分管理系统" in resp.text
 
 
 def test_auth_config_exposes_subsystem_client(monkeypatch):
@@ -571,7 +553,7 @@ def test_grid_locate_sdk_endpoint():
 def test_code_parse_sdk_endpoint():
     locate_resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "level": 7, "point": [116.391, 39.907]})
     space_code = locate_resp.json()["cell"]["space_code"]
-    resp = client.post("/v1/code/parse", json={"st_code": f"gh:7:{space_code}:202603091530:v1"})
+    resp = client.post("/v1/code/parse", json={"st_code": f"gh:7:{space_code}:202603091530"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["grid_type"] == "geohash"
@@ -854,7 +836,7 @@ def test_carbon_partition_retry_runner_reuses_request_payload(monkeypatch):
         }
     )
 
-    assert captured["mode"] == "partition_demo"
+    assert captured["mode"] == "partition_retry"
     assert captured["payload"]["selected_observations"][0]["source_index"] == 3
     assert result["mode"] == "partition_retry"
 
@@ -1252,16 +1234,16 @@ def test_partition_demo_rejects_mgrs_grid_type():
 
 
 def test_partition_run_can_run_as_async_task(monkeypatch):
-    def fake_run_product_partition_demo(payload=None):
+    def fake_run_product_partition_run(payload=None):
         assert payload == {"grid_type": "geohash", "grid_level": 5}
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "product",
             "rows": 20,
         }
 
-    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
 
     submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
 
@@ -1282,6 +1264,7 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
 
     assert task_body is not None
     assert task_body["status"] == "completed"
+    assert task_body["result"]["mode"] == "partition_run"
     assert task_body["result"]["rows"] == 20
 
 
@@ -1569,11 +1552,11 @@ def test_radar_schema_first_batch_run_accepts_non_sentinel_filename(monkeypatch)
     )
     captured = {}
 
-    def fake_run_radar_partition_demo(payload=None):
+    def fake_run_radar_partition_run(payload=None):
         captured["payload"] = payload
-        return {"status": "completed", "mode": "partition_demo", "data_type": "radar", "rows": 1}
+        return {"status": "completed", "mode": "partition_run", "data_type": "radar", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_radar_partition_demo", fake_run_radar_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_radar_partition_run", fake_run_radar_partition_run)
 
     assert import_resp.status_code == 200
     submit_resp = client.post("/v1/partition/batches/RADAR_SCHEMA_FIRST/run", json={})
@@ -1676,10 +1659,10 @@ def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
         },
     )
 
-    def fake_run_optical_partition_demo(payload=None):
-        return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
+    def fake_run_optical_partition_run(payload=None):
+        return {"status": "completed", "mode": "partition_run", "data_type": "optical", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_ATTEMPTS/run", json={})
     assert submit_resp.status_code == 202
@@ -1710,11 +1693,11 @@ def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypat
         },
     )
 
-    def fake_run_product_partition_demo(payload=None):
+    def fake_run_product_partition_run(payload=None):
         assert payload["batch_id"] == "BATCH_RUN_SUCCESS"
-        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 2}
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 2}
 
-    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_RUN_SUCCESS/run", json={})
     assert submit_resp.status_code == 202
@@ -1749,12 +1732,12 @@ def test_partition_batch_run_reuses_active_task_instead_of_duplicate_attempt(mon
     release_runner = threading.Event()
     calls = []
 
-    def slow_optical_partition_demo(payload=None):
+    def slow_optical_partition_run(payload=None):
         calls.append(payload)
         release_runner.wait(timeout=3)
-        return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
+        return {"status": "completed", "mode": "partition_run", "data_type": "optical", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", slow_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", slow_optical_partition_run)
 
     try:
         first_resp = client.post("/v1/partition/batches/BATCH_ACTIVE_IDEMPOTENT/run", json={})
@@ -1795,10 +1778,10 @@ def test_partition_batch_run_persists_quality_pass(monkeypatch):
         },
     )
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 3,
             "quality_status": "PASS",
@@ -1810,7 +1793,7 @@ def test_partition_batch_run_persists_quality_pass(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_PASS/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1839,10 +1822,10 @@ def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
         },
     )
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 3,
             "quality_status": "FAIL",
@@ -1854,7 +1837,7 @@ def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_FAIL/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1888,12 +1871,12 @@ def test_partition_batch_quality_warn_enters_manual_queue_and_retries_warning_as
     )
     calls = []
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
         if len(calls) == 1:
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 3,
                 "quality_status": "WARN",
@@ -1913,14 +1896,14 @@ def test_partition_batch_quality_warn_enters_manual_queue_and_retries_warning_as
         assert calls[-1] == ["asset-b"]
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 1,
             "quality_status": "PASS",
             "quality_report_id": "quality-warn-pass-report",
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -1966,12 +1949,12 @@ def test_partition_batch_quality_warn_retry_matches_hashed_cog_warning_assets(mo
     )
     calls = []
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
         if len(calls) == 1:
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 3,
                 "quality_status": "WARN",
@@ -1995,14 +1978,14 @@ def test_partition_batch_quality_warn_retry_matches_hashed_cog_warning_assets(mo
         assert calls[-1] == ["asset-b"]
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 1,
             "quality_status": "PASS",
             "quality_report_id": "quality-warn-hashed-pass-report",
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -2045,12 +2028,12 @@ def test_partition_batch_retry_clears_stale_quality_result_then_persists_pass(mo
     release_retry = threading.Event()
     calls = []
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         calls.append(payload)
         if len(calls) == 1:
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 3,
                 "quality_status": "FAIL",
@@ -2060,7 +2043,7 @@ def test_partition_batch_retry_clears_stale_quality_result_then_persists_pass(mo
         release_retry.wait(timeout=3)
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 3,
             "quality_status": "PASS",
@@ -2068,7 +2051,7 @@ def test_partition_batch_retry_clears_stale_quality_result_then_persists_pass(mo
             "quality_report": {"report_id": "quality-retry-pass-report", "status": "PASS"},
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -2130,7 +2113,7 @@ def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
     def fail_optical(_payload=None):
         raise RuntimeError("temporary network timeout")
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fail_optical)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_FAIL_RETRY/run", json={})
     assert submit_resp.status_code == 202
@@ -2172,7 +2155,7 @@ def test_partition_manual_retry_gets_fresh_auto_retry_budget(monkeypatch):
         calls.append(_payload)
         raise RuntimeError("temporary network timeout")
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fail_optical)
 
     first_resp = client.post("/v1/partition/batches/BATCH_MANUAL_RETRY_BUDGET/run", json={})
     assert first_resp.status_code == 202
@@ -2215,7 +2198,7 @@ def test_partition_batch_source_missing_requires_manual_without_auto_retry(monke
     def fail_optical(_payload=None):
         raise RuntimeError("source missing")
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fail_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fail_optical)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_SOURCE_MISSING/run", json={})
     assert submit_resp.status_code == 202
@@ -2251,12 +2234,12 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
     )
     calls = []
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
         if len(calls) == 1:
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 1,
                 "asset_results": [
@@ -2264,9 +2247,9 @@ def test_partition_asset_retry_submits_only_selected_asset(monkeypatch):
                     {"asset_id": "asset-b", "status": "failed", "error_type": "transient", "last_error": "temporary network timeout"},
                 ],
             }
-        return {"status": "completed", "mode": "partition_demo", "data_type": "optical", "rows": 1}
+        return {"status": "completed", "mode": "partition_run", "data_type": "optical", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     run_resp = client.post("/v1/partition/batches/BATCH_ASSET_RETRY/run", json={})
     run_task_id = run_resp.json()["task_id"]
@@ -2328,13 +2311,13 @@ def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch)
     )
     calls = []
 
-    def fake_run_optical_partition_demo(payload=None):
+    def fake_run_optical_partition_run(payload=None):
         selected_asset_ids = [asset["asset_id"] for asset in payload["selected_assets"]]
         calls.append(selected_asset_ids)
         if len(calls) == 1:
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 1,
                 "run_dir": "/tmp/asset-level-run-1",
@@ -2352,7 +2335,7 @@ def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch)
             assert selected_asset_ids == ["asset-b"]
             return {
                 "status": "completed",
-                "mode": "partition_demo",
+                "mode": "partition_run",
                 "data_type": "optical",
                 "rows": 0,
                 "run_dir": "/tmp/asset-level-run-2",
@@ -2368,7 +2351,7 @@ def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch)
         assert selected_asset_ids == ["asset-b"]
         return {
             "status": "completed",
-            "mode": "partition_demo",
+            "mode": "partition_run",
             "data_type": "optical",
             "rows": 1,
             "run_dir": "/tmp/asset-level-run-3",
@@ -2383,7 +2366,7 @@ def test_partition_asset_results_auto_retry_then_manual_asset_retry(monkeypatch)
             ],
         }
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", fake_run_optical_partition_demo)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_ASSET_LEVEL_RETRY/run", json={})
     assert submit_resp.status_code == 202
@@ -2454,9 +2437,9 @@ def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
 
     def slow_product(_payload=None):
         time.sleep(0.2)
-        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", slow_product)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", slow_product)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -2486,9 +2469,9 @@ def test_partition_task_cancel_keeps_running_task_from_completing(monkeypatch):
 
     def slow_product(payload=None):
         time.sleep(0.1)
-        return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 1}
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "run_product_partition_demo", slow_product)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", slow_product)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_RUNNING/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -2520,7 +2503,7 @@ def test_partition_cancelled_runner_marks_batch_cancelled(monkeypatch):
     def cancelled_optical(payload=None):
         raise PartitionCancelledError("Partition task cancelled")
 
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_demo", cancelled_optical)
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", cancelled_optical)
 
     submit_resp = client.post("/v1/partition/batches/BATCH_CANCEL_EXCEPTION/run", json={})
     task_id = submit_resp.json()["task_id"]
@@ -2582,7 +2565,7 @@ def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
         "grid_type": "geohash",
         "grid_level": 5,
         "space_code": "wx4g0",
-        "st_code": "gh:5:wx4g0:20200701:v1",
+        "st_code": "gh:5:wx4g0:20200701",
         "time_bucket": "20200701",
         "cell_min_lon": 116.0,
         "cell_min_lat": 39.9,

@@ -229,15 +229,15 @@ L3 编码元操作层
 建议统一采用以下格式：
 
 ```text
-<grid_prefix>:<level>:<space_code>:<time_code>:<version>
+<grid_prefix>:<level>:<space_code>:<time_code>
 ```
 
 ### 示例
 
 ```text
-gh:7:wtw3sjq:202603091530:v1
-mgrs:5:50SMG1234:2026030915:v1
-hx:9:F12A03C21:20260309:v1
+gh:7:wtw3sjq:202603091530
+mgrs:5:50SMG1234:2026030915
+hx:9:F12A03C21:20260309
 ```
 
 ## 6.2.4 空间编码规则
@@ -361,8 +361,7 @@ hx:9:F12A03C21:20260309:v1
   "level": 7,
   "space_code": "wtw3sjq",
   "time_code": "202603091530",
-  "version": "v1",
-  "st_code": "gh:7:wtw3sjq:202603091530:v1"
+  "st_code": "gh:7:wtw3sjq:202603091530"
 }
 ```
 
@@ -542,8 +541,7 @@ class BaseGridEngine:
   "level": 7,
   "space_code": "wtw3sjq",
   "timestamp": "2026-03-09T15:30:00Z",
-  "time_granularity": "minute",
-  "version": "v1"
+  "time_granularity": "minute"
 }
 ```
 
@@ -551,7 +549,7 @@ class BaseGridEngine:
 
 ```json
 {
-  "st_code": "gh:7:wtw3sjq:202603091530:v1"
+  "st_code": "gh:7:wtw3sjq:202603091530"
 }
 ```
 
@@ -563,7 +561,7 @@ class BaseGridEngine:
 
 ```json
 {
-  "st_code": "gh:7:wtw3sjq:202603091530:v1"
+  "st_code": "gh:7:wtw3sjq:202603091530"
 }
 ```
 
@@ -574,8 +572,7 @@ class BaseGridEngine:
   "grid_type": "geohash",
   "level": 7,
   "space_code": "wtw3sjq",
-  "time_code": "202603091530",
-  "version": "v1"
+  "time_code": "202603091530"
 }
 ```
 
@@ -722,13 +719,12 @@ HX<level><global_id>
 统一格式：
 
 ```text
-<grid_prefix>:<level>:<space_code>:<time_code>:<version>
+<grid_prefix>:<level>:<space_code>:<time_code>
 ```
 
 ### 规范要求
 - 可逆解析
 - 全局唯一
-- 支持版本演进
 - 字段定界明确
 - 不依赖外部状态
 
@@ -869,5 +865,4 @@ grid_core/
 - 第三优先：逐步实现 ISEA4H 六边形全球格网能力
 
 ---
-
 

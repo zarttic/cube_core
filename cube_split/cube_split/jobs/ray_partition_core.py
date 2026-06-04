@@ -746,7 +746,6 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                     space_code=row.space_code,
                     timestamp=acq_dt,
                     time_granularity=time_granularity,
-                    version="v1",
                 ).st_code
                 st_cache[st_key] = st_code
 

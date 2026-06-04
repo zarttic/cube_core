@@ -31,7 +31,7 @@ def _sample_row(
         "grid_level": 7,
         "space_code": space_code,
         "space_code_prefix": "wtw",
-        "st_code": f"gh:7:{space_code}:20260421:v1",
+        "st_code": f"gh:7:{space_code}:20260421",
         "time_bucket": "20260421",
         "cover_mode": "intersect",
         "cell_min_lon": 116.1,

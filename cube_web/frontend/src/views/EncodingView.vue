@@ -394,7 +394,6 @@ async function runGridEncoding() {
       { label: '格网类型', value: formatGridType(parsed.grid_type) },
       { label: '空间编码', value: parsed.space_code, code: true },
       { label: '时间编码', value: parsed.time_code },
-      { label: '版本', value: parsed.version },
     ]);
     return;
   }
@@ -410,7 +409,6 @@ async function runGridEncoding() {
     space_code: located.cell.space_code,
     timestamp,
     time_granularity: config.timeGranularity,
-    version: 'v1',
   });
   const parts = codeResp.st_code.split(':');
   encodingParts.value = {
@@ -693,7 +691,7 @@ async function runDemo() {
                   </div>
                   <div v-else class="form-group">
                     <label>格网编码</label>
-                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: tm:8:8/420/71:202603091530:v1">
+                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: tm:8:8/420/71:202603091530">
                   </div>
                 </template>
 

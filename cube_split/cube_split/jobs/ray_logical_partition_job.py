@@ -205,7 +205,6 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "cube_split/results/**",
             "cube_web/frontend/node_modules/**",
             "cube_web/frontend/dist/**",
-            "cube_web/cube_web/web/assets/**",
         ],
         "env_vars": {
             "CUBE_PROJECT_ROOT": ".",

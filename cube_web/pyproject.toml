@@ -29,9 +29,6 @@ dev = [
 where = ["."]
 include = ["cube_web*"]
 
-[tool.setuptools.package-data]
-cube_web = ["web/index.html", "web/assets/*"]
-
 [tool.ruff]
 line-length = 140
 target-version = "py311"

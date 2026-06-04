@@ -256,7 +256,6 @@ def _write_entity_tiles(
                             space_code=str(task["space_code"]),
                             timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
                             time_granularity=st_time_granularity,
-                            version="v1",
                         ).st_code
 
                     rows.append(

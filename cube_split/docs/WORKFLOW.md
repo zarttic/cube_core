@@ -31,7 +31,7 @@
 载入系统推荐交付 ARD schema，并通过 Web API 导入：
 
 ```bash
-curl -X POST http://127.0.0.1:50040/v1/partition/schemas/import \
+curl -X POST http://127.0.0.1:50039/v1/partition/schemas/import \
   -H 'Content-Type: application/json' \
   -d @schema.json
 ```

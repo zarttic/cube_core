@@ -41,7 +41,6 @@ class STCodeParseResponse(BaseResponse):
     level: int
     space_code: str
     time_code: str
-    version: str
 
 
 class NeighborsResponse(BaseResponse):

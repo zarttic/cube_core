@@ -11,7 +11,6 @@ from cube_web.routes import partition as partition_route
 from cube_web.routes.auth import create_auth_router, require_auth_for_api
 from cube_web.routes.config import create_config_router
 from cube_web.routes.ingest import create_ingest_router
-from cube_web.routes.pages import create_pages_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
@@ -52,7 +51,6 @@ def create_app() -> FastAPI:
     api_router.include_router(create_partition_router())
     web_app.include_router(api_router)
     web_app.include_router(create_auth_router())
-    web_app.include_router(create_pages_router())
     return web_app
 
 

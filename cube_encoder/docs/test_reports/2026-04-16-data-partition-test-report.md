@@ -213,7 +213,7 @@ export PYSPARK_DRIVER_PYTHON=/home/hadoop/anaconda3/bin/python3.11
 - `inspect_partition_output.py` 执行成功
 - 所有输出行都处于 `geohash level 5`
 - 同一景同一 band 的重复输出与“每个资产覆盖 4 个格网”的预期一致
-- 抽样结果中 `st_code` 有效，例如 `gh:5:35e4:20200105:v1`
+- 抽样结果中 `st_code` 有效，例如 `gh:5:35e4:20200105`
 
 产物:
 - `data/spark_output/test_report/landsat8_synth20_driver/run_20260416_135543/job_report.json`

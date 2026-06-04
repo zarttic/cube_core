@@ -66,7 +66,6 @@ def test_sdk_st_code_generate_parse_batch():
         space_code=h3.latlng_to_cell(39.907, 116.391, 7),
         timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity="minute",
-        version="v1",
     )
     assert st.st_code.startswith("hx:7:")
 
@@ -78,14 +77,13 @@ def test_sdk_st_code_generate_parse_batch():
         grid_type="geohash",
         level=7,
         time_granularity="minute",
-        version="v1",
         items=[
             {"space_code": g1, "timestamp": datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)},
             {"space_code": g2, "timestamp": datetime(2026, 3, 9, 15, 31, 0, tzinfo=timezone.utc)},
         ],
     )
     assert len(batch) == 2
-    assert batch[0] == f"gh:7:{g1}:202603091530:v1"
+    assert batch[0] == f"gh:7:{g1}:202603091530"
 
 
 def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
@@ -96,7 +94,6 @@ def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
         grid_type="geohash",
         level=7,
         time_granularity="day",
-        version="v1",
         items=[
             {"point": [116.391, 39.907], "timestamp": timestamp},
             {"point": [116.392, 39.908], "timestamp": timestamp},
@@ -110,7 +107,6 @@ def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
         space_code=expected_code,
         timestamp=timestamp,
         time_granularity="day",
-        version="v1",
     ).st_code
     assert len(batch) == 2
     assert batch[0]["space_code"] == expected_code

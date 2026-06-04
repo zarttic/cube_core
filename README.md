@@ -9,7 +9,7 @@
   `grid_core.sdk.CubeEncoderSDK` SDK 提供方。
 - `cube_split`：光学/产品/碳卫星/雷达剖分，Ray 或本地执行，PostgreSQL/MinIO
   或本地后端入库，质检和 AOI 回读。
-- `cube_web`：FastAPI 主机、Vue 构建后的静态 UI、进程内 SDK API facade、
+- `cube_web`：FastAPI 后端、独立 Vue/Vite 前端、进程内 SDK API facade、
   托管剖分接口和质检报告接口。
 
 `cube_encoder` 只负责格网能力。其他包必须通过
@@ -56,11 +56,20 @@ npm ci
 npm run build
 ```
 
-使用仓库内 SDK 和剖分后端运行 Web UI：
+使用仓库内 SDK 和剖分后端运行 Web API：
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50039
 ```
+
+启动前端开发服务：
+
+```bash
+cd cube_web/frontend
+npm run dev
+```
+
+前端服务监听 `50040`，并把 `/v1`、`/api` 和 `/health` 代理到后端 `50039`。
 
 ## 当前链路快照
 

@@ -121,7 +121,7 @@
 ### 5.3 时空索引表 `rs_st_index`
 
 关键字段：
-- `st_code` STRING（如 `gh:7:wtw3sjq:202603091530:v1`）
+- `st_code` STRING（如 `gh:7:wtw3sjq:202603091530`）
 - `grid_type` STRING
 - `level` INT
 - `space_code` STRING
@@ -392,7 +392,7 @@ upsert_result(result, table="rs_logical_partition_result", keys=["job_id", "spac
 3. 补齐契约文档：
 - 层级定义（尤其 MGRS）
 - cover 模式选择规范
-- st_code 版本策略
+- ST code 格式策略
 
 4. 增加基准数据集与对照测试：
 - dateline、极区、UTM 分区边界场景
@@ -554,7 +554,6 @@ class JobConfig:
     geometry_geojson: str
     bands: list[int]
     time_granularity: str = "day"
-    st_version: str = "v1"
     source_db: str = "rs_cube"
     target_db: str = "rs_cube"
     shuffle_partitions: int = 800
@@ -874,8 +873,7 @@ spark-submit \
   "level": 7,
   "space_code": "wtw3sjq",
   "timestamp": "2026-04-07T12:00:00Z",
-  "time_granularity": "day",
-  "version": "v1"
+  "time_granularity": "day"
 }
 ```
 

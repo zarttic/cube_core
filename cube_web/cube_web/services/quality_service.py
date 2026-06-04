@@ -12,6 +12,7 @@ def repo_root() -> Path:
 def allowed_quality_roots() -> list[Path]:
     return [
         (repo_root() / "cube_split" / "data" / "ray_output").resolve(),
+        (Path("/tmp") / "cube_web_partition_run").resolve(),
         (Path("/tmp") / "cube_web_partition_demo").resolve(),
     ]
 

@@ -6,7 +6,7 @@
 
 - `cube_encoder/`：核心格网 SDK 和 API 模型位于 `grid_core/`，测试位于 `tests/`。
 - `cube_split/`：剖分、Ray 入库、AOI 读取和作业实现位于 `cube_split/`，测试位于 `tests/`。
-- `cube_web/`：FastAPI 主机位于 `cube_web/app.py`，静态资源位于 `cube_web/web/`，测试位于 `tests/`。
+- `cube_web/`：FastAPI 后端位于 `cube_web/app.py`，Vue/Vite 前端位于 `frontend/`，测试位于 `tests/`。
 - 包级文档放在各包的 `docs/` 目录。
 
 `cube_encoder` 是 SDK 提供方。其他包必须通过 `grid_core.sdk.CubeEncoderSDK`
@@ -31,11 +31,17 @@ cd cube_encoder && python -m build
 构建 `cube-encoder` 分发包。
 
 ```bash
-PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50040
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50039
 ```
 
-使用 Python 3.11、仓库内 SDK 和剖分后端运行 Web UI。匹配环境变量未设置时，
+使用 Python 3.11、仓库内 SDK 和剖分后端运行 Web API。匹配环境变量未设置时，
 运行时服务端点会从本地 `.cube_web.env` 自动加载。
+
+```bash
+cd cube_web/frontend && npm run dev
+```
+
+前端开发服务运行在 `50040`，并把 `/v1`、`/api` 和 `/health` 代理到后端 `50039`。
 
 ## 代码风格与命名
 
@@ -223,7 +229,7 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 
 ### Ray 分布式计算集群
 
-4 节点 Ray 集群，Ray 2.10.0，Head 在 .13。
+4 节点 Ray 集群，Ray 2.55.x（与 `cube_split` 依赖 `ray>=2.55.1,<2.56.0` 保持一致），Head 在 .13。
 
 | 节点 | IP | 角色 | 端口 | CPUs | RAM | GPU |
 |------|-----|------|------|------|-----|-----|

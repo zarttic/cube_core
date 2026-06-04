@@ -36,7 +36,6 @@ class CodeService:
         space_code: str,
         timestamp,
         time_granularity: TimeGranularity,
-        version: str,
     ) -> STCode:
         if grid_type not in PREFIX_MAP:
             raise ValidationError(f"Unsupported grid_type: {grid_type}")
@@ -47,7 +46,6 @@ class CodeService:
             level=level,
             space_code=space_code,
             time_code=time_code,
-            version=version,
         )
 
     def build_st_code(
@@ -56,18 +54,16 @@ class CodeService:
         level: int,
         space_code: str,
         time_code: str,
-        version: str,
     ) -> STCode:
         if grid_type not in PREFIX_MAP:
             raise ValidationError(f"Unsupported grid_type: {grid_type}")
         prefix = PREFIX_MAP[grid_type]
-        st_code = f"{prefix}:{level}:{space_code}:{time_code}:{version}"
+        st_code = f"{prefix}:{level}:{space_code}:{time_code}"
         return STCode(
             grid_type=grid_type.value,
             level=level,
             space_code=space_code,
             time_code=time_code,
-            version=version,
             st_code=st_code,
         )
 
@@ -88,7 +84,6 @@ class CodeService:
             level=parsed["level"],
             space_code=parsed["space_code"],
             time_code=parsed["time_code"],
-            version=parsed["version"],
             st_code=st_code,
         )
 
@@ -98,7 +93,6 @@ class CodeService:
         level: int,
         items: list[dict],
         time_granularity: TimeGranularity,
-        version: str,
     ) -> list[str]:
         st_codes: list[str] = []
         for item in items:
@@ -108,7 +102,6 @@ class CodeService:
                 space_code=item["space_code"],
                 timestamp=item["timestamp"],
                 time_granularity=time_granularity,
-                version=version,
             )
             st_codes.append(result.st_code)
         return st_codes

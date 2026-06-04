@@ -1226,7 +1226,7 @@ const partitionResultDetailRows = computed(() => {
   return [
     { label: '执行引擎', value: result.execution_engine || result.partition_backend || '-' },
     { label: '后台任务 ID', value: result.partition_task_id || '-' },
-    { label: '执行任务 ID', value: result.demo_task_id || '-' },
+    { label: '执行 ID', value: result.execution_id || result.run_task_id || result.demo_task_id || '-' },
     { label: 'Ray 任务 ID', value: result.ray_task_id || '-' },
     { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
     { label: '索引文件', value: result.rows_path || result.output_path || '-' },
@@ -1656,7 +1656,7 @@ function buildPartitionFailureResult(error, request = {}) {
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
   return {
     status: 'failed',
-    mode: operation === 'test' ? 'partition_test_no_ingest' : 'partition_demo',
+    mode: operation === 'test' ? 'partition_test_no_ingest' : operation === 'retry' ? 'partition_retry' : 'partition_run',
     data_type: activeModule.value,
     endpoint: apiPath,
     grid_type: payload.grid_type || selectedMapGridType.value || '-',

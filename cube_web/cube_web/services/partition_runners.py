@@ -22,18 +22,51 @@ DEFAULT_ENTITY_TEST_GRID_LEVEL = 4
 PARTITION_GRID_TYPES = {"geohash", "mgrs", "tile_matrix", "isea4h"}
 
 
-def _demo_run_dir(name: str) -> Path:
-    run_dir = Path("/tmp") / "cube_web_partition_demo" / name / f"{time.strftime('run_%Y%m%d_%H%M%S')}_{time.perf_counter_ns()}"
+def _new_run_dir(root_name: str, name: str) -> Path:
+    run_dir = Path("/tmp") / root_name / name / f"{time.strftime('run_%Y%m%d_%H%M%S')}_{time.perf_counter_ns()}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
-def _demo_task_metadata(execution_engine: str) -> dict[str, str | None]:
-    return {
-        "demo_task_id": f"demo-{uuid4().hex[:12]}",
+def _demo_run_dir(name: str) -> Path:
+    return _new_run_dir("cube_web_partition_demo", name)
+
+
+def _partition_run_dir(name: str, mode: str = "partition_demo") -> Path:
+    if mode == "partition_run":
+        return _new_run_dir("cube_web_partition_run", name)
+    return _demo_run_dir(name)
+
+
+def _task_metadata(mode: str, execution_engine: str) -> dict[str, str | None]:
+    execution_prefix = "run" if mode == "partition_run" else "demo" if mode == "partition_demo" else "task"
+    metadata = {
+        "execution_id": f"{execution_prefix}-{uuid4().hex[:12]}",
         "execution_engine": execution_engine,
         "ray_task_id": None,
     }
+    if mode == "partition_demo":
+        metadata["demo_task_id"] = metadata["execution_id"]
+    return metadata
+
+
+def _source_metadata(mode: str, source: str) -> dict[str, str]:
+    metadata = {"source": source}
+    if mode == "partition_demo":
+        metadata["demo_source"] = source
+    return metadata
+
+
+def _require_run_source(payload: dict, *, data_type: str) -> None:
+    if data_type == "carbon":
+        if payload.get("input_dir"):
+            return
+        raise ValueError("carbon partition run requires input_dir")
+    if payload.get("input_dir") or payload.get("manifest_path"):
+        return
+    if data_type != "carbon" and payload.get("selected_assets"):
+        return
+    raise ValueError(f"{data_type} partition run requires input_dir, manifest_path, or selected assets")
 
 
 def _optical_demo_input_dir() -> Path:
@@ -456,14 +489,16 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
 
     raw_payload = payload or {}
+    if mode == "partition_run":
+        _require_run_source(raw_payload, data_type="entity")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
     cancellation_check = _cancellation_check_from_payload(raw_payload)
-    input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
+    input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
-        raise FileNotFoundError(f"Entity demo input_dir not found: {input_dir}")
+        raise FileNotFoundError(f"Entity partition input_dir not found: {input_dir}")
 
-    root = _demo_run_dir("entity")
+    root = _partition_run_dir("entity", mode)
     output_root = root / "output"
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_optical_manifest_assets(payload, input_dir)
@@ -548,8 +583,8 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         "status": "completed",
         "mode": mode,
         "data_type": "entity",
-        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
-        "demo_source": str(input_dir),
+        **_task_metadata(mode, str(report.get("execution_engine") or args.partition_backend)),
+        **_source_metadata(mode, str(input_dir)),
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
         "run_dir": str(run_dir),
@@ -617,30 +652,38 @@ def _carbon_selected_source_indexes(payload: dict | None) -> tuple[int, ...] | N
 def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | None = None) -> dict:
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
+    payload = payload or {}
+    if mode == "partition_run":
+        _require_run_source(payload, data_type="carbon")
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
-    if not sample.exists():
+    if not sample.exists() and not payload.get("input_dir"):
         raise RuntimeError(f"Carbon demo data not found: {sample}")
 
-    root = _demo_run_dir("carbon")
+    root = _partition_run_dir("carbon", mode)
     input_dir = root / "input"
     output_dir = root / "output"
     input_dir.mkdir(parents=True)
-    (input_dir / sample.name).symlink_to(sample)
-    workers = 4
+    if payload.get("input_dir"):
+        input_dir = Path(str(payload["input_dir"])).expanduser().resolve()
+        if not input_dir.exists():
+            raise FileNotFoundError(f"Carbon partition input_dir not found: {input_dir}")
+    else:
+        (input_dir / sample.name).symlink_to(sample)
+    workers = _int_payload_value(payload, "partition_workers", 4)
     selected_source_indexes = _carbon_selected_source_indexes(payload)
     cancellation_check = _cancellation_check_from_payload(payload)
     args = SimpleNamespace(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
-        grid_type="isea4h",
-        grid_level=5,
-        time_granularity="day",
-        product_type="xco2",
-        max_observations=1000,
-        partition_chunk_size=250,
+        grid_type=str(payload.get("grid_type") or "isea4h"),
+        grid_level=_int_payload_value(payload, "grid_level", 5),
+        time_granularity=str(payload.get("time_granularity") or "day"),
+        product_type=str(payload.get("product_type") or "xco2"),
+        max_observations=_int_payload_value(payload, "max_observations", 0 if mode == "partition_run" else 1000),
+        partition_chunk_size=_int_payload_value(payload, "partition_chunk_size", 250),
         partition_workers=workers,
-        partition_backend=str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
-        ray_address=_ray_address(),
+        partition_backend=str(payload.get("partition_backend") or os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
+        ray_address=str(payload.get("ray_address") or _ray_address()),
         ray_parallelism=workers,
         selected_source_indexes=selected_source_indexes,
         cancellation_check=cancellation_check,
@@ -661,8 +704,8 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "status": "completed",
         "mode": mode,
         "data_type": "carbon_satellite",
-        **_demo_task_metadata(str(result["execution_engine"])),
-        "demo_source": sample.name,
+        **_task_metadata(mode, str(result["execution_engine"])),
+        **_source_metadata(mode, str(input_dir if payload.get("input_dir") else sample.name)),
         "run_dir": result["run_dir"],
         "rows": result["rows"],
         "distinct_space_codes": len(space_codes),
@@ -672,8 +715,8 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "grid_type": result["grid_type"],
         "grid_level": result["grid_level"],
         "workers": workers,
-        "batch_id": (payload or {}).get("batch_id") or "",
-        "batch_name": (payload or {}).get("batch_name") or "",
+        "batch_id": payload.get("batch_id") or "",
+        "batch_name": payload.get("batch_name") or "",
         "selected_observation_count": len(selected_source_indexes or ()),
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
@@ -699,7 +742,7 @@ def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
     request_payload = request.get("payload") if isinstance(request, dict) else {}
     if not isinstance(request_payload, dict):
         request_payload = {}
-    result = _run_carbon_partition_demo(payload=request_payload)
+    result = _run_carbon_partition_demo(mode="partition_retry", payload=request_payload)
     result["mode"] = "partition_retry"
     result["retry"] = {
         "strategy": "full_request",
@@ -715,11 +758,13 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     from cube_split.jobs.product_partition_job import run_product_partition
 
     payload = payload or {}
+    if mode == "partition_run":
+        _require_run_source(payload, data_type="product")
     cancellation_check = _cancellation_check_from_payload(payload)
-    root = _demo_run_dir("product")
-    input_dir = Path(str(payload.get("input_dir") or _product_demo_input_dir())).expanduser().resolve()
+    root = _partition_run_dir("product", mode)
+    input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _product_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
-        raise FileNotFoundError(f"Product demo input_dir not found: {input_dir}")
+        raise FileNotFoundError(f"Product partition input_dir not found: {input_dir}")
     run_input_dir = _selected_product_input_dir(payload, input_dir, root)
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_product_manifest_assets(payload, input_dir, run_input_dir)
@@ -803,6 +848,8 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     )
     result = run_entity_partition(args) if grid_type == "isea4h" else run_product_partition(args)
     result["mode"] = mode
+    result.update(_task_metadata(mode, str(result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend)))
+    result.update(_source_metadata(mode, str(input_dir)))
     result["output_path"] = result.get("rows_path")
     result["workers"] = result.get("ray_parallelism") or args.partition_workers
     result["execution_engine"] = result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend
@@ -843,16 +890,18 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
     raw_payload = payload or {}
+    if mode == "partition_run":
+        _require_run_source(raw_payload, data_type="radar")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     if "partition_backend" not in raw_payload:
         payload["partition_backend"] = "thread"
     if "product_family" not in raw_payload:
         payload["product_family"] = "sentinel1"
     cancellation_check = _cancellation_check_from_payload(raw_payload)
-    root = _demo_run_dir("radar")
-    input_dir = Path(str(payload.get("input_dir") or _radar_demo_input_dir())).expanduser().resolve()
+    root = _partition_run_dir("radar", mode)
+    input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _radar_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
-        raise FileNotFoundError(f"Radar demo input_dir not found: {input_dir}")
+        raise FileNotFoundError(f"Radar partition input_dir not found: {input_dir}")
     run_input_dir = _selected_radar_input_dir(payload, input_dir, root)
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_radar_manifest_assets(payload, input_dir, run_input_dir)
@@ -950,8 +999,8 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         "status": "completed",
         "mode": mode,
         "data_type": "radar",
-        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
-        "demo_source": str(input_dir),
+        **_task_metadata(mode, str(report.get("execution_engine") or args.partition_backend)),
+        **_source_metadata(mode, str(input_dir)),
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
         "run_dir": str(run_dir),
@@ -992,14 +1041,16 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
     raw_payload = payload or {}
+    if mode == "partition_run":
+        _require_run_source(raw_payload, data_type="optical")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
     cancellation_check = _cancellation_check_from_payload(raw_payload)
-    input_dir = Path(str(payload.get("input_dir") or _optical_demo_input_dir())).expanduser().resolve()
+    input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
-        raise FileNotFoundError(f"Optical demo input_dir not found: {input_dir}")
+        raise FileNotFoundError(f"Optical partition input_dir not found: {input_dir}")
 
-    root = _demo_run_dir("optical")
+    root = _partition_run_dir("optical", mode)
     output_root = root / "output"
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_optical_manifest_assets(payload, input_dir)
@@ -1096,8 +1147,8 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "status": "completed",
         "mode": mode,
         "data_type": "optical",
-        **_demo_task_metadata(str(report.get("execution_engine") or args.partition_backend)),
-        "demo_source": str(input_dir),
+        **_task_metadata(mode, str(report.get("execution_engine") or args.partition_backend)),
+        **_source_metadata(mode, str(input_dir)),
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
         "run_dir": str(run_dir),
