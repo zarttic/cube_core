@@ -1556,6 +1556,43 @@ section {
     cursor: crosshair;
 }
 
+.map-mode-switch {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 3;
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(15, 23, 42, 0.14);
+    border-radius: 8px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+    pointer-events: auto;
+}
+
+.map-mode-button {
+    min-width: 42px;
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #475569;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.map-mode-button:hover {
+    background: rgba(15, 23, 42, 0.08);
+}
+
+.map-mode-button.active {
+    background: var(--primary);
+    color: white;
+}
+
 .cesium-map .cesium-viewer,
 .cesium-map .cesium-viewer-cesiumWidgetContainer,
 .cesium-map .cesium-widget,

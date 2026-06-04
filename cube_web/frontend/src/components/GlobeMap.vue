@@ -15,9 +15,11 @@ import {
   Math as CesiumMath,
   PolygonHierarchy,
   Rectangle,
+  SceneMode,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   TileMapServiceImageryProvider,
+  UrlTemplateImageryProvider,
   VerticalOrigin,
   Viewer,
 } from 'cesium';
@@ -39,10 +41,12 @@ const emit = defineEmits(['point-selected', 'circle-drawn']);
 const EARTH_KM = 6371;
 const DEFAULT_PREVIEW_IMAGERY_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer';
 const PREVIEW_IMAGERY_URL = (import.meta.env.VITE_GLOBE_IMAGERY_URL || DEFAULT_PREVIEW_IMAGERY_URL).trim();
+const OSM_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 const mapEl = ref(null);
 const fallbackSphere = ref(null);
 const useFallback = ref(false);
+const mapMode = ref('3d');
 
 let viewer;
 let overlaySource;
@@ -306,6 +310,10 @@ function renderLayers({ refocus = true } = {}) {
 }
 
 function cameraHeight() {
+  if (mapMode.value === '2d') {
+    const height = 26000000 / (2 ** Math.max(0, (Number(props.zoom) || 7) - 2));
+    return Math.max(150000, Math.min(18000000, height));
+  }
   const height = 23000000 - (Number(props.zoom) || 7) * 1800000;
   return Math.max(2800000, Math.min(18000000, height));
 }
@@ -378,11 +386,11 @@ function fallbackScreenToLatLng(screenPosition) {
 function setCameraInteraction(enabled) {
   if (!viewer) return;
   const controller = viewer.scene.screenSpaceCameraController;
-  controller.enableRotate = enabled;
+  controller.enableRotate = enabled && mapMode.value === '3d';
   controller.enableTranslate = enabled;
   controller.enableZoom = enabled;
-  controller.enableTilt = enabled;
-  controller.enableLook = enabled;
+  controller.enableTilt = enabled && mapMode.value === '3d';
+  controller.enableLook = enabled && mapMode.value === '3d';
 }
 
 function setupInteractions() {
@@ -447,6 +455,41 @@ async function createPreviewBaseLayer() {
   }
 }
 
+function createOsmBaseLayer() {
+  return new ImageryLayer(new UrlTemplateImageryProvider({
+    url: OSM_TILE_URL,
+    subdomains: ['a', 'b', 'c'],
+    maximumLevel: 18,
+    credit: 'OpenStreetMap contributors',
+    enablePickFeatures: false,
+  }));
+}
+
+function replaceBaseLayer(layer) {
+  if (!viewer || !layer) return;
+  viewer.imageryLayers.removeAll(true);
+  viewer.imageryLayers.add(layer, 0);
+}
+
+async function setMapMode(mode) {
+  if (mode === mapMode.value) return;
+  mapMode.value = mode;
+  drawStart = null;
+  draftCircle = null;
+  pointerDown = null;
+  setCameraInteraction(true);
+
+  if (!viewer || useFallback.value) return;
+  if (mode === '2d') {
+    replaceBaseLayer(createOsmBaseLayer());
+    viewer.scene.morphTo2D(0);
+  } else {
+    replaceBaseLayer(await createPreviewBaseLayer());
+    viewer.scene.morphTo3D(0);
+  }
+  renderLayers();
+}
+
 async function initViewer() {
   if (!canCreateWebglContext()) {
     useFallback.value = true;
@@ -466,6 +509,7 @@ async function initViewer() {
       navigationHelpButton: false,
       sceneModePicker: false,
       selectionIndicator: false,
+      sceneMode: SceneMode.SCENE3D,
       timeline: false,
       terrainProvider: new EllipsoidTerrainProvider(),
     });
@@ -564,8 +608,33 @@ onBeforeUnmount(() => {
     :class="{
       'is-picking': ['point', 'draw'].includes(props.interactionMode),
       'is-fallback-picking': useFallback && ['point', 'draw'].includes(props.interactionMode),
+      'is-map-2d': mapMode === '2d',
     }"
   >
+    <div v-if="!useFallback" class="map-mode-switch" aria-label="地图模式">
+      <button
+        type="button"
+        class="map-mode-button"
+        :class="{ active: mapMode === '3d' }"
+        :aria-pressed="mapMode === '3d'"
+        @mousedown.stop
+        @pointerdown.stop
+        @click.stop="setMapMode('3d')"
+      >
+        3D
+      </button>
+      <button
+        type="button"
+        class="map-mode-button"
+        :class="{ active: mapMode === '2d' }"
+        :aria-pressed="mapMode === '2d'"
+        @mousedown.stop
+        @pointerdown.stop
+        @click.stop="setMapMode('2d')"
+      >
+        2D
+      </button>
+    </div>
     <div
       v-if="useFallback"
       class="globe-fallback"
