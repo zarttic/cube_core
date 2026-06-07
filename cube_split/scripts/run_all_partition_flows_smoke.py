@@ -15,6 +15,7 @@ from minio.error import S3Error
 from rasterio.transform import from_origin
 
 from cube_split import runtime_config
+from cube_split.partition.carbon import load_oco2_lite_observations
 
 PartitionRunner = Callable[[Dict[str, Any]], Dict[str, Any]]
 
@@ -65,6 +66,13 @@ ACCEPTANCE_CASES = (
         "optical",
         "isea4h",
         1,
+    ),
+    AcceptanceCase(
+        "radar_geohash",
+        "small radar geohash partition",
+        "radar",
+        "geohash",
+        4,
     ),
     AcceptanceCase(
         "product_geohash",
@@ -224,6 +232,43 @@ def _prepare_assets(work_dir: Path, prefix: str, client: Minio, bucket: str) -> 
     return selected
 
 
+def _prepare_carbon_input(work_dir: Path, prefix: str, client: Minio, bucket: str) -> tuple[Path, str]:
+    sample = Path(__file__).resolve().parents[1] / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
+    if not sample.exists():
+        raise RuntimeError(f"Carbon source sample not found: {sample}")
+    key = f"{prefix}/sources/carbon/oco2_LtCO2_201231_B11014Ar_220729012824s.nc4"
+    source_uri = _upload(client, bucket, sample, key)
+
+    observations = load_oco2_lite_observations(sample, max_observations=1)
+    if not observations:
+        raise RuntimeError(f"No carbon observations loaded from: {sample}")
+    observation = observations[0]
+    input_dir = work_dir / "carbon"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    rows_path = input_dir / "carbon_observations.jsonl"
+    rows_path.write_text(
+        json.dumps(
+            {
+                "satellite": observation.satellite,
+                "observation_id": observation.observation_id,
+                "acq_time": observation.acq_time,
+                "lon": observation.lon,
+                "lat": observation.lat,
+                "xco2": observation.xco2,
+                "quality_flag": observation.quality_flag,
+                "footprint": observation.footprint,
+                "source_uri": source_uri,
+                "source_index": 0,
+                "metadata": {"source_format": "oco2_lite_nc4", "source_sample": sample.name},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return input_dir, source_uri
+
+
 def _runner(data_type: str, mode: str) -> PartitionRunner:
     if data_type == "optical":
         return partition_runners._run_optical_partition_test if mode == "test" else partition_runners._run_optical_partition_demo
@@ -369,12 +414,22 @@ def _partition_payload(
     *,
     base_payload: dict[str, Any],
     selected_assets: dict[str, list[dict[str, Any]]],
+    carbon_input_dir: Path,
     run_id: str,
 ) -> dict[str, Any]:
     if case.data_type == "carbon":
         return {
             "batch_id": f"smoke-{run_id}-{case.case_id}",
             "batch_name": case.label,
+            "input_dir": str(carbon_input_dir),
+            "partition_backend": "ray",
+            "ray_address": base_payload["ray_address"],
+            "ray_parallelism": base_payload["ray_parallelism"],
+            "partition_workers": base_payload["ray_parallelism"],
+            "partition_chunk_size": base_payload["chunk_size"],
+            "grid_type": case.grid_type,
+            "grid_level": case.grid_level,
+            "time_granularity": "day",
             "selected_observations": [{"source_index": 0}],
         }
     payload = dict(base_payload)
@@ -402,12 +457,19 @@ def _run_partition_case(
     mode: str,
     base_payload: dict[str, Any],
     selected_assets: dict[str, list[dict[str, Any]]],
+    carbon_input_dir: Path,
     run_id: str,
     run_quality: bool,
 ) -> dict[str, Any]:
     start = time.perf_counter()
     try:
-        payload = _partition_payload(case, base_payload=base_payload, selected_assets=selected_assets, run_id=run_id)
+        payload = _partition_payload(
+            case,
+            base_payload=base_payload,
+            selected_assets=selected_assets,
+            carbon_input_dir=carbon_input_dir,
+            run_id=run_id,
+        )
         result = _runner(case.data_type, mode)(payload)
         item = _validate_result(
             case.case_id,
@@ -544,6 +606,7 @@ def main() -> None:
     _ensure_bucket(client, minio.bucket)
     prefix = f"cube/smoke/all_partition_flows/{run_id}".strip("/")
     selected_assets = _prepare_assets(work_dir, prefix, client, minio.bucket)
+    carbon_input_dir, carbon_source_uri = _prepare_carbon_input(work_dir, prefix, client, minio.bucket)
 
     base_payload = {
         "input_dir": str(work_dir),
@@ -577,6 +640,7 @@ def main() -> None:
             mode=args.mode,
             base_payload=base_payload,
             selected_assets=selected_assets,
+            carbon_input_dir=carbon_input_dir,
             run_id=run_id,
             run_quality=True,
         )
@@ -605,6 +669,7 @@ def main() -> None:
         "status": "fail" if failed else "pass",
         "prefix": prefix,
         "work_dir": str(work_dir),
+        "carbon_source_uri": carbon_source_uri,
         "summary_path": str(summary_path),
         "acceptance_count": len(results),
         "failed_count": len(failed),

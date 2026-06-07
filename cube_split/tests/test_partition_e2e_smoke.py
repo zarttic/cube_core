@@ -67,11 +67,13 @@ def test_smoke_acceptance_cases_are_fixed() -> None:
         "optical_geohash",
         "optical_mgrs",
         "optical_isea4h_level1",
+        "radar_geohash",
         "product_geohash",
         "carbon_satellite",
     ]
     assert smoke.ACCEPTANCE_CASES[1].grid_type == "mgrs"
     assert smoke.ACCEPTANCE_CASES[2].grid_level == 1
+    assert smoke.ACCEPTANCE_CASES[3].data_type == "radar"
 
 
 @pytest.mark.e2e
@@ -114,6 +116,7 @@ def test_run_all_partition_flows_smoke(tmp_path: Path) -> None:
         "optical_geohash",
         "optical_mgrs",
         "optical_isea4h_level1",
+        "radar_geohash",
         "product_geohash",
         "carbon_satellite",
         "quality_checks",
