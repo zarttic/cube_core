@@ -109,7 +109,11 @@ class QualityReportRequest(CubeWebModel):
 
 
 class QualityHistoryRequest(CubeWebModel):
-    limit: int = Field(default=20, ge=1)
+    limit: int | None = Field(default=None, ge=1)
+    page: int = Field(default=1, ge=1)
+    page_size: int | None = Field(default=None, ge=1)
+    keyword: str | None = None
+    status: str | None = None
 
 
 class QualityResponse(CubeWebModel):

@@ -22,7 +22,24 @@ class QualityReportStore:
     def latest_report(self, data_type: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
-    def list_reports(self, data_type: str, limit: int = 20) -> list[dict[str, Any]]:
+    def list_reports(
+        self,
+        data_type: str,
+        limit: int = 20,
+        *,
+        offset: int = 0,
+        status: str | None = None,
+        keyword: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_reports(
+        self,
+        data_type: str,
+        *,
+        status: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
         raise NotImplementedError
 
 
@@ -168,12 +185,21 @@ class PostgresQualityReportStore(QualityReportStore):
                 row = cur.fetchone()
         return None if row is None else row[0]
 
-    def list_reports(self, data_type: str, limit: int = 20) -> list[dict[str, Any]]:
+    def list_reports(
+        self,
+        data_type: str,
+        limit: int = 20,
+        *,
+        offset: int = 0,
+        status: str | None = None,
+        keyword: str | None = None,
+    ) -> list[dict[str, Any]]:
         self.ensure_schema()
+        where, params = _history_where_params(data_type, status=status, keyword=keyword)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                       report_id::text AS report_id,
                       data_type,
@@ -187,14 +213,32 @@ class PostgresQualityReportStore(QualityReportStore):
                       created_at,
                       updated_at
                     FROM quality_reports
-                    WHERE data_type = %s
+                    WHERE {" AND ".join(where)}
                     ORDER BY generated_at DESC, updated_at DESC
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                     """,
-                    (data_type, limit),
+                    [*params, limit, offset],
                 )
                 rows = cur.fetchall()
         return [_history_row(row) for row in rows]
+
+    def count_reports(
+        self,
+        data_type: str,
+        *,
+        status: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
+        self.ensure_schema()
+        where, params = _history_where_params(data_type, status=status, keyword=keyword)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT count(*) FROM quality_reports WHERE {' AND '.join(where)}",
+                    params,
+                )
+                row = cur.fetchone()
+        return int(row[0] if row else 0)
 
     def _connect(self):
         try:
@@ -308,6 +352,26 @@ def _history_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "updated_at": _datetime_text(updated_at),
         "summary": summary or {},
     }
+
+
+def _history_where_params(
+    data_type: str,
+    *,
+    status: str | None = None,
+    keyword: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    where = ["data_type = %s"]
+    params: list[Any] = [data_type]
+    if status:
+        where.append("status = %s")
+        params.append(status)
+    if keyword:
+        like = f"%{keyword}%"
+        where.append(
+            "(dataset ILIKE %s OR run_name ILIKE %s OR run_dir ILIKE %s OR report_id::text ILIKE %s)"
+        )
+        params.extend([like, like, like, like])
+    return where, params
 
 
 def _datetime_text(value: Any) -> str | None:

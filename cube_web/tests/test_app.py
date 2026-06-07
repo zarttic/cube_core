@@ -90,8 +90,23 @@ class FakeQualityReportStore:
             return None
         return self.get_report(data_type, rows[0]["report_id"])
 
-    def list_reports(self, data_type, limit=20):
-        return list(self.history.get(data_type, []))[:limit]
+    def list_reports(self, data_type, limit=20, *, offset=0, status=None, keyword=None):
+        return self._filtered_history(data_type, status=status, keyword=keyword)[offset:offset + limit]
+
+    def count_reports(self, data_type, *, status=None, keyword=None):
+        return len(self._filtered_history(data_type, status=status, keyword=keyword))
+
+    def _filtered_history(self, data_type, *, status=None, keyword=None):
+        rows = list(self.history.get(data_type, []))
+        if status:
+            rows = [row for row in rows if row["status"] == status]
+        if keyword:
+            needle = str(keyword).lower()
+            rows = [
+                row for row in rows
+                if any(needle in str(row.get(key) or "").lower() for key in ("dataset", "run_name", "run_dir", "report_id"))
+            ]
+        return rows
 
 
 class FakeConfigStore:
@@ -1255,7 +1270,8 @@ def test_partition_run_accepts_mgrs_grid_type_in_request_model():
 
 def test_partition_run_can_run_as_async_task(monkeypatch):
     def fake_run_product_partition_run(payload=None):
-        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        assert payload["grid_type"] == "geohash"
+        assert payload["grid_level"] == 5
         return {
             "status": "completed",
             "mode": "partition_run",
@@ -1286,6 +1302,107 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
     assert task_body["status"] == "completed"
     assert task_body["result"]["mode"] == "partition_run"
     assert task_body["result"]["rows"] == 20
+
+
+def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch):
+    payload = {
+        "batch_id": "DIRECT_RUN_QUEUE",
+        "batch_name": "Direct run queue",
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/product/direct-a.tif",
+                "direct-a",
+                data_type="product",
+                asset_id="direct-asset-a",
+            )
+        ],
+    }
+
+    def fake_run_product_partition_run(received=None):
+        assert received["batch_id"] == "DIRECT_RUN_QUEUE"
+        assert received["selected_assets"][0]["asset_id"] == "direct-asset-a"
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 20}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    submit_resp = client.post("/v1/partition/product/tasks/run", json=payload)
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
+        if task_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    batch = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE").json()
+    attempts = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE/attempts").json()["attempts"]
+    assets = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE/assets").json()["assets"]
+    queue = client.get("/v1/partition/tasks", params={"keyword": "DIRECT_RUN_QUEUE", "limit": 10}).json()["tasks"]
+
+    assert batch["status"] == "succeeded"
+    assert batch["last_task_id"] == task_id
+    assert batch["attempt_count"] == 1
+    assert attempts[0]["task_id"] == task_id
+    assert attempts[0]["status"] == "succeeded"
+    assert attempts[0]["operation"] == "auto_run"
+    assert attempts[0]["payload"]["batch_id"] == "DIRECT_RUN_QUEUE"
+    assert attempts[0]["runner_result"]["rows"] == 20
+    assert assets[0]["asset_id"] == "direct-asset-a"
+    assert assets[0]["attempt_count"] == 1
+    assert assets[0]["status"] == "succeeded"
+    assert queue[0]["task_id"] == task_id
+    assert queue[0]["batch_id"] == "DIRECT_RUN_QUEUE"
+    assert queue[0]["asset_count"] == 1
+
+
+def test_partition_direct_run_without_batch_id_remains_compatible(monkeypatch):
+    def fake_run_product_partition_run(payload=None):
+        assert payload["grid_type"] == "geohash"
+        assert payload["grid_level"] == 5
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 12}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
+
+    assert submit_resp.status_code == 202
+    submitted = submit_resp.json()
+    assert submitted["operation"] == "run"
+    task_id = submitted["task_id"]
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
+        if task_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    task = client.get(f"/v1/partition/tasks/{task_id}").json()
+    queue = client.get("/v1/partition/tasks", params={"keyword": task_id}).json()["tasks"]
+    assert task["status"] == "completed"
+    assert queue[0]["task_id"] == task_id
+    assert queue[0]["batch_id"].startswith("runtime-partition-")
+    assert queue[0]["asset_count"] == 0
+
+
+def test_partition_direct_run_rejects_mismatched_batch_type():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "DIRECT_TYPE_MISMATCH",
+            "batch_name": "Direct type mismatch",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/mismatch.tif", "mismatch")],
+        },
+    )
+
+    resp = client.post(
+        "/v1/partition/product/tasks/run",
+        json={"batch_id": "DIRECT_TYPE_MISMATCH", "grid_type": "geohash", "grid_level": 5},
+    )
+
+    assert resp.status_code == 422
+    assert "not a product batch" in resp.json()["detail"]
 
 
 def test_partition_demo_task_endpoint_remains_compatible(monkeypatch):
@@ -1745,6 +1862,66 @@ def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypat
     assert batch_resp.json()["partitioned_at"]
     assert "BATCH_RUN_SUCCESS" not in [batch["batch_id"] for batch in pending_resp.json()["batches"]]
     assert "BATCH_RUN_SUCCESS" in [batch["batch_id"] for batch in history_resp.json()["batches"]]
+
+
+def test_partition_task_queue_lists_direct_and_batch_attempts(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_QUEUE_LIST",
+            "batch_name": "Batch queue list",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/list-a.tif", "list-a", asset_id="list-a")],
+        },
+    )
+
+    def fake_run_optical_partition_run(payload=None):
+        return {"status": "completed", "mode": "partition_run", "data_type": "optical", "rows": 1}
+
+    def fake_run_product_partition_run(payload=None):
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 2}
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    batch_resp = client.post("/v1/partition/batches/BATCH_QUEUE_LIST/run", json={})
+    direct_resp = client.post(
+        "/v1/partition/product/tasks/run",
+        json={
+            "batch_id": "DIRECT_QUEUE_LIST",
+            "batch_name": "Direct queue list",
+            "grid_type": "geohash",
+            "grid_level": 5,
+            "selected_assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/list-product.tif",
+                    "list-product",
+                    data_type="product",
+                    asset_id="list-product",
+                )
+            ],
+        },
+    )
+    task_ids = {batch_resp.json()["task_id"], direct_resp.json()["task_id"]}
+    for task_id in task_ids:
+        for _ in range(20):
+            if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+    queue_resp = client.get("/v1/partition/tasks", params={"limit": 20})
+    assert queue_resp.status_code == 200
+    rows = {row["task_id"]: row for row in queue_resp.json()["tasks"] if row["task_id"] in task_ids}
+
+    assert set(rows) == task_ids
+    assert rows[batch_resp.json()["task_id"]]["batch_id"] == "BATCH_QUEUE_LIST"
+    assert rows[batch_resp.json()["task_id"]]["data_type"] == "optical"
+    assert rows[direct_resp.json()["task_id"]]["batch_id"] == "DIRECT_QUEUE_LIST"
+    assert rows[direct_resp.json()["task_id"]]["data_type"] == "product"
+    assert rows[direct_resp.json()["task_id"]]["asset_count"] == 1
+    assert all(row["status"] == "succeeded" for row in rows.values())
+    assert all(row["created_at"] for row in rows.values())
+    assert all(row["updated_at"] for row in rows.values())
 
 
 def test_partition_batch_run_reuses_active_task_instead_of_duplicate_attempt(monkeypatch):
@@ -3578,11 +3755,44 @@ def test_optical_quality_history_endpoint(quality_store):
     body = quality_adapters.quality_optical_history({"target_crs": "EPSG:4326"})
 
     assert body["count"] == 1
+    assert body["total"] == 1
+    assert body["page"] == 1
+    assert body["page_size"] == 20
     record = body["records"][0]
     assert record["dataset"] == "dataset_a"
     assert record["run_name"] == "run_20260515_010203"
     assert record["status"] == "PASS"
     assert record["summary"]["index_rows"] == 1
+
+
+def test_quality_history_endpoint_supports_pagination_and_filters(quality_store):
+    for index in range(25):
+        quality_store.upsert_report(
+            "optical",
+            f"/tmp/dataset_page/run_{index:02d}",
+            {
+                "report_id": f"optical-page-{index:02d}",
+                "status": "WARN" if index % 2 else "PASS",
+                "target_crs": "EPSG:4326",
+                "generated_at": f"2026-05-15T01:{index:02d}:03Z",
+                "summary": {"index_rows": index + 1},
+            },
+        )
+
+    body = quality_adapters.quality_optical_history({"page": 2, "page_size": 10})
+
+    assert body["count"] == 10
+    assert body["total"] == 25
+    assert body["page"] == 2
+    assert body["page_size"] == 10
+    assert body["records"][0]["report_id"] == "optical-page-14"
+    assert body["records"][-1]["report_id"] == "optical-page-05"
+
+    filtered = quality_adapters.quality_optical_history({"page": 1, "page_size": 5, "status": "WARN", "keyword": "run_1"})
+    assert filtered["total"] == 5
+    assert filtered["count"] == 5
+    assert all(record["status"] == "WARN" for record in filtered["records"])
+    assert all("run_1" in record["run_name"] for record in filtered["records"])
 
 
 def test_product_quality_history_endpoint(quality_store):

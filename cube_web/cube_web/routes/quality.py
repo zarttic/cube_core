@@ -65,10 +65,7 @@ def create_quality_router() -> APIRouter:
 
     @router.post("/optical/history")
     def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
-        payload = payload_from_model(payload)
-        limit = _history_limit(payload)
-        records = get_quality_report_store().list_reports("optical", limit=limit)
-        return {"records": records, "count": len(records)}
+        return _quality_history("optical", payload_from_model(payload))
 
     @router.post("/product/run")
     def quality_product_run(payload: QualityRunRequest) -> dict:
@@ -117,10 +114,7 @@ def create_quality_router() -> APIRouter:
 
     @router.post("/product/history")
     def quality_product_history(payload: QualityHistoryRequest | None = None) -> dict:
-        payload = payload_from_model(payload)
-        limit = _history_limit(payload)
-        records = get_quality_report_store().list_reports("product", limit=limit)
-        return {"records": records, "count": len(records)}
+        return _quality_history("product", payload_from_model(payload))
 
     @router.post("/carbon/run")
     def quality_carbon_run(payload: QualityRunRequest) -> dict:
@@ -169,19 +163,51 @@ def create_quality_router() -> APIRouter:
 
     @router.post("/carbon/history")
     def quality_carbon_history(payload: QualityHistoryRequest | None = None) -> dict:
-        payload = payload_from_model(payload)
-        limit = _history_limit(payload)
-        records = get_quality_report_store().list_reports("carbon", limit=limit)
-        return {"records": records, "count": len(records)}
+        return _quality_history("carbon", payload_from_model(payload))
 
     return router
 
 
-def _history_limit(payload: dict) -> int:
+def _quality_history(data_type: str, payload: dict) -> dict:
+    page = _history_page(payload)
+    page_size = _history_page_size(payload)
+    status = _optional_text(payload.get("status"))
+    keyword = _optional_text(payload.get("keyword"))
+    store = get_quality_report_store()
+    records = store.list_reports(
+        data_type,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        status=status,
+        keyword=keyword,
+    )
+    total = store.count_reports(data_type, status=status, keyword=keyword)
+    return {"records": records, "count": len(records), "total": total, "page": page, "page_size": page_size}
+
+
+def _history_page(payload: dict) -> int:
     try:
-        limit = int(payload.get("limit", 20) or 20)
+        page = int(payload.get("page", 1) or 1)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="limit must be an integer") from None
-    if limit <= 0:
-        raise HTTPException(status_code=422, detail="limit must be greater than 0")
-    return limit
+        raise HTTPException(status_code=422, detail="page must be an integer") from None
+    if page <= 0:
+        raise HTTPException(status_code=422, detail="page must be greater than 0")
+    return page
+
+
+def _history_page_size(payload: dict) -> int:
+    value = payload.get("page_size")
+    if value is None:
+        value = payload.get("limit", 20)
+    try:
+        page_size = int(value or 20)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="page_size must be an integer") from None
+    if page_size <= 0:
+        raise HTTPException(status_code=422, detail="page_size must be greater than 0")
+    return min(page_size, 200)
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None

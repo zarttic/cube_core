@@ -39,6 +39,17 @@ class PartitionJobStore:
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    def ensure_runtime_batch(
+        self,
+        *,
+        batch_id: str,
+        batch_name: str,
+        data_type: str,
+        payload: dict[str, Any],
+        max_auto_retries: int = 0,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -89,6 +100,16 @@ class PartitionJobStore:
         raise NotImplementedError
 
     def list_attempts(self, batch_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
 
@@ -163,6 +184,61 @@ class InMemoryPartitionJobStore(PartitionJobStore):
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         row = self.batches.get(batch_id)
         return None if row is None else copy.deepcopy(row)
+
+    def ensure_runtime_batch(
+        self,
+        *,
+        batch_id: str,
+        batch_name: str,
+        data_type: str,
+        payload: dict[str, Any],
+        max_auto_retries: int = 0,
+    ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        existing = self.batches.get(batch_id, {})
+        batch = {
+            **existing,
+            "batch_id": batch_id,
+            "batch_name": batch_name or batch_id,
+            "data_type": data_type,
+            "source_system": existing.get("source_system") or "runtime",
+            "source_schema": existing.get("source_schema") or {
+                "batch_id": batch_id,
+                "batch_name": batch_name or batch_id,
+                "data_type": data_type,
+                "source_system": "runtime",
+            },
+            "normalized_payload": copy.deepcopy(payload),
+            "status": existing.get("status") or "pending",
+            "priority": int(existing.get("priority") or 0),
+            "attempt_count": int(existing.get("attempt_count") or 0),
+            "max_auto_retries": _max_auto_retries_value(max_auto_retries, existing.get("max_auto_retries")),
+            "last_task_id": existing.get("last_task_id"),
+            "last_error": existing.get("last_error"),
+            "quality_status": existing.get("quality_status"),
+            "quality_report_id": existing.get("quality_report_id"),
+            "quality_failure_reason": existing.get("quality_failure_reason"),
+            "partitioned_at": existing.get("partitioned_at"),
+            "manual_required_at": existing.get("manual_required_at"),
+            "created_at": existing.get("created_at") or now,
+            "updated_at": now,
+        }
+        self.batches[batch_id] = batch
+        for asset in _runtime_assets_from_payload(batch):
+            existing_asset = self.assets.get(asset["asset_id"], {})
+            same_batch = existing_asset.get("batch_id") == asset["batch_id"]
+            self.assets[asset["asset_id"]] = {
+                **existing_asset,
+                **asset,
+                "status": existing_asset.get("status") if same_batch else "pending",
+                "attempt_count": int(existing_asset.get("attempt_count") or 0) if same_batch else 0,
+                "last_error": existing_asset.get("last_error") if same_batch else None,
+                "last_run_dir": existing_asset.get("last_run_dir") if same_batch else None,
+                "partitioned_at": existing_asset.get("partitioned_at") if same_batch else None,
+                "created_at": existing_asset.get("created_at") or now,
+                "updated_at": now,
+            }
+        return copy.deepcopy(batch)
 
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
         rows = [row for row in self.assets.values() if row["batch_id"] == batch_id]
@@ -321,6 +397,25 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         rows = [row for row in self.attempts.values() if row["batch_id"] == batch_id]
         rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
         return copy.deepcopy(rows)
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = [_task_row_from_attempt(attempt, self.batches.get(attempt["batch_id"], {}), self.assets) for attempt in self.attempts.values()]
+        if status:
+            rows = [row for row in rows if row["status"] == status]
+        if data_type:
+            rows = [row for row in rows if row["data_type"] == data_type]
+        if keyword:
+            needle = keyword.lower()
+            rows = [row for row in rows if needle in _task_search_text(row)]
+        rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
+        return copy.deepcopy(rows[:limit])
 
     def _set_assets_status(self, attempt: dict[str, Any], status: str, **updates: Any) -> None:
         asset_ids = attempt.get("asset_ids") or [
@@ -652,6 +747,111 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 row = cur.fetchone()
                 return None if row is None else _row_to_dict(cur, row)
 
+    def ensure_runtime_batch(
+        self,
+        *,
+        batch_id: str,
+        batch_name: str,
+        data_type: str,
+        payload: dict[str, Any],
+        max_auto_retries: int = 0,
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        schema = {
+            "batch_id": batch_id,
+            "batch_name": batch_name or batch_id,
+            "data_type": data_type,
+            "source_system": "runtime",
+            "normalized_payload": copy.deepcopy(payload),
+        }
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    MERGE INTO partition_batches target
+                    USING (
+                      SELECT
+                        %(batch_id)s::text AS batch_id,
+                        %(batch_name)s::text AS batch_name,
+                        %(data_type)s::text AS data_type,
+                        %(source_system)s::text AS source_system,
+                        %(source_schema)s::jsonb AS source_schema,
+                        %(normalized_payload)s::jsonb AS normalized_payload,
+                        %(max_auto_retries)s::int AS max_auto_retries
+                    ) source
+                    ON (target.batch_id = source.batch_id)
+                    WHEN MATCHED THEN UPDATE SET
+                      batch_name = source.batch_name,
+                      data_type = source.data_type,
+                      source_system = COALESCE(target.source_system, source.source_system),
+                      source_schema = CASE
+                        WHEN target.source_system = 'runtime' THEN source.source_schema
+                        ELSE target.source_schema
+                      END,
+                      normalized_payload = source.normalized_payload,
+                      max_auto_retries = CASE
+                        WHEN target.source_system = 'runtime' THEN source.max_auto_retries
+                        ELSE target.max_auto_retries
+                      END,
+                      updated_at = now()
+                    WHEN NOT MATCHED THEN INSERT (
+                      batch_id, batch_name, data_type, source_system, source_schema,
+                      normalized_payload, max_auto_retries
+                    ) VALUES (
+                      source.batch_id, source.batch_name, source.data_type, source.source_system,
+                      source.source_schema, source.normalized_payload, source.max_auto_retries
+                    )
+                    """,
+                    _jsonb_record(
+                        {
+                            **schema,
+                            "source_schema": schema,
+                            "max_auto_retries": max_auto_retries,
+                        },
+                        "source_schema",
+                        "normalized_payload",
+                    ),
+                )
+                for asset in _runtime_assets_from_payload(
+                    {
+                        "batch_id": batch_id,
+                        "data_type": data_type,
+                        "normalized_payload": payload,
+                    }
+                ):
+                    cur.execute(
+                        """
+                        MERGE INTO partition_assets target
+                        USING (
+                          SELECT
+                            %(asset_id)s::text AS asset_id,
+                            %(batch_id)s::text AS batch_id,
+                            %(data_type)s::text AS data_type,
+                            %(scene_id)s::text AS scene_id,
+                            %(source_uri)s::text AS source_uri,
+                            %(asset_payload)s::jsonb AS asset_payload
+                        ) source
+                        ON (target.asset_id = source.asset_id)
+                        WHEN MATCHED THEN UPDATE SET
+                          batch_id = source.batch_id,
+                          data_type = source.data_type,
+                          scene_id = source.scene_id,
+                          source_uri = source.source_uri,
+                          asset_payload = source.asset_payload,
+                          updated_at = now()
+                        WHEN NOT MATCHED THEN INSERT (
+                          asset_id, batch_id, data_type, scene_id, source_uri, asset_payload
+                        ) VALUES (
+                          source.asset_id, source.batch_id, source.data_type, source.scene_id, source.source_uri, source.asset_payload
+                        )
+                        """,
+                        _jsonb_record(asset, "asset_payload"),
+                    )
+                cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (batch_id,))
+                batch = _dict_row(cur)
+            conn.commit()
+        return batch
+
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
         self.ensure_schema()
         params: list[Any] = [batch_id]
@@ -861,6 +1061,51 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     (batch_id,),
                 )
                 return [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        where = []
+        params: list[Any] = []
+        if status:
+            where.append("a.status = %s")
+            params.append(status)
+        if data_type:
+            where.append("b.data_type = %s")
+            params.append(data_type)
+        if keyword:
+            where.append("(a.task_id ILIKE %s OR b.batch_id ILIKE %s OR b.batch_name ILIKE %s OR COALESCE(a.error_message, '') ILIKE %s)")
+            params.extend([f"%{keyword}%"] * 4)
+        sql = """
+            SELECT
+              a.*,
+              b.batch_name,
+              b.data_type,
+              b.status AS batch_status,
+              COALESCE(NULLIF(array_length(a.asset_ids, 1), 0), asset_counts.asset_count, 0) AS asset_count
+            FROM partition_job_attempts a
+            JOIN partition_batches b ON b.batch_id = a.batch_id
+            LEFT JOIN (
+              SELECT batch_id, count(*)::int AS asset_count
+              FROM partition_assets
+              GROUP BY batch_id
+            ) asset_counts ON asset_counts.batch_id = a.batch_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY a.created_at DESC LIMIT %s"
+        params.append(limit)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = [_row_to_dict(cur, row) for row in cur.fetchall()]
+        return [_task_row_from_joined_attempt(row) for row in rows]
 
     def _update_attempt_and_batch(self, task_id: str, attempt_status: str, batch_status: str, *, started: bool = False) -> None:
         started_sql = ", started_at = COALESCE(started_at, now())" if started else ""
@@ -1092,6 +1337,124 @@ def _assets_from_record(record: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return assets
+
+
+def _runtime_assets_from_payload(record: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = record.get("normalized_payload") or {}
+    data_type = str(record.get("data_type") or "optical")
+    items = payload.get("selected_observations") if data_type == "carbon" else payload.get("selected_assets")
+    if not isinstance(items, list):
+        return []
+    batch_id = str(record["batch_id"])
+    assets = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        source_uri = str(item.get("source_uri") or item.get("observation_id") or item.get("source_index") or f"{batch_id}:{idx}")
+        scene_id = item.get("scene_id") or item.get("product_year") or item.get("observation_id") or item.get("source_index")
+        asset_id = str(item.get("asset_id") or f"{batch_id}:{_stable_asset_key(source_uri, idx)}")
+        assets.append(
+            {
+                "asset_id": asset_id,
+                "batch_id": batch_id,
+                "data_type": data_type,
+                "scene_id": None if scene_id is None else str(scene_id),
+                "source_uri": source_uri,
+                "asset_payload": copy.deepcopy(item),
+            }
+        )
+    return assets
+
+
+def _task_row_from_attempt(
+    attempt: dict[str, Any],
+    batch: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    batch_id = str(attempt.get("batch_id") or batch.get("batch_id") or "")
+    asset_ids = [str(item) for item in attempt.get("asset_ids") or [] if item]
+    asset_count = len(asset_ids)
+    if not asset_count:
+        asset_count = sum(1 for asset in assets.values() if asset.get("batch_id") == batch_id)
+    result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
+    return {
+        "task_id": attempt.get("task_id"),
+        "status": attempt.get("status"),
+        "data_type": batch.get("data_type") or result.get("data_type"),
+        "operation": attempt.get("operation"),
+        "batch_id": batch_id,
+        "batch_name": batch.get("batch_name") or batch_id,
+        "batch_status": batch.get("status"),
+        "asset_ids": asset_ids,
+        "asset_count": asset_count,
+        "attempt_no": attempt.get("attempt_no"),
+        "requested_by": attempt.get("requested_by"),
+        "source_task_id": attempt.get("source_task_id"),
+        "retry_strategy": attempt.get("retry_strategy"),
+        "failure_reason": attempt.get("failure_reason"),
+        "created_at": attempt.get("created_at"),
+        "updated_at": attempt.get("updated_at"),
+        "started_at": attempt.get("started_at"),
+        "finished_at": attempt.get("finished_at"),
+        "error_type": attempt.get("error_type"),
+        "error_message": attempt.get("error_message"),
+        "result_summary": _task_result_summary(result),
+    }
+
+
+def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
+    result = row.get("runner_result") if isinstance(row.get("runner_result"), dict) else {}
+    asset_ids = [str(item) for item in row.get("asset_ids") or [] if item]
+    return {
+        "task_id": row.get("task_id"),
+        "status": row.get("status"),
+        "data_type": row.get("data_type") or result.get("data_type"),
+        "operation": row.get("operation"),
+        "batch_id": row.get("batch_id"),
+        "batch_name": row.get("batch_name") or row.get("batch_id"),
+        "batch_status": row.get("batch_status"),
+        "asset_ids": asset_ids,
+        "asset_count": int(row.get("asset_count") or 0),
+        "attempt_no": row.get("attempt_no"),
+        "requested_by": row.get("requested_by"),
+        "source_task_id": row.get("source_task_id"),
+        "retry_strategy": row.get("retry_strategy"),
+        "failure_reason": row.get("failure_reason"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "started_at": row.get("started_at"),
+        "finished_at": row.get("finished_at"),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "result_summary": _task_result_summary(result),
+    }
+
+
+def _task_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict) or not result:
+        return {}
+    return {
+        "rows": result.get("rows") or result.get("total_index_rows") or result.get("metadata_rows"),
+        "quality_status": result.get("quality_status") or (result.get("quality_report") or {}).get("status")
+        if isinstance(result.get("quality_report") or {}, dict)
+        else result.get("quality_status"),
+        "run_dir": result.get("run_dir"),
+        "rows_path": result.get("rows_path") or result.get("output_path"),
+        "execution_engine": result.get("execution_engine") or result.get("partition_backend"),
+    }
+
+
+def _task_search_text(row: dict[str, Any]) -> str:
+    values = [
+        row.get("task_id"),
+        row.get("status"),
+        row.get("data_type"),
+        row.get("operation"),
+        row.get("batch_id"),
+        row.get("batch_name"),
+        row.get("error_message"),
+    ]
+    return " ".join(str(value) for value in values if value).lower()
 
 
 def _validate_ard_payload(payload: dict[str, Any], *, data_type: str) -> None:

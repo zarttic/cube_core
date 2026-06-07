@@ -2103,6 +2103,22 @@ section {
     line-height: 1.6;
 }
 
+.table-text-clamp,
+.quality-text-clamp,
+.quality-check-message,
+.quality-check-detail-title,
+.quality-check-detail-line {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+.quality-check-message {
+    margin: 0;
+}
+
 .quality-check-details {
     margin-top: 10px;
     display: grid;
@@ -2268,6 +2284,12 @@ section {
 
 .quality-history-table .el-table__row {
     cursor: pointer;
+}
+
+.quality-history-pagination {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 12px;
 }
 
 .quality-empty-state {
@@ -3534,6 +3556,99 @@ section {
     border-radius: 8px;
     background: #fff;
     padding: 10px 12px;
+}
+
+.partition-task-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: calc(100vh - 240px);
+}
+
+.partition-task-page-header,
+.partition-task-table-panel {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+}
+
+.partition-task-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 18px;
+}
+
+.partition-task-page-header h3 {
+    margin: 0;
+    color: var(--dark);
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.partition-task-page-header span {
+    display: block;
+    margin-top: 3px;
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.partition-task-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.partition-task-stat {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: var(--shadow);
+}
+
+.partition-task-stat span {
+    display: block;
+    color: var(--gray);
+    font-size: 12px;
+}
+
+.partition-task-stat strong {
+    display: block;
+    margin-top: 4px;
+    color: var(--dark);
+    font-size: 22px;
+    line-height: 1.2;
+}
+
+.partition-task-stat.running {
+    border-color: rgba(245, 194, 17, 0.45);
+}
+
+.partition-task-stat.manual_required {
+    border-color: rgba(224, 27, 36, 0.35);
+}
+
+.partition-task-stat.succeeded {
+    border-color: rgba(38, 162, 105, 0.35);
+}
+
+.partition-task-table-panel {
+    padding: 12px;
+    overflow: hidden;
+}
+
+.partition-task-table strong {
+    color: var(--dark);
+    font-size: 13px;
+}
+
+.partition-task-table .table-text-clamp {
+    color: var(--gray);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 .partition-warn-alert {

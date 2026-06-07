@@ -88,6 +88,8 @@ const qualityHistory = ref([]);
 const qualityError = ref('');
 const qualityTargetCrs = ref('EPSG:4326');
 const qualityHistoryLimit = ref(30);
+const qualityHistoryPage = ref(1);
+const qualityHistoryTotal = ref(0);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
 const qualityReportDataTypes = new Set(['optical', 'product', 'carbon']);
@@ -175,11 +177,22 @@ const partitionBatchDetailTab = ref('overview');
 const partitionBatchDetailSearch = ref('');
 const partitionBatchDetailAssetStatus = ref('all');
 const partitionBatchDetailSelectedAssetIds = ref([]);
+const partitionTasks = ref([]);
+const partitionTasksLoading = ref(false);
 
 const visibleOpticalBatches = computed(() => managedOpticalBatches.value);
 const visibleCarbonBatches = computed(() => managedCarbonBatches.value);
 const visibleRadarBatches = computed(() => managedRadarBatches.value);
 const visibleProductBatches = computed(() => managedProductBatches.value);
+const partitionTaskQueueStats = computed(() => {
+  const countByStatus = (statuses) => partitionTasks.value.filter((task) => statuses.includes(task.status)).length;
+  return [
+    { label: '排队中', value: countByStatus(['queued']), status: 'queued' },
+    { label: '运行中', value: countByStatus(['running', 'retrying']), status: 'running' },
+    { label: '需处理', value: countByStatus(['failed', 'manual_required', 'cancel_requested']), status: 'manual_required' },
+    { label: '已完成', value: countByStatus(['succeeded', 'completed']), status: 'succeeded' },
+  ];
+});
 
 function setBatchSelection(batchId, dataType) {
   if (dataType === 'carbon') {
@@ -213,6 +226,7 @@ function partitionStatusText(status) {
     manual_required: '人工确认',
     cancelled: '已取消',
     succeeded: '已完成',
+    completed: '已完成',
   };
   return map[status] || status || '未知';
 }
@@ -228,6 +242,7 @@ function partitionStatusType(status) {
     manual_required: 'warning',
     cancelled: 'info',
     succeeded: 'success',
+    completed: 'success',
   };
   return map[status] || 'info';
 }
@@ -254,6 +269,7 @@ function partitionOperationText(operation) {
     auto_retry: '自动重试',
     manual_retry: '人工重试',
     manual_asset_retry: '失败资产重试',
+    manual_run: '手动执行',
     demo: '批次执行',
     retry: '重试',
     test: '测试',
@@ -503,6 +519,39 @@ function selectManagedBatchByDetail(batch) {
   setBatchSelection(batch.batch_id || batch.id, batch.data_type);
 }
 
+function partitionTaskTitle(task) {
+  return task.batch_name || task.batch_id || task.task_id || '-';
+}
+
+function partitionTaskTimeText(task) {
+  if (task.finished_at) return `结束 ${formatPartitionTimestamp(task.finished_at)}`;
+  if (task.started_at) return `开始 ${formatPartitionTimestamp(task.started_at)}`;
+  return `创建 ${formatPartitionTimestamp(task.created_at)}`;
+}
+
+function partitionTaskResultText(task) {
+  if (task.error_message) return task.error_message;
+  const summary = task.result_summary || {};
+  const rows = summary.rows ?? '-';
+  const quality = summary.quality_status ? ` · 质检 ${summary.quality_status}` : '';
+  return `索引行 ${rows}${quality}`;
+}
+
+function canOpenPartitionTaskBatch(task) {
+  return Boolean(task?.batch_id);
+}
+
+async function openPartitionTaskBatch(task) {
+  if (!canOpenPartitionTaskBatch(task)) return;
+  await openPartitionBatchDetail({
+    id: task.batch_id,
+    batch_id: task.batch_id,
+    batch_name: task.batch_name,
+    data_type: task.data_type,
+    status: task.batch_status || task.status,
+  });
+}
+
 async function loadPartitionBatchDetail(batchId) {
   const { partitionPrefix } = apiPrefixes();
   const [batch, assetsResp, attemptsResp] = await Promise.all([
@@ -516,6 +565,19 @@ async function loadPartitionBatchDetail(batchId) {
     assets: assetsResp.assets || [],
     attempts: attemptsResp.attempts || [],
   };
+}
+
+async function loadPartitionTasks() {
+  partitionTasksLoading.value = true;
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const response = await requestGet(`${partitionPrefix}/tasks?limit=50`);
+    partitionTasks.value = response.tasks || [];
+  } catch (error) {
+    ElMessage.error(`剖分任务队列加载失败：${error.message}`);
+  } finally {
+    partitionTasksLoading.value = false;
+  }
 }
 
 async function openPartitionBatchDetail(batch) {
@@ -582,6 +644,7 @@ async function runPartitionBatchFromDetail() {
     if (!response.task_id) {
       throw new Error('批次执行任务未返回 task_id');
     }
+    await loadPartitionTasks();
     lastPartitionRequest.value = {
       kind: 'batch',
       batchId,
@@ -608,6 +671,7 @@ async function runPartitionBatchFromDetail() {
     }
     ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
     await loadPartitionBatches();
+    await loadPartitionTasks();
     await refreshPartitionBatchDetail();
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
@@ -615,6 +679,7 @@ async function runPartitionBatchFromDetail() {
     lastPartitionResult.value = failure;
     resultRows.value = formatRows(failure);
     setPartitionStage('persist', 'failed', `执行失败：${failure.error}`);
+    await loadPartitionTasks();
     ElMessage.error(error.message);
   } finally {
     stopPartitionTimer();
@@ -651,6 +716,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
     if (!response.task_id) {
       throw new Error('失败资产重试任务未返回 task_id');
     }
+    await loadPartitionTasks();
     lastPartitionRequest.value = {
       kind: 'assets',
       endpoint: 'assets',
@@ -677,6 +743,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
     clearPartitionBatchDetailSelection();
     ElMessage.success('失败资产重试完成');
     await loadPartitionBatches();
+    await loadPartitionTasks();
     await refreshPartitionBatchDetail();
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
@@ -684,6 +751,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
     lastPartitionResult.value = failure;
     resultRows.value = formatRows(failure);
     setPartitionStage('persist', 'failed', `重试失败：${failure.error}`);
+    await loadPartitionTasks();
     ElMessage.error(error.message);
   } finally {
     stopPartitionTimer();
@@ -715,6 +783,7 @@ async function cancelPartitionBatchFromDetail() {
       ElMessage.success('已发起取消请求');
     }
     await loadPartitionBatches();
+    await loadPartitionTasks();
     await refreshPartitionBatchDetail();
   } catch (error) {
     ElMessage.error(error.message);
@@ -831,19 +900,6 @@ const selectedDataName = computed(() => {
     return names.join('，');
   }
   return '未选择';
-});
-
-const filteredQualityHistory = computed(() => {
-  const keyword = qualityHistorySearch.value.trim().toLowerCase();
-  return qualityHistory.value.filter((row) => {
-    const matchesKeyword =
-      !keyword ||
-      [row.dataset, row.run_name, row.run_dir, row.report_id]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(keyword));
-    const matchesStatus = !qualityHistoryStatus.value || row.status === qualityHistoryStatus.value;
-    return matchesKeyword && matchesStatus;
-  });
 });
 
 const selectedQualityRecord = computed(() => {
@@ -1287,11 +1343,32 @@ function openDataDrawer() {
 function openQualityHistoryDrawer() {
   qualityHistorySearch.value = '';
   qualityHistoryStatus.value = '';
+  qualityHistoryPage.value = 1;
   qualityHistoryDrawerVisible.value = true;
+  loadQualityHistory();
 }
 
 function qualityHistoryRowClass({ row }) {
   return row.report_id === selectedQualityReportId.value ? 'selected-quality-history-row' : '';
+}
+
+function qualityHistoryProductYearsText(row) {
+  return row.summary?.product_years?.join(', ') || '-';
+}
+
+function qualityHistoryQualityFlagsText(row) {
+  return Object.entries(row.summary?.quality_counts || {}).map(([flag, count]) => `Q${flag}: ${count}`).join(', ') || '-';
+}
+
+async function changeQualityHistoryPage(page) {
+  qualityHistoryPage.value = page;
+  await loadQualityHistory();
+}
+
+async function changeQualityHistoryPageSize(size) {
+  qualityHistoryLimit.value = size;
+  qualityHistoryPage.value = 1;
+  await loadQualityHistory();
 }
 
 function assetKey(asset) {
@@ -1713,8 +1790,13 @@ async function requestPartitionOperation(partitionPrefix, endpoint, operation, p
   if (!taskId) {
     throw new Error('剖分任务提交后未返回 task_id');
   }
+  await loadPartitionTasks();
   setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
-  return waitForPartitionTask(partitionPrefix, taskId);
+  try {
+    return await waitForPartitionTask(partitionPrefix, taskId);
+  } finally {
+    await loadPartitionTasks();
+  }
 }
 
 async function requestRetryOperation(partitionPrefix, retryRequest, retryPayload) {
@@ -1724,8 +1806,13 @@ async function requestRetryOperation(partitionPrefix, retryRequest, retryPayload
     if (!taskId) {
       throw new Error('批次重试任务未返回 task_id');
     }
+    await loadPartitionTasks();
     setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
-    return waitForPartitionTask(partitionPrefix, taskId);
+    try {
+      return await waitForPartitionTask(partitionPrefix, taskId);
+    } finally {
+      await loadPartitionTasks();
+    }
   }
   if (retryRequest.kind === 'assets') {
     const submitted = await requestJson(`${partitionPrefix}/assets/retry`, retryRequest.payload || {});
@@ -1733,8 +1820,13 @@ async function requestRetryOperation(partitionPrefix, retryRequest, retryPayload
     if (!taskId) {
       throw new Error('失败资产重试任务未返回 task_id');
     }
+    await loadPartitionTasks();
     setPartitionStage('partition', 'running', `后台任务 ${taskId} 执行中。`);
-    return waitForPartitionTask(partitionPrefix, taskId);
+    try {
+      return await waitForPartitionTask(partitionPrefix, taskId);
+    } finally {
+      await loadPartitionTasks();
+    }
   }
   return requestPartitionOperation(partitionPrefix, retryRequest.endpoint, 'retry', retryPayload);
 }
@@ -2011,6 +2103,8 @@ function formatQualityTime(value) {
 async function loadQualityHistory() {
   if (!qualityReportDataTypes.has(qualityDataType.value)) {
     qualityHistory.value = [];
+    qualityHistoryTotal.value = 0;
+    qualityHistoryPage.value = 1;
     return;
   }
   qualityHistoryLoading.value = true;
@@ -2018,9 +2112,19 @@ async function loadQualityHistory() {
     const { qualityPrefix } = apiPrefixes();
     const result = await requestJson(`${qualityPrefix}/${qualityDataType.value}/history`, {
       target_crs: qualityTargetCrs.value,
-      limit: qualityHistoryLimit.value,
+      page: qualityHistoryPage.value,
+      page_size: qualityHistoryLimit.value,
+      keyword: qualityHistorySearch.value.trim() || undefined,
+      status: qualityHistoryStatus.value || undefined,
     });
     qualityHistory.value = result.records || [];
+    qualityHistoryTotal.value = Number(result.total ?? result.count ?? qualityHistory.value.length);
+    qualityHistoryPage.value = Number(result.page || qualityHistoryPage.value);
+    qualityHistoryLimit.value = Number(result.page_size || qualityHistoryLimit.value);
+    if (!qualityHistory.value.length && qualityHistoryTotal.value > 0 && qualityHistoryPage.value > 1) {
+      qualityHistoryPage.value = Math.max(1, Math.ceil(qualityHistoryTotal.value / qualityHistoryLimit.value));
+      await loadQualityHistory();
+    }
   } catch (error) {
     qualityError.value = error.message;
     ElMessage.error(error.message);
@@ -2122,6 +2226,8 @@ async function exportQualityReport(format) {
 async function changeQualityDataType() {
   qualityReport.value = null;
   qualityHistory.value = [];
+  qualityHistoryTotal.value = 0;
+  qualityHistoryPage.value = 1;
   selectedQualityReportId.value = '';
   await refreshQualityWorkspace();
 }
@@ -2360,6 +2466,13 @@ watch(qualityDataType, () => {
   }
 });
 
+watch([qualityHistorySearch, qualityHistoryStatus], () => {
+  qualityHistoryPage.value = 1;
+  if (activeModule.value === 'quality' && qualityHistoryDrawerVisible.value) {
+    loadQualityHistory();
+  }
+});
+
 watch(opticalGridType, () => {
   applyDefaultGridLevel('optical');
   mapGridGeometries.value = [];
@@ -2398,6 +2511,7 @@ watch([
 onMounted(async () => {
   await loadManagedConfig();
   await loadPartitionBatches();
+  await loadPartitionTasks();
   applyDefaultGridLevels();
   if (activeModule.value === 'quality') {
     refreshQualityWorkspace();
@@ -2420,6 +2534,7 @@ onUnmounted(() => {
           <button class="module-tab" :class="{ active: activeModule === 'product' }" @click="activeModule = 'product'">信息产品</button>
           <button class="module-tab" :class="{ active: activeModule === 'quality' }" @click="activeModule = 'quality'">自动化质检</button>
           <button class="module-tab" :class="{ active: activeModule === 'config' }" @click="activeModule = 'config'">配置管理</button>
+          <button class="module-tab" :class="{ active: activeModule === 'tasks' }" @click="activeModule = 'tasks'; loadPartitionTasks()">剖分任务队列</button>
         </div>
       </div>
     </section>
@@ -2428,6 +2543,61 @@ onUnmounted(() => {
       <div class="container">
         <div class="module-content active">
           <ConfigView v-if="activeModule === 'config'" />
+          <div v-else-if="activeModule === 'tasks'" class="partition-task-workspace">
+            <div class="partition-task-page-header">
+              <div>
+                <h3>剖分任务队列</h3>
+                <span>最近 {{ partitionTasks.length }} 个任务</span>
+              </div>
+              <el-button :icon="Refresh" :loading="partitionTasksLoading" @click="loadPartitionTasks">刷新</el-button>
+            </div>
+            <div class="partition-task-stats">
+              <div v-for="item in partitionTaskQueueStats" :key="item.label" class="partition-task-stat" :class="item.status">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+              </div>
+            </div>
+            <div class="partition-task-table-panel">
+              <el-table v-loading="partitionTasksLoading" :data="partitionTasks" class="drawer-table partition-task-table" row-key="task_id">
+                <el-table-column label="状态" width="96">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="partitionStatusType(row.status)">{{ partitionStatusText(row.status) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="任务" min-width="230">
+                  <template #default="{ row }">
+                    <strong>{{ row.task_id }}</strong>
+                    <div class="partition-asset-subtitle">{{ partitionTaskTitle(row) }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="数据类型" width="110">
+                  <template #default="{ row }">{{ dataLabelsByModule[row.data_type] || row.data_type || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="120">
+                  <template #default="{ row }">{{ partitionOperationText(row.operation) }}</template>
+                </el-table-column>
+                <el-table-column label="批次" min-width="180">
+                  <template #default="{ row }">{{ row.batch_id || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="资产" width="80">
+                  <template #default="{ row }">{{ row.asset_count ?? 0 }}</template>
+                </el-table-column>
+                <el-table-column label="时间" min-width="180">
+                  <template #default="{ row }">{{ partitionTaskTimeText(row) }}</template>
+                </el-table-column>
+                <el-table-column label="结果" min-width="180">
+                  <template #default="{ row }">
+                    <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="90" fixed="right">
+                  <template #default="{ row }">
+                    <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
           <div v-else class="workspace">
             <div class="workspace-sidebar">
               <div class="config-panel">
@@ -2585,7 +2755,7 @@ onUnmounted(() => {
                     <label>历史质检记录</label>
                     <button type="button" class="quality-history-drawer-toggle" @click="openQualityHistoryDrawer">
                       <span>
-                        <strong>{{ qualityHistory.length }}</strong>
+                        <strong>{{ qualityHistoryTotal || qualityHistory.length }}</strong>
                         <span>条记录</span>
                       </span>
                       <span>打开列表</span>
@@ -2725,7 +2895,9 @@ onUnmounted(() => {
                             <span>尝试 {{ batch.attempt_count || 0 }} 次</span>
                             <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
                           </div>
-                          <div class="quality-manual-batch-error">{{ batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理' }}</div>
+                          <div class="quality-manual-batch-error quality-text-clamp" :title="batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理'">
+                            {{ batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理' }}
+                          </div>
                         </div>
                         <div class="quality-manual-batch-actions">
                           <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
@@ -2852,11 +3024,11 @@ onUnmounted(() => {
                           <strong>{{ checkNameText(check.name) }}</strong>
                           <el-tag :type="checkStatusType(check.status)" size="small">{{ statusText(check.status) }}</el-tag>
                         </div>
-                        <p>{{ checkMessageText(check) }}</p>
+                        <p class="quality-check-message" :title="checkMessageText(check)">{{ checkMessageText(check) }}</p>
                         <div v-if="checkDetailRows(check).length" class="quality-check-details">
                           <div v-for="detail in checkDetailRows(check)" :key="detail.title" class="quality-check-detail">
-                            <strong>{{ detail.title }}</strong>
-                            <span v-for="line in detail.lines" :key="line">{{ line }}</span>
+                            <strong class="quality-check-detail-title" :title="detail.title">{{ detail.title }}</strong>
+                            <span v-for="line in detail.lines" :key="line" class="quality-check-detail-line" :title="String(line)">{{ line }}</span>
                           </div>
                         </div>
                       </div>
@@ -3102,7 +3274,7 @@ onUnmounted(() => {
       </div>
       <el-table
         v-loading="qualityHistoryLoading"
-        :data="filteredQualityHistory"
+        :data="qualityHistory"
         class="drawer-table quality-history-table"
         highlight-current-row
         :row-class-name="qualityHistoryRowClass"
@@ -3111,11 +3283,13 @@ onUnmounted(() => {
         <el-table-column label="数据集" prop="dataset" min-width="130" />
         <el-table-column label="批次" prop="run_name" min-width="170" />
 	        <el-table-column v-if="qualityDataType === 'product'" label="年份" min-width="150">
-	          <template #default="{ row }">{{ row.summary?.product_years?.join(', ') || '-' }}</template>
+	          <template #default="{ row }">
+              <div class="table-text-clamp" :title="qualityHistoryProductYearsText(row)">{{ qualityHistoryProductYearsText(row) }}</div>
+            </template>
 	        </el-table-column>
 	        <el-table-column v-if="qualityDataType === 'carbon'" label="质量标记" min-width="150">
 	          <template #default="{ row }">
-	            {{ Object.entries(row.summary?.quality_counts || {}).map(([flag, count]) => `Q${flag}: ${count}`).join(', ') || '-' }}
+	            <div class="table-text-clamp" :title="qualityHistoryQualityFlagsText(row)">{{ qualityHistoryQualityFlagsText(row) }}</div>
 	          </template>
 	        </el-table-column>
         <el-table-column label="状态" width="86">
@@ -3133,6 +3307,19 @@ onUnmounted(() => {
           <template #default="{ row }">{{ formatQualityTime(row.generated_at || row.modified_at) }}</template>
         </el-table-column>
       </el-table>
+      <div class="quality-history-pagination">
+        <el-pagination
+          v-model:current-page="qualityHistoryPage"
+          v-model:page-size="qualityHistoryLimit"
+          :total="qualityHistoryTotal"
+          :page-sizes="[10, 20, 30, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          small
+          @current-change="changeQualityHistoryPage"
+          @size-change="changeQualityHistoryPageSize"
+        />
+      </div>
     </el-drawer>
 
     <el-dialog v-model="partitionStageDetailVisible" title="剖分进程详情" width="520px">

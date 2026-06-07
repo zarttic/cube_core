@@ -67,6 +67,74 @@ class PartitionWorkflowService:
         self.get_batch(batch_id)
         return self.store.list_attempts(batch_id)
 
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.store.list_tasks(status=status, data_type=data_type, keyword=keyword, limit=limit)
+
+    def run_payload(
+        self,
+        data_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        requested_by: str = "operator",
+    ) -> PartitionTask:
+        with self._run_lock:
+            raw_payload = copy.deepcopy(payload or {})
+            task_id = f"partition-{uuid4().hex[:12]}"
+            batch_id = _text_or_none(raw_payload.get("batch_id"))
+            batch = self.store.get_batch(batch_id) if batch_id else None
+            if batch is not None and str(batch.get("data_type") or "") != data_type:
+                raise HTTPException(status_code=422, detail=f"Partition batch {batch_id} is not a {data_type} batch")
+            if batch is None:
+                batch_id = batch_id or f"runtime-{task_id}"
+                batch = self.store.ensure_runtime_batch(
+                    batch_id=batch_id,
+                    batch_name=_text_or_none(raw_payload.get("batch_name")) or batch_id,
+                    data_type=data_type,
+                    payload=raw_payload,
+                    max_auto_retries=0,
+                )
+            active_task = self._active_task_for_batch(batch)
+            if active_task is not None:
+                return active_task
+
+            asset_ids = self._selected_asset_ids_for_payload(str(batch["batch_id"]), str(batch["data_type"]), raw_payload)
+
+            def cancellation_check() -> bool:
+                return self.store.is_cancel_requested(task_id)
+
+            try:
+                self.store.create_attempt(
+                    task_id=task_id,
+                    batch_id=str(batch["batch_id"]),
+                    operation="auto_run",
+                    payload=raw_payload,
+                    asset_ids=asset_ids,
+                    requested_by=requested_by,
+                )
+            except PartitionBatchAlreadyActiveError as exc:
+                active_task = self._active_task_for_batch(self.get_batch(str(batch["batch_id"])))
+                if active_task is not None:
+                    return active_task
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            self.store.mark_batch_queued(str(batch["batch_id"]), task_id, operation="auto_run")
+            return self.partition_service.submit(
+                data_type,
+                "run",
+                raw_payload,
+                task_id=task_id,
+                on_started=self.on_task_started,
+                on_succeeded=self.on_task_succeeded,
+                on_failed=self.on_task_failed,
+                cancellation_check=cancellation_check,
+            )
+
     def run_batch(
         self,
         batch_id: str,
@@ -264,6 +332,21 @@ class PartitionWorkflowService:
             payload.update(config_override)
         return payload
 
+    def _selected_asset_ids_for_payload(self, batch_id: str, data_type: str, payload: dict[str, Any]) -> list[str] | None:
+        key = "selected_observations" if data_type == "carbon" else "selected_assets"
+        selected = payload.get(key)
+        if not isinstance(selected, list) or not selected:
+            return None
+        assets = self.store.list_assets(batch_id)
+        matched: list[str] = []
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            match = _find_asset_for_payload_item(assets, item)
+            if match is not None and match.get("asset_id"):
+                matched.append(str(match["asset_id"]))
+        return matched or None
+
     def _active_task_for_batch(self, batch: dict[str, Any]) -> PartitionTask | None:
         if str(batch.get("status") or "") not in ACTIVE_BATCH_RUN_STATUSES:
             return None
@@ -303,6 +386,22 @@ def _payload_asset_with_identity(asset: dict[str, Any]) -> dict[str, Any]:
     if asset.get("scene_id") is not None:
         payload.setdefault("scene_id", asset.get("scene_id"))
     return payload
+
+
+def _find_asset_for_payload_item(assets: list[dict[str, Any]], item: dict[str, Any]) -> dict[str, Any] | None:
+    asset_id = str(item.get("asset_id") or "").strip()
+    if asset_id:
+        for asset in assets:
+            if str(asset.get("asset_id") or "") == asset_id:
+                return asset
+    source_uri = str(item.get("source_uri") or "").strip()
+    scene_id = str(item.get("scene_id") or item.get("product_year") or item.get("observation_id") or item.get("source_index") or "").strip()
+    for asset in assets:
+        if source_uri and str(asset.get("source_uri") or "") == source_uri:
+            return asset
+        if scene_id and str(asset.get("scene_id") or "") == scene_id:
+            return asset
+    return None
 
 
 def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
