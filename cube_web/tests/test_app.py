@@ -195,6 +195,13 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert "{ label: '自动化质检'," not in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
     assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
+    order_source = nav_source.split("const headerLabelOrder = [", 1)[1].split("];", 1)[0]
+    assert order_source.index("'首页'") < order_source.index("'ARD数据载入'")
+    assert order_source.index("'ARD数据载入'") < order_source.index("'分析就绪数据剖分'")
+    assert order_source.index("'分析就绪数据剖分'") < order_source.index("'剖分数据服务'")
+    assert order_source.index("'剖分数据服务'") < order_source.index("'资源调度'")
+    assert order_source.index("'资源调度'") < order_source.index("'后台管理'")
+    assert order_source.index("'后台管理'") < order_source.index("'全球离散格网模型与编码'")
     assert "runtimeNavigation()" in nav_source
     assert ':href="item.path"' in app_source
     assert "currentNavItems" in app_source
@@ -445,9 +452,9 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "auth_required": False,
         "navigation": [
             {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
+            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
             {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
             {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
-            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
             {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
         ],
     }
@@ -480,9 +487,9 @@ def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch)
     assert resp.status_code == 200
     assert resp.json()["navigation"] == [
         {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
+        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
         {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
         {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
-        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
         {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
     ]
 

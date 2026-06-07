@@ -152,9 +152,9 @@ def navigation_items() -> list[dict[str, str]]:
     settings = portal_settings()
     items = [
         ("首页", settings.home_url),
+        ("ARD数据载入", settings.data_ingest_url),
         ("剖分数据服务", settings.partition_service_url),
         ("资源调度", settings.dispatch_url),
-        ("ARD数据载入", settings.data_ingest_url),
         ("后台管理", settings.admin_url),
     ]
     return [{"label": label, "kind": "external", "url": url} for label, url in items if url]
