@@ -13,12 +13,16 @@ from cube_split import runtime_config
 
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
-from cube_web.services.partition_defaults import default_grid_level_for_grid_type, default_grid_level_from_assets
+from cube_web.services.partition_defaults import (
+    DEFAULT_ISEA4H_GRID_LEVEL,
+    default_grid_level_for_grid_type,
+    default_grid_level_from_assets,
+)
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
 
-DEFAULT_ENTITY_GRID_LEVEL = 4
-DEFAULT_ENTITY_TEST_GRID_LEVEL = 4
+DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
+DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 PARTITION_GRID_TYPES = {"geohash", "mgrs", "tile_matrix", "isea4h"}
 
 

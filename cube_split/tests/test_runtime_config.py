@@ -9,8 +9,8 @@ def test_env_text_reads_local_env_file(monkeypatch, tmp_path):
         "\n".join(
             [
                 "CUBE_WEB_POSTGRES_DSN=postgresql://local/cube",
-                "CUBE_WEB_RAY_ADDRESS=ray://10.136.1.13:10001",
-                "CUBE_WEB_MINIO_ENDPOINT=10.136.1.14:9000",
+                "CUBE_WEB_RAY_ADDRESS=10.3.100.182:6379",
+                "CUBE_WEB_MINIO_ENDPOINT=10.3.100.179:9000",
             ]
         ),
         encoding="utf-8",
@@ -19,8 +19,8 @@ def test_env_text_reads_local_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CUBE_WEB_ENV_FILE", str(env_file))
 
     assert runtime_config.postgres_dsn() == "postgresql://local/cube"
-    assert runtime_config.ray_address() == "ray://10.136.1.13:10001"
-    assert runtime_config.minio_settings().endpoint == "10.136.1.14:9000"
+    assert runtime_config.ray_address() == "10.3.100.182:6379"
+    assert runtime_config.minio_settings().endpoint == "10.3.100.179:9000"
 
 
 def test_environment_overrides_local_env_file(monkeypatch, tmp_path):

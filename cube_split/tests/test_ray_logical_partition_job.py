@@ -175,7 +175,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             postgres_dsn="postgresql://postgres:postgres@127.0.0.1:5432/cube",
             db_path="",
             asset_storage_backend="minio",
-            minio_endpoint="10.136.1.14:9000",
+            minio_endpoint="10.3.100.179:9000",
             minio_access_key="access",
             minio_secret_key="secret",
             minio_bucket="cube",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from cube_web.schemas import (
     PartitionAssetRetryRequest,
@@ -118,7 +118,7 @@ def create_partition_router(
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = 100,
+        limit: int = Query(default=100, ge=1, le=500),
     ) -> dict:
         return {
             "tasks": workflow_service.list_tasks(

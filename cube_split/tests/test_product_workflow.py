@@ -219,13 +219,13 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
             cog_workers=1,
             partition_workers=1,
             partition_backend="ray",
-            ray_address="ray://10.136.1.13:10001",
+            ray_address="10.3.100.182:6379",
             ray_parallelism=4,
             chunk_size=1,
             sample_mean=True,
             metadata_backend="none",
             asset_storage_backend="local",
-            minio_endpoint="10.136.1.14:9000",
+            minio_endpoint="10.3.100.179:9000",
             minio_access_key="access",
             minio_secret_key="secret",
             minio_bucket="cube",
@@ -239,7 +239,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert result["execution_engine"] == "ray"
     assert result["partition_backend_used"] == "ray"
     assert result["ray_parallelism"] == 1
-    assert result["ray_address"] == "ray://10.136.1.13:10001"
+    assert result["ray_address"] == "10.3.100.182:6379"
     assert result["ray_init_elapsed_sec"] == 0.25
     assert captured["parallelism"] == 1
     assert captured["include_sample_mean"] is True
@@ -248,7 +248,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert captured["cog_overwrite"] is True
     assert "PREDICTOR" not in captured["cog_options"]
     assert captured["target_crs"] == "EPSG:4326"
-    assert captured["source_options"]["endpoint"] == "10.136.1.14:9000"
+    assert captured["source_options"]["endpoint"] == "10.3.100.179:9000"
     assert captured["source_options"]["access_key"] == "access"
     assert captured["cog_upload_options"]["bucket"] == "cube"
     assert captured["cog_upload_options"]["prefix"] == "cube/product"
@@ -322,7 +322,7 @@ def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             postgres_dsn="postgresql://postgres:postgres@127.0.0.1:5432/cube",
             db_path="",
             asset_storage_backend="minio",
-            minio_endpoint="10.136.1.14:9000",
+            minio_endpoint="10.3.100.179:9000",
             minio_access_key="access",
             minio_secret_key="secret",
             minio_bucket="cube",

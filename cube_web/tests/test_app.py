@@ -182,9 +182,9 @@ def ard_carbon_observation(observation_id: str = "obs-a") -> dict:
 
 @pytest.fixture(autouse=True)
 def quality_store(monkeypatch):
-    monkeypatch.setenv("CUBE_WEB_POSTGRES_DSN", "postgresql://postgres:postgres@127.0.0.1:55432/cube")
-    monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "ray://10.136.1.13:10001")
-    monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.136.1.14:9000")
+    monkeypatch.setenv("CUBE_WEB_POSTGRES_DSN", "postgresql://test_user:test_password@10.3.100.180:15400/postgres")
+    monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "10.3.100.182:6379")
+    monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.3.100.179:9000")
     monkeypatch.setenv("CUBE_WEB_MINIO_BUCKET", "cube")
     monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
     monkeypatch.delenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", raising=False)
@@ -262,8 +262,9 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "carbon: 'carbon'" in source
     assert "radar: 'radar'" in source
     assert "product: 'product'" in source
-    assert "const testModules = new Set(['optical', 'carbon', 'radar', 'product']);" in source
-    assert "const operation = testModules.has(activeModule.value) ? 'test' : 'run';" in source
+    assert "const partitionModules = new Set(['optical', 'carbon', 'radar', 'product']);" in source
+    assert "const operation = 'run';" in source
+    assert "testModules" not in source
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
@@ -273,9 +274,21 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert '<el-option label="MGRS (逻辑剖分)" value="mgrs" />' not in source
     assert 'v-model="radarGridType"' in source
     assert 'v-model="productGridType"' in source
+    carbon_block = source.split('<template v-else-if="activeModule === \'carbon\'">', 1)[1].split(
+        '<template v-else-if="activeModule === \'radar\'">',
+        1,
+    )[0]
+    radar_block = source.split('<template v-else-if="activeModule === \'radar\'">', 1)[1].split(
+        '<template v-else-if="activeModule === \'product\'">',
+        1,
+    )[0]
+    product_block = source.split('<template v-else-if="activeModule === \'product\'">', 1)[1].split("<template v-else>", 1)[0]
+    assert 'value="isea4h"' not in carbon_block
+    assert 'value="isea4h"' in radar_block
+    assert 'value="isea4h"' in product_block
     assert "grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto'" in source
     assert "grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto'" in source
-    assert "if (gridType === 'isea4h') return resolution < 10 ? 5 : defaultEntityGridLevel;" in source
+    assert "if (gridType === 'isea4h') return defaultEntityGridLevel;" in source
     assert "if (resolution < 10) return 8;" in source
     assert "if (resolution <= 30) return 7;" in source
     assert "const partitionStageDetailVisible = ref(false);" in source
@@ -308,9 +321,12 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule.value === 'radar'" in source
     assert "? selectedRadarAssets.value" in source
     assert "? radarGridType.value" in source
-    assert "const defaultEntityGridLevel = 4;" in source
+    assert "const defaultEntityGridLevel = 6;" in source
     assert "const entityGridLevel = ref(defaultEntityGridLevel);" in source
-    assert "activeModule.value === 'radar' ? radarGridLevel.value" in source
+    assert "const radarEntityGridLevel = ref(defaultEntityGridLevel);" in source
+    assert "const productEntityGridLevel = ref(defaultEntityGridLevel);" in source
+    assert "return radarGridType.value === 'isea4h' ? radarEntityGridLevel.value : radarGridLevel.value;" in source
+    assert "return productGridType.value === 'isea4h' ? productEntityGridLevel.value : productGridLevel.value;" in source
     assert "activeModule === 'product' ? '产品范围地图预览'" in source
     assert "selected_assets: selectedAssets" in source
     assert "function buildPartitionFailureResult(error, request = {})" in source
@@ -350,9 +366,9 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
         ("10m", "geohash", 7),
         (30, "tile_matrix", 7),
         (31, "geohash", 6),
-        (5, "isea4h", 5),
-        ("10m", "isea4h", 4),
-        (30, "isea4h", 4),
+        (5, "isea4h", 6),
+        ("10m", "isea4h", 6),
+        (30, "isea4h", 6),
     ],
 )
 def test_partition_resolution_grid_level_defaults(resolution, grid_type, expected_level):
@@ -427,9 +443,9 @@ def test_health_reports_runtime_config_sources():
     assert body["status"] == "ok"
     values = body["checks"]["config"]["values"]
     assert values["postgres_dsn"]["source"] == "environment"
-    assert values["postgres_dsn"]["value"] == "postgresql://***:***@127.0.0.1:55432/cube"
+    assert values["postgres_dsn"]["value"] == "postgresql://***:***@10.3.100.180:15400/postgres"
     assert values["ray_address"]["source"] == "environment"
-    assert values["minio_endpoint"]["value"] == "10.136.1.14:9000"
+    assert values["minio_endpoint"]["value"] == "10.3.100.179:9000"
     assert values["minio_bucket"]["value"] == "cube"
     assert "value" not in values["minio_secret_key"]
 
@@ -450,11 +466,12 @@ def test_health_selectively_runs_dependency_checks(monkeypatch):
 
 
 def test_auth_config_exposes_subsystem_client(monkeypatch):
-    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://10.136.1.14:5177")
+    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://portal.example.test")
     monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
-    monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://10.136.1.14:50040/callback")
-    monkeypatch.setenv("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL", "http://10.136.1.14:5176/#/partition")
-    monkeypatch.setenv("CUBE_WEB_PORTAL_DISPATCH_URL", "http://10.136.1.14:5176/#/dispatch")
+    monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://web.example.test/callback")
+    monkeypatch.setenv("CUBE_WEB_PORTAL_HOME_URL", "http://portal.example.test/#/home")
+    monkeypatch.setenv("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL", "http://portal.example.test/#/partition")
+    monkeypatch.setenv("CUBE_WEB_PORTAL_DISPATCH_URL", "http://portal.example.test/#/dispatch")
     monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
 
     resp = client.get("/api/config")
@@ -462,15 +479,15 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {
         "client_id": "system_ard",
-        "redirect_uri": "http://10.136.1.14:50040/callback",
-        "main_system_url": "http://10.136.1.14:5177",
+        "redirect_uri": "http://web.example.test/callback",
+        "main_system_url": "http://portal.example.test",
         "auth_required": False,
         "navigation": [
-            {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
-            {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
-            {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
-            {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
-            {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
+            {"label": "首页", "kind": "external", "url": "http://portal.example.test/#/home"},
+            {"label": "ARD数据载入", "kind": "external", "url": "http://portal.example.test/ard"},
+            {"label": "剖分数据服务", "kind": "external", "url": "http://portal.example.test/#/partition"},
+            {"label": "资源调度", "kind": "external", "url": "http://portal.example.test/#/dispatch"},
+            {"label": "后台管理", "kind": "external", "url": "http://portal.example.test/admin"},
         ],
     }
 
@@ -488,7 +505,7 @@ def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch)
             "runtime": {
                 "portal": {
                     "navigation": [
-                        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:9001"},
+                        {"label": "ARD数据载入", "kind": "external", "url": "http://ignored.example.test/ard"},
                         {"label": "剖分数据服务", "kind": "internal", "path": "/partition"},
                     ]
                 }
@@ -500,13 +517,7 @@ def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch)
     resp = client.get("/api/config")
 
     assert resp.status_code == 200
-    assert resp.json()["navigation"] == [
-        {"label": "首页", "kind": "external", "url": "http://10.136.1.14:5176/#/home"},
-        {"label": "ARD数据载入", "kind": "external", "url": "http://10.136.1.14:5177/ard"},
-        {"label": "剖分数据服务", "kind": "external", "url": "http://10.136.1.14:5176/#/partition"},
-        {"label": "资源调度", "kind": "external", "url": "http://10.136.1.14:5176/#/dispatch"},
-        {"label": "后台管理", "kind": "external", "url": "http://10.136.1.14:5177/admin"},
-    ]
+    assert resp.json()["navigation"] == []
 
 
 def test_auth_config_exposes_runtime_auth_switch(monkeypatch):
@@ -647,12 +658,12 @@ def test_config_get_returns_defaults():
     assert body["config"]["partition"]["optical"]["grid_level"] == 5
     assert body["config"]["ingest"]["optical"]["metadata_backend"] == "postgres"
     assert body["config"]["ingest"]["optical"]["asset_storage_backend"] == "minio"
-    assert body["config"]["ingest"]["optical"]["minio_endpoint"] == "10.136.1.14:9000"
+    assert body["config"]["ingest"]["optical"]["minio_endpoint"] == "10.3.100.179:9000"
     assert body["config"]["ingest"]["optical"]["minio_bucket"] == "cube"
-    assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@127.0.0.1:55432/cube"
-    assert body["runtime"]["ray_address"] == "ray://10.136.1.13:10001"
+    assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@10.3.100.180:15400/postgres"
+    assert body["runtime"]["ray_address"] == "10.3.100.182:6379"
     assert body["runtime"]["minio"] == {
-        "endpoint": "10.136.1.14:9000",
+        "endpoint": "10.3.100.179:9000",
         "bucket": "cube",
         "secure": False,
     }
@@ -1164,7 +1175,7 @@ def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_pa
     assert captured["grid_level"] == 7
 
 
-def test_optical_partition_test_runner_defaults_isea4h_to_level4(monkeypatch, tmp_path):
+def test_optical_partition_test_runner_defaults_isea4h_to_level6(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run_entity_partition(args):
@@ -1195,7 +1206,7 @@ def test_optical_partition_test_runner_defaults_isea4h_to_level4(monkeypatch, tm
         mode="partition_test_no_ingest",
     )
 
-    assert captured["grid_level"] == 4
+    assert captured["grid_level"] == 6
 
 
 def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(monkeypatch, tmp_path):
@@ -1235,9 +1246,9 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
     assert result["partition_type"] == "entity"
     assert result["output_path"].endswith("entity_index_rows.jsonl")
     assert result["ingest_enabled"] is False
-    assert captured["grid_level"] == 4
+    assert captured["grid_level"] == 6
     assert captured["partition_backend"] == "ray"
-    assert captured["ray_address"] == "ray://10.136.1.13:10001"
+    assert captured["ray_address"] == "10.3.100.182:6379"
     assert captured["metadata_backend"] == "postgres"
     assert captured["asset_storage_backend"] == "minio"
     assert captured["ingest_enabled"] is False
@@ -1405,6 +1416,201 @@ def test_partition_direct_run_rejects_mismatched_batch_type():
     assert "not a product batch" in resp.json()["detail"]
 
 
+def test_partition_direct_run_unsupported_type_does_not_persist_orphan_queue():
+    resp = client.post("/v1/partition/unknown/tasks/run", json={"batch_id": "DIRECT_UNSUPPORTED_TYPE"})
+
+    assert resp.status_code == 404
+    assert client.get("/v1/partition/batches/DIRECT_UNSUPPORTED_TYPE").status_code == 404
+    assert client.get("/v1/partition/tasks", params={"keyword": "DIRECT_UNSUPPORTED_TYPE"}).json()["tasks"] == []
+
+
+def test_partition_direct_run_refreshes_existing_runtime_batch_assets(monkeypatch):
+    seen_assets = []
+
+    def fake_run_product_partition_run(payload=None):
+        seen_assets.append([asset["asset_id"] for asset in payload["selected_assets"]])
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": len(payload["selected_assets"])}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    first_payload = {
+        "batch_id": "DIRECT_REFRESH_RUNTIME",
+        "batch_name": "Direct refresh runtime",
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/product/refresh-a.tif",
+                "refresh-a",
+                data_type="product",
+                asset_id="refresh-a",
+            )
+        ],
+    }
+    second_payload = {
+        **first_payload,
+        "selected_assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/product/refresh-b.tif",
+                "refresh-b",
+                data_type="product",
+                asset_id="refresh-b",
+            )
+        ],
+    }
+
+    for payload in (first_payload, second_payload):
+        task_id = client.post("/v1/partition/product/tasks/run", json=payload).json()["task_id"]
+        for _ in range(20):
+            if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+    assets = client.get("/v1/partition/batches/DIRECT_REFRESH_RUNTIME/assets").json()["assets"]
+
+    assert seen_assets == [["refresh-a"], ["refresh-b"]]
+    assert [asset["asset_id"] for asset in assets] == ["refresh-b"]
+    assert assets[0]["source_uri"] == "s3://cube/cube/source/product/refresh-b.tif"
+    assert assets[0]["attempt_count"] == 1
+    assert assets[0]["status"] == "succeeded"
+
+
+def test_partition_direct_run_resets_same_asset_id_when_runtime_payload_changes(monkeypatch):
+    def fake_run_product_partition_run(payload=None):
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": len(payload["selected_assets"])}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    first_payload = {
+        "batch_id": "DIRECT_REFRESH_SAME_ASSET",
+        "batch_name": "Direct refresh same asset",
+        "grid_type": "geohash",
+        "grid_level": 5,
+        "selected_assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/product/same-a.tif",
+                "same-a",
+                data_type="product",
+                asset_id="same-asset",
+            )
+        ],
+    }
+    second_payload = {
+        **first_payload,
+        "selected_assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/product/same-b.tif",
+                "same-b",
+                data_type="product",
+                asset_id="same-asset",
+            )
+        ],
+    }
+
+    first_task_id = client.post("/v1/partition/product/tasks/run", json=first_payload).json()["task_id"]
+    for _ in range(20):
+        if client.get(f"/v1/partition/tasks/{first_task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    second_task_id = client.post("/v1/partition/product/tasks/run", json=second_payload).json()["task_id"]
+    for _ in range(20):
+        if client.get(f"/v1/partition/tasks/{second_task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    attempts = client.get("/v1/partition/batches/DIRECT_REFRESH_SAME_ASSET/attempts").json()["attempts"]
+    assets = client.get("/v1/partition/batches/DIRECT_REFRESH_SAME_ASSET/assets").json()["assets"]
+
+    assert attempts[0]["asset_ids"] == ["same-asset"]
+    assert assets[0]["source_uri"] == "s3://cube/cube/source/product/same-b.tif"
+    assert assets[0]["attempt_count"] == 1
+    assert assets[0]["status"] == "succeeded"
+
+
+def test_partition_task_queue_rejects_out_of_range_limit():
+    assert client.get("/v1/partition/tasks", params={"limit": 0}).status_code == 422
+    assert client.get("/v1/partition/tasks", params={"limit": 501}).status_code == 422
+
+
+def test_postgres_runtime_batch_refresh_resets_changed_assets_and_deletes_stale(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        description = [
+            ("batch_id",),
+            ("batch_name",),
+            ("data_type",),
+            ("source_system",),
+            ("source_schema",),
+            ("normalized_payload",),
+        ]
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (
+                "PG_RUNTIME_REFRESH",
+                "Postgres runtime refresh",
+                "product",
+                "runtime",
+                {},
+                {},
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "ensure_schema", lambda: None)
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+    monkeypatch.setattr(store, "_jsonb", lambda value: value)
+
+    store.ensure_runtime_batch(
+        batch_id="PG_RUNTIME_REFRESH",
+        batch_name="Postgres runtime refresh",
+        data_type="product",
+        payload={
+            "selected_assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/pg-refresh.tif",
+                    "pg-refresh",
+                    data_type="product",
+                    asset_id="pg-refresh",
+                )
+            ]
+        },
+    )
+
+    sql_text = "\n".join(sql for sql, _params in executed)
+    delete_params = [params for sql, params in executed if "DELETE FROM partition_assets" in sql][0]
+
+    assert "target.asset_payload = source.asset_payload" in sql_text
+    assert "THEN target.status" in sql_text
+    assert "ELSE 'pending'" in sql_text
+    assert "ELSE 0" in sql_text
+    assert "ELSE NULL" in sql_text
+    assert "NOT (asset_id = ANY(%s::text[]))" in sql_text
+    assert delete_params == ("PG_RUNTIME_REFRESH", ["pg-refresh"])
+
+
 def test_partition_demo_task_endpoint_remains_compatible(monkeypatch):
     def fake_run_product_partition_demo(payload=None):
         assert payload == {"grid_type": "geohash", "grid_level": 5}
@@ -1530,7 +1736,7 @@ def test_partition_job_store_does_not_seed_demo_schemas_by_default(monkeypatch):
         store = partition_job_store_module.get_partition_job_store()
 
         assert store.list_batches(include_succeeded=True) == []
-        assert store.dsn == "postgresql://postgres:postgres@127.0.0.1:55432/cube"
+        assert store.dsn == "postgresql://test_user:test_password@10.3.100.180:15400/postgres"
     finally:
         set_partition_job_store(None)
 
@@ -1771,7 +1977,7 @@ def test_partition_schema_import_infers_non_carbon_grid_level_from_resolution():
     assert "grid_level" not in carbon_resp.json()["normalized_payload"]
 
 
-def test_partition_schema_import_defaults_isea4h_grid_level_to_4():
+def test_partition_schema_import_defaults_isea4h_grid_level_to_6():
     resp = client.post(
         "/v1/partition/schemas/import",
         json={
@@ -1789,7 +1995,7 @@ def test_partition_schema_import_defaults_isea4h_grid_level_to_4():
     )
 
     assert resp.status_code == 200
-    assert resp.json()["normalized_payload"]["grid_level"] == 4
+    assert resp.json()["normalized_payload"]["grid_level"] == 6
     assert resp.json()["normalized_payload"]["grid_level_mode"] == "auto"
 
 
@@ -2857,7 +3063,7 @@ def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch
     assert body["cube_version"].startswith("demo-")
     assert captured["metadata_backend"] == "postgres"
     assert captured["asset_storage_backend"] == "minio"
-    assert captured["minio_endpoint"] == "10.136.1.14:9000"
+    assert captured["minio_endpoint"] == "10.3.100.179:9000"
     assert captured["minio_bucket"] == "cube"
     assert captured["cog_materialize_mode"] == "symlink"
     assert captured["asset_version"].startswith("demo-")
@@ -3137,10 +3343,10 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
     assert result["mode"] == "partition_test_no_ingest"
     assert result["ingest_enabled"] is False
     assert captured["partition_backend"] == "ray"
-    assert captured["ray_address"] == "ray://10.136.1.13:10001"
+    assert captured["ray_address"] == "10.3.100.182:6379"
     assert captured["metadata_backend"] == "postgres"
     assert captured["asset_storage_backend"] == "minio"
-    assert captured["minio_endpoint"] == "10.136.1.14:9000"
+    assert captured["minio_endpoint"] == "10.3.100.179:9000"
     assert captured["minio_bucket"] == "cube"
     assert captured["ingest_enabled"] is False
     assert result["selected_asset_count"] == 1
@@ -3793,6 +3999,29 @@ def test_quality_history_endpoint_supports_pagination_and_filters(quality_store)
     assert filtered["count"] == 5
     assert all(record["status"] == "WARN" for record in filtered["records"])
     assert all("run_1" in record["run_name"] for record in filtered["records"])
+
+
+def test_quality_history_http_endpoint_preserves_large_legacy_limit(quality_store):
+    for index in range(250):
+        quality_store.upsert_report(
+            "optical",
+            f"/tmp/dataset_http/run_{index:03d}",
+            {
+                "report_id": f"optical-http-{index:03d}",
+                "status": "PASS",
+                "target_crs": "EPSG:4326",
+                "generated_at": f"2026-05-15T{index // 60:02d}:{index % 60:02d}:03Z",
+                "summary": {"index_rows": index + 1},
+            },
+        )
+
+    resp = client.post("/v1/quality/optical/history", json={"limit": 250})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 250
+    assert body["total"] == 250
+    assert body["page_size"] == 250
 
 
 def test_product_quality_history_endpoint(quality_store):

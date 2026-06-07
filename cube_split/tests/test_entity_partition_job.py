@@ -145,7 +145,7 @@ def test_entity_partition_minio_updates_rows_and_postgres_metadata(monkeypatch, 
             asset_storage_backend="minio",
             metadata_backend="postgres",
             postgres_dsn="postgresql://example",
-            minio_endpoint="10.136.1.14:9000",
+            minio_endpoint="10.3.100.179:9000",
             minio_access_key="access",
             minio_secret_key="secret",
             minio_bucket="entity-bucket",
@@ -284,7 +284,7 @@ def test_entity_partition_ingest_disabled_skips_minio_and_postgres(monkeypatch, 
             asset_storage_backend="minio",
             metadata_backend="postgres",
             postgres_dsn="postgresql://example",
-            minio_endpoint="10.136.1.14:9000",
+            minio_endpoint="10.3.100.179:9000",
             minio_access_key="access",
             minio_secret_key="secret",
             minio_bucket="entity-bucket",
@@ -600,7 +600,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
             max_cells_per_asset=20000,
             partition_prefix_len=3,
             partition_backend="ray",
-            ray_address="ray://10.136.1.13:10001",
+            ray_address="10.3.100.182:6379",
             ray_parallelism=4,
             chunk_size=1,
             asset_storage_backend="local",
@@ -611,7 +611,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert report["execution_engine"] == "ray"
     assert report["partition_backend_used"] == "ray"
     assert report["ray_parallelism"] == 1
-    assert report["ray_address"] == "ray://10.136.1.13:10001"
+    assert report["ray_address"] == "10.3.100.182:6379"
     assert report["ray_init_elapsed_sec"] == 0.25
     assert captured["parallelism"] == 1
-    assert captured["ray_address"] == "ray://10.136.1.13:10001"
+    assert captured["ray_address"] == "10.3.100.182:6379"

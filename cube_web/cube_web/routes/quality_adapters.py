@@ -84,7 +84,7 @@ def history_page_size(payload: dict) -> int:
         raise HTTPException(status_code=422, detail="page_size must be an integer") from None
     if page_size <= 0:
         raise HTTPException(status_code=422, detail="page_size must be greater than 0")
-    return min(page_size, 200)
+    return page_size
 
 
 def _quality_report(data_type: str, payload: dict) -> dict:

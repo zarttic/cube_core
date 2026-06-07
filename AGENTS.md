@@ -117,19 +117,21 @@ Web 启动配置只属于运行时。不要把 PostgreSQL DSN、Ray 地址、Min
 仓库已忽略 `.cube_web.env`。该文件只保留在本地，不能提交凭据。本地部署文件至少包含：
 
 ```bash
-CUBE_WEB_POSTGRES_DSN=postgresql://<user>:<password>@127.0.0.1:55432/cube
-CUBE_WEB_RAY_ADDRESS=ray://10.136.1.13:10001
-CUBE_WEB_MINIO_ENDPOINT=10.136.1.14:9000
+CUBE_WEB_POSTGRES_DSN=postgresql://<user>:<password>@10.3.100.180:15400/postgres
+CUBE_WEB_RAY_ADDRESS=10.3.100.182:6379
+CUBE_WEB_MINIO_ENDPOINT=10.3.100.179:9000
 CUBE_WEB_MINIO_BUCKET=cube
+CUBE_WEB_MINIO_ACCESS_KEY=<access-key>
+CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 ```
 
 当前运行端点：
 
-- **PostgreSQL**: Podman container `cube-pg`, host port `127.0.0.1:55432`, database `cube`.
-- **Ray**: `ray://10.136.1.13:10001`.
-- **MinIO**: `10.136.1.14:9000`, bucket `cube`, `secure=false`.
+- **OpenGauss**: 主节点 `10.3.100.180:15400`，database `postgres`，使用 PostgreSQL 兼容 DSN。
+- **Ray**: Head/GCS `10.3.100.182:6379`，Dashboard `http://10.3.100.182:8265`。
+- **MinIO**: API 可用 `10.3.100.179:9000`、`10.3.100.180:9000`、`10.3.100.181:9000`、`10.3.100.182:9000`，Console `http://10.3.100.181:9001`，bucket `cube`，`secure=false`。
 
-配置页面必须展示 PostgreSQL、Ray 和 MinIO 的运行时启动信息，但不得把这些值写回
+配置页面必须展示 OpenGauss/PostgreSQL 兼容 DSN、Ray 和 MinIO 的运行时启动信息，但不得把这些值写回
 `cube_web_configs`。
 
 演示剖分 seed 批次不是生产配置。只有演示环境才应设置：
@@ -140,33 +142,45 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 
 门户导航属于运行时配置，不属于配置管理数据。默认值为：
 
-- 首页: `http://10.136.1.14:5176/#/home`
-- 剖分数据服务: `http://10.136.1.14:5176/#/partition`
-- 资源调度: `http://10.136.1.14:5176/#/dispatch`
-- ARD数据载入: `http://10.136.1.14:5177/ard`
-- 后台管理: `http://10.136.1.14:5177/admin`
+- 首页: 由 `CUBE_WEB_PORTAL_HOME_URL` 设置。
+- 剖分数据服务: 由 `CUBE_WEB_PORTAL_PARTITION_SERVICE_URL` 设置。
+- 资源调度: 由 `CUBE_WEB_PORTAL_DISPATCH_URL` 设置。
+- ARD数据载入: 由 `CUBE_WEB_PORTAL_DATA_INGEST_URL` 设置。
+- 后台管理: 由 `CUBE_WEB_PORTAL_ADMIN_URL` 设置。
 
 ---
 
 ## 基础设施集群信息
 
+### OpenGauss 数据库
+
+4 节点 OpenGauss 7.0.0-RC3 集群，主节点在 `poufennode02`。
+
+| 节点 | IP | 角色 | 端口 |
+|------|----|------|------|
+| poufennode02 | 10.3.100.180 | **Primary** | 15400 |
+| poufennode01 | 10.3.100.179 | Standby | 15400 |
+| poufennode03 | 10.3.100.181 | Standby | 15400 |
+| poufennode04 | 10.3.100.182 | Standby | 15400 |
+
+- **连接 DSN**: `postgresql://<user>:<password>@10.3.100.180:15400/postgres`
+- **凭据来源**: 运行时从环境变量、`CUBE_WEB_ENV_FILE` 或本地 `.cube_web.env` 读取；不要把明文口令写入仓库。
+
 ### MinIO 分布式集群
 
-4 节点分布式集群，EC:2 纠删码。
+4 节点分布式集群，每个节点提供 API `:9000` 和 Console `:9001`。
 
-| 节点 | IP | 主机名 | MinIO API | Console | 认证 |
-|------|-----|--------|-----------|---------|------|
-| .13 | 10.136.1.13 | slave01 | :9000 | :9001 | 使用本地密钥管理 |
-| .14 | 10.136.1.14 | slave02 | :19010 | :19011 | 使用本地密钥管理 |
-| .15 | 10.136.1.15 | slave03 | :9000 | :9001 | 使用本地密钥管理 |
-| .20 | 10.136.1.20 | inspur-NF5280M4 | :9000 | :9001 | 使用本地密钥管理 |
+| 节点 | IP | 数据目录 | MinIO API | Console |
+|------|----|----------|-----------|---------|
+| poufennode01 | 10.3.100.179 | `/data/minio` | `:9000` | `:9001` |
+| poufennode02 | 10.3.100.180 | `/data/minio` | `:9000` | `:9001` |
+| poufennode03 | 10.3.100.181 | `/data/minio` | `:9000` | `:9001` |
+| poufennode04 | 10.3.100.182 | `/data/minio` | `:9000` | `:9001` |
 
-- **Console 入口**: `http://10.136.1.14:9001`（Nginx LB 在 .14）
-- **Nginx LB**: .14 上，API 端口 9000，Console 端口 9001
-- **环境变量**: 各节点 `/etc/default/minio` 已配置 `MINIO_PROMETHEUS_AUTH_TYPE=public`
-- **数据盘**: .13/.14/.15 为 39T/39T/31T，.20 为 2.6T（/data1）
-- **SSH 认证**: 使用本地密钥管理或运维侧凭据，不在仓库记录口令。
-- **认证来源**: 运行任务时优先从环境变量或节点 `/etc/default/minio` 读取 MinIO 凭据，不在仓库记录明文口令。不要继续假设 `minioadmin/minioadmin` 可用。
+- **Console 入口**: `http://10.3.100.181:9001`
+- **默认 API Endpoint**: `10.3.100.179:9000`
+- **可用 API Endpoint**: `10.3.100.179:9000`、`10.3.100.180:9000`、`10.3.100.181:9000`、`10.3.100.182:9000`
+- **认证来源**: 运行任务时优先从 `CUBE_WEB_MINIO_ACCESS_KEY` / `CUBE_WEB_MINIO_SECRET_KEY`、`MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` 或节点本地 MinIO 服务环境读取，不在仓库记录明文口令。
 - **演示源数据前缀**:
   - 光学/实体剖分源影像: `s3://cube/cube/source/optocal/...`
   - 信息产品源影像: `s3://cube/cube/source/product/...`
@@ -179,12 +193,12 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   from minio import Minio
   from minio.error import S3Error
 
-  root = Path("/home/lyjdev/projects/cube_project")
+  root = Path.cwd()
   jobs = [
       (root / "cube_split/data/product", "cube/source/product"),
       (root / "cube_split/data/optocal", "cube/source/optocal"),
   ]
-  client = Minio("10.136.1.14:9000", access_key="...", secret_key="...", secure=False)
+  client = Minio("10.3.100.179:9000", access_key="...", secret_key="...", secure=False)
   bucket = "cube"
   if not client.bucket_exists(bucket):
       client.make_bucket(bucket)
@@ -212,55 +226,34 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   PY
   ```
 
-### 监控栈（Prometheus + Grafana）
-
-| 组件 | 节点 | 端口 | 访问地址 |
-|------|------|------|----------|
-| Prometheus | .13 | 9090 | `http://10.136.1.13:9090` |
-| Grafana | .13 (Docker) | 3000 | `http://10.136.1.13:3000` |
-| Node Exporter | .13/.15/.20 | 9100 | - |
-| Node Exporter | .14 | 19100 | - |
-
-- **Grafana Dashboard**:
-  - MinIO Cluster: `http://10.136.1.13:3000/d/minio-cluster-v2/minio-cluster`（自定义，10 面板，工作正常）
-  - Node Exporter Full: `http://10.136.1.13:3000/d/rYdddlPWk/node-exporter-full`
-- **Prometheus 采集**: 12 个目标（minio-cluster x4, minio-node x4, node-exporter x4）全部 UP
-- **MinIO 指标端点**: `/minio/v2/metrics/cluster` 和 `/minio/v2/metrics/node`
-
 ### Ray 分布式计算集群
 
-4 节点 Ray 集群，Ray 2.55.x（与 `cube_split` 依赖 `ray>=2.55.1,<2.56.0` 保持一致），Head 在 .13。
+4 节点 Ray 集群，Head 在 `poufennode04`。
 
-| 节点 | IP | 角色 | 端口 | CPUs | RAM | GPU |
-|------|-----|------|------|------|-----|-----|
-| .13 (slave01) | 10.136.1.13 | **Head** | GCS:6379, Dashboard:8265, Client:10001 | 60 | 252GB | 无 |
-| .14 (slave02) | 10.136.1.14 | Worker | - | 60 | 252GB | 无 |
-| .15 (slave03) | 10.136.1.15 | Worker | - | 60 | 252GB | 无 |
-| .20 (inspur) | 10.136.1.20 | Worker | - | 28 | 31GB | 2x Quadro M4000 |
+| 节点 | IP | 角色 | GCS 地址 |
+|------|----|------|----------|
+| poufennode04 | 10.3.100.182 | **Head Node** | `10.3.100.182:6379` |
+| poufennode01 | 10.3.100.179 | Worker Node | - |
+| poufennode02 | 10.3.100.180 | Worker Node | - |
+| poufennode03 | 10.3.100.181 | Worker Node | - |
 
-**总计: 208 CPUs, 2 GPUs, 501 GiB 内存**
-
-- **Dashboard**: `http://10.136.1.13:8265`
-- **Ray Client**: `ray://10.136.1.13:10001`
+- **Dashboard**: `http://10.3.100.182:8265`
+- **GCS 地址**: `10.3.100.182:6379`
+- **Head Node IP**: `10.3.100.182`
+- **集群 ID**: `3a74cad5b9acda678ec4c7db6bf996772af733039bb153dc4810f131`
 - **连接方式**:
   ```python
   import ray
-  ray.init(address="ray://10.136.1.13:10001")
+  ray.init(address="10.3.100.182:6379")
   # 或
   ray.init(address="auto")  # 在集群节点上
   ```
-- **Systemd 服务**: Head 为 `ray-head.service`，Worker 为 `ray-worker.service`，全部开机自启
-- **对象溢出目录**: .13/.14/.15 为 `/data/ray/spill`，.20 为 `/data1/ray/spill`
 - **注意事项**:
-  - .13 当前 GCS 端口为 6379（Head 已迁移到 .13）
-  - .14 不再作为 Head，原有 .14 Head 端口说明已失效
-  - .20 的 pip 安装需要 sudo
-  - Worker 配置了 `Restart=on-failure`，Head 重启后自动重连
   - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
-  - 不要用 `RAY_ACTOR_NODE_RESOURCE=node:10.136.1.14` 规避数据路径问题；演示数据已同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
+  - 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
   - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
   - 普通光学逻辑剖分（geohash/MGRS）和实体剖分（ISEA4H）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
   - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
   - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
-  - 前端不单独暴露“实体剖分”模块；实体剖分由“光学遥感”页面的剖分格网选择 `ISEA4H` 触发，默认 `grid_level=6`。普通光学/产品逻辑剖分（geohash/MGRS）默认层级仍为 5。
+  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `ISEA4H` 触发实体剖分，默认 `grid_level=6`。普通逻辑剖分（geohash/MGRS）默认层级仍为 5。
   - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。

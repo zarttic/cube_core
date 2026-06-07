@@ -224,17 +224,23 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "updated_at": now,
         }
         self.batches[batch_id] = batch
-        for asset in _runtime_assets_from_payload(batch):
+        assets = _runtime_assets_from_payload(batch)
+        asset_ids = {asset["asset_id"] for asset in assets}
+        for asset_id, asset in list(self.assets.items()):
+            if asset.get("batch_id") == batch_id and asset_id not in asset_ids:
+                del self.assets[asset_id]
+        for asset in assets:
             existing_asset = self.assets.get(asset["asset_id"], {})
             same_batch = existing_asset.get("batch_id") == asset["batch_id"]
+            preserve_state = same_batch and _same_runtime_asset(existing_asset, asset)
             self.assets[asset["asset_id"]] = {
                 **existing_asset,
                 **asset,
-                "status": existing_asset.get("status") if same_batch else "pending",
-                "attempt_count": int(existing_asset.get("attempt_count") or 0) if same_batch else 0,
-                "last_error": existing_asset.get("last_error") if same_batch else None,
-                "last_run_dir": existing_asset.get("last_run_dir") if same_batch else None,
-                "partitioned_at": existing_asset.get("partitioned_at") if same_batch else None,
+                "status": existing_asset.get("status") if preserve_state else "pending",
+                "attempt_count": int(existing_asset.get("attempt_count") or 0) if preserve_state else 0,
+                "last_error": existing_asset.get("last_error") if preserve_state else None,
+                "last_run_dir": existing_asset.get("last_run_dir") if preserve_state else None,
+                "partitioned_at": existing_asset.get("partitioned_at") if preserve_state else None,
                 "created_at": existing_asset.get("created_at") or now,
                 "updated_at": now,
             }
@@ -812,13 +818,14 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         "normalized_payload",
                     ),
                 )
-                for asset in _runtime_assets_from_payload(
+                assets = _runtime_assets_from_payload(
                     {
                         "batch_id": batch_id,
                         "data_type": data_type,
                         "normalized_payload": payload,
                     }
-                ):
+                )
+                for asset in assets:
                     cur.execute(
                         """
                         MERGE INTO partition_assets target
@@ -838,6 +845,46 @@ class PostgresPartitionJobStore(PartitionJobStore):
                           scene_id = source.scene_id,
                           source_uri = source.source_uri,
                           asset_payload = source.asset_payload,
+                          status = CASE
+                            WHEN target.batch_id = source.batch_id
+                              AND target.data_type = source.data_type
+                              AND target.scene_id IS NOT DISTINCT FROM source.scene_id
+                              AND target.source_uri = source.source_uri
+                              AND target.asset_payload = source.asset_payload THEN target.status
+                            ELSE 'pending'
+                          END,
+                          attempt_count = CASE
+                            WHEN target.batch_id = source.batch_id
+                              AND target.data_type = source.data_type
+                              AND target.scene_id IS NOT DISTINCT FROM source.scene_id
+                              AND target.source_uri = source.source_uri
+                              AND target.asset_payload = source.asset_payload THEN target.attempt_count
+                            ELSE 0
+                          END,
+                          last_error = CASE
+                            WHEN target.batch_id = source.batch_id
+                              AND target.data_type = source.data_type
+                              AND target.scene_id IS NOT DISTINCT FROM source.scene_id
+                              AND target.source_uri = source.source_uri
+                              AND target.asset_payload = source.asset_payload THEN target.last_error
+                            ELSE NULL
+                          END,
+                          last_run_dir = CASE
+                            WHEN target.batch_id = source.batch_id
+                              AND target.data_type = source.data_type
+                              AND target.scene_id IS NOT DISTINCT FROM source.scene_id
+                              AND target.source_uri = source.source_uri
+                              AND target.asset_payload = source.asset_payload THEN target.last_run_dir
+                            ELSE NULL
+                          END,
+                          partitioned_at = CASE
+                            WHEN target.batch_id = source.batch_id
+                              AND target.data_type = source.data_type
+                              AND target.scene_id IS NOT DISTINCT FROM source.scene_id
+                              AND target.source_uri = source.source_uri
+                              AND target.asset_payload = source.asset_payload THEN target.partitioned_at
+                            ELSE NULL
+                          END,
                           updated_at = now()
                         WHEN NOT MATCHED THEN INSERT (
                           asset_id, batch_id, data_type, scene_id, source_uri, asset_payload
@@ -847,6 +894,13 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         """,
                         _jsonb_record(asset, "asset_payload"),
                     )
+                if assets:
+                    cur.execute(
+                        "DELETE FROM partition_assets WHERE batch_id = %s AND NOT (asset_id = ANY(%s::text[]))",
+                        (batch_id, [asset["asset_id"] for asset in assets]),
+                    )
+                else:
+                    cur.execute("DELETE FROM partition_assets WHERE batch_id = %s", (batch_id,))
                 cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (batch_id,))
                 batch = _dict_row(cur)
             conn.commit()
@@ -1364,6 +1418,16 @@ def _runtime_assets_from_payload(record: dict[str, Any]) -> list[dict[str, Any]]
             }
         )
     return assets
+
+
+def _same_runtime_asset(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    return (
+        existing.get("batch_id") == incoming.get("batch_id")
+        and existing.get("data_type") == incoming.get("data_type")
+        and existing.get("scene_id") == incoming.get("scene_id")
+        and existing.get("source_uri") == incoming.get("source_uri")
+        and (existing.get("asset_payload") or {}) == (incoming.get("asset_payload") or {})
+    )
 
 
 def _task_row_from_attempt(

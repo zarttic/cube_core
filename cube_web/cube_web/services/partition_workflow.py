@@ -84,6 +84,7 @@ class PartitionWorkflowService:
         *,
         requested_by: str = "operator",
     ) -> PartitionTask:
+        self.partition_service._resolve(data_type, "run")
         with self._run_lock:
             raw_payload = copy.deepcopy(payload or {})
             task_id = f"partition-{uuid4().hex[:12]}"
@@ -100,6 +101,18 @@ class PartitionWorkflowService:
                     payload=raw_payload,
                     max_auto_retries=0,
                 )
+            else:
+                active_task = self._active_task_for_batch(batch)
+                if active_task is not None:
+                    return active_task
+                if str(batch.get("source_system") or "") == "runtime":
+                    batch = self.store.ensure_runtime_batch(
+                        batch_id=str(batch["batch_id"]),
+                        batch_name=_text_or_none(raw_payload.get("batch_name")) or str(batch.get("batch_name") or batch["batch_id"]),
+                        data_type=data_type,
+                        payload=raw_payload,
+                        max_auto_retries=0,
+                    )
             active_task = self._active_task_for_batch(batch)
             if active_task is not None:
                 return active_task

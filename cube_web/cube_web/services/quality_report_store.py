@@ -177,7 +177,7 @@ class PostgresQualityReportStore(QualityReportStore):
                     SELECT report
                     FROM quality_reports
                     WHERE data_type = %s
-                    ORDER BY generated_at DESC, updated_at DESC
+                    ORDER BY generated_at DESC, updated_at DESC, id DESC
                     LIMIT 1
                     """,
                     (data_type,),
@@ -214,7 +214,7 @@ class PostgresQualityReportStore(QualityReportStore):
                       updated_at
                     FROM quality_reports
                     WHERE {" AND ".join(where)}
-                    ORDER BY generated_at DESC, updated_at DESC
+                    ORDER BY generated_at DESC, updated_at DESC, id DESC
                     LIMIT %s OFFSET %s
                     """,
                     [*params, limit, offset],

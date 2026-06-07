@@ -102,13 +102,13 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
             job_id="carbon-job-postgres",
             cube_version="v1",
             metadata_backend="postgres",
-            postgres_dsn="postgresql://postgres:postgres@127.0.0.1:55432/cube",
+            postgres_dsn="postgresql://test_user:test_password@10.3.100.180:15400/postgres",
         )
     )
 
     assert stats["carbon_fact_rows"] == 1
     assert stats["metadata_backend"] == "postgres"
-    assert ("connect", "postgresql://postgres:postgres@127.0.0.1:55432/cube") in calls
+    assert ("connect", "postgresql://test_user:test_password@10.3.100.180:15400/postgres") in calls
     assert ("executemany", 1) in calls
 
 

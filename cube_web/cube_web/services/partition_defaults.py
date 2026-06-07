@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from typing import Any
 
 DEFAULT_LOGICAL_GRID_LEVEL = 5
-DEFAULT_ISEA4H_GRID_LEVEL = 4
+DEFAULT_ISEA4H_GRID_LEVEL = 6
 
 _RESOLUTION_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _RESOLUTION_KEYS = (
@@ -35,7 +35,7 @@ def default_grid_level_for_resolution(
     if parsed is None:
         return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
     if str(grid_type or "").lower() == "isea4h":
-        return 5 if parsed < 10 else DEFAULT_ISEA4H_GRID_LEVEL
+        return DEFAULT_ISEA4H_GRID_LEVEL
     if parsed < 10:
         return 8
     if parsed <= 30:
