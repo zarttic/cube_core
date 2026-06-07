@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 from typing import Any
 
 from cube_web.services.partition_defaults import DEFAULT_LOGICAL_GRID_LEVEL
@@ -9,8 +8,8 @@ from cube_web.services.partition_defaults import DEFAULT_LOGICAL_GRID_LEVEL
 MINIO_SOURCE_PREFIX = "s3://cube/cube/source"
 OPTICAL_SOURCE_PREFIX = f"{MINIO_SOURCE_PREFIX}/optocal"
 PRODUCT_SOURCE_PREFIX = f"{MINIO_SOURCE_PREFIX}/product"
-RADAR_SOURCE_ROOT = "/home/lyjdev/projects/cube_project/cube_split/data/2018-2020年6月-8月江苏扬州10米Sentinel-1影像数据-01"
-CARBON_SOURCE_URI = "/home/lyjdev/projects/cube_project/cube_split/oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
+RADAR_SOURCE_PREFIX = f"{MINIO_SOURCE_PREFIX}/radar"
+CARBON_SOURCE_URI = f"{MINIO_SOURCE_PREFIX}/carbon/oco2_LtCO2_201231_B11014Ar_220729012824s.nc4"
 
 
 OPTICAL_ASSET_SCHEMA = [
@@ -296,9 +295,9 @@ def _carbon_observation(
 
 
 def _radar_asset(date: str, polarization: str, bbox: list[float], corners: list[list[float]]) -> dict[str, Any]:
-    source = Path(RADAR_SOURCE_ROOT) / "Data" / f"{date}_{polarization.upper()}.dat"
+    source_uri = f"{RADAR_SOURCE_PREFIX}/yangzhou_sentinel1_2018_2020/{date}_{polarization.upper()}.dat"
     return {
-        "source_uri": str(source),
+        "source_uri": source_uri,
         "scene_id": f"S1_{date}",
         "acq_time": f"{date[:4]}-{date[4:6]}-{date[6:8]}T00:00:00Z",
         "bands": [polarization],

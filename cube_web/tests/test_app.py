@@ -1234,10 +1234,23 @@ def test_partition_demo_rejects_invalid_grid_level():
     assert resp.status_code == 422
 
 
-def test_partition_demo_rejects_mgrs_grid_type():
-    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "mgrs", "grid_level": 5})
+def test_partition_run_accepts_mgrs_grid_type_in_request_model():
+    route_app = FastAPI()
+    production = PartitionService(
+        {
+            "optical": PartitionBackend(
+                data_type="optical",
+                run=lambda payload=None: {"status": "completed", "source": "production", "payload": payload or {}},
+            )
+        }
+    )
+    route_app.include_router(web_app.partition_route.create_partition_router(service=production))
+    route_client = TestClient(route_app)
 
-    assert resp.status_code == 422
+    resp = route_client.post("/partition/optical/run", json={"grid_type": "mgrs", "grid_level": 5})
+
+    assert resp.status_code == 200
+    assert resp.json()["payload"]["grid_type"] == "mgrs"
 
 
 def test_partition_run_can_run_as_async_task(monkeypatch):
@@ -1352,6 +1365,7 @@ def test_standard_loaded_schemas_seed_task_store():
     assert carbon["normalized_payload"]["selected_observations"][0]["sensor"] == "oco2"
     assert carbon["normalized_payload"]["selected_observations"][0]["product_family"] == "xco2"
     assert radar["data_type"] == "radar"
+    assert radar["normalized_payload"]["selected_assets"][0]["source_uri"].startswith("s3://cube/cube/source/radar/")
     assert radar["normalized_payload"]["selected_assets"][0]["source_uri"].endswith("20180603_VH.dat")
     assert product["data_type"] == "product"
     assert product["normalized_payload"]["selected_assets"][0]["scene_id"] == "dianzhong_ecological_security_1980"
@@ -1360,6 +1374,13 @@ def test_standard_loaded_schemas_seed_task_store():
     assert len(store.list_assets("CARBON_BATCH_20201231_A")) == 4
     assert len(store.list_assets("RADAR_BATCH_YANGZHOU_S1_2018_2020")) == 48
     assert len(store.list_assets("PRODUCT_BATCH_DIANZHONG_1980_2020")) == 5
+    all_sources = [
+        str(asset.get("source_uri") or "")
+        for schema in standard_partition_schemas()
+        for asset in (schema.get("assets") or schema.get("observations") or [])
+    ]
+    assert all(source.startswith("s3://") for source in all_sources)
+    assert not any("/home/" in source for source in all_sources)
 
 
 def test_standard_loaded_schemas_do_not_overwrite_existing_batch_state():

@@ -18,6 +18,7 @@ from cube_split.partition.carbon import (
     load_oco2_lite_observations,
     partition_observation,
 )
+from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition.carbon_products import get_carbon_product_adapter, supported_carbon_product_types
 from cube_split.partition.radar_products import parse_radar_asset
 
@@ -26,6 +27,21 @@ def test_partition_registry_separates_optical_and_carbon_services():
     assert isinstance(get_partition_service("optical"), OpticalPartitionService)
     assert isinstance(get_partition_service("carbon_satellite"), CarbonSatellitePartitionService)
     assert isinstance(get_partition_service("radar"), RadarPartitionService)
+
+
+def test_cancel_ray_refs_force_cancels_all_refs():
+    class FakeRay:
+        def __init__(self):
+            self.cancelled = []
+
+        def cancel(self, ref, *, force):
+            self.cancelled.append((ref, force))
+
+    ray = FakeRay()
+
+    cancel_ray_refs(ray, ["ref-a", "ref-b"])
+
+    assert ray.cancelled == [("ref-a", True), ("ref-b", True)]
 
 
 def test_optical_service_declares_landsat_and_sentinel2_families():

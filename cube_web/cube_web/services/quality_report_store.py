@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from cube_split.runtime_config import require_postgres_dsn
 
@@ -140,6 +140,8 @@ class PostgresQualityReportStore(QualityReportStore):
 
     def get_report(self, data_type: str, report_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
+        if not _is_uuid(report_id):
+            return None
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -247,6 +249,14 @@ def _quality_report_record(data_type: str, run_dir: Path | str, report: dict[str
         "assets": assets,
         "report": report_copy,
     }
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _jsonb_record(record: dict[str, Any]) -> dict[str, Any]:
