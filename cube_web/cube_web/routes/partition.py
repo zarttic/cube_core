@@ -181,6 +181,10 @@ def create_partition_router(
         request = payload_from_model(payload)
         return workflow_service.retry_batch(batch_id, config_override=request.get("config_override") or {}).to_dict()
 
+    @router.post("/batches/{batch_id}/archive")
+    def archive_partition_batch(batch_id: str) -> dict:
+        return workflow_service.archive_batch(batch_id)
+
     @router.post("/batches/{batch_id}/cancel")
     def cancel_partition_batch(batch_id: str) -> dict:
         batch = workflow_service.get_batch(batch_id)

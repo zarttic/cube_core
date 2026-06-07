@@ -12,9 +12,14 @@ from cube_web.services.partition_defaults import apply_resolution_grid_defaults
 BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_requested"}
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
 BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
+BATCH_HIDDEN_STATUSES = {"succeeded", "archived"}
 
 
 class PartitionBatchAlreadyActiveError(RuntimeError):
+    pass
+
+
+class PartitionBatchArchivedError(RuntimeError):
     pass
 
 
@@ -37,6 +42,9 @@ class PartitionJobStore:
         raise NotImplementedError
 
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def ensure_runtime_batch(
@@ -172,7 +180,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         if status:
             rows = [row for row in rows if row["status"] == status]
         elif not include_succeeded:
-            rows = [row for row in rows if row["status"] != "succeeded"]
+            rows = [row for row in rows if row["status"] not in BATCH_HIDDEN_STATUSES]
         if data_type:
             rows = [row for row in rows if row["data_type"] == data_type]
         if keyword:
@@ -184,6 +192,21 @@ class InMemoryPartitionJobStore(PartitionJobStore):
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         row = self.batches.get(batch_id)
         return None if row is None else copy.deepcopy(row)
+
+    def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            return None
+        if str(batch.get("status") or "") in BATCH_RUN_ACTIVE_STATUSES:
+            raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
+        now = _utc_now_iso()
+        batch["status"] = "archived"
+        batch["updated_at"] = now
+        for asset in self.assets.values():
+            if asset["batch_id"] == batch_id:
+                asset["status"] = "archived"
+                asset["updated_at"] = now
+        return copy.deepcopy(batch)
 
     def ensure_runtime_batch(
         self,
@@ -267,8 +290,11 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         failure_reason: str | None = None,
     ) -> dict[str, Any]:
         batch = self.batches[batch_id]
-        if str(batch.get("status") or "") in BATCH_RUN_ACTIVE_STATUSES:
+        status = str(batch.get("status") or "")
+        if status in BATCH_RUN_ACTIVE_STATUSES:
             raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
+        if status == "archived":
+            raise PartitionBatchArchivedError(f"Partition batch is archived: {batch_id}")
         attempt_no = int(batch.get("attempt_count") or 0) + 1
         batch["attempt_count"] = attempt_no
         batch["status"] = "retrying" if "retry" in operation else "queued"
@@ -728,7 +754,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
             where.append("status = %s")
             params.append(status)
         elif not include_succeeded:
-            where.append("status <> 'succeeded'")
+            where.append("status NOT IN ('succeeded', 'archived')")
         if data_type:
             where.append("data_type = %s")
             params.append(data_type)
@@ -752,6 +778,35 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (batch_id,))
                 row = cur.fetchone()
                 return None if row is None else _row_to_dict(cur, row)
+
+    def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE partition_batches
+                    SET status = 'archived',
+                        updated_at = now()
+                    WHERE batch_id = %s
+                      AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested')
+                    RETURNING *
+                    """,
+                    (batch_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute("SELECT status FROM partition_batches WHERE batch_id = %s", (batch_id,))
+                    status_row = cur.fetchone()
+                    if status_row is None:
+                        return None
+                    if str(status_row[0] or "") in BATCH_RUN_ACTIVE_STATUSES:
+                        raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
+                    return None
+                batch = _row_to_dict(cur, row)
+                cur.execute("UPDATE partition_assets SET status = 'archived', updated_at = now() WHERE batch_id = %s", (batch_id,))
+            conn.commit()
+        return batch
 
     def ensure_runtime_batch(
         self,
@@ -947,7 +1002,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         quality_failure_reason = NULL,
                         updated_at = now()
                     WHERE batch_id = %s
-                      AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested')
+                      AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested', 'archived')
                     RETURNING attempt_count
                     """,
                     (batch_status, task_id, batch_id),
@@ -955,8 +1010,11 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 row = cur.fetchone()
                 if row is None:
                     cur.execute("SELECT status FROM partition_batches WHERE batch_id = %s", (batch_id,))
-                    if cur.fetchone() is None:
+                    status_row = cur.fetchone()
+                    if status_row is None:
                         raise KeyError(batch_id)
+                    if str(status_row[0] or "") == "archived":
+                        raise PartitionBatchArchivedError(f"Partition batch is archived: {batch_id}")
                     raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
                 self._increment_asset_attempts(cur, batch_id, asset_ids)
                 cur.execute(

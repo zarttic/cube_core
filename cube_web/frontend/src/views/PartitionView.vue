@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { CircleCloseFilled, Document, EditPen, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
+import { CircleCloseFilled, Document, EditPen, FolderChecked, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
 import GlobeMap from '@/components/GlobeMap.vue';
 import ConfigView from '@/views/ConfigView.vue';
@@ -235,12 +235,12 @@ const visibleCarbonBatches = computed(() => managedCarbonBatches.value);
 const visibleRadarBatches = computed(() => managedRadarBatches.value);
 const visibleProductBatches = computed(() => managedProductBatches.value);
 const partitionTaskQueueStats = computed(() => {
-  const countByStatus = (statuses) => partitionTasks.value.filter((task) => statuses.includes(task.status)).length;
+  const countByStatus = (statuses) => partitionTasks.value.filter((task) => statuses.includes(partitionTaskDisplayStatus(task))).length;
   return [
     { label: '排队中', value: countByStatus(['queued']), status: 'queued' },
     { label: '运行中', value: countByStatus(['running', 'retrying']), status: 'running' },
     { label: '需处理', value: countByStatus(['failed', 'manual_required', 'cancel_requested']), status: 'manual_required' },
-    { label: '已完成', value: countByStatus(['succeeded', 'completed']), status: 'succeeded' },
+    { label: '已完成', value: countByStatus(['succeeded', 'completed', 'archived']), status: 'succeeded' },
   ];
 });
 
@@ -262,7 +262,7 @@ function setBatchSelection(batchId, dataType) {
 
 function preferredBatchId(batches) {
   if (!Array.isArray(batches) || !batches.length) return '';
-  return batches.find((batch) => batch.status !== 'succeeded')?.id || batches[0]?.id || '';
+  return batches.find((batch) => !['succeeded', 'archived'].includes(batch.status))?.id || batches[0]?.id || '';
 }
 
 function partitionStatusText(status) {
@@ -275,6 +275,7 @@ function partitionStatusText(status) {
     failed: '失败',
     manual_required: '人工确认',
     cancelled: '已取消',
+    archived: '已归档',
     succeeded: '已完成',
     completed: '已完成',
   };
@@ -291,6 +292,7 @@ function partitionStatusType(status) {
     failed: 'danger',
     manual_required: 'warning',
     cancelled: 'info',
+    archived: 'info',
     succeeded: 'success',
     completed: 'success',
   };
@@ -345,6 +347,14 @@ function partitionBatchDetailSubtitle(batch) {
 
 function partitionBatchCanCancel(batch) {
   return ['queued', 'running', 'retrying', 'cancel_requested'].includes(batch?.status);
+}
+
+function partitionBatchCanArchive(batch) {
+  return ['failed', 'manual_required', 'cancelled'].includes(batch?.status);
+}
+
+function partitionBatchCanRun(batch) {
+  return Boolean(batch) && batch.status !== 'archived';
 }
 
 function partitionBatchCanRetrySelectedAssets(batch) {
@@ -414,6 +424,7 @@ function partitionBatchActionLabel(batch) {
   if (batch?.status === 'manual_required') return '继续重试';
   if (batch?.status === 'failed') return '重试批次';
   if (batch?.status === 'cancelled') return '重新执行';
+  if (batch?.status === 'archived') return '已归档';
   if (batch?.status === 'succeeded') return '再次执行';
   return batch?.attempt_count ? '再次执行' : '开始执行';
 }
@@ -427,7 +438,13 @@ function partitionBatchActionType(batch) {
 function partitionBatchActionIcon(batch) {
   if (partitionBatchCanCancel(batch)) return CircleCloseFilled;
   if (['failed', 'manual_required', 'cancelled'].includes(batch?.status)) return Refresh;
+  if (batch?.status === 'archived') return FolderChecked;
   return VideoPlay;
+}
+
+function partitionBatchArchiveActionKey(batch) {
+  const batchId = batch?.id || batch?.batch_id;
+  return batchId ? `archive:${batchId}` : 'archive';
 }
 
 function partitionBatchSummary(batch) {
@@ -571,6 +588,10 @@ function selectManagedBatchByDetail(batch) {
   setBatchSelection(batch.batch_id || batch.id, batch.data_type);
 }
 
+function partitionTaskDisplayStatus(task) {
+  return task?.batch_status === 'archived' ? 'archived' : task?.status;
+}
+
 function partitionTaskTitle(task) {
   return task.batch_name || task.batch_id || task.task_id || '-';
 }
@@ -591,6 +612,24 @@ function partitionTaskResultText(task) {
 
 function canOpenPartitionTaskBatch(task) {
   return Boolean(task?.batch_id);
+}
+
+function partitionTaskBatchProxy(task) {
+  return {
+    id: task?.batch_id,
+    batch_id: task?.batch_id,
+    batch_name: task?.batch_name,
+    data_type: task?.data_type,
+    status: task?.batch_status || task?.status,
+  };
+}
+
+function partitionTaskCanArchiveBatch(task) {
+  return canOpenPartitionTaskBatch(task) && partitionBatchCanArchive(partitionTaskBatchProxy(task));
+}
+
+async function archivePartitionTaskBatch(task) {
+  await archivePartitionBatch(partitionTaskBatchProxy(task));
 }
 
 async function openPartitionTaskBatch(task) {
@@ -676,7 +715,7 @@ async function refreshPartitionBatchDetail() {
 async function runPartitionBatchFromDetail() {
   const batch = partitionBatchDetail.value;
   const batchId = batch?.id || batch?.batch_id;
-  if (!batchId) return;
+  if (!batchId || !partitionBatchCanRun(batch)) return;
   const operation = partitionBatchExecutionOperation(batch);
   const configOverride = partitionBatchConfigOverride(batch);
   partitionBatchDetailAction.value = operation;
@@ -841,6 +880,39 @@ async function cancelPartitionBatchFromDetail() {
     ElMessage.error(error.message);
   } finally {
     partitionBatchDetailAction.value = '';
+  }
+}
+
+async function archivePartitionBatch(batch) {
+  const batchId = batch?.id || batch?.batch_id;
+  if (!batchId || !partitionBatchCanArchive(batch)) return;
+  try {
+    await ElMessageBox.confirm(
+      '归档后该批次会从待处理队列移除，不会继续提交重试或执行；历史详情仍保留原始错误信息。',
+      '归档批次',
+      { confirmButtonText: '归档完成', cancelButtonText: '返回', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  const actionKey = partitionBatchArchiveActionKey(batch);
+  partitionBatchDetailAction.value = actionKey;
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    await requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {});
+    ElMessage.success('批次已归档完成');
+    await loadPartitionBatches();
+    await loadPartitionTasks();
+    const detailBatchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
+    if (partitionBatchDetailVisible.value && detailBatchId === batchId) {
+      await refreshPartitionBatchDetail();
+    }
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    if (partitionBatchDetailAction.value === actionKey) {
+      partitionBatchDetailAction.value = '';
+    }
   }
 }
 
@@ -2734,7 +2806,7 @@ onUnmounted(() => {
               <el-table v-loading="partitionTasksLoading" :data="partitionTasks" class="drawer-table partition-task-table" row-key="task_id">
                 <el-table-column label="状态" width="96">
                   <template #default="{ row }">
-                    <el-tag size="small" :type="partitionStatusType(row.status)">{{ partitionStatusText(row.status) }}</el-tag>
+                    <el-tag size="small" :type="partitionStatusType(partitionTaskDisplayStatus(row))">{{ partitionStatusText(partitionTaskDisplayStatus(row)) }}</el-tag>
                   </template>
                 </el-table-column>
                 <el-table-column label="任务" min-width="230">
@@ -2763,9 +2835,19 @@ onUnmounted(() => {
                     <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="90" fixed="right">
+                <el-table-column label="操作" width="180" fixed="right">
                   <template #default="{ row }">
                     <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+                    <el-button
+                      v-if="partitionTaskCanArchiveBatch(row)"
+                      size="small"
+                      type="info"
+                      :icon="FolderChecked"
+                      :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
+                      @click="archivePartitionTaskBatch(row)"
+                    >
+                      归档完成
+                    </el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -3072,6 +3154,16 @@ onUnmounted(() => {
                           <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
                             {{ partitionBatchActionLabel(batch) }}
                           </el-button>
+                          <el-button
+                            v-if="partitionBatchCanArchive(batch)"
+                            size="small"
+                            type="info"
+                            :icon="FolderChecked"
+                            :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
+                            @click="archivePartitionBatch(batch)"
+                          >
+                            归档完成
+                          </el-button>
                         </div>
                       </div>
                     </div>
@@ -3247,6 +3339,16 @@ onUnmounted(() => {
                 <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
                   {{ partitionBatchActionLabel(batch) }}
                 </el-button>
+                <el-button
+                  v-if="partitionBatchCanArchive(batch)"
+                  size="small"
+                  type="info"
+                  :icon="FolderChecked"
+                  :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
+                  @click="archivePartitionBatch(batch)"
+                >
+                  归档完成
+                </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleOpticalBatchExpand(batch.id)">
                   {{ expandedOpticalBatchId === batch.id ? '收起' : '展开' }}
                 </button>
@@ -3300,6 +3402,16 @@ onUnmounted(() => {
                 <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
                 <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
                   {{ partitionBatchActionLabel(batch) }}
+                </el-button>
+                <el-button
+                  v-if="partitionBatchCanArchive(batch)"
+                  size="small"
+                  type="info"
+                  :icon="FolderChecked"
+                  :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
+                  @click="archivePartitionBatch(batch)"
+                >
+                  归档完成
                 </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleCarbonBatchExpand(batch.id)">
                   {{ expandedCarbonBatchId === batch.id ? '收起' : '展开' }}
@@ -3356,6 +3468,16 @@ onUnmounted(() => {
                   <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
                     {{ partitionBatchActionLabel(batch) }}
                   </el-button>
+                  <el-button
+                    v-if="partitionBatchCanArchive(batch)"
+                    size="small"
+                    type="info"
+                    :icon="FolderChecked"
+                    :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
+                    @click="archivePartitionBatch(batch)"
+                  >
+                    归档完成
+                  </el-button>
                   <button type="button" class="batch-expand-btn" @click="toggleRadarBatchExpand(batch.id)">
                     {{ expandedRadarBatchId === batch.id ? '收起' : '展开' }}
                   </button>
@@ -3411,6 +3533,16 @@ onUnmounted(() => {
                   <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
                   <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
                     {{ partitionBatchActionLabel(batch) }}
+                  </el-button>
+                  <el-button
+                    v-if="partitionBatchCanArchive(batch)"
+                    size="small"
+                    type="info"
+                    :icon="FolderChecked"
+                    :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
+                    @click="archivePartitionBatch(batch)"
+                  >
+                    归档完成
                   </el-button>
                   <button type="button" class="batch-expand-btn" @click="toggleProductBatchExpand(batch.id)">
                     {{ expandedProductBatchId === batch.id ? '收起' : '展开' }}
@@ -3564,13 +3696,22 @@ onUnmounted(() => {
               取消任务
             </el-button>
             <el-button
-              v-else
+              v-else-if="partitionBatchCanRun(partitionBatchDetail)"
               type="primary"
               :icon="partitionBatchActionIcon(partitionBatchDetail)"
               :loading="partitionBatchDetailAction === 'run' || partitionBatchDetailAction === 'retry'"
               @click="runPartitionBatchFromDetail"
             >
               {{ partitionBatchActionLabel(partitionBatchDetail) }}
+            </el-button>
+            <el-button
+              v-if="partitionBatchCanArchive(partitionBatchDetail)"
+              type="info"
+              :icon="FolderChecked"
+              :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionBatchDetail)"
+              @click="archivePartitionBatch(partitionBatchDetail)"
+            >
+              归档完成
             </el-button>
           </div>
         </div>
@@ -3602,6 +3743,7 @@ onUnmounted(() => {
               <el-option label="失败" value="failed" />
               <el-option label="人工确认" value="manual_required" />
               <el-option label="已取消" value="cancelled" />
+              <el-option label="已归档" value="archived" />
               <el-option label="已完成" value="succeeded" />
             </el-select>
           </div>

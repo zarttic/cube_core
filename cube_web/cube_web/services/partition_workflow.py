@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from cube_web.services.partition_job_store import (
     PartitionBatchAlreadyActiveError,
+    PartitionBatchArchivedError,
     PartitionJobStore,
     get_partition_job_store,
 )
@@ -66,6 +67,15 @@ class PartitionWorkflowService:
     def list_attempts(self, batch_id: str) -> list[dict[str, Any]]:
         self.get_batch(batch_id)
         return self.store.list_attempts(batch_id)
+
+    def archive_batch(self, batch_id: str) -> dict[str, Any]:
+        try:
+            batch = self.store.archive_batch(batch_id)
+        except PartitionBatchAlreadyActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if batch is None:
+            raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
+        return batch
 
     def list_tasks(
         self,
@@ -131,7 +141,7 @@ class PartitionWorkflowService:
                     asset_ids=asset_ids,
                     requested_by=requested_by,
                 )
-            except PartitionBatchAlreadyActiveError as exc:
+            except (PartitionBatchAlreadyActiveError, PartitionBatchArchivedError) as exc:
                 active_task = self._active_task_for_batch(self.get_batch(str(batch["batch_id"])))
                 if active_task is not None:
                     return active_task
@@ -183,7 +193,7 @@ class PartitionWorkflowService:
                     retry_strategy=retry_strategy,
                     failure_reason=failure_reason,
                 )
-            except PartitionBatchAlreadyActiveError as exc:
+            except (PartitionBatchAlreadyActiveError, PartitionBatchArchivedError) as exc:
                 active_task = self._active_task_for_batch(self.get_batch(batch_id))
                 if active_task is not None:
                     return active_task

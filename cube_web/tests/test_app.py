@@ -314,6 +314,14 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
     assert "取消会立即请求执行层中断当前任务" in source
     assert "重试失败资产" in source
+    assert "async function archivePartitionBatch(batch)" in source
+    assert "function partitionTaskDisplayStatus(task)" in source
+    assert "partitionTaskCanArchiveBatch(row)" in source
+    assert "function partitionBatchCanRun(batch)" in source
+    assert 'v-else-if="partitionBatchCanRun(partitionBatchDetail)"' in source
+    assert "requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {})" in source
+    assert "归档完成" in source
+    assert "archived: '已归档'" in source
     assert "partitionBatchDetailTab === 'attempts'" in source
     assert "visibleOpticalBatches" in source
     assert "const selectedProductAssets = computed(() => {" in source
@@ -2121,6 +2129,86 @@ def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypat
     assert batch_resp.json()["partitioned_at"]
     assert "BATCH_RUN_SUCCESS" not in [batch["batch_id"] for batch in pending_resp.json()["batches"]]
     assert "BATCH_RUN_SUCCESS" in [batch["batch_id"] for batch in history_resp.json()["batches"]]
+
+
+def test_partition_batch_archive_marks_handled_and_hides_from_pending_list():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_ARCHIVE_HANDLED",
+            "batch_name": "Archive handled",
+            "data_type": "optical",
+            "assets": [
+                ard_raster_asset("s3://cube/cube/source/optocal/archive-a.tif", "archive-a", asset_id="archive-a"),
+                ard_raster_asset("s3://cube/cube/source/optocal/archive-b.tif", "archive-b", asset_id="archive-b"),
+            ],
+        },
+    )
+    store = web_app.partition_workflow_service.store
+    store.create_attempt(
+        task_id="partition-archive-handled",
+        batch_id="BATCH_ARCHIVE_HANDLED",
+        operation="auto_run",
+        payload={},
+    )
+    store.fail_attempt(
+        "partition-archive-handled",
+        "operator handled this failed batch outside retry",
+        manual_required=True,
+        error_type="validation",
+    )
+
+    archive_resp = client.post("/v1/partition/batches/BATCH_ARCHIVE_HANDLED/archive")
+    detail_resp = client.get("/v1/partition/batches/BATCH_ARCHIVE_HANDLED")
+    assets_resp = client.get("/v1/partition/batches/BATCH_ARCHIVE_HANDLED/assets")
+    tasks_resp = client.get("/v1/partition/tasks", params={"limit": 20})
+    pending_resp = client.get("/v1/partition/batches")
+    archived_resp = client.get("/v1/partition/batches", params={"status": "archived"})
+    history_resp = client.get("/v1/partition/batches", params={"include_succeeded": True})
+    run_resp = client.post("/v1/partition/batches/BATCH_ARCHIVE_HANDLED/run", json={})
+    retry_resp = client.post("/v1/partition/batches/BATCH_ARCHIVE_HANDLED/retry", json={})
+
+    assert archive_resp.status_code == 200
+    assert archive_resp.json()["status"] == "archived"
+    assert detail_resp.json()["status"] == "archived"
+    assert detail_resp.json()["last_error"] == "operator handled this failed batch outside retry"
+    assert {asset["status"] for asset in assets_resp.json()["assets"]} == {"archived"}
+    task_row = next(row for row in tasks_resp.json()["tasks"] if row["task_id"] == "partition-archive-handled")
+    assert task_row["status"] == "failed"
+    assert task_row["batch_status"] == "archived"
+    assert "BATCH_ARCHIVE_HANDLED" not in [batch["batch_id"] for batch in pending_resp.json()["batches"]]
+    assert "BATCH_ARCHIVE_HANDLED" in [batch["batch_id"] for batch in archived_resp.json()["batches"]]
+    assert "BATCH_ARCHIVE_HANDLED" in [batch["batch_id"] for batch in history_resp.json()["batches"]]
+    assert run_resp.status_code == 409
+    assert retry_resp.status_code == 409
+
+
+@pytest.mark.parametrize("start_attempt, expected_status", [(False, "queued"), (True, "running")])
+def test_partition_batch_archive_rejects_active_batch(start_attempt, expected_status):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": f"BATCH_ARCHIVE_ACTIVE_{expected_status.upper()}",
+            "batch_name": "Archive active",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/archive-active.tif", "archive-active")],
+        },
+    )
+    store = web_app.partition_workflow_service.store
+    store.create_attempt(
+        task_id=f"partition-archive-active-{expected_status}",
+        batch_id=f"BATCH_ARCHIVE_ACTIVE_{expected_status.upper()}",
+        operation="auto_run",
+        payload={},
+    )
+    if start_attempt:
+        store.start_attempt(f"partition-archive-active-{expected_status}")
+
+    archive_resp = client.post(f"/v1/partition/batches/BATCH_ARCHIVE_ACTIVE_{expected_status.upper()}/archive")
+    batch_resp = client.get(f"/v1/partition/batches/BATCH_ARCHIVE_ACTIVE_{expected_status.upper()}")
+
+    assert archive_resp.status_code == 409
+    assert batch_resp.json()["status"] == expected_status
 
 
 def test_partition_task_queue_lists_direct_and_batch_attempts(monkeypatch):
