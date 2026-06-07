@@ -3480,6 +3480,33 @@ section {
     white-space: nowrap;
 }
 
+.batch-schema-collapse {
+    margin: 0 12px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #f8fafc;
+    overflow: hidden;
+}
+
+.batch-schema-collapse .el-collapse-item__header {
+    height: 34px;
+    padding: 0 10px;
+    border-bottom: none;
+    background: #f8fafc;
+    color: var(--dark);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.batch-schema-collapse .el-collapse-item__wrap {
+    border-top: 1px solid var(--border);
+    border-bottom: none;
+}
+
+.batch-schema-collapse .el-collapse-item__content {
+    padding-bottom: 0;
+}
+
 .batch-assets {
     border-top: 1px solid var(--border);
     max-height: 280px;

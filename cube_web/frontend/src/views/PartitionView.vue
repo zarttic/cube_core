@@ -49,6 +49,52 @@ const radarEntityGridLevel = ref(defaultEntityGridLevel);
 const productGridType = ref('geohash');
 const productGridLevel = ref(5);
 const productEntityGridLevel = ref(defaultEntityGridLevel);
+const defaultOpticalSchemaFields = [
+  { field: 'source_uri', type: 'string', meaning: '光学栅格源文件路径或 MinIO 对象 URL' },
+  { field: 'scene_id', type: 'string', meaning: '光学场景标识' },
+  { field: 'sensor', type: 'string', meaning: '光学传感器' },
+  { field: 'product_family', type: 'string', meaning: '光学产品族' },
+  { field: 'bands / band', type: 'string[] / string', meaning: '波段' },
+  { field: 'acq_time', type: 'datetime', meaning: '采集时间' },
+  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
+  { field: 'bbox', type: 'float[4]', meaning: '覆盖范围 bbox（WGS84）' },
+  { field: 'corners', type: 'float[4][2]', meaning: '覆盖范围四角点（WGS84 lon/lat）' },
+];
+const defaultCarbonSchemaFields = [
+  { field: 'source_uri', type: 'string', meaning: '碳卫星源文件路径或 MinIO 对象 URL' },
+  { field: 'observation_id / sounding_id', type: 'string', meaning: '碳卫星观测唯一标识' },
+  { field: 'product_type', type: 'string', meaning: '碳卫星产品类型' },
+  { field: 'acq_time / time', type: 'datetime', meaning: '观测时间' },
+  { field: 'lon / lat', type: 'float', meaning: '观测中心点（WGS84 lon/lat）' },
+  { field: 'xco2', type: 'float', meaning: '柱平均 CO2 浓度' },
+  { field: 'quality_flag / xco2_quality_flag', type: 'int', meaning: '质量标记' },
+  { field: 'footprint / vertices', type: 'float[4][2]', meaning: '观测足迹四角点（WGS84 lon/lat）' },
+];
+const defaultRadarSchemaFields = [
+  { field: 'source_uri', type: 'string', meaning: '雷达栅格源文件路径或 MinIO 对象 URL' },
+  { field: 'scene_id', type: 'string', meaning: 'Sentinel-1 场景标识' },
+  { field: 'sensor', type: 'string', meaning: '雷达传感器' },
+  { field: 'product_family', type: 'string', meaning: '雷达产品族' },
+  { field: 'band / polarization', type: 'string', meaning: '极化方式' },
+  { field: 'acq_time', type: 'datetime', meaning: '采集时间' },
+  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
+  { field: 'bbox', type: 'float[4]', meaning: '覆盖范围 bbox（WGS84）' },
+  { field: 'corners', type: 'float[4][2]', meaning: '覆盖范围四角点（WGS84 lon/lat）' },
+];
+const defaultProductSchemaFields = [
+  { field: 'source_uri', type: 'string', meaning: '信息产品栅格源文件路径或 MinIO 对象 URL' },
+  { field: 'product_name', type: 'string', meaning: '信息产品名称' },
+  { field: 'product_year', type: 'int', meaning: '产品年份' },
+  { field: 'scene_id', type: 'string', meaning: '产品场景标识' },
+  { field: 'product_family', type: 'string', meaning: '产品族' },
+  { field: 'sensor', type: 'string', meaning: '数据来源/产品传感器' },
+  { field: 'band', type: 'string', meaning: '产品值波段' },
+  { field: 'acq_time', type: 'datetime', meaning: '产品时间' },
+  { field: 'resolution', type: 'float', meaning: '空间分辨率（米）' },
+  { field: 'target_crs', type: 'string', meaning: '标准化目标参考系统' },
+  { field: 'bbox', type: 'float[4]', meaning: '产品覆盖范围 bbox（WGS84）' },
+  { field: 'corners', type: 'float[4][2]', meaning: '产品覆盖范围四角点（WGS84 lon/lat）' },
+];
 const gridLevelManualOverrides = ref({
   optical: false,
   opticalEntity: false,
@@ -1009,6 +1055,26 @@ function cornersToBbox(corners) {
   return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
 }
 
+function normalizedBboxKey(corners) {
+  if (!Array.isArray(corners) || corners.length !== 4) return '';
+  const bbox = cornersToBbox(corners);
+  if (!bbox.every((value) => Number.isFinite(value))) return '';
+  return bbox.map((value) => value.toFixed(6)).join(',');
+}
+
+function normalizedCornersKey(corners) {
+  if (!Array.isArray(corners) || corners.length !== 4) return '';
+  const values = corners.flatMap((corner) => [Number(corner?.[0]), Number(corner?.[1])]);
+  if (!values.every((value) => Number.isFinite(value))) return '';
+  return values.map((value) => value.toFixed(6)).join(',');
+}
+
+function joinUniqueLabels(values, limit = 4) {
+  const labels = Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
+  if (labels.length <= limit) return labels.join(', ');
+  return `${labels.slice(0, limit).join(', ')} 等 ${labels.length} 项`;
+}
+
 function assetBands(asset) {
   if (Array.isArray(asset?.bands) && asset.bands.length) return asset.bands;
   if (asset?.band) return [asset.band];
@@ -1020,50 +1086,112 @@ function assetBandsText(asset) {
   return bands.length ? bands.join(', ') : '-';
 }
 
-const mapBatchGeometries = computed(() => selectedOpticalAssets.value
-  .map((asset) => {
-    const geometry = cornersToPolygon(asset.corners);
-    if (!geometry) return null;
-    return {
-      geometry,
-      label: `${asset.scene_id} / ${assetBandsText(asset)}`,
-      color: '#2f91ea',
-      fillColor: '#2f91ea',
-      fillOpacity: 0.12,
-      weight: 2,
-    };
-  })
-  .filter(Boolean));
+function uniqueFootprintAssets(assets, labelForAsset) {
+  const groups = new Map();
+  assets.forEach((asset) => {
+    const key = normalizedCornersKey(asset.corners);
+    if (!key) return;
+    const group = groups.get(key);
+    if (group) {
+      group.assets.push(asset);
+      group.labels.push(labelForAsset(asset));
+      return;
+    }
+    groups.set(key, {
+      key,
+      corners: asset.corners,
+      assets: [asset],
+      labels: [labelForAsset(asset)],
+    });
+  });
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    label: joinUniqueLabels(group.labels),
+    assetCount: group.assets.length,
+  }));
+}
 
-const productMapGeometries = computed(() => selectedProductAssets.value
-  .map((asset) => {
-    const geometry = cornersToPolygon(asset.corners);
-    if (!geometry) return null;
-    return {
-      geometry,
-      label: `${asset.product_year} / ${asset.product_name}`,
-      color: '#3f7f5f',
-      fillColor: '#3f7f5f',
-      fillOpacity: 0.12,
-      weight: 2,
-    };
-  })
-  .filter(Boolean));
+function mapGeometryItemsFromFootprints(footprints, style) {
+  return footprints
+    .map((footprint) => {
+      const geometry = cornersToPolygon(footprint.corners);
+      if (!geometry) return null;
+      return {
+        geometry,
+        label: footprint.assetCount > 1 ? `${footprint.label} / ${footprint.assetCount} 条资产` : footprint.label,
+        ...style,
+      };
+    })
+    .filter(Boolean);
+}
 
-const radarMapGeometries = computed(() => selectedRadarAssets.value
-  .map((asset) => {
-    const geometry = cornersToPolygon(asset.corners);
-    if (!geometry) return null;
-    return {
-      geometry,
-      label: `${asset.scene_id} / ${(asset.polarization || asset.band || '').toUpperCase()}`,
-      color: '#b06f2c',
-      fillColor: '#b06f2c',
-      fillOpacity: 0.12,
-      weight: 2,
-    };
-  })
-  .filter(Boolean));
+const opticalMapFootprints = computed(() => uniqueFootprintAssets(
+  selectedOpticalAssets.value,
+  (asset) => `${asset.scene_id} / ${assetBandsText(asset)}`,
+));
+
+const productMapFootprints = computed(() => uniqueFootprintAssets(
+  selectedProductAssets.value,
+  (asset) => `${asset.product_year} / ${asset.product_name}`,
+));
+
+const radarMapFootprints = computed(() => uniqueFootprintAssets(
+  selectedRadarAssets.value,
+  (asset) => `${asset.scene_id} / ${(asset.polarization || asset.band || '').toUpperCase()}`,
+));
+
+const mapBatchGeometries = computed(() => mapGeometryItemsFromFootprints(opticalMapFootprints.value, {
+  color: '#2f91ea',
+  fillColor: '#2f91ea',
+  fillOpacity: 0.12,
+  weight: 2,
+}));
+
+const productMapGeometries = computed(() => mapGeometryItemsFromFootprints(productMapFootprints.value, {
+  color: '#3f7f5f',
+  fillColor: '#3f7f5f',
+  fillOpacity: 0.12,
+  weight: 2,
+}));
+
+const radarMapGeometries = computed(() => mapGeometryItemsFromFootprints(radarMapFootprints.value, {
+  color: '#b06f2c',
+  fillColor: '#b06f2c',
+  fillOpacity: 0.12,
+  weight: 2,
+}));
+
+function selectedMapFootprintsForModule() {
+  if (activeModule.value === 'product') return productMapFootprints.value;
+  if (activeModule.value === 'radar') return radarMapFootprints.value;
+  return opticalMapFootprints.value;
+}
+
+function uniqueGridCoverFootprints(footprints) {
+  const groups = new Map();
+  footprints.forEach((footprint) => {
+    const key = normalizedBboxKey(footprint.corners);
+    if (key && !groups.has(key)) groups.set(key, footprint);
+  });
+  return Array.from(groups.values());
+}
+
+function uniqueGridGeometryItems(chunks, gridType, level) {
+  const cellsByCode = new Map();
+  chunks.flat().forEach((cell) => {
+    if (!cell?.geometry || !cell.space_code) return;
+    const key = `${gridType}:${level}:${cell.space_code}`;
+    if (!cellsByCode.has(key)) cellsByCode.set(key, cell);
+  });
+  return Array.from(cellsByCode.values()).map((cell) => ({
+    geometry: cell.geometry,
+    label: cell.space_code,
+    color: '#e67e22',
+    fillColor: '#e67e22',
+    fillOpacity: 0.06,
+    weight: 1,
+  }));
+}
 
 const selectedMapAssets = computed(() => (
   activeModule.value === 'product'
@@ -1511,22 +1639,43 @@ function toggleProductAssetSelect(batchId, asset) {
 
 function opticalBatchSummary(batch) {
   const selectedCount = batch.assets.filter((asset) => isOpticalAssetSelected(batch.id, asset)).length;
-  return `${selectedCount}/${batch.assets.length} 条资产已选`;
+  return `${selectedCount}/${batch.assets.length} 条资产已选 | schema ${schemaForBatch(batch).length} 字段`;
 }
 
 function carbonBatchSummary(batch) {
   const selectedCount = batch.observations.filter((observation) => isCarbonObservationSelected(batch.id, observation)).length;
-  return `${selectedCount}/${batch.observations.length} 条观测已选 | schema ${batch.schema.length} 字段`;
+  return `${selectedCount}/${batch.observations.length} 条观测已选 | schema ${schemaForBatch(batch).length} 字段`;
 }
 
 function radarBatchSummary(batch) {
   const selectedCount = batch.assets.filter((asset) => isRadarAssetSelected(batch.id, asset)).length;
-  return `${selectedCount}/${batch.assets.length} 条资产已选 | schema ${batch.schema.length} 字段`;
+  return `${selectedCount}/${batch.assets.length} 条资产已选 | schema ${schemaForBatch(batch).length} 字段`;
 }
 
 function productBatchSummary(batch) {
   const selectedCount = batch.assets.filter((asset) => isProductAssetSelected(batch.id, asset)).length;
-  return `${selectedCount}/${batch.assets.length} 个年份已选 | schema ${batch.schema.length} 字段`;
+  return `${selectedCount}/${batch.assets.length} 个年份已选 | schema ${schemaForBatch(batch).length} 字段`;
+}
+
+function fallbackSchemaForDataType(dataType) {
+  if (dataType === 'carbon') return defaultCarbonSchemaFields;
+  if (dataType === 'radar') return defaultRadarSchemaFields;
+  if (dataType === 'product') return defaultProductSchemaFields;
+  return defaultOpticalSchemaFields;
+}
+
+function schemaForBatch(batch) {
+  return Array.isArray(batch?.schema) && batch.schema.length ? batch.schema : fallbackSchemaForDataType(batch?.data_type);
+}
+
+function schemaCollapseTitle(batch) {
+  return `Schema 字段（${schemaForBatch(batch).length}）`;
+}
+
+function schemaFromManagedBatch(batch) {
+  if (Array.isArray(batch?.source_schema?.schema) && batch.source_schema.schema.length) return batch.source_schema.schema;
+  if (Array.isArray(batch?.schema) && batch.schema.length) return batch.schema;
+  return fallbackSchemaForDataType(batch?.data_type);
 }
 
 function normalizeManagedBatch(batch) {
@@ -1536,13 +1685,13 @@ function normalizeManagedBatch(batch) {
     id: batch.batch_id,
     name: batch.batch_name || batch.batch_id,
     status: batch.status || '待处理',
+    schema: schemaFromManagedBatch(batch),
   };
   if (batch.data_type === 'carbon') {
     return {
       ...base,
       product_type: payload.product_type || 'xco2',
       source_uri: payload.source_uri || '',
-      schema: batch.source_schema?.schema || [],
       observations: payload.selected_observations || [],
     };
   }
@@ -1552,7 +1701,6 @@ function normalizeManagedBatch(batch) {
       product_family: payload.product_family || 'product',
       sensor: payload.sensor || 'data_product',
       target_crs: payload.target_crs || 'EPSG:4326',
-      schema: batch.source_schema?.schema || [],
       assets: payload.selected_assets || [],
     };
   }
@@ -1562,7 +1710,6 @@ function normalizeManagedBatch(batch) {
       product_family: payload.product_family || 'sentinel1',
       sensor: payload.sensor || 'sentinel1_sar',
       target_crs: payload.target_crs || 'EPSG:4326',
-      schema: batch.source_schema?.schema || [],
       assets: payload.selected_assets || [],
     };
   }
@@ -1695,33 +1842,39 @@ async function loadMapGridForSelectedAssets() {
     ElMessage.warning(activeModule.value === 'product' ? '请至少选择一个产品年份' : activeModule.value === 'radar' ? '请至少选择一条雷达资产' : '请至少选择一条资产');
     return;
   }
+  const mapFootprints = selectedMapFootprintsForModule();
+  const footprints = uniqueGridCoverFootprints(mapFootprints).slice(0, 30);
+  if (!footprints.length) {
+    ElMessage.warning('所选资产缺少有效空间范围');
+    return;
+  }
   mapGridLoading.value = true;
   mapGridGeometries.value = [];
   try {
     const { gridPrefix } = apiPrefixes();
-    const requests = selectedAssets.slice(0, 30).map(async (asset) => {
+    const gridType = selectedMapGridType.value;
+    const gridLevel = Number(selectedMapGridLevel.value);
+    const requests = footprints.map(async (footprint) => {
       const result = await requestJson(`${gridPrefix}/cover`, {
-        grid_type: selectedMapGridType.value,
-        level: Number(selectedMapGridLevel.value),
+        grid_type: gridType,
+        level: gridLevel,
         cover_mode: 'intersect',
         boundary_type: 'polygon',
-        bbox: cornersToBbox(asset.corners),
+        bbox: cornersToBbox(footprint.corners),
         crs: 'EPSG:4326',
       });
-      return (result.cells || [])
-        .map((cell) => (cell.geometry ? {
-          geometry: cell.geometry,
-          label: cell.space_code,
-          color: '#e67e22',
-          fillColor: '#e67e22',
-          fillOpacity: 0.06,
-          weight: 1,
-        } : null))
-        .filter(Boolean);
+      return result.cells || [];
     });
     const chunks = await Promise.all(requests);
-    mapGridGeometries.value = chunks.flat();
-    ElMessage.success(`已加载格网 ${mapGridGeometries.value.length} 个`);
+    mapGridGeometries.value = uniqueGridGeometryItems(chunks, gridType, gridLevel);
+    const mergedAssetCount = selectedAssets.length - mapFootprints.length;
+    const mergedCoverCount = mapFootprints.length - footprints.length;
+    const mergedParts = [
+      mergedAssetCount > 0 ? `合并重复资产 ${mergedAssetCount} 条` : '',
+      mergedCoverCount > 0 ? `合并重复格网范围 ${mergedCoverCount} 个` : '',
+    ].filter(Boolean);
+    const mergedText = mergedParts.length ? `，${mergedParts.join('，')}` : '';
+    ElMessage.success(`已加载格网 ${mapGridGeometries.value.length} 个${mergedText}`);
   } catch (error) {
     ElMessage.error(error.message);
   } finally {
@@ -3100,6 +3253,17 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="batch-summary">{{ opticalBatchSummary(batch) }}</div>
+            <el-collapse class="batch-schema-collapse">
+              <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
+                <div class="schema-grid">
+                  <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
+                    <strong>{{ field.field }}</strong>
+                    <span>{{ field.type }}</span>
+                    <small>{{ field.meaning }}</small>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
             <div class="batch-footer">
               <span>{{ partitionBatchSummary(batch) }}</span>
               <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
@@ -3143,18 +3307,22 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="batch-summary">{{ carbonBatchSummary(batch) }}</div>
+            <el-collapse class="batch-schema-collapse">
+              <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
+                <div class="schema-grid">
+                  <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
+                    <strong>{{ field.field }}</strong>
+                    <span>{{ field.type }}</span>
+                    <small>{{ field.meaning }}</small>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
             <div class="batch-footer">
               <span>{{ partitionBatchSummary(batch) }}</span>
               <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
             </div>
             <div v-if="expandedCarbonBatchId === batch.id" class="batch-assets">
-              <div class="schema-grid">
-                <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
-                  <strong>{{ field.field }}</strong>
-                  <span>{{ field.type }}</span>
-                  <small>{{ field.meaning }}</small>
-                </div>
-              </div>
               <div v-for="observation in batch.observations" :key="`${batch.id}-${observation.source_index}`" class="asset-row">
                 <div class="asset-main">
                   <el-checkbox :model-value="isCarbonObservationSelected(batch.id, observation)" @change="toggleCarbonObservationSelect(batch.id, observation)" />
@@ -3194,18 +3362,22 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="batch-summary">{{ radarBatchSummary(batch) }}</div>
+              <el-collapse class="batch-schema-collapse">
+                <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
+                  <div class="schema-grid">
+                    <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
+                      <strong>{{ field.field }}</strong>
+                      <span>{{ field.type }}</span>
+                      <small>{{ field.meaning }}</small>
+                    </div>
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
               <div class="batch-footer">
                 <span>{{ partitionBatchSummary(batch) }}</span>
                 <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
               </div>
               <div v-if="expandedRadarBatchId === batch.id" class="batch-assets">
-                <div class="schema-grid">
-                  <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
-                    <strong>{{ field.field }}</strong>
-                    <span>{{ field.type }}</span>
-                    <small>{{ field.meaning }}</small>
-                  </div>
-                </div>
                 <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
                   <div class="asset-main">
                     <el-checkbox :model-value="isRadarAssetSelected(batch.id, asset)" @change="toggleRadarAssetSelect(batch.id, asset)" />
@@ -3246,18 +3418,22 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
+              <el-collapse class="batch-schema-collapse">
+                <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
+                  <div class="schema-grid">
+                    <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
+                      <strong>{{ field.field }}</strong>
+                      <span>{{ field.type }}</span>
+                      <small>{{ field.meaning }}</small>
+                    </div>
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
               <div class="batch-footer">
                 <span>{{ partitionBatchSummary(batch) }}</span>
                 <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
               </div>
               <div v-if="expandedProductBatchId === batch.id" class="batch-assets">
-                <div class="schema-grid">
-                  <div v-for="field in batch.schema" :key="`${batch.id}-${field.field}`" class="schema-item">
-                    <strong>{{ field.field }}</strong>
-                    <span>{{ field.type }}</span>
-                    <small>{{ field.meaning }}</small>
-                  </div>
-                </div>
                 <div v-for="asset in batch.assets" :key="`${batch.id}-${asset.source_uri}`" class="asset-row">
                   <div class="asset-main">
                     <el-checkbox :model-value="isProductAssetSelected(batch.id, asset)" @change="toggleProductAssetSelect(batch.id, asset)" />

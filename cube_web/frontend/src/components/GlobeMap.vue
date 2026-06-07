@@ -42,6 +42,8 @@ const EARTH_KM = 6371;
 const DEFAULT_PREVIEW_IMAGERY_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer';
 const PREVIEW_IMAGERY_URL = (import.meta.env.VITE_GLOBE_IMAGERY_URL || DEFAULT_PREVIEW_IMAGERY_URL).trim();
 const OSM_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const MIN_3D_ZOOM_DISTANCE = 5000;
+const MAX_ZOOM_DISTANCE = 32000000;
 
 const mapEl = ref(null);
 const fallbackSphere = ref(null);
@@ -54,6 +56,7 @@ let handler;
 let drawStart = null;
 let draftCircle = null;
 let pointerDown = null;
+let lastFocusSignature = '';
 
 function toRad(value) {
   return CesiumMath.toRadians(Number(value));
@@ -147,6 +150,14 @@ function collectCoordinatePairs(geometry, output = []) {
 
   walk(geometry.coordinates);
   return output;
+}
+
+function geometrySignature() {
+  return JSON.stringify({
+    markers: props.markers.map((marker) => [marker.position?.[0], marker.position?.[1], marker.label || '']),
+    geometries: props.geometries.map((item) => [item.label || '', item.geometry]),
+    circle: props.circle,
+  });
 }
 
 function degreesArrayFromRing(ring) {
@@ -297,7 +308,11 @@ function renderLayers({ refocus = true } = {}) {
   const markerPoints = props.markers.map(addMarker).filter(Boolean);
   const circlePoint = addCircle(draftCircle || props.circle);
 
-  if (!refocus) return;
+  const signature = geometrySignature();
+  const shouldRefocus = refocus && signature !== lastFocusSignature;
+  lastFocusSignature = signature;
+
+  if (!shouldRefocus) return;
   if (focusPoints.length) {
     focusToPoints(focusPoints);
   } else if (markerPoints.length) {
@@ -315,7 +330,7 @@ function cameraHeight() {
     return Math.max(150000, Math.min(18000000, height));
   }
   const height = 23000000 - (Number(props.zoom) || 7) * 1800000;
-  return Math.max(2800000, Math.min(18000000, height));
+  return Math.max(300000, Math.min(18000000, height));
 }
 
 function focusToPoints(points) {
@@ -477,6 +492,7 @@ async function setMapMode(mode) {
   drawStart = null;
   draftCircle = null;
   pointerDown = null;
+  lastFocusSignature = '';
   setCameraInteraction(true);
 
   if (!viewer || useFallback.value) return;
@@ -520,8 +536,8 @@ async function initViewer() {
   }
   viewer.scene.globe.depthTestAgainstTerrain = false;
   viewer.scene.globe.enableLighting = false;
-  viewer.scene.screenSpaceCameraController.minimumZoomDistance = 500000;
-  viewer.scene.screenSpaceCameraController.maximumZoomDistance = 32000000;
+  viewer.scene.screenSpaceCameraController.minimumZoomDistance = MIN_3D_ZOOM_DISTANCE;
+  viewer.scene.screenSpaceCameraController.maximumZoomDistance = MAX_ZOOM_DISTANCE;
 
   overlaySource = new CustomDataSource('cube-map-overlays');
   await viewer.dataSources.add(overlaySource);
@@ -583,7 +599,10 @@ onMounted(() => {
 watch(() => props.markers, () => renderLayers(), { deep: true });
 watch(() => props.geometries, () => renderLayers(), { deep: true });
 watch(() => props.circle, () => renderLayers(), { deep: true });
-watch(() => props.center, focusDefault, { deep: true });
+watch(() => props.center, () => {
+  lastFocusSignature = '';
+  focusDefault();
+}, { deep: true });
 watch(() => props.interactionMode, () => {
   if (props.interactionMode !== 'draw') {
     drawStart = null;

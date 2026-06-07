@@ -317,7 +317,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "partitionBatchDetailTab === 'attempts'" in source
     assert "visibleOpticalBatches" in source
     assert "const selectedProductAssets = computed(() => {" in source
-    assert "const productMapGeometries = computed(() => selectedProductAssets.value" in source
+    assert "const productMapGeometries = computed(() => mapGeometryItemsFromFootprints(productMapFootprints.value" in source
     assert "activeModule.value === 'radar'" in source
     assert "? selectedRadarAssets.value" in source
     assert "? radarGridType.value" in source
@@ -340,6 +340,23 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "carbon_rows: '观测行文件读取'" in source
     assert "function qualitySourceText()" in source
     assert "schema-grid" in source
+    assert "defaultOpticalSchemaFields" in source
+    assert "defaultCarbonSchemaFields" in source
+    assert "defaultRadarSchemaFields" in source
+    assert "defaultProductSchemaFields" in source
+    assert "function schemaForBatch(batch)" in source
+    assert "function schemaCollapseTitle(batch)" in source
+    assert "function schemaFromManagedBatch(batch)" in source
+    assert "schema: schemaFromManagedBatch(batch)" in source
+    assert 'class="batch-schema-collapse"' in source
+    assert ':title="schemaCollapseTitle(batch)"' in source
+    assert "schemaForBatch(batch)" in source
+    assert "雷达栅格源文件路径或 MinIO 对象 URL" in source
+    assert "Sentinel-1 场景标识" in source
+    assert "band / polarization" in source
+    assert "覆盖范围 bbox（WGS84）" in source
+    assert "光学栅格源文件路径或 MinIO 对象 URL" in source
+    assert "碳卫星源文件路径或 MinIO 对象 URL" in source
     assert "buildLocalPartitionBatchDetail" not in source
     assert "dataRowsByModule" not in source
     assert "filteredDataRows" not in source
@@ -356,6 +373,42 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "观测足迹匹配" not in source
     assert "面积加权" not in source
     assert "最近邻" not in source
+
+
+def test_partition_view_deduplicates_map_preview_and_grid_cover_requests():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function normalizedCornersKey(corners)" in source
+    assert "function normalizedBboxKey(corners)" in source
+    assert "function uniqueFootprintAssets(assets, labelForAsset)" in source
+    assert "const opticalMapFootprints = computed(() => uniqueFootprintAssets(" in source
+    assert "const productMapFootprints = computed(() => uniqueFootprintAssets(" in source
+    assert "const radarMapFootprints = computed(() => uniqueFootprintAssets(" in source
+    assert "function uniqueGridCoverFootprints(footprints)" in source
+    assert "function uniqueGridGeometryItems(chunks, gridType, level)" in source
+    assert "const footprints = uniqueGridCoverFootprints(mapFootprints).slice(0, 30);" in source
+    assert "mapGridGeometries.value = uniqueGridGeometryItems(chunks, gridType, gridLevel);" in source
+    assert "selectedAssets.slice(0, 30).map" not in source
+    assert "mapGridGeometries.value = chunks.flat();" not in source
+
+
+def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "components" / "GlobeMap.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const MIN_3D_ZOOM_DISTANCE = 5000;" in source
+    assert "minimumZoomDistance = MIN_3D_ZOOM_DISTANCE" in source
+    assert "maximumZoomDistance = MAX_ZOOM_DISTANCE" in source
+    assert "let lastFocusSignature = '';" in source
+    assert "function geometrySignature()" in source
+    assert "const shouldRefocus = refocus && signature !== lastFocusSignature;" in source
+    assert "if (!shouldRefocus) return;" in source
+    assert "return Math.max(300000, Math.min(18000000, height));" in source
+    assert "lastFocusSignature = '';" in source
+    assert "minimumZoomDistance = 500000" not in source
 
 
 @pytest.mark.parametrize(
