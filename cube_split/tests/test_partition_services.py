@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, RadarPartitionService, get_partition_service
 from cube_split.partition.carbon import (
     CarbonPartitionConfig,
@@ -18,7 +19,6 @@ from cube_split.partition.carbon import (
     load_oco2_lite_observations,
     partition_observation,
 )
-from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition.carbon_products import get_carbon_product_adapter, supported_carbon_product_types
 from cube_split.partition.radar_products import parse_radar_asset
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from grid_core.app.core.enums import GridType
 from grid_core.app.core.exceptions import ValidationError
-from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.engines.tile_matrix_engine import TileMatrixEngine
 
 

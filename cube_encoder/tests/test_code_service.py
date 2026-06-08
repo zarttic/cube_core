@@ -7,8 +7,8 @@ import pytest
 
 from grid_core.app.core.enums import GridType, TimeGranularity
 from grid_core.app.core.exceptions import ParseError, ValidationError
-from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.engines.tile_matrix_engine import TileMatrixEngine
 from grid_core.app.services.code_service import CodeService
 

@@ -5,9 +5,9 @@ import random
 import h3
 from s2sphere import CellId
 
-from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.utils.geometry import bbox_to_polygon
 
 
