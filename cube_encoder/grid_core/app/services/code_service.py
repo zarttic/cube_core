@@ -12,7 +12,7 @@ from grid_core.app.utils.timecode import to_time_code
 from grid_core.app.utils.validator import parse_st_code
 
 PREFIX_MAP = {
-    GridType.GEOHASH: "gh",
+    GridType.S2: "s2",
     GridType.MGRS: "mgrs",
     GridType.ISEA4H: "hx",
     GridType.TILE_MATRIX: "tm",
@@ -111,17 +111,17 @@ class CodeService:
         if level < 1:
             raise ValidationError("level must be >= 1")
 
-        if grid_type == GridType.GEOHASH:
+        if grid_type == GridType.S2:
             if level > 12:
-                raise ValidationError("Geohash level must be in [1, 12]")
+                raise ValidationError("S2 level must be in [1, 12]")
             try:
                 cid = CellId.from_token(space_code)
             except Exception as exc:
-                raise ValidationError("Invalid geohash space_code") from exc
+                raise ValidationError("Invalid s2 space_code") from exc
             if not cid.is_valid():
-                raise ValidationError("Invalid geohash space_code")
+                raise ValidationError("Invalid s2 space_code")
             if cid.level() != level:
-                raise ValidationError("Geohash space_code level does not match level")
+                raise ValidationError("S2 space_code level does not match level")
             return
 
         if grid_type == GridType.MGRS:

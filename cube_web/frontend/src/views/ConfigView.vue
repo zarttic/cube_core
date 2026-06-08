@@ -16,7 +16,7 @@ const optical = computed(() => config.value.partition.optical);
 const ingest = computed(() => config.value.ingest.optical);
 const quality = computed(() => config.value.quality.optical);
 const gridTypeLabels = {
-  geohash: '四边形格网',
+  s2: 'S2 格网',
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
 };
@@ -29,7 +29,7 @@ function emptyConfig() {
   return {
     partition: {
       optical: {
-        grid_type: 'geohash',
+        grid_type: 's2',
         grid_level: 5,
         target_crs: 'EPSG:4326',
         cover_mode: 'intersect',
@@ -173,7 +173,7 @@ onMounted(loadConfig);
               <div class="config-form-grid">
                 <el-form-item label="格网类型">
                   <el-select v-model="optical.grid_type">
-                    <el-option label="四边形格网" value="geohash" />
+                    <el-option label="S2 格网" value="s2" />
                     <el-option label="平面格网" value="tile_matrix" />
                     <el-option label="六边形格网" value="isea4h" />
                   </el-select>

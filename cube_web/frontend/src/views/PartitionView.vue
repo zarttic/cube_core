@@ -34,19 +34,19 @@ const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
 const defaultEntityGridLevel = 6;
 const gridTypeLabels = {
-  geohash: '四边形格网',
+  s2: 'S2 格网',
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
 };
 const partitionTaskPollIntervalMs = 1500;
 const partitionTaskMaxPolls = 1200;
-const opticalGridType = ref('geohash');
+const opticalGridType = ref('s2');
 const opticalGridLevel = ref(defaultLogicalGridLevel);
 const entityGridLevel = ref(defaultEntityGridLevel);
-const radarGridType = ref('geohash');
+const radarGridType = ref('s2');
 const radarGridLevel = ref(5);
 const radarEntityGridLevel = ref(defaultEntityGridLevel);
-const productGridType = ref('geohash');
+const productGridType = ref('s2');
 const productGridLevel = ref(5);
 const productEntityGridLevel = ref(defaultEntityGridLevel);
 const defaultOpticalSchemaFields = [
@@ -2931,7 +2931,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="opticalGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="S2 格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
@@ -2977,7 +2977,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="S2 格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
@@ -3004,7 +3004,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="productGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="geohash" />
+                      <el-option label="S2 格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>

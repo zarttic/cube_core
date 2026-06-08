@@ -5,14 +5,14 @@ import random
 import h3
 from s2sphere import CellId
 
-from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
 from grid_core.app.engines.mgrs_engine import MGRSEngine
+from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.utils.geometry import bbox_to_polygon
 
 
-def _expand_geohash(codes: set[str], target_level: int) -> set[str]:
-    engine = GeohashEngine()
+def _expand_s2(codes: set[str], target_level: int) -> set[str]:
+    engine = S2Engine()
     out: set[str] = set()
     for code in codes:
         if CellId.from_token(code).level() == target_level:
@@ -33,8 +33,8 @@ def _expand_mgrs(engine: MGRSEngine, codes: set[str], target_level: int) -> set[
     return out
 
 
-def test_geohash_cover_random_bbox_stability():
-    engine = GeohashEngine()
+def test_s2_cover_random_bbox_stability():
+    engine = S2Engine()
     rng = random.Random(20260311)
 
     for _ in range(50):
@@ -53,7 +53,7 @@ def test_geohash_cover_random_bbox_stability():
         geometry = bbox_to_polygon(bbox).__geo_interface__
         intersect_codes = {c.space_code for c in engine.cover_geometry(geometry, level=4, cover_mode="intersect")}
         minimal_codes = {c.space_code for c in engine.cover_geometry(geometry, level=4, cover_mode="minimal")}
-        expanded_minimal = _expand_geohash(minimal_codes, target_level=4)
+        expanded_minimal = _expand_s2(minimal_codes, target_level=4)
 
         assert expanded_minimal.issubset(intersect_codes)
 

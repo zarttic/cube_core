@@ -69,7 +69,7 @@ def build_radar_partition_schema(
     batch_id: str,
     batch_name: str | None = None,
     source_prefix: str | None = None,
-    grid_type: str = "geohash",
+    grid_type: str = "s2",
     grid_level: int = 5,
     target_crs: str = "EPSG:4326",
     max_auto_retries: int = 1,

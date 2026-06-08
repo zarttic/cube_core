@@ -18,7 +18,7 @@ from cube_split.ingest.ray_ingest_job import (
 def _sample_row(
     scene_id: str,
     acq_time: str,
-    space_code: str = "wtw3",
+    space_code: str = "35f04",
     band: str = "b04",
     asset_path: str | None = None,
 ) -> dict:
@@ -27,11 +27,11 @@ def _sample_row(
         "band": band,
         "asset_path": asset_path or f"/tmp/{scene_id}_{band}.TIF",
         "acq_time": acq_time,
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 7,
         "space_code": space_code,
-        "space_code_prefix": "wtw",
-        "st_code": f"gh:7:{space_code}:20260421",
+        "space_code_prefix": space_code[:3],
+        "st_code": f"s2:7:{space_code}:20260421",
         "time_bucket": "20260421",
         "cover_mode": "intersect",
         "cell_min_lon": 116.1,
@@ -71,8 +71,8 @@ def test_build_raw_asset_records_deduplicates_by_scene_band():
 
 def test_build_cube_fact_records_resolves_conflict_with_latest_scene():
     rows = [
-        _sample_row("S_OLD", "2026-04-21T00:00:00Z", space_code="wtw3"),
-        _sample_row("S_NEW", "2026-04-21T06:00:00Z", space_code="wtw3"),
+        _sample_row("S_OLD", "2026-04-21T00:00:00Z", space_code="35f04"),
+        _sample_row("S_NEW", "2026-04-21T06:00:00Z", space_code="35f04"),
     ]
     facts = build_cube_fact_records(
         rows=rows,
@@ -102,9 +102,9 @@ def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):
     s2_path.write_bytes(b"fake-cog-s2")
 
     rows = [
-        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw3", band="b04", asset_path=str(s1_path)),
-        _sample_row("S2", "2026-04-21T05:00:00Z", space_code="wtw3", band="b04", asset_path=str(s2_path)),
-        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="wtw4", band="b04", asset_path=str(s1_path)),
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="35f04", band="b04", asset_path=str(s1_path)),
+        _sample_row("S2", "2026-04-21T05:00:00Z", space_code="35f04", band="b04", asset_path=str(s2_path)),
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="35f05", band="b04", asset_path=str(s1_path)),
     ]
     with rows_path.open("w", encoding="utf-8") as fh:
         for row in rows:

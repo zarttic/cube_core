@@ -38,11 +38,11 @@ def _product_row(asset_path: Path, year: int = 1980) -> dict:
         "band": "product_value",
         "asset_path": str(asset_path),
         "acq_time": f"{year}-01-01T00:00:00Z",
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
-        "space_code": "wm6n0",
-        "space_code_prefix": "wm6",
-        "st_code": f"gh:5:wm6n0:{year}",
+        "space_code": "372c",
+        "space_code_prefix": "372",
+        "st_code": f"s2:5:372c:{year}",
         "time_bucket": str(year),
         "cover_mode": "intersect",
         "cell_min_lon": 100.0,
@@ -78,14 +78,14 @@ def test_prepare_product_task_rows_keeps_year_bucket_and_day_st_code_input():
     rows = _prepare_product_task_rows(
         [
             {
-                "space_code": "wm6n0",
+                "space_code": "372c",
                 "acq_time": "2010-01-01T00:00:00Z",
             }
         ],
         partition_prefix_len=3,
     )
 
-    assert rows[0]["space_code_prefix"] == "wm6"
+    assert rows[0]["space_code_prefix"] == "372"
     assert rows[0]["time_bucket"] == "2010"
     assert rows[0]["st_time_granularity"] == "day"
 
@@ -110,10 +110,10 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
                 "band": "product_value",
                 "asset_path": str(tif),
                 "acq_time": "1980-01-01T00:00:00Z",
-                "grid_type": "geohash",
+                "grid_type": "s2",
                 "grid_level": 5,
-                "space_code": "wm6n0",
-                "st_code": "gh:5:wm6n0:19800101",
+                "space_code": "372c",
+                "st_code": "s2:5:372c:19800101",
                 "cell_min_lon": 100.0,
                 "cell_min_lat": 24.9,
                 "cell_max_lon": 100.1,
@@ -138,7 +138,7 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -210,7 +210,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -300,7 +300,7 @@ def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,

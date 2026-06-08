@@ -14,9 +14,8 @@ from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils.geometry import to_shapely
 
 
-class GeohashEngine:
-    # Keep the external grid_type string unchanged for API compatibility.
-    grid_type = "geohash"
+class S2Engine:
+    grid_type = "s2"
 
     def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
         self._validate_level(level)
@@ -134,7 +133,7 @@ class GeohashEngine:
     def parent(self, code: str) -> str:
         cid = self._cell_id_from_code(code)
         if cid.level() <= 1:
-            raise ValidationError("Root geohash level has no parent")
+            raise ValidationError("Root s2 level has no parent")
         return cid.parent(cid.level() - 1).to_token()
 
     def children(self, code: str, target_level: int) -> list[str]:
@@ -216,9 +215,9 @@ class GeohashEngine:
         try:
             cid = CellId.from_token(code)
         except Exception as exc:
-            raise ValidationError("Invalid geohash space_code") from exc
+            raise ValidationError("Invalid s2 space_code") from exc
         if not cid.is_valid():
-            raise ValidationError("Invalid geohash space_code")
+            raise ValidationError("Invalid s2 space_code")
         return cid
 
     @classmethod

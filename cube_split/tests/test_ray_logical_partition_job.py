@@ -45,7 +45,7 @@ def test_prepare_task_rows_for_partitioning_adds_prefix_and_time_bucket():
     rows = _prepare_task_rows_for_partitioning(
         [
             {
-                "space_code": "wtw3sjq6",
+                "space_code": "35f04",
                 "acq_time": "2021-03-12T00:00:00Z",
             }
         ],
@@ -53,7 +53,7 @@ def test_prepare_task_rows_for_partitioning_adds_prefix_and_time_bucket():
         time_granularity="day",
     )
 
-    assert rows[0]["space_code_prefix"] == "wtw"
+    assert rows[0]["space_code_prefix"] == "35f"
     assert rows[0]["time_bucket"] == "20210312"
 
 
@@ -89,9 +89,9 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
                 "band": "b04",
                 "asset_path": str(cog_dir / "source_cog.tif"),
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "geohash",
+                "grid_type": "s2",
                 "grid_level": 5,
-                "space_code": "wtw3s",
+                "space_code": "35f4",
                 "cell_min_lon": 116.1,
                 "cell_min_lat": 39.8,
                 "cell_max_lon": 116.2,
@@ -106,9 +106,9 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
 
     def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
         row = dict(group[0])
-        row["st_code"] = "gh:5:wtw3s:20260421"
+        row["st_code"] = "s2:5:35f4:20260421"
         row["time_bucket"] = "20260421"
-        row["space_code_prefix"] = "wtw"
+        row["space_code_prefix"] = "35f"
         row["intersect_min_lon"] = row["cell_min_lon"]
         row["intersect_min_lat"] = row["cell_min_lat"]
         row["intersect_max_lon"] = row["cell_max_lon"]
@@ -152,7 +152,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=5,
             cover_mode="intersect",
             time_granularity="day",

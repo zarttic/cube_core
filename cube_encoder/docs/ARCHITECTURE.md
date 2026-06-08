@@ -23,7 +23,7 @@
 
 支持的格网体系：
 
-- `geohash`：定位、覆盖、拓扑和几何反算。
+- `s2`：定位、覆盖、拓扑和几何反算。
 - `mgrs`：定位、覆盖、拓扑和几何反算。
 - `tile_matrix`：Web Mercator 平面瓦片格网定位、覆盖和几何反算。
 - `isea4h`：基于 Uber H3 的第一阶段可运行能力。
@@ -35,7 +35,7 @@
   -> SDK / HTTP API
   -> 统一请求与响应模型
   -> grid service / code service / topology service
-  -> geohash / mgrs / isea4h engine
+  -> s2 / mgrs / isea4h engine
   -> geometry / projection / timecode utilities
 ```
 
@@ -55,7 +55,7 @@ from grid_core.sdk import CubeEncoderSDK
 
 sdk = CubeEncoderSDK()
 cells = sdk.cover(
-    grid_type="geohash",
+    grid_type="s2",
     level=7,
     geometry={
         "type": "Polygon",

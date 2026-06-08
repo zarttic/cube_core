@@ -35,14 +35,14 @@ def test_smoke_result_summary_includes_quality_metadata(tmp_path: Path) -> None:
     rows_path.write_text(json.dumps({"asset_path": "s3://cube/cog/a.tif"}) + "\n", encoding="utf-8")
 
     item = smoke._validate_result(
-        "optical:geohash",
-        "geohash",
+        "optical:s2",
+        "s2",
         "demo",
         {
             "rows": 1,
             "rows_path": str(rows_path),
             "execution_engine": "ray",
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 4,
             "ingest_enabled": True,
             "metadata_backend": "postgres",
@@ -64,11 +64,11 @@ def test_smoke_acceptance_cases_are_fixed() -> None:
     smoke = _load_smoke_module()
 
     assert [case.case_id for case in smoke.ACCEPTANCE_CASES] == [
-        "optical_geohash",
+        "optical_s2",
         "optical_mgrs",
         "optical_isea4h_level1",
-        "radar_geohash",
-        "product_geohash",
+        "radar_s2",
+        "product_s2",
         "carbon_satellite",
     ]
     assert smoke.ACCEPTANCE_CASES[1].grid_type == "mgrs"
@@ -113,18 +113,18 @@ def test_run_all_partition_flows_smoke(tmp_path: Path) -> None:
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     ids = {item["id"] for item in summary["results"]}
     assert {
-        "optical_geohash",
+        "optical_s2",
         "optical_mgrs",
         "optical_isea4h_level1",
-        "radar_geohash",
-        "product_geohash",
+        "radar_s2",
+        "product_s2",
         "carbon_satellite",
         "quality_checks",
         "aoi_readback",
     } <= ids
     assert summary["status"] == "pass"
     assert all(item["status"] == "pass" for item in summary["results"])
-    quality_results = [item for item in summary["results"] if item["id"] in {"optical_geohash", "product_geohash", "carbon_satellite"}]
+    quality_results = [item for item in summary["results"] if item["id"] in {"optical_s2", "product_s2", "carbon_satellite"}]
     assert quality_results
     assert all(item["quality_status"] for item in quality_results)
     assert all(item["quality_report_id"] for item in quality_results)

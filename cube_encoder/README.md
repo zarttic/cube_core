@@ -6,7 +6,7 @@
 
 ## 核心能力
 
-- 支持 `geohash`、`mgrs`、`tile_matrix` 和 H3-backed `isea4h` 的点定位与几何覆盖。
+- 支持 S2 CellId token-backed `s2`、`mgrs`、`tile_matrix` 和 H3-backed `isea4h` 的点定位与几何覆盖。
 - 支持时空编码生成、批量生成与解析。
 - 支持邻接、父级、子级、编码转几何、批量编码转几何。
 - Python SDK 入口：`grid_core.sdk.CubeEncoderSDK`。
@@ -33,10 +33,10 @@ from datetime import datetime, timezone
 from grid_core.sdk import CubeEncoderSDK
 
 sdk = CubeEncoderSDK()
-cell = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907])
-neighbors = sdk.neighbors(grid_type="geohash", code=cell.space_code, k=1)
+cell = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907])
+neighbors = sdk.neighbors(grid_type="s2", code=cell.space_code, k=1)
 st_code = sdk.generate_st_code(
-    grid_type="geohash",
+    grid_type="s2",
     level=7,
     space_code=cell.space_code,
     timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
@@ -56,11 +56,11 @@ python3.11 -m pip install dist/cube_encoder-*.whl
 ```bash
 curl -X POST http://127.0.0.1:50012/v1/grid/locate \
   -H 'Content-Type: application/json' \
-  -d '{"grid_type":"geohash","level":7,"point":[116.391,39.907]}'
+  -d '{"grid_type":"s2","level":7,"point":[116.391,39.907]}'
 
 curl -X POST http://127.0.0.1:50012/v1/code/st \
   -H 'Content-Type: application/json' \
-  -d '{"grid_type":"geohash","level":7,"space_code":"wtw3sjq","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute"}'
+  -d '{"grid_type":"s2","level":7,"space_code":"35f04","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute"}'
 ```
 
 ## 测试
