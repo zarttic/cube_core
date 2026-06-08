@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import time
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
 from uuid import uuid4
@@ -86,6 +88,13 @@ class PartitionWorkflowService:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         return self.store.list_tasks(status=status, data_type=data_type, keyword=keyword, limit=limit)
+
+    def get_task(self, task_id: str) -> PartitionTask:
+        attempt = self.store.get_attempt(task_id)
+        if attempt is None:
+            return self.partition_service.get_task(task_id)
+        batch = self.store.get_batch(str(attempt.get("batch_id") or ""))
+        return _task_from_attempt(attempt, batch or {})
 
     def run_payload(
         self,
@@ -268,10 +277,16 @@ class PartitionWorkflowService:
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         attempt = self.store.request_cancel(task_id)
+        task: PartitionTask | None = None
+        try:
+            task = self.partition_service.cancel_task(task_id)
+        except HTTPException as exc:
+            if attempt is None or exc.status_code != 404:
+                raise
         if attempt is None:
-            self.partition_service.cancel_task(task_id)
-            return {"task_id": task_id, "status": "cancel_requested"}
-        self.partition_service.cancel_task(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
+            return task.to_dict()
         return attempt
 
     def on_task_started(self, task_id: str) -> None:
@@ -396,6 +411,49 @@ def classify_partition_error(error: str) -> str:
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
         return "permission"
     return "unknown"
+
+
+def _task_from_attempt(attempt: dict[str, Any], batch: dict[str, Any]) -> PartitionTask:
+    result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else None
+    return PartitionTask(
+        task_id=str(attempt.get("task_id") or ""),
+        status=_task_response_status(str(attempt.get("status") or "")),
+        data_type=str(batch.get("data_type") or (result or {}).get("data_type") or ""),
+        operation=_task_response_operation(str(attempt.get("operation") or "")),
+        created_at=_timestamp_or_now(attempt.get("created_at")),
+        updated_at=_timestamp_or_now(attempt.get("updated_at")),
+        result=result,
+        error=_text_or_none(attempt.get("error_message")),
+    )
+
+
+def _task_response_status(status: str) -> str:
+    return "completed" if status == "succeeded" else status
+
+
+def _task_response_operation(operation: str) -> str:
+    if operation.endswith("_run"):
+        return "run"
+    if operation.endswith("_retry"):
+        return "retry"
+    return operation
+
+
+def _timestamp_or_now(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return time.time()
+    else:
+        return time.time()
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.timestamp()
 
 
 def is_retryable_partition_error(error_type: str) -> bool:

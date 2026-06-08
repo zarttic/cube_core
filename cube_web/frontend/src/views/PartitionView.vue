@@ -747,20 +747,24 @@ async function runPartitionBatchFromDetail() {
     setPartitionStage('queue', 'done', `后端任务 ${response.task_id} 已创建。`);
     setPartitionStage('partition', 'running', `后台任务 ${response.task_id} 执行中。`);
     const result = await waitForPartitionTask(partitionPrefix, response.task_id);
-    setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
-    lastPartitionResult.value = result;
-    resultRows.value = formatRows(result);
-    if (activeModule.value === 'quality') {
-      if (result.quality_report) {
-        qualityReport.value = result.quality_report;
-        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-        await loadQualityHistory();
-      } else {
-        await refreshQuality();
+    if (isPartitionCancelledResult(result)) {
+      applyPartitionCancelledResult(result, operation === 'retry' ? '批次重试已取消' : '批次执行已取消');
+    } else {
+      setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+      lastPartitionResult.value = result;
+      resultRows.value = formatRows(result);
+      if (activeModule.value === 'quality') {
+        if (result.quality_report) {
+          qualityReport.value = result.quality_report;
+          selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+          await loadQualityHistory();
+        } else {
+          await refreshQuality();
+        }
       }
+      ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
     }
-    ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
     await loadPartitionBatches();
     await loadPartitionTasks();
     await refreshPartitionBatchDetail();
@@ -818,21 +822,25 @@ async function retrySelectedPartitionAssetsFromDetail() {
     setPartitionStage('queue', 'done', `后端任务 ${response.task_id} 已创建。`);
     setPartitionStage('partition', 'running', `后台任务 ${response.task_id} 执行中。`);
     const result = await waitForPartitionTask(partitionPrefix, response.task_id);
-    setPartitionStage('partition', 'done', `失败资产重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
-    lastPartitionResult.value = result;
-    resultRows.value = formatRows(result);
-    if (activeModule.value === 'quality') {
-      if (result.quality_report) {
-        qualityReport.value = result.quality_report;
-        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-        await loadQualityHistory();
-      } else {
-        await refreshQuality();
+    if (isPartitionCancelledResult(result)) {
+      applyPartitionCancelledResult(result, '失败资产重试已取消');
+    } else {
+      setPartitionStage('partition', 'done', `失败资产重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+      lastPartitionResult.value = result;
+      resultRows.value = formatRows(result);
+      if (activeModule.value === 'quality') {
+        if (result.quality_report) {
+          qualityReport.value = result.quality_report;
+          selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+          await loadQualityHistory();
+        } else {
+          await refreshQuality();
+        }
       }
+      clearPartitionBatchDetailSelection();
+      ElMessage.success('失败资产重试完成');
     }
-    clearPartitionBatchDetailSelection();
-    ElMessage.success('失败资产重试完成');
     await loadPartitionBatches();
     await loadPartitionTasks();
     await refreshPartitionBatchDetail();
@@ -1449,7 +1457,7 @@ const partitionContextRows = computed(() => {
   const operation = request.operation || 'run';
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
-  const status = resultLoading.value ? '执行中' : result.status === 'failed' ? '失败' : lastPartitionResult.value ? '已完成' : '待执行';
+  const status = resultLoading.value ? '执行中' : result.status ? partitionStatusText(result.status) : lastPartitionResult.value ? '已完成' : '待执行';
   const rows = [
     { label: '运行状态', value: status },
     { label: '执行接口', value: apiPath },
@@ -1997,6 +2005,32 @@ function buildPartitionFailureResult(error, request = {}) {
   };
 }
 
+function buildPartitionCancelledResult(task, taskId) {
+  return {
+    status: task.status === 'cancel_requested' ? 'cancel_requested' : 'cancelled',
+    mode: 'partition_cancelled',
+    data_type: task.data_type || activeModule.value,
+    partition_task_id: task.task_id || taskId,
+    error: task.error || (task.status === 'cancel_requested' ? '剖分任务正在取消' : '剖分任务已取消'),
+    started_at: partitionStartedAt.value || '',
+    elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
+    ingest_enabled: false,
+  };
+}
+
+function isPartitionCancelledResult(result) {
+  return ['cancel_requested', 'cancelled'].includes(result?.status);
+}
+
+function applyPartitionCancelledResult(result, message) {
+  partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'cancelled' } : item));
+  setPartitionStage('partition', 'cancelled', result.error || message);
+  setPartitionStage('persist', 'cancelled', '任务取消后不整理执行结果。');
+  lastPartitionResult.value = result;
+  resultRows.value = formatRows(result);
+  ElMessage.info(message);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -2017,6 +2051,9 @@ async function waitForPartitionTask(partitionPrefix, taskId) {
     }
     if (task.status === 'failed') {
       throw new Error(task.error || `剖分任务 ${taskId} 执行失败`);
+    }
+    if (['cancel_requested', 'cancelled'].includes(task.status)) {
+      return buildPartitionCancelledResult(task, taskId);
     }
     if (!['queued', 'running'].includes(task.status)) {
       throw new Error(`剖分任务 ${taskId} 状态异常: ${task.status || '-'}`);
@@ -2088,6 +2125,7 @@ function stageTagType(status) {
   if (status === 'done') return 'success';
   if (status === 'running') return 'warning';
   if (status === 'failed') return 'danger';
+  if (status === 'cancelled') return 'info';
   return 'info';
 }
 
@@ -2095,6 +2133,7 @@ function stageText(status) {
   if (status === 'done') return '完成';
   if (status === 'running') return '进行中';
   if (status === 'failed') return '失败';
+  if (status === 'cancelled') return '已取消';
   return '待执行';
 }
 
@@ -2526,17 +2565,21 @@ async function runDemo() {
     setPartitionStage('queue', 'done', '数据队列已提交到后端。');
     setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/tasks/${operation} 提交后台剖分任务。`);
     const result = await requestPartitionOperation(partitionPrefix, endpoint, operation, payload);
-    setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-    setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
-    lastPartitionResult.value = result;
-    resultRows.value = formatRows(result);
-	    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
-	    if (result.quality_report) {
-	      qualityDataType.value = qualityDataTypeForEndpoint(endpoint);
-	      qualityReport.value = result.quality_report;
-	      selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-	    }
-	    ElMessage.success('剖分任务完成');
+    if (isPartitionCancelledResult(result)) {
+      applyPartitionCancelledResult(result, '剖分任务已取消');
+    } else {
+      setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+      setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
+      lastPartitionResult.value = result;
+      resultRows.value = formatRows(result);
+      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+      if (result.quality_report) {
+        qualityDataType.value = qualityDataTypeForEndpoint(endpoint);
+        qualityReport.value = result.quality_report;
+        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+      }
+      ElMessage.success('剖分任务完成');
+    }
 	  } catch (error) {
 	    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
 	    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
@@ -2673,18 +2716,22 @@ async function retryLastPartitionTask() {
     }
     setPartitionStage('partition', 'running', `调用 ${currentRetryRequest.apiPath} 提交后台重试任务。`);
     const result = await requestRetryOperation(partitionPrefix, retryRequest, retryPayload);
-    setPartitionStage('partition', 'done', `重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-    setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
-    lastPartitionResult.value = result;
-    resultRows.value = formatRows(result);
-	    setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
-	    if (activeModule.value === 'quality' && result.quality_report) {
-	      qualityDataType.value = qualityDataTypeForEndpoint(retryRequest.endpoint);
-	      qualityReport.value = result.quality_report;
-      selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-      await loadQualityHistory();
+    if (isPartitionCancelledResult(result)) {
+      applyPartitionCancelledResult(result, '重试任务已取消');
+    } else {
+      setPartitionStage('partition', 'done', `重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
+      setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
+      lastPartitionResult.value = result;
+      resultRows.value = formatRows(result);
+      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+      if (activeModule.value === 'quality' && result.quality_report) {
+        qualityDataType.value = qualityDataTypeForEndpoint(retryRequest.endpoint);
+        qualityReport.value = result.quality_report;
+        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
+        await loadQualityHistory();
+      }
+      ElMessage.success('任务已重试完成');
     }
-    ElMessage.success('任务已重试完成');
   } catch (error) {
     partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
     const failure = buildPartitionFailureResult(error, currentRetryRequest || retryRequest || {});

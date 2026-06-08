@@ -131,7 +131,7 @@ def create_partition_router(
 
     @router.get("/tasks/{task_id}", response_model=PartitionTaskResponse)
     def get_partition_task(task_id: str) -> dict:
-        return service.get_task(task_id).to_dict()
+        return workflow_service.get_task(task_id).to_dict()
 
     @router.post("/tasks/{task_id}/cancel")
     def cancel_partition_task(task_id: str) -> dict:
