@@ -491,7 +491,14 @@ def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
         quality_report_store_module.set_quality_report_store(None)
 
 
-@pytest.mark.parametrize("path", ["/", "/encoding", "/encoding.html", "/config", "/callback"])
+def test_root_smoke_endpoint():
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"service": "cube-web", "status": "ok"}
+
+
+@pytest.mark.parametrize("path", ["/encoding", "/encoding.html", "/config", "/callback"])
 def test_backend_does_not_serve_frontend_routes(path):
     resp = client.get(path)
     assert resp.status_code == 404
