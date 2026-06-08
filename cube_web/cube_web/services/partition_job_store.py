@@ -1498,7 +1498,8 @@ def _task_row_from_attempt(
     asset_count = len(asset_ids)
     if not asset_count:
         asset_count = sum(1 for asset in assets.values() if asset.get("batch_id") == batch_id)
-    result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
+    raw_result = attempt.get("runner_result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
     return {
         "task_id": attempt.get("task_id"),
         "status": attempt.get("status"),
@@ -1525,7 +1526,8 @@ def _task_row_from_attempt(
 
 
 def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
-    result = row.get("runner_result") if isinstance(row.get("runner_result"), dict) else {}
+    raw_result = row.get("runner_result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
     asset_ids = [str(item) for item in row.get("asset_ids") or [] if item]
     return {
         "task_id": row.get("task_id"),

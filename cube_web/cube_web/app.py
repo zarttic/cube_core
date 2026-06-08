@@ -37,6 +37,10 @@ def create_app() -> FastAPI:
     web_app.middleware("http")(require_auth_for_api)
     web_app.add_exception_handler(GridCoreError, handle_grid_core_error)
 
+    @web_app.get("/")
+    async def root() -> dict[str, str]:
+        return {"service": "cube-web", "status": "ok"}
+
     @web_app.get("/health")
     async def health(
         checks: list[str] | None = Query(default=None),

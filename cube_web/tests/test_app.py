@@ -28,6 +28,7 @@ from cube_web.services.partition_defaults import default_grid_level_for_resoluti
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
 from cube_web.services.partition_service import PartitionBackend, PartitionService
+from cube_web.services.partition_workflow import PartitionWorkflowService
 from cube_web.services.quality_report_store import set_quality_report_store
 
 client = TestClient(app)
@@ -490,7 +491,14 @@ def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
         quality_report_store_module.set_quality_report_store(None)
 
 
-@pytest.mark.parametrize("path", ["/", "/encoding", "/encoding.html", "/config", "/callback"])
+def test_root_smoke_endpoint():
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"service": "cube-web", "status": "ok"}
+
+
+@pytest.mark.parametrize("path", ["/encoding", "/encoding.html", "/config", "/callback"])
 def test_backend_does_not_serve_frontend_routes(path):
     resp = client.get(path)
     assert resp.status_code == 404
@@ -1374,6 +1382,78 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
     assert task_body["status"] == "completed"
     assert task_body["result"]["mode"] == "partition_run"
     assert task_body["result"]["rows"] == 20
+
+
+def test_partition_task_detail_reads_persisted_attempt_without_memory_task():
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "PERSISTED_TASK_DETAIL",
+            "batch_name": "Persisted task detail",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/persisted-detail.tif",
+                    "persisted-detail-scene",
+                    data_type="product",
+                    asset_id="persisted-detail",
+                )
+            ],
+        }
+    )
+    task_id = "partition-persisted-detail"
+    store.create_attempt(task_id=task_id, batch_id="PERSISTED_TASK_DETAIL", operation="auto_run", payload={})
+    store.succeed_attempt(task_id, {"status": "completed", "data_type": "product", "rows": 3})
+    service = PartitionService({"product": PartitionBackend(data_type="product", run=lambda payload=None: {})})
+    workflow = PartitionWorkflowService(service, store=store)
+    route_app = FastAPI()
+    route_app.include_router(web_app.partition_route.create_partition_router(service=service, workflow=workflow))
+    route_client = TestClient(route_app)
+
+    task_resp = route_client.get(f"/partition/tasks/{task_id}")
+
+    assert task_resp.status_code == 200
+    task = task_resp.json()
+    assert task["task_id"] == task_id
+    assert task["status"] == "completed"
+    assert task["data_type"] == "product"
+    assert task["operation"] == "run"
+    assert task["result"]["rows"] == 3
+    assert isinstance(task["created_at"], float)
+    assert isinstance(task["updated_at"], float)
+
+
+def test_partition_task_cancel_uses_persisted_attempt_when_memory_task_missing():
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "PERSISTED_TASK_CANCEL",
+            "batch_name": "Persisted task cancel",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/persisted-cancel.tif",
+                    "persisted-cancel-scene",
+                    data_type="product",
+                    asset_id="persisted-cancel",
+                )
+            ],
+        }
+    )
+    task_id = "partition-persisted-cancel"
+    store.create_attempt(task_id=task_id, batch_id="PERSISTED_TASK_CANCEL", operation="auto_run", payload={})
+    store.start_attempt(task_id)
+    service = PartitionService({"product": PartitionBackend(data_type="product", run=lambda payload=None: {})})
+    workflow = PartitionWorkflowService(service, store=store)
+    route_app = FastAPI()
+    route_app.include_router(web_app.partition_route.create_partition_router(service=service, workflow=workflow))
+    route_client = TestClient(route_app)
+
+    cancel_resp = route_client.post(f"/partition/tasks/{task_id}/cancel")
+
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] == "cancel_requested"
+    assert store.get_attempt(task_id)["status"] == "cancel_requested"
 
 
 def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch):
