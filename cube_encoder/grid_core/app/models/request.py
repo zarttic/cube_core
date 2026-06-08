@@ -9,7 +9,7 @@ from grid_core.app.core.enums import BoundaryType, CoverMode, GridType, TimeGran
 
 
 class LocateRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     level: int = Field(ge=1, le=12)
     point: List[float] = Field(min_length=2, max_length=2)
 
@@ -24,7 +24,7 @@ class LocateRequest(BaseModel):
 
 
 class CoverRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     level: int = Field(ge=1, le=12)
     cover_mode: CoverMode = CoverMode.INTERSECT
     boundary_type: BoundaryType = BoundaryType.BBOX
@@ -40,7 +40,7 @@ class CoverRequest(BaseModel):
 
 
 class STCodeGenerateRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     level: int = Field(ge=1, le=12)
     space_code: str
     timestamp: datetime
@@ -57,36 +57,36 @@ class STCodeBatchItem(BaseModel):
 
 
 class STCodeBatchGenerateRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     level: int = Field(ge=1, le=12)
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
     items: List[STCodeBatchItem] = Field(min_length=1, max_length=1000)
 
 
 class NeighborsRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     code: str
     k: int = Field(default=1, ge=1, le=5)
 
 
 class CodeToGeometryRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     code: str
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 
 class BatchCodeToGeometryRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     codes: List[str] = Field(min_length=1, max_length=500)
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 
 class ParentRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     code: str
 
 
 class ChildrenRequest(BaseModel):
-    grid_type: GridType = GridType.GEOHASH
+    grid_type: GridType = GridType.S2
     code: str
     target_level: int = Field(ge=1, le=12)

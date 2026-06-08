@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from s2sphere import CellId
 
-from grid_core.app.engines.geohash_engine import GeohashEngine
+from grid_core.app.engines.s2_engine import S2Engine
 from grid_core.app.utils.geometry import bbox_to_polygon
 
 
-def _expand_s2(engine: GeohashEngine, codes: set[str], target_level: int) -> set[str]:
+def _expand_s2(engine: S2Engine, codes: set[str], target_level: int) -> set[str]:
     out: set[str] = set()
     for code in codes:
         cid = CellId.from_token(code)
@@ -18,20 +18,20 @@ def _expand_s2(engine: GeohashEngine, codes: set[str], target_level: int) -> set
 
 
 def test_locate_point_returns_valid_cell():
-    engine = GeohashEngine()
+    engine = S2Engine()
     cell = engine.locate_point(lon=116.391, lat=39.907, level=7)
 
     cid = CellId.from_token(cell.space_code)
     assert cid.is_valid()
     assert cid.level() == 7
-    assert cell.grid_type == "geohash"
+    assert cell.grid_type == "s2"
     assert cell.level == 7
     assert len(cell.bbox) == 4
     assert len(cell.center) == 2
 
 
 def test_neighbors_k1_non_empty():
-    engine = GeohashEngine()
+    engine = S2Engine()
     code = engine.locate_point(lon=116.391, lat=39.907, level=7).space_code
     codes = engine.neighbors(code, k=1)
     assert len(codes) > 0
@@ -39,7 +39,7 @@ def test_neighbors_k1_non_empty():
 
 
 def test_cover_intersect_polygon_non_empty():
-    engine = GeohashEngine()
+    engine = S2Engine()
     polygon = {
         "type": "Polygon",
         "coordinates": [
@@ -57,7 +57,7 @@ def test_cover_intersect_polygon_non_empty():
 
 
 def test_cover_contain_returns_only_fully_contained_cells():
-    engine = GeohashEngine()
+    engine = S2Engine()
     code = engine.locate_point(lon=116.391, lat=39.907, level=6).space_code
     min_lon, min_lat, max_lon, max_lat = engine.code_to_bbox(code)
     polygon = {
@@ -79,7 +79,7 @@ def test_cover_contain_returns_only_fully_contained_cells():
 
 
 def test_cover_minimal_expanded_is_subset_of_intersect():
-    engine = GeohashEngine()
+    engine = S2Engine()
     polygon = {
         "type": "Polygon",
         "coordinates": [
@@ -104,7 +104,7 @@ def test_cover_minimal_expanded_is_subset_of_intersect():
 
 
 def test_cover_intersect_dateline_crossing_bbox_polygon():
-    engine = GeohashEngine()
+    engine = S2Engine()
     geometry = bbox_to_polygon([170.0, -10.0, -170.0, 10.0]).__geo_interface__
 
     cells = engine.cover_geometry(geometry, level=3, cover_mode="intersect")
@@ -114,7 +114,7 @@ def test_cover_intersect_dateline_crossing_bbox_polygon():
 
 
 def test_cover_geometry_compact_matches_full_cover():
-    engine = GeohashEngine()
+    engine = S2Engine()
     polygon = {
         "type": "Polygon",
         "coordinates": [

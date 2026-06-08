@@ -36,30 +36,30 @@ def test_sdk_locate_and_cover_mgrs_minimal():
 
 def test_sdk_topology_roundtrip():
     sdk = CubeEncoderSDK()
-    located = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907])
+    located = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907])
     code = located.space_code
 
-    parent_code = sdk.parent(grid_type="geohash", code=code)
+    parent_code = sdk.parent(grid_type="s2", code=code)
     assert CellId.from_token(parent_code).level() == 6
 
-    child_codes = sdk.children(grid_type="geohash", code=parent_code, target_level=7)
+    child_codes = sdk.children(grid_type="s2", code=parent_code, target_level=7)
     assert len(child_codes) == 4
     assert code in child_codes
 
-    neighbor_codes = sdk.neighbors(grid_type="geohash", code=code, k=1)
+    neighbor_codes = sdk.neighbors(grid_type="s2", code=code, k=1)
     assert len(neighbor_codes) > 0
 
-    geom = sdk.code_to_geometry(grid_type="geohash", code=code, boundary_type="polygon")
+    geom = sdk.code_to_geometry(grid_type="s2", code=code, boundary_type="polygon")
     assert geom["type"] == "Polygon"
 
-    geom_map = sdk.codes_to_geometries(grid_type="geohash", codes=neighbor_codes[:3], boundary_type="polygon")
+    geom_map = sdk.codes_to_geometries(grid_type="s2", codes=neighbor_codes[:3], boundary_type="polygon")
     assert len(geom_map) == 3
 
 
 def test_sdk_st_code_generate_parse_batch():
     sdk = CubeEncoderSDK()
-    g1 = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907]).space_code
-    g2 = sdk.locate(grid_type="geohash", level=7, point=[116.392, 39.908]).space_code
+    g1 = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907]).space_code
+    g2 = sdk.locate(grid_type="s2", level=7, point=[116.392, 39.908]).space_code
     st = sdk.generate_st_code(
         grid_type="isea4h",
         level=7,
@@ -74,7 +74,7 @@ def test_sdk_st_code_generate_parse_batch():
     assert parsed.level == 7
 
     batch = sdk.batch_generate_st_codes(
-        grid_type="geohash",
+        grid_type="s2",
         level=7,
         time_granularity="minute",
         items=[
@@ -83,7 +83,28 @@ def test_sdk_st_code_generate_parse_batch():
         ],
     )
     assert len(batch) == 2
-    assert batch[0] == f"gh:7:{g1}:202603091530"
+    assert batch[0] == f"s2:7:{g1}:202603091530"
+
+
+def test_sdk_s2_locate_generate_parse_roundtrip():
+    sdk = CubeEncoderSDK()
+    timestamp = datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)
+
+    cell = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907])
+    st_code = sdk.generate_st_code(
+        grid_type="s2",
+        level=cell.level,
+        space_code=cell.space_code,
+        timestamp=timestamp,
+        time_granularity="minute",
+    )
+    parsed = sdk.parse_st_code(st_code.st_code)
+
+    assert st_code.st_code == f"s2:7:{cell.space_code}:202603091530"
+    assert parsed.grid_type == "s2"
+    assert parsed.level == cell.level
+    assert parsed.space_code == cell.space_code
+    assert parsed.time_code == "202603091530"
 
 
 def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
@@ -91,7 +112,7 @@ def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
     timestamp = datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)
 
     batch = sdk.batch_locate_st_codes(
-        grid_type="geohash",
+        grid_type="s2",
         level=7,
         time_granularity="day",
         items=[
@@ -100,9 +121,9 @@ def test_sdk_batch_locate_st_codes_matches_locate_and_generate():
         ],
     )
 
-    expected_code = sdk.locate(grid_type="geohash", level=7, point=[116.391, 39.907]).space_code
+    expected_code = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907]).space_code
     expected_st_code = sdk.generate_st_code(
-        grid_type="geohash",
+        grid_type="s2",
         level=7,
         space_code=expected_code,
         timestamp=timestamp,
@@ -119,14 +140,14 @@ def test_sdk_cover_compact_matches_full_cover_space_codes_and_bbox():
     bbox = [116.385, 39.903, 116.397, 39.911]
 
     full = sdk.cover(
-        grid_type="geohash",
+        grid_type="s2",
         level=6,
         cover_mode="intersect",
         boundary_type="bbox",
         bbox=bbox,
     )
     compact = sdk.cover_compact(
-        grid_type="geohash",
+        grid_type="s2",
         level=6,
         cover_mode="intersect",
         bbox=bbox,
@@ -141,9 +162,9 @@ def test_sdk_cover_compact_matches_full_cover_space_codes_and_bbox():
 
 def test_sdk_code_to_bbox_matches_bbox_geometry_response():
     sdk = CubeEncoderSDK()
-    code = sdk.locate(grid_type="geohash", level=6, point=[116.391, 39.907]).space_code
+    code = sdk.locate(grid_type="s2", level=6, point=[116.391, 39.907]).space_code
 
-    direct_bbox = sdk.code_to_bbox(grid_type="geohash", code=code)
-    geometry_bbox = sdk.code_to_geometry(grid_type="geohash", code=code, boundary_type="bbox")["bbox"]
+    direct_bbox = sdk.code_to_bbox(grid_type="s2", code=code)
+    geometry_bbox = sdk.code_to_geometry(grid_type="s2", code=code, boundary_type="bbox")["bbox"]
 
     assert direct_bbox == geometry_bbox

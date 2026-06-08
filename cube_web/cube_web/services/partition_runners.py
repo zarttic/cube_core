@@ -23,7 +23,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
-PARTITION_GRID_TYPES = {"geohash", "mgrs", "tile_matrix", "isea4h"}
+PARTITION_GRID_TYPES = {"s2", "mgrs", "tile_matrix", "isea4h"}
 
 
 def _new_run_dir(root_name: str, name: str) -> Path:
@@ -371,9 +371,9 @@ def _int_payload_value(payload: dict, key: str, default: int) -> int:
 
 
 def _partition_grid_type(payload: dict) -> str:
-    grid_type = str(payload.get("grid_type") or "geohash").lower()
+    grid_type = str(payload.get("grid_type") or "s2").lower()
     if grid_type not in PARTITION_GRID_TYPES:
-        raise ValueError("grid_type must be one of: geohash, mgrs, tile_matrix, isea4h")
+        raise ValueError("grid_type must be one of: s2, mgrs, tile_matrix, isea4h")
     return grid_type
 
 

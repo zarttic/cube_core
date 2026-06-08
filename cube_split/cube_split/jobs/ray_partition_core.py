@@ -580,7 +580,7 @@ def _cover_codes(
             bbox_cache[code] = sdk.code_to_bbox(grid_type=grid_type, code=code)
         return bbox_cache[code]
 
-    if grid_type == "geohash" and grid_level >= 7:
+    if grid_type == "s2" and grid_level >= 7:
         coarse_level = max(1, grid_level - 2)
         coarse_cells = sdk.cover_compact(
             grid_type=grid_type,

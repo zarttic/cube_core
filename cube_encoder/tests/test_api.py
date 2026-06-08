@@ -29,9 +29,9 @@ def test_health():
 
 
 def test_locate_endpoint_function():
-    req = LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])
+    req = LocateRequest(grid_type="s2", level=7, point=[116.391, 39.907])
     resp = locate(req)
-    assert resp.cell.grid_type == "geohash"
+    assert resp.cell.grid_type == "s2"
     assert CellId.from_token(resp.cell.space_code).level() == 7
 
 
@@ -58,27 +58,27 @@ def test_locate_endpoint_function_tile_matrix():
 
 
 def test_st_code_functions():
-    code = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
+    code = locate(LocateRequest(grid_type="s2", level=7, point=[116.391, 39.907])).cell.space_code
     gen_req = STCodeGenerateRequest(
-        grid_type="geohash",
+        grid_type="s2",
         level=7,
         space_code=code,
         timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity="minute",
     )
     gen_resp = generate_st(gen_req)
-    assert gen_resp.st_code == f"gh:7:{code}:202603091530"
+    assert gen_resp.st_code == f"s2:7:{code}:202603091530"
 
     parse_resp = parse_st(STCodeParseRequest(st_code=gen_resp.st_code))
-    assert parse_resp.grid_type == "geohash"
+    assert parse_resp.grid_type == "s2"
     assert parse_resp.level == 7
 
 
 def test_st_code_batch_function():
-    c1 = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
-    c2 = locate(LocateRequest(grid_type="geohash", level=7, point=[116.392, 39.908])).cell.space_code
+    c1 = locate(LocateRequest(grid_type="s2", level=7, point=[116.391, 39.907])).cell.space_code
+    c2 = locate(LocateRequest(grid_type="s2", level=7, point=[116.392, 39.908])).cell.space_code
     req = STCodeBatchGenerateRequest(
-        grid_type="geohash",
+        grid_type="s2",
         level=7,
         time_granularity="minute",
         items=[
@@ -88,27 +88,27 @@ def test_st_code_batch_function():
     )
     resp = batch_generate_st(req)
     assert resp.statistics["count"] == 2
-    assert resp.st_codes[0] == f"gh:7:{c1}:202603091530"
+    assert resp.st_codes[0] == f"s2:7:{c1}:202603091530"
 
 
 def test_cover_with_bbox_input():
-    req = CoverRequest(grid_type="geohash", level=6, cover_mode="intersect", bbox=[116.38, 39.90, 116.40, 39.91])
+    req = CoverRequest(grid_type="s2", level=6, cover_mode="intersect", bbox=[116.38, 39.90, 116.40, 39.91])
     resp = cover(req)
-    assert resp.grid_type == "geohash"
+    assert resp.grid_type == "s2"
     assert resp.statistics["cell_count"] > 0
 
 
 def test_cover_with_dateline_crossing_bbox_input():
-    req = CoverRequest(grid_type="geohash", level=3, cover_mode="intersect", bbox=[170.0, -10.0, -170.0, 10.0])
+    req = CoverRequest(grid_type="s2", level=3, cover_mode="intersect", bbox=[170.0, -10.0, -170.0, 10.0])
     resp = cover(req)
-    assert resp.grid_type == "geohash"
+    assert resp.grid_type == "s2"
     assert resp.statistics["cell_count"] > 0
 
 
 def test_cover_with_polar_bbox_input():
-    req = CoverRequest(grid_type="geohash", level=4, cover_mode="intersect", bbox=[-30.0, 85.0, 30.0, 89.0])
+    req = CoverRequest(grid_type="s2", level=4, cover_mode="intersect", bbox=[-30.0, 85.0, 30.0, 89.0])
     resp = cover(req)
-    assert resp.grid_type == "geohash"
+    assert resp.grid_type == "s2"
     assert resp.statistics["cell_count"] > 0
 
 
@@ -148,11 +148,11 @@ def test_cover_with_bbox_input_tile_matrix():
 
 
 def test_topology_parent_children_functions():
-    code = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell.space_code
-    parent_resp = parent(ParentRequest(grid_type="geohash", code=code))
+    code = locate(LocateRequest(grid_type="s2", level=7, point=[116.391, 39.907])).cell.space_code
+    parent_resp = parent(ParentRequest(grid_type="s2", code=code))
     assert CellId.from_token(parent_resp.parent_code).level() == 6
 
-    children_resp = children(ChildrenRequest(grid_type="geohash", code=parent_resp.parent_code, target_level=7))
+    children_resp = children(ChildrenRequest(grid_type="s2", code=parent_resp.parent_code, target_level=7))
     assert len(children_resp.child_codes) == 4
     assert code in children_resp.child_codes
 
@@ -202,10 +202,10 @@ def test_topology_mgrs_parent_children_neighbors_functions():
 
 
 def test_topology_batch_geometry_function():
-    cell = locate(LocateRequest(grid_type="geohash", level=7, point=[116.391, 39.907])).cell
-    neighbor_codes = neighbors(NeighborsRequest(grid_type="geohash", code=cell.space_code, k=1)).result_codes[:5]
+    cell = locate(LocateRequest(grid_type="s2", level=7, point=[116.391, 39.907])).cell
+    neighbor_codes = neighbors(NeighborsRequest(grid_type="s2", code=cell.space_code, k=1)).result_codes[:5]
     resp = codes_to_geometries(
-        BatchCodeToGeometryRequest(grid_type="geohash", codes=neighbor_codes, boundary_type="polygon")
+        BatchCodeToGeometryRequest(grid_type="s2", codes=neighbor_codes, boundary_type="polygon")
     )
     assert resp.statistics["count"] == len(neighbor_codes)
     assert set(resp.geometries.keys()) == set(neighbor_codes)

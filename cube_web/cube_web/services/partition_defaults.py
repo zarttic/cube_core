@@ -69,12 +69,12 @@ def apply_resolution_grid_defaults(
 ) -> dict[str, Any]:
     if data_type == "carbon":
         return payload
-    payload.setdefault("grid_type", "geohash")
+    payload.setdefault("grid_type", "s2")
     grid_level = payload.get("grid_level")
     if grid_level is None or grid_level == "":
         payload["grid_level"] = default_grid_level_from_assets(
             payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
-            grid_type=str(payload.get("grid_type") or "geohash"),
+            grid_type=str(payload.get("grid_type") or "s2"),
             fallback=fallback_grid_level,
         )
         payload.setdefault("grid_level_mode", "auto")

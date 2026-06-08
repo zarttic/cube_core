@@ -268,7 +268,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
-    assert '<el-option label="四边形格网" value="geohash" />' in source
+    assert '<el-option label="S2 格网" value="s2" />' in source
     assert '<el-option label="平面格网" value="tile_matrix" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS (逻辑剖分)" value="mgrs" />' not in source
@@ -422,11 +422,11 @@ def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():
 @pytest.mark.parametrize(
     ("resolution", "grid_type", "expected_level"),
     [
-        (5, "geohash", 8),
+        (5, "s2", 8),
         ("9.9m", "tile_matrix", 8),
-        ("10m", "geohash", 7),
+        ("10m", "s2", 7),
         (30, "tile_matrix", 7),
-        (31, "geohash", 6),
+        (31, "s2", 6),
         (5, "isea4h", 6),
         ("10m", "isea4h", 6),
         (30, "isea4h", 6),
@@ -441,7 +441,7 @@ def test_config_view_does_not_expose_mgrs_partition_grid_type():
         encoding="utf-8"
     )
 
-    assert '<el-option label="四边形格网" value="geohash" />' in source
+    assert '<el-option label="S2 格网" value="s2" />' in source
     assert '<el-option label="平面格网" value="tile_matrix" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS" value="mgrs" />' not in source
@@ -456,7 +456,10 @@ def test_encoding_view_displays_generic_grid_type_names():
     assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
     assert '<option value="tile_matrix">平面格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
-    assert "Geohash" not in source
+    assert "s2: 'S2 格网'" in source
+    assert '<input v-model="division.gridType" type="radio" value="s2">' in source
+    assert '<option value="s2">S2 格网</option>' in source
+    assert '<input v-model="topology.gridType" type="radio" value="s2">' in source
     assert "MGRS" not in source
     assert "Tile Matrix" not in source
     assert "ISEA4H" not in source
@@ -630,7 +633,7 @@ def test_auth_required_allows_v1_with_valid_bearer(monkeypatch):
     resp = client.post("/v1/config/get", json={}, headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
-    assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "geohash"
+    assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "s2"
 
 
 def test_cube_web_imports_encoder_package():
@@ -638,19 +641,19 @@ def test_cube_web_imports_encoder_package():
 
 
 def test_grid_locate_sdk_endpoint():
-    resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "level": 7, "point": [116.391, 39.907]})
+    resp = client.post("/v1/grid/locate", json={"grid_type": "s2", "level": 7, "point": [116.391, 39.907]})
     assert resp.status_code == 200
     body = resp.json()
     assert CellId.from_token(body["cell"]["space_code"]).level() == 7
 
 
 def test_code_parse_sdk_endpoint():
-    locate_resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "level": 7, "point": [116.391, 39.907]})
+    locate_resp = client.post("/v1/grid/locate", json={"grid_type": "s2", "level": 7, "point": [116.391, 39.907]})
     space_code = locate_resp.json()["cell"]["space_code"]
-    resp = client.post("/v1/code/parse", json={"st_code": f"gh:7:{space_code}:202603091530"})
+    resp = client.post("/v1/code/parse", json={"st_code": f"s2:7:{space_code}:202603091530"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["grid_type"] == "geohash"
+    assert body["grid_type"] == "s2"
     assert body["level"] == 7
 
 
@@ -698,9 +701,9 @@ def test_partition_router_dispatches_run_and_legacy_operations_to_separate_servi
     route_app.include_router(web_app.partition_route.create_partition_router(service=production, legacy_service=legacy))
     route_client = TestClient(route_app)
 
-    run_resp = route_client.post("/partition/optical/run", json={"grid_type": "geohash", "grid_level": 4})
-    demo_resp = route_client.post("/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 4})
-    test_resp = route_client.post("/partition/optical/test", json={"grid_type": "geohash", "grid_level": 4})
+    run_resp = route_client.post("/partition/optical/run", json={"grid_type": "s2", "grid_level": 4})
+    demo_resp = route_client.post("/partition/optical/demo", json={"grid_type": "s2", "grid_level": 4})
+    test_resp = route_client.post("/partition/optical/test", json={"grid_type": "s2", "grid_level": 4})
 
     assert run_resp.status_code == 200
     assert run_resp.json()["source"] == "production"
@@ -715,7 +718,7 @@ def test_config_get_returns_defaults():
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["config"]["partition"]["optical"]["grid_type"] == "geohash"
+    assert body["config"]["partition"]["optical"]["grid_type"] == "s2"
     assert body["config"]["partition"]["optical"]["grid_level"] == 5
     assert body["config"]["ingest"]["optical"]["metadata_backend"] == "postgres"
     assert body["config"]["ingest"]["optical"]["asset_storage_backend"] == "minio"
@@ -813,7 +816,7 @@ def test_partition_demo_rejects_legacy_contains_cover_mode():
     resp = client.post(
         "/v1/partition/optical/demo",
         json={
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 5,
             "cover_mode": "contains",
         },
@@ -832,7 +835,7 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
             "distinct_space_codes": 5,
             "elapsed_sec": 0.12,
             "rows_per_sec": 100.0,
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 7,
             "workers": 2,
             "partition_backend": "process",
@@ -961,7 +964,7 @@ def test_optical_partition_demo_endpoint(monkeypatch):
             "cog_elapsed_sec": 0.1,
             "partition_elapsed_sec": 0.2,
             "total_elapsed_sec": 0.4,
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 7,
             "workers": 2,
             "output_path": "/tmp/demo/index_rows.jsonl",
@@ -986,7 +989,7 @@ def test_optical_partition_demo_endpoint(monkeypatch):
 
 def test_optical_partition_demo_endpoint_accepts_frontend_payload(monkeypatch):
     expected_payload = {
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "batch_id": "OPTICAL_BATCH_20260522_135546",
         "batch_name": "Shandong_mosaic_optocal",
@@ -1108,7 +1111,7 @@ def test_optical_partition_runner_infers_grid_level_from_selected_asset_resoluti
         mode="partition_test_no_ingest",
     )
 
-    assert captured["grid_type"] == "geohash"
+    assert captured["grid_type"] == "s2"
     assert captured["grid_level"] == 7
 
 
@@ -1316,7 +1319,7 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
 
 
 def test_partition_demo_rejects_invalid_grid_level():
-    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 0})
+    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "s2", "grid_level": 0})
 
     assert resp.status_code == 422
 
@@ -1342,7 +1345,7 @@ def test_partition_run_accepts_mgrs_grid_type_in_request_model():
 
 def test_partition_run_can_run_as_async_task(monkeypatch):
     def fake_run_product_partition_run(payload=None):
-        assert payload["grid_type"] == "geohash"
+        assert payload["grid_type"] == "s2"
         assert payload["grid_level"] == 5
         return {
             "status": "completed",
@@ -1353,7 +1356,7 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
 
-    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
+    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "s2", "grid_level": 5})
 
     assert submit_resp.status_code == 202
     submitted = submit_resp.json()
@@ -1380,7 +1383,7 @@ def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch)
     payload = {
         "batch_id": "DIRECT_RUN_QUEUE",
         "batch_name": "Direct run queue",
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [
             ard_raster_asset(
@@ -1431,13 +1434,13 @@ def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch)
 
 def test_partition_direct_run_without_batch_id_remains_compatible(monkeypatch):
     def fake_run_product_partition_run(payload=None):
-        assert payload["grid_type"] == "geohash"
+        assert payload["grid_type"] == "s2"
         assert payload["grid_level"] == 5
         return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 12}
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
 
-    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
+    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "s2", "grid_level": 5})
 
     assert submit_resp.status_code == 202
     submitted = submit_resp.json()
@@ -1470,7 +1473,7 @@ def test_partition_direct_run_rejects_mismatched_batch_type():
 
     resp = client.post(
         "/v1/partition/product/tasks/run",
-        json={"batch_id": "DIRECT_TYPE_MISMATCH", "grid_type": "geohash", "grid_level": 5},
+        json={"batch_id": "DIRECT_TYPE_MISMATCH", "grid_type": "s2", "grid_level": 5},
     )
 
     assert resp.status_code == 422
@@ -1497,7 +1500,7 @@ def test_partition_direct_run_refreshes_existing_runtime_batch_assets(monkeypatc
     first_payload = {
         "batch_id": "DIRECT_REFRESH_RUNTIME",
         "batch_name": "Direct refresh runtime",
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [
             ard_raster_asset(
@@ -1545,7 +1548,7 @@ def test_partition_direct_run_resets_same_asset_id_when_runtime_payload_changes(
     first_payload = {
         "batch_id": "DIRECT_REFRESH_SAME_ASSET",
         "batch_name": "Direct refresh same asset",
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [
             ard_raster_asset(
@@ -1674,12 +1677,12 @@ def test_postgres_runtime_batch_refresh_resets_changed_assets_and_deletes_stale(
 
 def test_partition_demo_task_endpoint_remains_compatible(monkeypatch):
     def fake_run_product_partition_demo(payload=None):
-        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        assert payload == {"grid_type": "s2", "grid_level": 5}
         return {"status": "completed", "mode": "partition_demo", "data_type": "product", "rows": 20}
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
-    submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "geohash", "grid_level": 5})
+    submit_resp = client.post("/v1/partition/product/tasks/demo", json={"grid_type": "s2", "grid_level": 5})
 
     assert submit_resp.status_code == 202
     submitted = submit_resp.json()
@@ -2101,7 +2104,7 @@ def test_partition_batch_run_marks_success_and_hides_from_pending_list(monkeypat
             "batch_name": "Run success",
             "data_type": "product",
             "assets": [ard_raster_asset("s3://cube/cube/source/product/a.tif", "product-a", data_type="product")],
-            "normalized_payload": {"grid_type": "geohash", "grid_level": 5},
+            "normalized_payload": {"grid_type": "s2", "grid_level": 5},
         },
     )
 
@@ -2237,7 +2240,7 @@ def test_partition_task_queue_lists_direct_and_batch_attempts(monkeypatch):
         json={
             "batch_id": "DIRECT_QUEUE_LIST",
             "batch_name": "Direct queue list",
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 5,
             "selected_assets": [
                 ard_raster_asset(
@@ -3082,7 +3085,7 @@ def test_optical_partition_test_endpoint(monkeypatch):
             "run_dir": "/tmp/run",
             "rows_path": "/tmp/run/index_rows.jsonl",
             "rows": 147,
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 5,
             "ingest_enabled": False,
             "quality_status": "PASS",
@@ -3114,10 +3117,10 @@ def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
         "band": "sr_band2",
         "asset_path": str(asset_path),
         "acq_time": "2020-07-01T00:00:00Z",
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
-        "space_code": "wx4g0",
-        "st_code": "gh:5:wx4g0:20200701",
+        "space_code": "35f4",
+        "st_code": "s2:5:35f4:20200701",
         "time_bucket": "20200701",
         "cell_min_lon": 116.0,
         "cell_min_lat": 39.9,
@@ -3212,7 +3215,7 @@ def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch
 
 def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
     original_payload = {
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [
             {
@@ -3266,7 +3269,7 @@ def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
 
 def test_optical_partition_retry_endpoint_matches_hashed_cog_warning_assets(monkeypatch):
     original_payload = {
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [
             {
@@ -3318,7 +3321,7 @@ def test_optical_partition_retry_endpoint_matches_hashed_cog_warning_assets(monk
 
 def test_optical_partition_retry_endpoint_falls_back_to_full_request(monkeypatch):
     original_payload = {
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [{"source_uri": "scene_a/asset_a.tif"}, {"source_uri": "scene_b/asset_b.tif"}],
     }
@@ -3369,20 +3372,20 @@ def test_carbon_partition_retry_endpoint(monkeypatch):
 
 def test_product_partition_demo_endpoint(monkeypatch):
     def fake_run_product_partition_demo(payload=None):
-        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        assert payload == {"grid_type": "s2", "grid_level": 5}
         return {
             "status": "completed",
             "mode": "partition_demo",
             "data_type": "product",
             "rows": 20,
-            "grid_type": "geohash",
+            "grid_type": "s2",
             "grid_level": 5,
             "output_path": "/tmp/product/index_rows.jsonl",
         }
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_demo", fake_run_product_partition_demo)
 
-    resp = client.post("/v1/partition/product/demo", json={"grid_type": "geohash", "grid_level": 5})
+    resp = client.post("/v1/partition/product/demo", json={"grid_type": "s2", "grid_level": 5})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -3393,7 +3396,7 @@ def test_product_partition_demo_endpoint(monkeypatch):
 
 def test_product_partition_test_endpoint(monkeypatch):
     expected_payload = {
-        "grid_type": "geohash",
+        "grid_type": "s2",
         "grid_level": 5,
         "selected_assets": [{"source_uri": "product_1980.tif", "product_year": 1980}],
     }
@@ -3631,7 +3634,7 @@ def test_product_partition_retry_endpoint(monkeypatch):
 
 def test_radar_partition_demo_endpoint(monkeypatch):
     def fake_run_radar_partition_demo(payload=None):
-        assert payload == {"grid_type": "geohash", "grid_level": 5}
+        assert payload == {"grid_type": "s2", "grid_level": 5}
         return {
             "status": "completed",
             "mode": "partition_demo",
@@ -3641,7 +3644,7 @@ def test_radar_partition_demo_endpoint(monkeypatch):
 
     monkeypatch.setattr(partition_adapters, "run_radar_partition_demo", fake_run_radar_partition_demo)
 
-    resp = client.post("/v1/partition/radar/demo", json={"grid_type": "geohash", "grid_level": 5})
+    resp = client.post("/v1/partition/radar/demo", json={"grid_type": "s2", "grid_level": 5})
 
     assert resp.status_code == 200
     body = resp.json()

@@ -5,10 +5,10 @@ from grid_core.app.services.grid_service import GridService
 from grid_core.app.services.topology_service import TopologyService
 
 
-def test_grid_service_geohash_route_still_works():
+def test_grid_service_s2_route_still_works():
     service = GridService()
-    cell = service.locate(GridType.GEOHASH, level=6, point=[116.391, 39.907])
-    assert cell.grid_type == "geohash"
+    cell = service.locate(GridType.S2, level=6, point=[116.391, 39.907])
+    assert cell.grid_type == "s2"
 
 
 def test_grid_service_mgrs_route_works_for_locate():

@@ -123,7 +123,7 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="geohash", grid_level=7),
+        config=CarbonPartitionConfig(grid_type="s2", grid_level=7),
         workers=1,
     )
 
@@ -162,7 +162,7 @@ def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=7,
             selected_source_indexes=(1, 3),
         ),
@@ -206,7 +206,7 @@ def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="geohash", grid_level=7),
+        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="s2", grid_level=7),
         workers=1,
     )
 
@@ -272,7 +272,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
                 {
                     "grid_level": kwargs["level"],
                     "space_code": item["point"][0],
-                    "st_code": f"gh:7:{item['point'][0]}:20260424",
+                    "st_code": f"s2:7:{item['point'][0]}:20260424",
                     "time_code": "20260424",
                 }
                 for item in kwargs["items"]
@@ -284,7 +284,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=7,
             partition_chunk_size=1,
             partition_backend="thread",
@@ -320,7 +320,7 @@ def test_carbon_service_applies_max_observations_across_whole_run(tmp_path: Path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="geohash", grid_level=7, max_observations=4),
+        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, max_observations=4),
         workers=1,
     )
 
@@ -358,7 +358,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
                 {
                     "grid_level": kwargs["level"],
                     "space_code": item["point"][0],
-                    "st_code": f"gh:7:{item['point'][0]}:20260424",
+                    "st_code": f"s2:7:{item['point'][0]}:20260424",
                     "time_code": "20260424",
                 }
                 for item in kwargs["items"]
@@ -370,7 +370,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="geohash",
+            grid_type="s2",
             grid_level=7,
             partition_chunk_size=1,
             partition_backend="thread",
@@ -422,7 +422,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="geohash", grid_level=7, partition_chunk_size=1),
+        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, partition_chunk_size=1),
         workers=4,
     )
 
@@ -440,13 +440,13 @@ def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-a",
-                    "st_code": "gh:7:cell-a:20260424",
+                    "st_code": "s2:7:cell-a:20260424",
                     "time_code": "20260424",
                 },
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-b",
-                    "st_code": "gh:7:cell-b:20260424",
+                    "st_code": "s2:7:cell-b:20260424",
                     "time_code": "20260424",
                 },
             ]
@@ -473,7 +473,7 @@ def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
 
     rows = _partition_observation_chunk(
         observations,
-        CarbonPartitionConfig(grid_type="geohash", grid_level=7),
+        CarbonPartitionConfig(grid_type="s2", grid_level=7),
     )
 
     assert [row["space_code"] for row in rows] == ["cell-a", "cell-b"]
@@ -488,7 +488,7 @@ def test_carbon_partition_chunk_rejects_mismatched_batch_locate_results(monkeypa
                 {
                     "grid_level": kwargs["level"],
                     "space_code": "cell-a",
-                    "st_code": "gh:7:cell-a:20260424",
+                    "st_code": "s2:7:cell-a:20260424",
                     "time_code": "20260424",
                 }
             ]
@@ -516,7 +516,7 @@ def test_carbon_partition_chunk_rejects_mismatched_batch_locate_results(monkeypa
     with pytest.raises(RuntimeError, match="1 cells for 2 carbon observations"):
         _partition_observation_chunk(
             observations,
-            CarbonPartitionConfig(grid_type="geohash", grid_level=7),
+            CarbonPartitionConfig(grid_type="s2", grid_level=7),
         )
 
 
@@ -560,7 +560,7 @@ def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
         ],
     ]
 
-    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="geohash", grid_level=7), worker_count=2)
+    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="s2", grid_level=7), worker_count=2)
 
     assert len(rows) == 2
     assert executor_calls == [2]
@@ -692,7 +692,7 @@ def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=sample_path.parent,
         output_dir=tmp_path / "out",
-        config=CarbonPartitionConfig(grid_type="geohash", grid_level=7, max_observations=3),
+        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, max_observations=3),
         workers=1,
     )
 

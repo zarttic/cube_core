@@ -2,7 +2,7 @@ from enum import Enum
 
 
 class GridType(str, Enum):
-    GEOHASH = "geohash"
+    S2 = "s2"
     MGRS = "mgrs"
     ISEA4H = "isea4h"
     TILE_MATRIX = "tile_matrix"

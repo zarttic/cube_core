@@ -11,7 +11,7 @@ def test_cover_rejects_non_epsg4326():
     service = GridService()
     with pytest.raises(ValidationError):
         service.cover(
-            grid_type=GridType.GEOHASH,
+            grid_type=GridType.S2,
             level=6,
             geometry={"type": "Point", "coordinates": [116.391, 39.907]},
             bbox=None,
@@ -25,7 +25,7 @@ def test_cover_requires_geometry_or_bbox():
     service = GridService()
     with pytest.raises(ValidationError):
         service.cover(
-            grid_type=GridType.GEOHASH,
+            grid_type=GridType.S2,
             level=6,
             geometry=None,
             bbox=None,
@@ -38,7 +38,7 @@ def test_cover_requires_geometry_or_bbox():
 def test_cover_bbox_boundary_type_sets_cell_geometry_none():
     service = GridService()
     cells = service.cover(
-        grid_type=GridType.GEOHASH,
+        grid_type=GridType.S2,
         level=6,
         geometry=None,
         bbox=[116.385, 39.903, 116.397, 39.911],
@@ -53,15 +53,15 @@ def test_cover_bbox_boundary_type_sets_cell_geometry_none():
 def test_locate_rejects_invalid_point_range():
     service = GridService()
     with pytest.raises(ValidationError):
-        service.locate(grid_type=GridType.GEOHASH, level=6, point=[200.0, 39.9])
+        service.locate(grid_type=GridType.S2, level=6, point=[200.0, 39.9])
     with pytest.raises(ValidationError):
-        service.locate(grid_type=GridType.GEOHASH, level=6, point=[116.3, 100.0])
+        service.locate(grid_type=GridType.S2, level=6, point=[116.3, 100.0])
 
 
 def test_cover_compact_returns_bbox_only_cells():
     service = GridService()
     cells = service.cover_compact(
-        grid_type=GridType.GEOHASH,
+        grid_type=GridType.S2,
         level=6,
         geometry=None,
         bbox=[116.385, 39.903, 116.397, 39.911],
@@ -80,7 +80,7 @@ def test_cover_bbox_boundary_type_matches_compact_cover_codes_and_bbox():
     bbox = [116.385, 39.903, 116.397, 39.911]
 
     full_bbox_cells = service.cover(
-        grid_type=GridType.GEOHASH,
+        grid_type=GridType.S2,
         level=6,
         geometry=None,
         bbox=bbox,
@@ -89,7 +89,7 @@ def test_cover_bbox_boundary_type_matches_compact_cover_codes_and_bbox():
         crs="EPSG:4326",
     )
     compact_cells = service.cover_compact(
-        grid_type=GridType.GEOHASH,
+        grid_type=GridType.S2,
         level=6,
         geometry=None,
         bbox=bbox,
@@ -106,7 +106,7 @@ def test_cover_bbox_boundary_type_matches_compact_cover_codes_and_bbox():
 
 def test_cover_bbox_boundary_type_uses_compact_engine_path(monkeypatch):
     service = GridService()
-    engine = service._registry.get_engine(GridType.GEOHASH)
+    engine = service._registry.get_engine(GridType.S2)
     calls = {"compact": 0, "full": 0}
 
     original_compact = engine.cover_geometry_compact
@@ -124,7 +124,7 @@ def test_cover_bbox_boundary_type_uses_compact_engine_path(monkeypatch):
     monkeypatch.setattr(engine, "cover_geometry", wrapped_full)
 
     cells = service.cover(
-        grid_type=GridType.GEOHASH,
+        grid_type=GridType.S2,
         level=6,
         geometry=None,
         bbox=[116.385, 39.903, 116.397, 39.911],

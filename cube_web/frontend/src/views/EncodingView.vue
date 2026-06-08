@@ -9,7 +9,7 @@ const activeModule = ref('division');
 const loading = ref(false);
 
 const division = ref({
-  gridType: 'geohash',
+  gridType: 's2',
   inputType: 'point',
   level: 6,
   lat: 39.9042,
@@ -19,7 +19,7 @@ const division = ref({
 
 const encoding = ref({
   operation: 'encode',
-  gridType: 'geohash',
+  gridType: 's2',
   timeGranularity: 'minute',
   timestamp: '',
   decodeInput: '',
@@ -30,7 +30,7 @@ const encoding = ref({
 
 const topology = ref({
   operation: 'neighbors',
-  gridType: 'geohash',
+  gridType: 's2',
   level: 6,
   lat: 39.9042,
   lng: 116.4074,
@@ -45,9 +45,9 @@ const conversion = ref({
 
 const encodingParts = ref({
   level: '6',
-  space: 'wx4g0b',
+  space: '35f1',
   time: '24021214',
-  full: 'G6-wx4g0b-24021214',
+  full: 'G6-35f1-24021214',
 });
 
 const resultRows = ref([]);
@@ -70,7 +70,7 @@ const emptyText = computed(() => {
 });
 
 const gridTypeLabels = {
-  geohash: '四边形格网',
+  s2: 'S2 格网',
   mgrs: '平面格网',
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
@@ -635,7 +635,7 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <div class="radio-group">
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>四边形格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>S2 格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
@@ -661,7 +661,7 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
-                      <option value="geohash">四边形格网</option>
+                      <option value="s2">S2 格网</option>
                       <option value="tile_matrix">平面格网</option>
                       <option value="isea4h">六边形格网</option>
                     </select>
@@ -701,7 +701,7 @@ async function runDemo() {
                     <div class="form-group">
                       <label>格网类型</label>
                       <div class="radio-group">
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>四边形格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>S2 格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>

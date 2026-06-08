@@ -107,7 +107,7 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition
   --manifest-path data/optocal/manifest.jsonl \
   --product-family auto \
   --output-dir data/ray_output/logical_partition \
-  --grid-type geohash \
+  --grid-type s2 \
   --grid-level 5 \
   --cover-mode intersect
 ```
@@ -132,7 +132,7 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.product_partition_job
   --input-dir data/product \
   --output-dir data/ray_output/product \
   --target-crs EPSG:4326 \
-  --grid-type geohash \
+  --grid-type s2 \
   --grid-level 5
 ```
 
@@ -151,7 +151,7 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job 
 
 底层通过 `CarbonSatellitePartitionService` 使用 `CarbonPartitionConfig`。`--partition-backend ray` 按观测 chunk 分发到 Ray actor；`auto` 在设置 `--ray-address` 时使用 Ray，否则回退到本地 `process`。测试 monkeypatch 或不适合 fork 的环境可改为 `thread`。
 
-端到端试运行脚本覆盖 `optical`、`radar`、`product` 三类资产，以及 `geohash`、`tile_matrix`、`isea4h` 三种格网。脚本会生成小 TIF，上传到 MinIO，以 `selected_assets` 写入完整 ARD 字段，并通过 Ray 执行剖分：
+端到端试运行脚本覆盖 `optical`、`radar`、`product` 三类资产，以及 `s2`、`tile_matrix`、`isea4h` 三种格网。脚本会生成小 TIF，上传到 MinIO，以 `selected_assets` 写入完整 ARD 字段，并通过 Ray 执行剖分：
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_split/scripts/run_all_partition_flows_smoke.py \
