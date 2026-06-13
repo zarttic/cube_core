@@ -8,7 +8,7 @@ from typing import Any
 from cube_split import runtime_config
 
 CONFIG_SCOPE = "cube_web"
-LEGACY_PARTITION_GRID_TYPE_ALIASES = {"mgrs": "tile_matrix"}
+LEGACY_PARTITION_GRID_TYPE_ALIASES = {"mgrs": "tile_matrix", "geohash": "s2"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "partition": {
