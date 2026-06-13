@@ -269,7 +269,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule === 'entity'" not in source
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
-    assert '<el-option label="S2 格网" value="s2" />' in source
+    assert '<el-option label="四边形格网" value="s2" />' in source
     assert '<el-option label="平面格网" value="tile_matrix" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS (逻辑剖分)" value="mgrs" />' not in source
@@ -296,6 +296,12 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "function openPartitionStageDetail(stage)" in source
     assert '@click="openPartitionStageDetail(stage)"' in source
     assert 'title="剖分进程详情"' in source
+    assert "function pruneBatchSelection(selectedIds, batches)" in source
+    assert "preferredBatchId" not in source
+    assert "selectedOpticalBatchIds.value = pruneBatchSelection(selectedOpticalBatchIds.value, managedOpticalBatches.value);" in source
+    assert "selectedCarbonBatchIds.value = pruneBatchSelection(selectedCarbonBatchIds.value, managedCarbonBatches.value);" in source
+    assert "selectedRadarBatchIds.value = pruneBatchSelection(selectedRadarBatchIds.value, managedRadarBatches.value);" in source
+    assert "selectedProductBatchIds.value = pruneBatchSelection(selectedProductBatchIds.value, managedProductBatches.value);" in source
     assert "const partitionContextDetailVisible = ref(false);" in source
     assert "function openPartitionContextDetail(item)" in source
     assert '@click="openPartitionContextDetail(item)"' in source
@@ -317,11 +323,46 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "重试失败资产" in source
     assert "async function archivePartitionBatch(batch)" in source
     assert "function partitionTaskDisplayStatus(task)" in source
+    assert "return task?.status;" in source
+    assert "excludeArchivedBatch" in source
+    assert "requestGet(`${partitionPrefix}/tasks/${taskId}`)" in source
+    assert "const query = partitionTaskQuery({ keyword: taskId, limit: 20 });" not in source
+    assert "const completedResult = row.result || row.result_summary || {};" in source
+    assert "const cleanRow = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));" in source
+    assert "{ label: '入库状态', value: partitionIngestStatusText(partitionIngestStatus(result)) }" in source
+    assert "{ label: '正式入库'" not in source
+    assert "result.ingest_enabled === false" not in source
+    assert "const opticalIngestStatus = computed(() => partitionIngestStatus(lastPartitionResult.value));" in source
+    assert "const opticalIngestConfirmReady = computed" in source
+    assert "payload.batch_id = result.batch_id;" in source
+    assert "ingest_status: submitted.data_type === 'optical' || activeModule.value === 'optical' ? 'not_ready' : 'not_supported'" in source
+    assert "{ label: '批次状态', value: partitionStatusText(result.batch_status) }" in source
+    assert "const activePartitionTasks = ref([]);" in source
+    assert "const partitionTaskTotal = ref(0);" in source
+    assert "const activePartitionTaskTotal = ref(0);" in source
+    assert "const activePartitionTaskQueueStats = computed(() => partitionTaskStats(activePartitionTasks.value));" in source
+    assert "const activePartitionTaskDrawerTitle = computed(() => `${dataLabelsByModule[activeModule.value] || '当前模块'}剖分任务队列`);" in source
+    assert "function partitionTaskQuery(params)" in source
+    assert "async function loadActivePartitionTasks(page = activePartitionTaskPage.value)" in source
+    assert "data_type: activeModule.value" in source
+    assert "async function openActivePartitionTaskDrawer()" in source
+    assert '<el-drawer v-model="partitionTaskDrawerVisible" :title="activePartitionTaskDrawerTitle"' in source
+    assert ':data="activePartitionTasks"' in source
+    assert 'v-model:current-page="activePartitionTaskPage"' in source
+    assert 'v-model:page-size="activePartitionTaskPageSize"' in source
+    assert 'empty-text="当前类别暂无剖分任务"' in source
     assert "partitionTaskCanArchiveBatch(row)" in source
+    assert "const partitionResultArchiveBatch = computed" in source
+    assert "async function archiveLastPartitionResultBatch()" in source
+    assert "function applyArchivedPartitionBatch(batchId, archivedBatch = null)" in source
+    assert "loadActivePartitionTasks(activePartitionTaskPage.value)" in source
+    assert "async function syncSubmittedPartitionTask(taskId)" in source
+    assert "startPartitionTaskSync(submitted.task_id)" in source
+    assert "const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];" in source
     assert "function partitionBatchCanRun(batch)" in source
     assert 'v-else-if="partitionBatchCanRun(partitionBatchDetail)"' in source
     assert "requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {})" in source
-    assert "归档完成" in source
+    assert "不再处理" in source
     assert "archived: '已归档'" in source
     assert "partitionBatchDetailTab === 'attempts'" in source
     assert "visibleOpticalBatches" in source
@@ -342,7 +383,11 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const partitionFailureMessage = computed" in source
     assert "partitionFailureMessage" in source
     assert "剖分失败，详情已写入执行结果" not in source
-    assert "requestPartitionOperation(partitionPrefix, endpoint, operation, payload)" in source
+    assert "submitPartitionOperation(partitionPrefix, endpoint, operation, payload)" in source
+    assert "function buildPartitionSubmittedResult(submitted, request, selectedCount)" in source
+    assert "剖分任务已提交，后台将连接 Ray 集群异步执行。" in source
+    assert "开始剖分" not in source
+    assert "提交剖分任务" in source
     assert "/tasks/${operation}" in source
     assert '<el-option label="碳卫星" value="carbon" />' in source
     assert '<el-option label="雷达遥感" value="radar" />' in source
@@ -1672,9 +1717,20 @@ def test_partition_direct_run_resets_same_asset_id_when_runtime_payload_changes(
     assert assets[0]["status"] == "succeeded"
 
 
-def test_partition_task_queue_rejects_out_of_range_limit():
+def test_partition_task_queue_paginates_and_validates_page_size():
+    resp = client.get("/v1/partition/tasks", params={"page": 1, "page_size": 2})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) >= {"tasks", "total", "page", "page_size"}
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+    assert isinstance(body["total"], int)
+
     assert client.get("/v1/partition/tasks", params={"limit": 0}).status_code == 422
-    assert client.get("/v1/partition/tasks", params={"limit": 501}).status_code == 422
+    assert client.get("/v1/partition/tasks", params={"limit": 501}).status_code == 200
+    assert client.get("/v1/partition/tasks", params={"page": 0}).status_code == 422
+    assert client.get("/v1/partition/tasks", params={"page_size": 0}).status_code == 422
+    assert client.get("/v1/partition/tasks", params={"page_size": 501}).status_code == 422
 
 
 def test_postgres_runtime_batch_refresh_resets_changed_assets_and_deletes_stale(monkeypatch):
@@ -2255,7 +2311,7 @@ def test_partition_batch_archive_marks_handled_and_hides_from_pending_list():
     assert archive_resp.json()["status"] == "archived"
     assert detail_resp.json()["status"] == "archived"
     assert detail_resp.json()["last_error"] == "operator handled this failed batch outside retry"
-    assert {asset["status"] for asset in assets_resp.json()["assets"]} == {"archived"}
+    assert {asset["status"] for asset in assets_resp.json()["assets"]} == {"manual_required"}
     task_row = next(row for row in tasks_resp.json()["tasks"] if row["task_id"] == "partition-archive-handled")
     assert task_row["status"] == "failed"
     assert task_row["batch_status"] == "archived"
@@ -2443,7 +2499,11 @@ def test_partition_batch_run_persists_quality_pass(monkeypatch):
     assert batch["status"] == "succeeded"
     assert batch["quality_status"] == "PASS"
     assert batch["quality_report_id"] == "quality-pass-report"
+    assert batch["ingest_status"] == "ready"
     assert attempts[0]["runner_result"]["quality_status"] == "PASS"
+    task = client.get(f"/v1/partition/tasks/{task_id}").json()
+    assert task["result"]["quality_report_id"] == "quality-pass-report"
+    assert task["result"]["ingest_status"] == "ready"
 
 
 def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
@@ -2487,6 +2547,7 @@ def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
     assert batch["status"] == "manual_required"
     assert batch["quality_status"] == "FAIL"
     assert batch["quality_report_id"] == "quality-fail-report"
+    assert batch["ingest_status"] == "not_ready"
     assert "asset_readability" in batch["last_error"]
     assert assets[0]["status"] == "succeeded"
 
@@ -3291,6 +3352,72 @@ def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch
     assert captured["minio_bucket"] == "cube"
     assert captured["cog_materialize_mode"] == "symlink"
     assert captured["asset_version"].startswith("demo-")
+
+
+def test_optical_ingest_confirm_persists_batch_ingest_status(monkeypatch, quality_store):
+    batch_id = "BATCH_OPTICAL_INGEST_CONFIRM"
+    report_id = "optical-ingest-confirm-batch"
+    run_dir = "/tmp/cube_web_partition_demo/test_app_ingest_confirm_batch"
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+    (Path(run_dir) / "index_rows.jsonl").write_text("", encoding="utf-8")
+    quality_store.upsert_report(
+        "optical",
+        run_dir,
+        {
+            "report_id": report_id,
+            "status": "PASS",
+            "target_crs": "EPSG:4326",
+            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
+            "checks": [],
+            "assets": [],
+        },
+    )
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": batch_id,
+            "batch_name": "Batch ingest confirm",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/ingest-confirm.tif", "ingest-confirm")],
+        },
+    )
+    store = web_app.partition_workflow_service.store
+    store.create_attempt(task_id="partition-ingest-confirm", batch_id=batch_id, operation="auto_run", payload={})
+    store.succeed_attempt(
+        "partition-ingest-confirm",
+        {
+            "status": "completed",
+            "mode": "partition_run",
+            "data_type": "optical",
+            "run_dir": run_dir,
+            "quality_status": "PASS",
+            "quality_report_id": report_id,
+            "quality_report": {"report_id": report_id, "status": "PASS"},
+        },
+    )
+
+    def fake_run_ingest(args):
+        return {
+            "run_dir": args.run_dir,
+            "input_rows": 1,
+            "materialized_cog_assets": 1,
+            "raw_asset_rows": 1,
+            "cube_fact_rows": 1,
+        }
+
+    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fake_run_ingest)
+
+    resp = client.post("/v1/ingest/optical/confirm", json={"report_id": report_id})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    batch = client.get(f"/v1/partition/batches/{batch_id}").json()
+    assert body["batch_id"] == batch_id
+    assert body["ingest_status"] == "ingested"
+    assert body["ingested_at"]
+    assert batch["ingest_status"] == "ingested"
+    assert batch["ingest_job_id"] == body["job_id"]
+    assert batch["ingested_at"]
 
 
 def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):

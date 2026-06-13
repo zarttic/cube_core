@@ -44,7 +44,21 @@ class PartitionJobStore:
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    def get_batch_by_quality_report_id(self, data_type: str, quality_report_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def update_ingest_status(
+        self,
+        batch_id: str,
+        ingest_status: str,
+        *,
+        job_id: str | None = None,
+        error: str | None = None,
+        ingested: bool = False,
+    ) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def ensure_runtime_batch(
@@ -117,7 +131,17 @@ class PartitionJobStore:
         data_type: str | None = None,
         keyword: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
         raise NotImplementedError
 
 
@@ -145,6 +169,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "quality_status": existing.get("quality_status"),
             "quality_report_id": existing.get("quality_report_id"),
             "quality_failure_reason": existing.get("quality_failure_reason"),
+            "ingest_status": existing.get("ingest_status") or _initial_ingest_status(record["data_type"]),
+            "ingest_job_id": existing.get("ingest_job_id"),
+            "ingest_error": existing.get("ingest_error"),
+            "ingested_at": existing.get("ingested_at"),
             "partitioned_at": existing.get("partitioned_at"),
             "manual_required_at": existing.get("manual_required_at"),
             "created_at": existing.get("created_at") or now,
@@ -193,6 +221,12 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         row = self.batches.get(batch_id)
         return None if row is None else copy.deepcopy(row)
 
+    def get_batch_by_quality_report_id(self, data_type: str, quality_report_id: str) -> dict[str, Any] | None:
+        for batch in self.batches.values():
+            if batch.get("data_type") == data_type and batch.get("quality_report_id") == quality_report_id:
+                return copy.deepcopy(batch)
+        return None
+
     def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
         batch = self.batches.get(batch_id)
         if batch is None:
@@ -202,10 +236,29 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         now = _utc_now_iso()
         batch["status"] = "archived"
         batch["updated_at"] = now
-        for asset in self.assets.values():
-            if asset["batch_id"] == batch_id:
-                asset["status"] = "archived"
-                asset["updated_at"] = now
+        return copy.deepcopy(batch)
+
+    def update_ingest_status(
+        self,
+        batch_id: str,
+        ingest_status: str,
+        *,
+        job_id: str | None = None,
+        error: str | None = None,
+        ingested: bool = False,
+    ) -> dict[str, Any] | None:
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            return None
+        now = _utc_now_iso()
+        batch["ingest_status"] = ingest_status
+        batch["ingest_job_id"] = job_id
+        batch["ingest_error"] = error
+        if ingested:
+            batch["ingested_at"] = now
+        elif ingest_status != "ingested":
+            batch["ingested_at"] = None
+        batch["updated_at"] = now
         return copy.deepcopy(batch)
 
     def ensure_runtime_batch(
@@ -241,6 +294,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "quality_status": existing.get("quality_status"),
             "quality_report_id": existing.get("quality_report_id"),
             "quality_failure_reason": existing.get("quality_failure_reason"),
+            "ingest_status": existing.get("ingest_status") or _initial_ingest_status(data_type),
+            "ingest_job_id": existing.get("ingest_job_id"),
+            "ingest_error": existing.get("ingest_error"),
+            "ingested_at": existing.get("ingested_at"),
             "partitioned_at": existing.get("partitioned_at"),
             "manual_required_at": existing.get("manual_required_at"),
             "created_at": existing.get("created_at") or now,
@@ -302,6 +359,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["quality_status"] = None
         batch["quality_report_id"] = None
         batch["quality_failure_reason"] = None
+        batch["ingest_status"] = _initial_ingest_status(batch.get("data_type"))
+        batch["ingest_job_id"] = None
+        batch["ingest_error"] = None
+        batch["ingested_at"] = None
         batch["updated_at"] = _utc_now_iso()
         self._increment_asset_attempts(batch_id, asset_ids)
         attempt = {
@@ -351,6 +412,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
         self._refresh_batch_from_assets(attempt["batch_id"], now=now)
         self._apply_quality_result(attempt["batch_id"], result, now=now)
+        self._refresh_ingest_readiness(attempt["batch_id"], now=now)
 
     def fail_attempt(
         self,
@@ -381,6 +443,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["quality_status"] = None
         batch["quality_report_id"] = None
         batch["quality_failure_reason"] = None
+        batch["ingest_status"] = _initial_ingest_status(batch.get("data_type"))
+        batch["ingest_job_id"] = None
+        batch["ingest_error"] = None
+        batch["ingested_at"] = None
         batch["updated_at"] = _utc_now_iso()
 
     def request_cancel(self, task_id: str) -> dict[str, Any] | None:
@@ -437,6 +503,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         data_type: str | None = None,
         keyword: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         rows = [_task_row_from_attempt(attempt, self.batches.get(attempt["batch_id"], {}), self.assets) for attempt in self.attempts.values()]
         if status:
@@ -447,7 +514,24 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             needle = keyword.lower()
             rows = [row for row in rows if needle in _task_search_text(row)]
         rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
-        return copy.deepcopy(rows[:limit])
+        return copy.deepcopy(rows[offset : offset + limit])
+
+    def count_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
+        rows = [_task_row_from_attempt(attempt, self.batches.get(attempt["batch_id"], {}), self.assets) for attempt in self.attempts.values()]
+        if status:
+            rows = [row for row in rows if row["status"] == status]
+        if data_type:
+            rows = [row for row in rows if row["data_type"] == data_type]
+        if keyword:
+            needle = keyword.lower()
+            rows = [row for row in rows if needle in _task_search_text(row)]
+        return len(rows)
 
     def _set_assets_status(self, attempt: dict[str, Any], status: str, **updates: Any) -> None:
         asset_ids = attempt.get("asset_ids") or [
@@ -553,6 +637,19 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             batch["manual_required_at"] = batch.get("manual_required_at") or now
         batch["updated_at"] = now
 
+    def _refresh_ingest_readiness(self, batch_id: str, *, now: str) -> None:
+        batch = self.batches[batch_id]
+        if batch.get("data_type") != "optical":
+            batch["ingest_status"] = "not_supported"
+        elif batch.get("status") == "succeeded" and batch.get("quality_report_id"):
+            batch["ingest_status"] = "ready"
+        else:
+            batch["ingest_status"] = "not_ready"
+        batch["ingest_job_id"] = None
+        batch["ingest_error"] = None
+        batch["ingested_at"] = None
+        batch["updated_at"] = now
+
 
 class PostgresPartitionJobStore(PartitionJobStore):
     def __init__(self, dsn: str) -> None:
@@ -581,6 +678,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       quality_status TEXT,
                       quality_report_id TEXT,
                       quality_failure_reason TEXT,
+                      ingest_status TEXT NOT NULL DEFAULT 'not_ready',
+                      ingest_job_id TEXT,
+                      ingest_error TEXT,
+                      ingested_at TIMESTAMPTZ,
                       partitioned_at TIMESTAMPTZ,
                       manual_required_at TIMESTAMPTZ,
                       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -638,6 +739,28 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_status TEXT")
                 cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_report_id TEXT")
                 cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_failure_reason TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_status TEXT DEFAULT 'not_ready'")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_job_id TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
+                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ")
+                cur.execute(
+                    """
+                    UPDATE partition_batches
+                    SET ingest_status = CASE
+                      WHEN data_type <> 'optical' THEN 'not_supported'
+                      WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
+                      ELSE COALESCE(ingest_status, 'not_ready')
+                    END
+                    WHERE ingest_status IS NULL
+                       OR (data_type <> 'optical' AND ingest_status = 'not_ready')
+                       OR (
+                         data_type = 'optical'
+                         AND status = 'succeeded'
+                         AND quality_report_id IS NOT NULL
+                         AND ingest_status = 'not_ready'
+                       )
+                    """
+                )
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
@@ -662,7 +785,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         %(source_schema)s::jsonb AS source_schema,
                         %(normalized_payload)s::jsonb AS normalized_payload,
                         %(priority)s::int AS priority,
-                        %(max_auto_retries)s::int AS max_auto_retries
+                        %(max_auto_retries)s::int AS max_auto_retries,
+                        %(ingest_status)s::text AS ingest_status
                     ) source
                     ON (target.batch_id = source.batch_id)
                     WHEN MATCHED THEN UPDATE SET
@@ -674,13 +798,13 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       priority = source.priority,
                       max_auto_retries = source.max_auto_retries,
                       updated_at = now()
-                    WHEN NOT MATCHED THEN INSERT (
-                      batch_id, batch_name, data_type, source_system, source_schema,
-                      normalized_payload, priority, max_auto_retries
-                    ) VALUES (
-                      source.batch_id, source.batch_name, source.data_type, source.source_system, source.source_schema,
-                      source.normalized_payload, source.priority, source.max_auto_retries
-                    )
+                        WHEN NOT MATCHED THEN INSERT (
+                          batch_id, batch_name, data_type, source_system, source_schema,
+                          normalized_payload, priority, max_auto_retries, ingest_status
+                        ) VALUES (
+                          source.batch_id, source.batch_name, source.data_type, source.source_system, source.source_schema,
+                          source.normalized_payload, source.priority, source.max_auto_retries, source.ingest_status
+                        )
                     """,
                     batch_params,
                 )
@@ -779,6 +903,24 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 row = cur.fetchone()
                 return None if row is None else _row_to_dict(cur, row)
 
+    def get_batch_by_quality_report_id(self, data_type: str, quality_report_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM partition_batches
+                    WHERE data_type = %s
+                      AND quality_report_id = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (data_type, quality_report_id),
+                )
+                row = cur.fetchone()
+                return None if row is None else _row_to_dict(cur, row)
+
     def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
         with self._connect() as conn:
@@ -804,7 +946,37 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
                     return None
                 batch = _row_to_dict(cur, row)
-                cur.execute("UPDATE partition_assets SET status = 'archived', updated_at = now() WHERE batch_id = %s", (batch_id,))
+            conn.commit()
+        return batch
+
+    def update_ingest_status(
+        self,
+        batch_id: str,
+        ingest_status: str,
+        *,
+        job_id: str | None = None,
+        error: str | None = None,
+        ingested: bool = False,
+    ) -> dict[str, Any] | None:
+        self.ensure_schema()
+        ingested_at_sql = "now()" if ingested else "NULL"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE partition_batches
+                    SET ingest_status = %s,
+                        ingest_job_id = %s,
+                        ingest_error = %s,
+                        ingested_at = {ingested_at_sql},
+                        updated_at = now()
+                    WHERE batch_id = %s
+                    RETURNING *
+                    """,
+                    (ingest_status, job_id, error, batch_id),
+                )
+                row = cur.fetchone()
+                batch = None if row is None else _row_to_dict(cur, row)
             conn.commit()
         return batch
 
@@ -838,7 +1010,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         %(source_system)s::text AS source_system,
                         %(source_schema)s::jsonb AS source_schema,
                         %(normalized_payload)s::jsonb AS normalized_payload,
-                        %(max_auto_retries)s::int AS max_auto_retries
+                        %(max_auto_retries)s::int AS max_auto_retries,
+                        %(ingest_status)s::text AS ingest_status
                     ) source
                     ON (target.batch_id = source.batch_id)
                     WHEN MATCHED THEN UPDATE SET
@@ -855,20 +1028,21 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         ELSE target.max_auto_retries
                       END,
                       updated_at = now()
-                    WHEN NOT MATCHED THEN INSERT (
-                      batch_id, batch_name, data_type, source_system, source_schema,
-                      normalized_payload, max_auto_retries
-                    ) VALUES (
-                      source.batch_id, source.batch_name, source.data_type, source.source_system,
-                      source.source_schema, source.normalized_payload, source.max_auto_retries
-                    )
+                        WHEN NOT MATCHED THEN INSERT (
+                          batch_id, batch_name, data_type, source_system, source_schema,
+                          normalized_payload, max_auto_retries, ingest_status
+                        ) VALUES (
+                          source.batch_id, source.batch_name, source.data_type, source.source_system,
+                          source.source_schema, source.normalized_payload, source.max_auto_retries, source.ingest_status
+                        )
                     """,
                     _jsonb_record(
                         {
                             **schema,
-                            "source_schema": schema,
-                            "max_auto_retries": max_auto_retries,
-                        },
+                                "source_schema": schema,
+                                "max_auto_retries": max_auto_retries,
+                                "ingest_status": _initial_ingest_status(data_type),
+                            },
                         "source_schema",
                         "normalized_payload",
                     ),
@@ -993,15 +1167,19 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 batch_status = "retrying" if "retry" in operation else "queued"
                 cur.execute(
                     """
-                    UPDATE partition_batches
-                    SET attempt_count = attempt_count + 1,
-                        status = %s,
-                        last_task_id = %s,
-                        quality_status = NULL,
-                        quality_report_id = NULL,
-                        quality_failure_reason = NULL,
-                        updated_at = now()
-                    WHERE batch_id = %s
+                        UPDATE partition_batches
+                        SET attempt_count = attempt_count + 1,
+                            status = %s,
+                            last_task_id = %s,
+                            quality_status = NULL,
+                            quality_report_id = NULL,
+                            quality_failure_reason = NULL,
+                            ingest_status = CASE WHEN data_type = 'optical' THEN 'not_ready' ELSE 'not_supported' END,
+                            ingest_job_id = NULL,
+                            ingest_error = NULL,
+                            ingested_at = NULL,
+                            updated_at = now()
+                        WHERE batch_id = %s
                       AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested', 'archived')
                     RETURNING attempt_count
                     """,
@@ -1064,6 +1242,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
                 self._refresh_batch_from_assets(cur, batch_id)
                 self._apply_quality_result(cur, batch_id, result)
+                self._refresh_ingest_readiness(cur, batch_id)
             conn.commit()
 
     def fail_attempt(
@@ -1100,14 +1279,18 @@ class PostgresPartitionJobStore(PartitionJobStore):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE partition_batches
-                    SET status = %s,
-                        last_task_id = %s,
-                        quality_status = NULL,
-                        quality_report_id = NULL,
-                        quality_failure_reason = NULL,
-                        updated_at = now()
-                    WHERE batch_id = %s
+                        UPDATE partition_batches
+                        SET status = %s,
+                            last_task_id = %s,
+                            quality_status = NULL,
+                            quality_report_id = NULL,
+                            quality_failure_reason = NULL,
+                            ingest_status = CASE WHEN data_type = 'optical' THEN 'not_ready' ELSE 'not_supported' END,
+                            ingest_job_id = NULL,
+                            ingest_error = NULL,
+                            ingested_at = NULL,
+                            updated_at = now()
+                        WHERE batch_id = %s
                     """,
                     (status, task_id, batch_id),
                 )
@@ -1181,6 +1364,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
         data_type: str | None = None,
         keyword: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         self.ensure_schema()
         where = []
@@ -1197,10 +1381,17 @@ class PostgresPartitionJobStore(PartitionJobStore):
         sql = """
             SELECT
               a.*,
-              b.batch_name,
-              b.data_type,
-              b.status AS batch_status,
-              COALESCE(NULLIF(array_length(a.asset_ids, 1), 0), asset_counts.asset_count, 0) AS asset_count
+                  b.batch_name,
+                  b.data_type,
+                  b.status AS batch_status,
+                  b.quality_status,
+                  b.quality_report_id,
+                  b.quality_failure_reason,
+                  b.ingest_status,
+                  b.ingest_job_id,
+                  b.ingest_error,
+                  b.ingested_at,
+                  COALESCE(NULLIF(array_length(a.asset_ids, 1), 0), asset_counts.asset_count, 0) AS asset_count
             FROM partition_job_attempts a
             JOIN partition_batches b ON b.batch_id = a.batch_id
             LEFT JOIN (
@@ -1211,13 +1402,45 @@ class PostgresPartitionJobStore(PartitionJobStore):
         """
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY a.created_at DESC LIMIT %s"
-        params.append(limit)
+        sql += " ORDER BY a.created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = [_row_to_dict(cur, row) for row in cur.fetchall()]
         return [_task_row_from_joined_attempt(row) for row in rows]
+
+    def count_tasks(
+        self,
+        *,
+        status: str | None = None,
+        data_type: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
+        self.ensure_schema()
+        where = []
+        params: list[Any] = []
+        if status:
+            where.append("a.status = %s")
+            params.append(status)
+        if data_type:
+            where.append("b.data_type = %s")
+            params.append(data_type)
+        if keyword:
+            where.append("(a.task_id ILIKE %s OR b.batch_id ILIKE %s OR b.batch_name ILIKE %s OR COALESCE(a.error_message, '') ILIKE %s)")
+            params.extend([f"%{keyword}%"] * 4)
+        sql = """
+            SELECT count(*)::int
+            FROM partition_job_attempts a
+            JOIN partition_batches b ON b.batch_id = a.batch_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+        return int(row[0] if row else 0)
 
     def _update_attempt_and_batch(self, task_id: str, attempt_status: str, batch_status: str, *, started: bool = False) -> None:
         started_sql = ", started_at = COALESCE(started_at, now())" if started else ""
@@ -1360,6 +1583,24 @@ class PostgresPartitionJobStore(PartitionJobStore):
             ),
         )
 
+    def _refresh_ingest_readiness(self, cur, batch_id: str) -> None:
+        cur.execute(
+            """
+            UPDATE partition_batches
+            SET ingest_status = CASE
+                  WHEN data_type <> 'optical' THEN 'not_supported'
+                  WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
+                  ELSE 'not_ready'
+                END,
+                ingest_job_id = NULL,
+                ingest_error = NULL,
+                ingested_at = NULL,
+                updated_at = now()
+            WHERE batch_id = %s
+            """,
+            (batch_id,),
+        )
+
     def _connect(self):
         try:
             import psycopg
@@ -1422,6 +1663,7 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
         "normalized_payload": payload,
         "priority": int(schema.get("priority") or 0),
         "max_auto_retries": int(schema.get("max_auto_retries") if schema.get("max_auto_retries") is not None else 1),
+        "ingest_status": _initial_ingest_status(data_type),
     }
 
 
@@ -1508,6 +1750,13 @@ def _task_row_from_attempt(
         "batch_id": batch_id,
         "batch_name": batch.get("batch_name") or batch_id,
         "batch_status": batch.get("status"),
+        "quality_status": batch.get("quality_status"),
+        "quality_report_id": batch.get("quality_report_id"),
+        "quality_failure_reason": batch.get("quality_failure_reason"),
+        "ingest_status": batch.get("ingest_status"),
+        "ingest_job_id": batch.get("ingest_job_id"),
+        "ingest_error": batch.get("ingest_error"),
+        "ingested_at": batch.get("ingested_at"),
         "asset_ids": asset_ids,
         "asset_count": asset_count,
         "attempt_no": attempt.get("attempt_no"),
@@ -1537,6 +1786,13 @@ def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
         "batch_id": row.get("batch_id"),
         "batch_name": row.get("batch_name") or row.get("batch_id"),
         "batch_status": row.get("batch_status"),
+        "quality_status": row.get("quality_status"),
+        "quality_report_id": row.get("quality_report_id"),
+        "quality_failure_reason": row.get("quality_failure_reason"),
+        "ingest_status": row.get("ingest_status"),
+        "ingest_job_id": row.get("ingest_job_id"),
+        "ingest_error": row.get("ingest_error"),
+        "ingested_at": row.get("ingested_at"),
         "asset_ids": asset_ids,
         "asset_count": int(row.get("asset_count") or 0),
         "attempt_no": row.get("attempt_no"),
@@ -1562,6 +1818,8 @@ def _task_result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "quality_status": result.get("quality_status") or (result.get("quality_report") or {}).get("status")
         if isinstance(result.get("quality_report") or {}, dict)
         else result.get("quality_status"),
+        "quality_report_id": result.get("quality_report_id")
+        or ((result.get("quality_report") or {}).get("report_id") if isinstance(result.get("quality_report") or {}, dict) else None),
         "run_dir": result.get("run_dir"),
         "rows_path": result.get("rows_path") or result.get("output_path"),
         "execution_engine": result.get("execution_engine") or result.get("partition_backend"),
@@ -1701,6 +1959,10 @@ def _stable_asset_key(value: str, idx: int) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _initial_ingest_status(data_type: Any) -> str:
+    return "not_ready" if str(data_type or "") == "optical" else "not_supported"
 
 
 def _max_auto_retries_value(primary: Any, fallback: Any = None) -> int:
