@@ -34,10 +34,12 @@ const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
 const defaultEntityGridLevel = 6;
 const gridTypeLabels = {
-  s2: 'S2 格网',
+  s2: '四边形格网',
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
 };
+const partitionArchiveableStatuses = ['failed', 'manual_required', 'cancelled'];
+const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];
 const partitionTaskPollIntervalMs = 1500;
 const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('s2');
@@ -117,6 +119,8 @@ const partitionStartedAt = ref(null);
 const partitionFinishedAt = ref(null);
 const partitionElapsedSec = ref(0);
 let partitionTimer = null;
+let partitionTaskSyncTimer = null;
+let partitionTaskSyncInFlight = false;
 const partitionStages = ref([
   { key: 'prepare', label: '准备任务', detail: '等待选择数据批次与剖分参数。', status: 'pending' },
   { key: 'queue', label: '读取数据队列', detail: '解析已载入资产、批次、波段与时间信息。', status: 'pending' },
@@ -229,20 +233,36 @@ const partitionBatchDetailAssetStatus = ref('all');
 const partitionBatchDetailSelectedAssetIds = ref([]);
 const partitionTasks = ref([]);
 const partitionTasksLoading = ref(false);
+const partitionTaskPage = ref(1);
+const partitionTaskPageSize = ref(20);
+const partitionTaskTotal = ref(0);
+const activePartitionTasks = ref([]);
+const activePartitionTaskPage = ref(1);
+const activePartitionTaskPageSize = ref(20);
+const activePartitionTaskTotal = ref(0);
+const partitionTaskDrawerVisible = ref(false);
 
 const visibleOpticalBatches = computed(() => managedOpticalBatches.value);
 const visibleCarbonBatches = computed(() => managedCarbonBatches.value);
 const visibleRadarBatches = computed(() => managedRadarBatches.value);
 const visibleProductBatches = computed(() => managedProductBatches.value);
-const partitionTaskQueueStats = computed(() => {
-  const countByStatus = (statuses) => partitionTasks.value.filter((task) => statuses.includes(partitionTaskDisplayStatus(task))).length;
+
+function partitionTaskStats(tasks) {
+  const countByStatus = (statuses, options = {}) => tasks.filter((task) => {
+    if (options.excludeArchivedBatch && task.batch_status === 'archived') return false;
+    return statuses.includes(partitionTaskDisplayStatus(task));
+  }).length;
   return [
     { label: '排队中', value: countByStatus(['queued']), status: 'queued' },
     { label: '运行中', value: countByStatus(['running', 'retrying']), status: 'running' },
-    { label: '需处理', value: countByStatus(['failed', 'manual_required', 'cancel_requested']), status: 'manual_required' },
+    { label: '需处理', value: countByStatus(['failed', 'manual_required', 'cancel_requested'], { excludeArchivedBatch: true }), status: 'manual_required' },
     { label: '已完成', value: countByStatus(['succeeded', 'completed', 'archived']), status: 'succeeded' },
   ];
-});
+}
+
+const partitionTaskQueueStats = computed(() => partitionTaskStats(partitionTasks.value));
+const activePartitionTaskQueueStats = computed(() => partitionTaskStats(activePartitionTasks.value));
+const activePartitionTaskDrawerTitle = computed(() => `${dataLabelsByModule[activeModule.value] || '当前模块'}剖分任务队列`);
 
 function setBatchSelection(batchId, dataType) {
   if (dataType === 'carbon') {
@@ -260,9 +280,14 @@ function setBatchSelection(batchId, dataType) {
   }
 }
 
-function preferredBatchId(batches) {
-  if (!Array.isArray(batches) || !batches.length) return '';
-  return batches.find((batch) => !['succeeded', 'archived'].includes(batch.status))?.id || batches[0]?.id || '';
+function pruneBatchSelection(selectedIds, batches) {
+  const availableIds = new Set(batches.map((batch) => batch.id));
+  return selectedIds.filter((batchId) => availableIds.has(batchId));
+}
+
+function pruneExpandedBatchId(expandedBatchId, batches) {
+  if (!expandedBatchId) return '';
+  return batches.some((batch) => batch.id === expandedBatchId) ? expandedBatchId : '';
 }
 
 function partitionStatusText(status) {
@@ -297,6 +322,36 @@ function partitionStatusType(status) {
     completed: 'success',
   };
   return map[status] || 'info';
+}
+
+function partitionIngestStatus(result = lastPartitionResult.value) {
+  if (!result) return 'not_ready';
+  const dataType = result.data_type || activeModule.value;
+  if (dataType !== 'optical') {
+    return ['completed', 'succeeded'].includes(result.status) ? 'not_supported' : 'not_ready';
+  }
+  if (ingestResult.value?.ingest_status === 'ingested' || ingestResult.value?.status === 'succeeded') return 'ingested';
+  if (result.ingest_status === 'ingested' || result.ingest_status === 'failed' || result.ingest_status === 'previewed') return result.ingest_status;
+  if (ingestPreview.value) return 'previewed';
+  if (result.ingest_status) return result.ingest_status;
+  const qualityStatus = result.quality_status || result.quality_report?.status || '';
+  const reportId = result.quality_report_id || result.quality_report?.report_id || '';
+  if (['completed', 'succeeded'].includes(result.status) && reportId && !['FAIL', 'WARN'].includes(String(qualityStatus).toUpperCase())) {
+    return 'ready';
+  }
+  return 'not_ready';
+}
+
+function partitionIngestStatusText(status) {
+  const map = {
+    not_supported: '剖分完成，暂不支持入库',
+    not_ready: '未就绪',
+    ready: '待入库',
+    previewed: '已预入库校验',
+    ingested: '已入库',
+    failed: '入库失败',
+  };
+  return map[status] || status || '未就绪';
 }
 
 function partitionAttemptStatusText(status) {
@@ -346,11 +401,11 @@ function partitionBatchDetailSubtitle(batch) {
 }
 
 function partitionBatchCanCancel(batch) {
-  return ['queued', 'running', 'retrying', 'cancel_requested'].includes(batch?.status);
+  return partitionActiveStatuses.includes(batch?.status);
 }
 
 function partitionBatchCanArchive(batch) {
-  return ['failed', 'manual_required', 'cancelled'].includes(batch?.status);
+  return partitionArchiveableStatuses.includes(batch?.status);
 }
 
 function partitionBatchCanRun(batch) {
@@ -589,7 +644,7 @@ function selectManagedBatchByDetail(batch) {
 }
 
 function partitionTaskDisplayStatus(task) {
-  return task?.batch_status === 'archived' ? 'archived' : task?.status;
+  return task?.status;
 }
 
 function partitionTaskTitle(task) {
@@ -615,12 +670,23 @@ function canOpenPartitionTaskBatch(task) {
 }
 
 function partitionTaskBatchProxy(task) {
+  const batchStatus = task?.batch_status;
+  const taskStatus = task?.status;
+  const status = batchStatus === 'archived'
+    ? batchStatus
+    : partitionActiveStatuses.includes(batchStatus)
+      ? batchStatus
+    : partitionArchiveableStatuses.includes(batchStatus)
+      ? batchStatus
+      : partitionArchiveableStatuses.includes(taskStatus)
+        ? taskStatus
+        : batchStatus || taskStatus;
   return {
     id: task?.batch_id,
     batch_id: task?.batch_id,
     batch_name: task?.batch_name,
     data_type: task?.data_type,
-    status: task?.batch_status || task?.status,
+    status,
   };
 }
 
@@ -630,6 +696,49 @@ function partitionTaskCanArchiveBatch(task) {
 
 async function archivePartitionTaskBatch(task) {
   await archivePartitionBatch(partitionTaskBatchProxy(task));
+}
+
+function applyArchivedPartitionBatch(batchId, archivedBatch = null) {
+  const detailBatchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
+  if (detailBatchId === batchId) {
+    partitionBatchDetail.value = {
+      ...partitionBatchDetail.value,
+      ...(archivedBatch || {}),
+      id: batchId,
+      batch_id: batchId,
+      status: 'archived',
+    };
+  }
+  const result = lastPartitionResult.value;
+  if (result?.batch_id === batchId) {
+    lastPartitionResult.value = {
+      ...result,
+      batch_status: 'archived',
+    };
+    resultRows.value = formatRows(lastPartitionResult.value);
+  }
+}
+
+const partitionResultArchiveBatch = computed(() => {
+  const result = lastPartitionResult.value;
+  if (!result || resultLoading.value || result.status !== 'failed') return null;
+  if (result.batch_status === 'archived' || partitionActiveStatuses.includes(result.batch_status)) return null;
+  const request = lastPartitionRequest.value || {};
+  const payload = request.payload || {};
+  const batchId = result.batch_id || request.batchId || payload.batch_id;
+  if (!batchId) return null;
+  return {
+    id: batchId,
+    batch_id: batchId,
+    batch_name: result.batch_name || payload.batch_name || selectedDataName.value,
+    data_type: result.data_type || activeModule.value,
+    status: result.batch_status || result.status,
+  };
+});
+
+async function archiveLastPartitionResultBatch() {
+  if (!partitionResultArchiveBatch.value) return;
+  await archivePartitionBatch(partitionResultArchiveBatch.value);
 }
 
 async function openPartitionTaskBatch(task) {
@@ -658,17 +767,229 @@ async function loadPartitionBatchDetail(batchId) {
   };
 }
 
-async function loadPartitionTasks() {
+function partitionTaskQuery(params) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  });
+  return query.toString();
+}
+
+function applyPartitionTaskResponse(response, target) {
+  target.tasks.value = response.tasks || [];
+  target.total.value = Number(response.total ?? target.tasks.value.length);
+  target.page.value = Number(response.page || target.page.value);
+  target.pageSize.value = Number(response.page_size || target.pageSize.value);
+}
+
+async function loadPartitionTasks(page = partitionTaskPage.value) {
   partitionTasksLoading.value = true;
   try {
     const { partitionPrefix } = apiPrefixes();
-    const response = await requestGet(`${partitionPrefix}/tasks?limit=50`);
-    partitionTasks.value = response.tasks || [];
+    const query = partitionTaskQuery({
+      page,
+      page_size: partitionTaskPageSize.value,
+    });
+    const response = await requestGet(`${partitionPrefix}/tasks?${query}`);
+    applyPartitionTaskResponse(response, {
+      tasks: partitionTasks,
+      total: partitionTaskTotal,
+      page: partitionTaskPage,
+      pageSize: partitionTaskPageSize,
+    });
   } catch (error) {
     ElMessage.error(`剖分任务队列加载失败：${error.message}`);
   } finally {
     partitionTasksLoading.value = false;
   }
+}
+
+async function loadActivePartitionTasks(page = activePartitionTaskPage.value) {
+  if (!partitionModules.has(activeModule.value)) {
+    activePartitionTasks.value = [];
+    activePartitionTaskTotal.value = 0;
+    return;
+  }
+  partitionTasksLoading.value = true;
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    const query = partitionTaskQuery({
+      data_type: activeModule.value,
+      page,
+      page_size: activePartitionTaskPageSize.value,
+    });
+    const response = await requestGet(`${partitionPrefix}/tasks?${query}`);
+    applyPartitionTaskResponse(response, {
+      tasks: activePartitionTasks,
+      total: activePartitionTaskTotal,
+      page: activePartitionTaskPage,
+      pageSize: activePartitionTaskPageSize,
+    });
+  } catch (error) {
+    ElMessage.error(`剖分任务队列加载失败：${error.message}`);
+  } finally {
+    partitionTasksLoading.value = false;
+  }
+}
+
+function upsertPartitionTaskRow(row) {
+  if (!row?.task_id) return;
+  const cleanRow = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));
+  const replaceIn = (items) => {
+    const index = items.findIndex((item) => item.task_id === cleanRow.task_id);
+    if (index < 0) return [cleanRow, ...items];
+    const next = [...items];
+    next[index] = { ...next[index], ...cleanRow };
+    return next;
+  };
+  partitionTasks.value = replaceIn(partitionTasks.value).slice(0, partitionTaskPageSize.value);
+  if (!cleanRow.data_type || cleanRow.data_type === activeModule.value) {
+    activePartitionTasks.value = replaceIn(activePartitionTasks.value).slice(0, activePartitionTaskPageSize.value);
+  }
+}
+
+async function fetchPartitionTaskRow(taskId) {
+  const { partitionPrefix } = apiPrefixes();
+  const task = await requestGet(`${partitionPrefix}/tasks/${taskId}`);
+  const result = task.result || {};
+  const qualityReport = result.quality_report || {};
+  return {
+    task_id: task.task_id || taskId,
+    status: task.status,
+    data_type: task.data_type || result.data_type,
+    operation: task.operation,
+    batch_id: result.batch_id,
+    batch_name: result.batch_name,
+    batch_status: result.batch_status,
+    quality_status: result.quality_status || qualityReport.status,
+    quality_report_id: result.quality_report_id || qualityReport.report_id,
+    quality_failure_reason: result.quality_failure_reason,
+    ingest_status: result.ingest_status,
+    ingest_job_id: result.ingest_job_id,
+    ingest_error: result.ingest_error,
+    ingested_at: result.ingested_at,
+    error_message: task.error,
+    result,
+    result_summary: {
+      rows: result.rows ?? result.total_index_rows ?? result.metadata_rows,
+      quality_status: result.quality_status || qualityReport.status,
+      quality_report_id: result.quality_report_id || qualityReport.report_id,
+      run_dir: result.run_dir,
+      rows_path: result.rows_path || result.output_path,
+      execution_engine: result.execution_engine || result.partition_backend,
+    },
+  };
+}
+
+function applySyncedPartitionTaskRow(row) {
+  const result = lastPartitionResult.value;
+  if (!row?.task_id || !result || result.partition_task_id !== row.task_id) return;
+  upsertPartitionTaskRow(row);
+  const batchStatus = row.batch_status || result.batch_status;
+  const batchId = row.batch_id || result.batch_id;
+  const rowStatus = row.status || result.status;
+  const isArchiveableFailure = !partitionActiveStatuses.includes(batchStatus)
+    && (partitionArchiveableStatuses.includes(batchStatus) || rowStatus === 'failed');
+  if (isArchiveableFailure) {
+    const error = row.error_message || result.error || partitionTaskResultText(row);
+    lastPartitionResult.value = {
+      ...result,
+      status: 'failed',
+      batch_id: batchId,
+      batch_status: batchStatus,
+      error,
+    };
+    resultRows.value = formatRows(lastPartitionResult.value);
+    partitionStages.value = partitionStages.value.map((item) => (
+      item.status === 'running' || item.status === 'pending' ? { ...item, status: 'failed' } : item
+    ));
+    setPartitionStage('persist', 'failed', `执行失败：${error}`);
+    stopPartitionTaskSync();
+    loadPartitionBatches();
+    return;
+  }
+  if (rowStatus === 'completed' || rowStatus === 'succeeded') {
+    const completedResult = row.result || row.result_summary || {};
+    lastPartitionResult.value = {
+      ...(result || {}),
+      ...completedResult,
+      status: 'completed',
+      batch_id: batchId,
+      batch_status: batchStatus,
+      ingest_status: completedResult.ingest_status || row.ingest_status || result.ingest_status,
+      ingest_job_id: completedResult.ingest_job_id || row.ingest_job_id || result.ingest_job_id,
+      ingested_at: completedResult.ingested_at || row.ingested_at || result.ingested_at,
+      ingest_error: completedResult.ingest_error || row.ingest_error || result.ingest_error,
+    };
+    resultRows.value = formatRows(lastPartitionResult.value);
+    stopPartitionTaskSync();
+    loadPartitionBatches();
+    return;
+  }
+  if (rowStatus === 'cancel_requested' || rowStatus === 'cancelled') {
+    lastPartitionResult.value = {
+      ...result,
+      status: rowStatus,
+      batch_id: batchId,
+      batch_status: batchStatus,
+      error: row.error_message || '剖分任务已取消',
+    };
+    resultRows.value = formatRows(lastPartitionResult.value);
+    stopPartitionTaskSync();
+    loadPartitionBatches();
+  }
+}
+
+async function syncSubmittedPartitionTask(taskId) {
+  if (partitionTaskSyncInFlight) return;
+  const result = lastPartitionResult.value;
+  if (!result || result.partition_task_id !== taskId) {
+    stopPartitionTaskSync();
+    return;
+  }
+  partitionTaskSyncInFlight = true;
+  try {
+    const row = await fetchPartitionTaskRow(taskId);
+    if (row) {
+      applySyncedPartitionTaskRow(row);
+    }
+  } catch {
+    // Keep the next interval alive; the task list can be temporarily unavailable.
+  } finally {
+    partitionTaskSyncInFlight = false;
+  }
+}
+
+function startPartitionTaskSync(taskId) {
+  stopPartitionTaskSync();
+  if (!taskId) return;
+  syncSubmittedPartitionTask(taskId);
+  partitionTaskSyncTimer = window.setInterval(() => {
+    syncSubmittedPartitionTask(taskId);
+  }, partitionTaskPollIntervalMs);
+}
+
+function stopPartitionTaskSync() {
+  if (partitionTaskSyncTimer) {
+    window.clearInterval(partitionTaskSyncTimer);
+    partitionTaskSyncTimer = null;
+  }
+  partitionTaskSyncInFlight = false;
+}
+
+function changePartitionTaskPageSize(size) {
+  partitionTaskPageSize.value = size;
+  loadPartitionTasks(1);
+}
+
+function changeActivePartitionTaskPageSize(size) {
+  activePartitionTaskPageSize.value = size;
+  loadActivePartitionTasks(1);
+}
+
+async function openActivePartitionTaskDrawer() {
+  partitionTaskDrawerVisible.value = true;
+  await loadActivePartitionTasks(1);
 }
 
 async function openPartitionBatchDetail(batch) {
@@ -716,6 +1037,7 @@ async function runPartitionBatchFromDetail() {
   const batch = partitionBatchDetail.value;
   const batchId = batch?.id || batch?.batch_id;
   if (!batchId || !partitionBatchCanRun(batch)) return;
+  stopPartitionTaskSync();
   const operation = partitionBatchExecutionOperation(batch);
   const configOverride = partitionBatchConfigOverride(batch);
   partitionBatchDetailAction.value = operation;
@@ -791,6 +1113,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
     ElMessage.warning('请先选择失败或人工确认状态的资产');
     return;
   }
+  stopPartitionTaskSync();
   partitionBatchDetailAction.value = 'assetRetry';
   resultLoading.value = true;
   resultRows.value = [];
@@ -896,9 +1219,9 @@ async function archivePartitionBatch(batch) {
   if (!batchId || !partitionBatchCanArchive(batch)) return;
   try {
     await ElMessageBox.confirm(
-      '归档后该批次会从待处理队列移除，不会继续提交重试或执行；历史详情仍保留原始错误信息。',
-      '归档批次',
-      { confirmButtonText: '归档完成', cancelButtonText: '返回', type: 'warning' },
+      '该批次会归档并从待处理队列移除，不会继续提交重试或执行；历史详情仍保留原始错误信息。',
+      '不再处理批次',
+      { confirmButtonText: '确认不再处理', cancelButtonText: '返回', type: 'warning' },
     );
   } catch {
     return;
@@ -907,10 +1230,16 @@ async function archivePartitionBatch(batch) {
   partitionBatchDetailAction.value = actionKey;
   try {
     const { partitionPrefix } = apiPrefixes();
-    await requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {});
-    ElMessage.success('批次已归档完成');
-    await loadPartitionBatches();
-    await loadPartitionTasks();
+    const archivedBatch = await requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {});
+    applyArchivedPartitionBatch(batchId, archivedBatch);
+    ElMessage.success('批次已归档，不再处理');
+    await Promise.all([
+      loadPartitionBatches(),
+      loadPartitionTasks(partitionTaskPage.value),
+      partitionTaskDrawerVisible.value && partitionModules.has(activeModule.value)
+        ? loadActivePartitionTasks(activePartitionTaskPage.value)
+        : Promise.resolve(),
+    ]);
     const detailBatchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
     if (partitionBatchDetailVisible.value && detailBatchId === batchId) {
       await refreshPartitionBatchDetail();
@@ -1401,10 +1730,13 @@ const partitionMetricRows = computed(() => {
     { label: '总耗时(s)', value: result.total_elapsed_sec ?? '-' },
     { label: '输出路径', value: result.output_path || result.rows_path || '-' },
     { label: '质检状态', value: result.quality_status || result.quality_report?.status || '-' },
-    { label: '正式入库', value: result.ingest_enabled === false ? '否' : '待确认' },
+    { label: '入库状态', value: partitionIngestStatusText(partitionIngestStatus(result)) },
   ];
   if (result.error) {
     rows.splice(1, 0, { label: '失败原因', value: result.error });
+  }
+  if (result.batch_status) {
+    rows.splice(1, 0, { label: '批次状态', value: partitionStatusText(result.batch_status) });
   }
   return rows;
 });
@@ -1529,9 +1861,9 @@ const partitionFailureMessage = computed(() => (
   lastPartitionResult.value?.status === 'failed' ? lastPartitionResult.value.error || '剖分失败' : ''
 ));
 
-const opticalIngestReady = computed(() => activeModule.value === 'optical' && Boolean(
-  lastPartitionResult.value?.quality_report_id || lastPartitionResult.value?.quality_report?.report_id || lastPartitionResult.value?.run_dir,
-));
+const opticalIngestStatus = computed(() => partitionIngestStatus(lastPartitionResult.value));
+const opticalIngestReady = computed(() => activeModule.value === 'optical' && ['ready', 'previewed', 'failed'].includes(opticalIngestStatus.value));
+const opticalIngestConfirmReady = computed(() => activeModule.value === 'optical' && ['previewed', 'failed'].includes(opticalIngestStatus.value));
 
 const ingestPreviewRows = computed(() => {
   if (!ingestPreview.value) return [];
@@ -1551,7 +1883,7 @@ const ingestResultRows = computed(() => {
   if (!ingestResult.value) return [];
   const result = ingestResult.value;
   return [
-    { label: '入库状态', value: result.status || '-' },
+    { label: '入库状态', value: partitionIngestStatusText(result.ingest_status || result.status) },
     { label: '任务 ID', value: result.job_id || '-' },
     { label: '资产版本', value: result.asset_version || '-' },
     { label: '立方体版本', value: result.cube_version || '-' },
@@ -1809,34 +2141,14 @@ async function loadPartitionBatches() {
     managedCarbonBatches.value = batches.filter((batch) => batch.data_type === 'carbon').map(normalizeManagedBatch);
     managedRadarBatches.value = batches.filter((batch) => batch.data_type === 'radar').map(normalizeManagedBatch);
     managedProductBatches.value = batches.filter((batch) => batch.data_type === 'product').map(normalizeManagedBatch);
-    if (managedOpticalBatches.value.length && !managedOpticalBatches.value.some((batch) => selectedOpticalBatchIds.value.includes(batch.id))) {
-      const batchId = preferredBatchId(managedOpticalBatches.value);
-      if (batchId) {
-        selectedOpticalBatchIds.value = [batchId];
-        expandedOpticalBatchId.value = batchId;
-      }
-    }
-    if (managedCarbonBatches.value.length && !managedCarbonBatches.value.some((batch) => selectedCarbonBatchIds.value.includes(batch.id))) {
-      const batchId = preferredBatchId(managedCarbonBatches.value);
-      if (batchId) {
-        selectedCarbonBatchIds.value = [batchId];
-        expandedCarbonBatchId.value = batchId;
-      }
-    }
-    if (managedRadarBatches.value.length && !managedRadarBatches.value.some((batch) => selectedRadarBatchIds.value.includes(batch.id))) {
-      const batchId = preferredBatchId(managedRadarBatches.value);
-      if (batchId) {
-        selectedRadarBatchIds.value = [batchId];
-        expandedRadarBatchId.value = batchId;
-      }
-    }
-    if (managedProductBatches.value.length && !managedProductBatches.value.some((batch) => selectedProductBatchIds.value.includes(batch.id))) {
-      const batchId = preferredBatchId(managedProductBatches.value);
-      if (batchId) {
-        selectedProductBatchIds.value = [batchId];
-        expandedProductBatchId.value = batchId;
-      }
-    }
+    selectedOpticalBatchIds.value = pruneBatchSelection(selectedOpticalBatchIds.value, managedOpticalBatches.value);
+    expandedOpticalBatchId.value = pruneExpandedBatchId(expandedOpticalBatchId.value, managedOpticalBatches.value);
+    selectedCarbonBatchIds.value = pruneBatchSelection(selectedCarbonBatchIds.value, managedCarbonBatches.value);
+    expandedCarbonBatchId.value = pruneExpandedBatchId(expandedCarbonBatchId.value, managedCarbonBatches.value);
+    selectedRadarBatchIds.value = pruneBatchSelection(selectedRadarBatchIds.value, managedRadarBatches.value);
+    expandedRadarBatchId.value = pruneExpandedBatchId(expandedRadarBatchId.value, managedRadarBatches.value);
+    selectedProductBatchIds.value = pruneBatchSelection(selectedProductBatchIds.value, managedProductBatches.value);
+    expandedProductBatchId.value = pruneExpandedBatchId(expandedProductBatchId.value, managedProductBatches.value);
     applyDefaultGridLevels();
   } catch (error) {
     ElMessage.error(`剖分批次加载失败：${error.message}`);
@@ -1989,6 +2301,7 @@ function buildPartitionFailureResult(error, request = {}) {
     endpoint: apiPath,
     grid_type: payload.grid_type || selectedMapGridType.value || '-',
     grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
+    batch_id: request.batchId || payload.batch_id || '',
     batch_name: selectedDataName.value,
     selected_count:
       activeModule.value === 'optical'
@@ -2001,7 +2314,7 @@ function buildPartitionFailureResult(error, request = {}) {
     error: errorText(error),
     started_at: partitionStartedAt.value || '',
     elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
-    ingest_enabled: false,
+    ingest_status: activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
   };
 }
 
@@ -2014,7 +2327,7 @@ function buildPartitionCancelledResult(task, taskId) {
     error: task.error || (task.status === 'cancel_requested' ? '剖分任务正在取消' : '剖分任务已取消'),
     started_at: partitionStartedAt.value || '',
     elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
-    ingest_enabled: false,
+    ingest_status: activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
   };
 }
 
@@ -2077,6 +2390,39 @@ async function requestPartitionOperation(partitionPrefix, endpoint, operation, p
   } finally {
     await loadPartitionTasks();
   }
+}
+
+async function submitPartitionOperation(partitionPrefix, endpoint, operation, payload) {
+  const apiPath = `${partitionPrefix}/${endpoint}/tasks/${operation}`;
+  const submitted = await requestJson(apiPath, payload);
+  const taskId = submitted.task_id;
+  if (!taskId) {
+    throw new Error('剖分任务提交后未返回 task_id');
+  }
+  await loadPartitionTasks(partitionTaskPage.value);
+  await loadActivePartitionTasks(1);
+  await loadPartitionBatches();
+  return { ...submitted, task_id: taskId, api_path: apiPath };
+}
+
+function buildPartitionSubmittedResult(submitted, request, selectedCount) {
+  const payload = request.payload || {};
+  return {
+    status: submitted.status || 'queued',
+    mode: 'partition_task_submitted',
+    data_type: submitted.data_type || activeModule.value,
+    operation: submitted.operation || request.operation || 'run',
+    endpoint: request.apiPath,
+    partition_task_id: submitted.task_id,
+    grid_type: payload.grid_type || selectedMapGridType.value || '-',
+    grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
+    batch_id: payload.batch_id || '',
+    batch_name: payload.batch_name || selectedDataName.value,
+    selected_count: selectedCount,
+    submitted_at: new Date().toISOString(),
+    ingest_status: submitted.data_type === 'optical' || activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
+    message: '剖分任务已提交，后台将连接 Ray 集群异步执行。',
+  };
 }
 
 async function requestRetryOperation(partitionPrefix, retryRequest, retryPayload) {
@@ -2519,6 +2865,7 @@ async function runDemo() {
     await refreshQualityWorkspace();
     return;
   }
+  stopPartitionTaskSync();
   resultLoading.value = true;
   resultRows.value = [];
   lastPartitionResult.value = null;
@@ -2564,29 +2911,22 @@ async function runDemo() {
     await Promise.resolve();
     setPartitionStage('queue', 'done', '数据队列已提交到后端。');
     setPartitionStage('partition', 'running', `调用 /v1/partition/${endpoint}/tasks/${operation} 提交后台剖分任务。`);
-    const result = await requestPartitionOperation(partitionPrefix, endpoint, operation, payload);
-    if (isPartitionCancelledResult(result)) {
-      applyPartitionCancelledResult(result, '剖分任务已取消');
-    } else {
-      setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-      setPartitionStage('persist', 'running', '正在整理结果并保存质检报告。');
-      lastPartitionResult.value = result;
-      resultRows.value = formatRows(result);
-      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
-      if (result.quality_report) {
-        qualityDataType.value = qualityDataTypeForEndpoint(endpoint);
-        qualityReport.value = result.quality_report;
-        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-      }
-      ElMessage.success('剖分任务完成');
-    }
-	  } catch (error) {
-	    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
-	    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
-	    lastPartitionResult.value = failure;
-	    resultRows.value = formatRows(failure);
-	    setPartitionStage('persist', 'failed', `执行失败：${failure.error}`);
-	  } finally {
+    const submitted = await submitPartitionOperation(partitionPrefix, endpoint, operation, payload);
+    const result = buildPartitionSubmittedResult(submitted, lastPartitionRequest.value, selectedCount);
+    setPartitionStage('partition', 'done', `后台任务 ${submitted.task_id} 已提交，Ray 集群将异步执行。`);
+    setPartitionStage('persist', 'pending', '等待后台任务完成后生成质检报告。');
+    lastPartitionResult.value = result;
+    resultRows.value = formatRows(result);
+    startPartitionTaskSync(submitted.task_id);
+    partitionTaskDrawerVisible.value = true;
+    ElMessage.success('剖分任务已提交');
+  } catch (error) {
+    partitionStages.value = partitionStages.value.map((item) => (item.status === 'running' ? { ...item, status: 'failed' } : item));
+    const failure = buildPartitionFailureResult(error, lastPartitionRequest.value || {});
+    lastPartitionResult.value = failure;
+    resultRows.value = formatRows(failure);
+    setPartitionStage('persist', 'failed', `提交失败：${failure.error}`);
+  } finally {
     stopPartitionTimer();
     resultLoading.value = false;
   }
@@ -2596,6 +2936,9 @@ function currentIngestPayload() {
   const result = lastPartitionResult.value || {};
   const reportId = result.quality_report_id || result.quality_report?.report_id || '';
   const payload = { ...ingestDefaults.value };
+  if (result.batch_id) {
+    payload.batch_id = result.batch_id;
+  }
   if (reportId) {
     payload.report_id = reportId;
   } else if (result.run_dir) {
@@ -2633,6 +2976,14 @@ async function previewOpticalIngest() {
   try {
     const { ingestPrefix } = apiPrefixes();
     ingestPreview.value = await requestJson(`${ingestPrefix}/optical/preview`, currentIngestPayload());
+    if (lastPartitionResult.value) {
+      lastPartitionResult.value = {
+        ...lastPartitionResult.value,
+        ingest_status: ingestPreview.value.ingest_status || 'previewed',
+        batch_id: ingestPreview.value.batch_id || lastPartitionResult.value.batch_id,
+      };
+      resultRows.value = formatRows(lastPartitionResult.value);
+    }
     ElMessage.success('预入库校验完成');
   } catch (error) {
     ElMessage.error(error.message);
@@ -2642,8 +2993,8 @@ async function previewOpticalIngest() {
 }
 
 async function confirmOpticalIngest() {
-  if (!opticalIngestReady.value) {
-    ElMessage.warning('请先完成一次光学剖分运行');
+  if (!opticalIngestConfirmReady.value) {
+    ElMessage.warning('请先完成预入库校验');
     return;
   }
   try {
@@ -2660,6 +3011,17 @@ async function confirmOpticalIngest() {
   try {
     const { ingestPrefix } = apiPrefixes();
     ingestResult.value = await requestJson(`${ingestPrefix}/optical/confirm`, currentIngestPayload());
+    if (lastPartitionResult.value) {
+      lastPartitionResult.value = {
+        ...lastPartitionResult.value,
+        ingest_status: ingestResult.value.ingest_status || 'ingested',
+        ingest_job_id: ingestResult.value.job_id || lastPartitionResult.value.ingest_job_id,
+        ingested_at: ingestResult.value.ingested_at || lastPartitionResult.value.ingested_at,
+        ingest_error: '',
+        batch_id: ingestResult.value.batch_id || lastPartitionResult.value.batch_id,
+      };
+      resultRows.value = formatRows(lastPartitionResult.value);
+    }
     ElMessage.success('生产版本入库完成');
     if (!ingestPreview.value) {
       ingestPreview.value = {
@@ -2675,9 +3037,18 @@ async function confirmOpticalIngest() {
       };
     }
   } catch (error) {
+    if (lastPartitionResult.value) {
+      lastPartitionResult.value = {
+        ...lastPartitionResult.value,
+        ingest_status: 'failed',
+        ingest_error: error.message,
+      };
+      resultRows.value = formatRows(lastPartitionResult.value);
+    }
     ElMessage.error(error.message);
   } finally {
     ingestConfirmLoading.value = false;
+    loadPartitionBatches();
   }
 }
 
@@ -2686,6 +3057,7 @@ async function retryLastPartitionTask() {
     ElMessage.warning('暂无可重试任务，请先执行一次剖分');
     return;
   }
+  stopPartitionTaskSync();
   resultLoading.value = true;
   resultRows.value = [];
   const retryRequest = lastPartitionRequest.value;
@@ -2747,6 +3119,9 @@ async function retryLastPartitionTask() {
 watch(activeModule, (moduleName) => {
   if (moduleName === 'quality' && !qualityReport.value && !qualityLoading.value) {
     refreshQualityWorkspace();
+  }
+  if (partitionTaskDrawerVisible.value && partitionModules.has(moduleName)) {
+    loadActivePartitionTasks(1);
   }
 });
 
@@ -2812,6 +3187,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPartitionTimer();
+  stopPartitionTaskSync();
 });
 </script>
 
@@ -2826,7 +3202,7 @@ onUnmounted(() => {
           <button class="module-tab" :class="{ active: activeModule === 'product' }" @click="activeModule = 'product'">信息产品</button>
           <button class="module-tab" :class="{ active: activeModule === 'quality' }" @click="activeModule = 'quality'">自动化质检</button>
           <button class="module-tab" :class="{ active: activeModule === 'config' }" @click="activeModule = 'config'">配置管理</button>
-          <button class="module-tab" :class="{ active: activeModule === 'tasks' }" @click="activeModule = 'tasks'; loadPartitionTasks()">剖分任务队列</button>
+          <button class="module-tab" :class="{ active: activeModule === 'tasks' }" @click="activeModule = 'tasks'; loadPartitionTasks(1)">剖分任务队列</button>
         </div>
       </div>
     </section>
@@ -2839,9 +3215,9 @@ onUnmounted(() => {
             <div class="partition-task-page-header">
               <div>
                 <h3>剖分任务队列</h3>
-                <span>最近 {{ partitionTasks.length }} 个任务</span>
+                <span>共 {{ partitionTaskTotal }} 个任务</span>
               </div>
-              <el-button :icon="Refresh" :loading="partitionTasksLoading" @click="loadPartitionTasks">刷新</el-button>
+              <el-button :icon="Refresh" :loading="partitionTasksLoading" @click="loadPartitionTasks(partitionTaskPage)">刷新</el-button>
             </div>
             <div class="partition-task-stats">
               <div v-for="item in partitionTaskQueueStats" :key="item.label" class="partition-task-stat" :class="item.status">
@@ -2893,11 +3269,21 @@ onUnmounted(() => {
                       :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
                       @click="archivePartitionTaskBatch(row)"
                     >
-                      归档完成
+                      不再处理
                     </el-button>
                   </template>
                 </el-table-column>
               </el-table>
+              <el-pagination
+                v-model:current-page="partitionTaskPage"
+                v-model:page-size="partitionTaskPageSize"
+                :total="partitionTaskTotal"
+                :page-sizes="[10, 20, 50, 100]"
+                layout="total, sizes, prev, pager, next"
+                class="partition-task-pagination"
+                @current-change="loadPartitionTasks"
+                @size-change="changePartitionTaskPageSize"
+              />
             </div>
           </div>
           <div v-else class="workspace">
@@ -2931,7 +3317,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="opticalGridType" class="legacy-control">
-                      <el-option label="S2 格网" value="s2" />
+                      <el-option label="四边形格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
@@ -2977,7 +3363,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
-                      <el-option label="S2 格网" value="s2" />
+                      <el-option label="四边形格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
@@ -3004,7 +3390,7 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="productGridType" class="legacy-control">
-                      <el-option label="S2 格网" value="s2" />
+                      <el-option label="四边形格网" value="s2" />
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
@@ -3068,22 +3454,22 @@ onUnmounted(() => {
                 <div class="form-group action-buttons">
                   <el-button>重置</el-button>
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
-                    {{ activeModule === 'quality' ? '刷新结果' : '开始剖分' }}
+                    {{ activeModule === 'quality' ? '刷新结果' : '提交剖分任务' }}
                   </el-button>
                   <el-button
-                    v-if="activeModule === 'optical'"
-                    :loading="ingestLoading"
-                    :disabled="!opticalIngestReady || resultLoading"
-                    @click="previewOpticalIngest"
-                  >
+	                    v-if="activeModule === 'optical'"
+	                    :loading="ingestLoading"
+	                    :disabled="!opticalIngestReady || opticalIngestStatus === 'ingested' || resultLoading"
+	                    @click="previewOpticalIngest"
+	                  >
                     预入库校验
                   </el-button>
                   <el-button
-                    v-if="activeModule === 'optical'"
-                    type="success"
-                    :loading="ingestConfirmLoading"
-                    :disabled="!opticalIngestReady || !ingestPreview || resultLoading || ingestLoading"
-                    @click="confirmOpticalIngest"
+	                    v-if="activeModule === 'optical'"
+	                    type="success"
+	                    :loading="ingestConfirmLoading"
+	                    :disabled="!opticalIngestConfirmReady || resultLoading || ingestLoading"
+	                    @click="confirmOpticalIngest"
                   >
                     确认入库
                   </el-button>
@@ -3209,7 +3595,7 @@ onUnmounted(() => {
                             :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
                             @click="archivePartitionBatch(batch)"
                           >
-                            归档完成
+                            不再处理
                           </el-button>
                         </div>
                       </div>
@@ -3221,12 +3607,31 @@ onUnmounted(() => {
             </div>
 
             <div class="workspace-result">
-              <div class="result-panel">
-                <div class="result-panel-header">
-                  <h3>{{ activeModule === 'quality' ? '质检结果' : '执行结果' }}</h3>
-                  <el-dropdown
-                    v-if="activeModule === 'quality'"
-                    trigger="click"
+                <div class="result-panel">
+                  <div class="result-panel-header">
+                    <h3>{{ activeModule === 'quality' ? '质检结果' : '执行结果' }}</h3>
+                    <el-button
+                      v-if="activeModule !== 'quality'"
+                      size="small"
+                      :icon="Document"
+                      :loading="partitionTasksLoading"
+                      @click="openActivePartitionTaskDrawer"
+                    >
+                      任务队列
+                    </el-button>
+                    <el-button
+                      v-if="partitionResultArchiveBatch"
+                      size="small"
+                      type="info"
+                      :icon="FolderChecked"
+                      :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionResultArchiveBatch)"
+                      @click="archiveLastPartitionResultBatch"
+                    >
+                      不再处理
+                    </el-button>
+                    <el-dropdown
+                      v-if="activeModule === 'quality'"
+                      trigger="click"
                     @command="exportQualityReport"
                   >
                     <el-button
@@ -3355,7 +3760,7 @@ onUnmounted(() => {
                     </div>
                   </template>
                   <div v-else class="empty-state">
-                    <p>{{ activeModule === 'quality' ? '尚未执行质检' : '配置参数并执行剖分' }}</p>
+                    <p>{{ activeModule === 'quality' ? '尚未执行质检' : '配置参数并提交剖分任务' }}</p>
                   </div>
                 </div>
               </div>
@@ -3394,7 +3799,7 @@ onUnmounted(() => {
                   :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
                   @click="archivePartitionBatch(batch)"
                 >
-                  归档完成
+                  不再处理
                 </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleOpticalBatchExpand(batch.id)">
                   {{ expandedOpticalBatchId === batch.id ? '收起' : '展开' }}
@@ -3458,7 +3863,7 @@ onUnmounted(() => {
                   :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
                   @click="archivePartitionBatch(batch)"
                 >
-                  归档完成
+                  不再处理
                 </el-button>
                 <button type="button" class="batch-expand-btn" @click="toggleCarbonBatchExpand(batch.id)">
                   {{ expandedCarbonBatchId === batch.id ? '收起' : '展开' }}
@@ -3523,7 +3928,7 @@ onUnmounted(() => {
                     :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
                     @click="archivePartitionBatch(batch)"
                   >
-                    归档完成
+                    不再处理
                   </el-button>
                   <button type="button" class="batch-expand-btn" @click="toggleRadarBatchExpand(batch.id)">
                     {{ expandedRadarBatchId === batch.id ? '收起' : '展开' }}
@@ -3589,7 +3994,7 @@ onUnmounted(() => {
                     :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
                     @click="archivePartitionBatch(batch)"
                   >
-                    归档完成
+                    不再处理
                   </el-button>
                   <button type="button" class="batch-expand-btn" @click="toggleProductBatchExpand(batch.id)">
                     {{ expandedProductBatchId === batch.id ? '收起' : '展开' }}
@@ -3630,6 +4035,85 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+      </div>
+    </el-drawer>
+
+    <el-drawer v-model="partitionTaskDrawerVisible" :title="activePartitionTaskDrawerTitle" size="860px" direction="rtl">
+      <div class="partition-task-page-header">
+        <div>
+          <h3>{{ activePartitionTaskDrawerTitle }}</h3>
+          <span>共 {{ activePartitionTaskTotal }} 个任务</span>
+        </div>
+        <el-button :icon="Refresh" :loading="partitionTasksLoading" @click="loadActivePartitionTasks(activePartitionTaskPage)">刷新</el-button>
+      </div>
+      <div class="partition-task-stats partition-task-drawer-stats">
+        <div v-for="item in activePartitionTaskQueueStats" :key="item.label" class="partition-task-stat" :class="item.status">
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </div>
+      </div>
+      <div class="partition-task-table-panel">
+        <el-table
+          v-loading="partitionTasksLoading"
+          :data="activePartitionTasks"
+          class="drawer-table partition-task-table"
+          row-key="task_id"
+          empty-text="当前类别暂无剖分任务"
+        >
+          <el-table-column label="状态" width="96">
+            <template #default="{ row }">
+              <el-tag size="small" :type="partitionStatusType(partitionTaskDisplayStatus(row))">{{ partitionStatusText(partitionTaskDisplayStatus(row)) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="任务" min-width="220">
+            <template #default="{ row }">
+              <strong>{{ row.task_id }}</strong>
+              <div class="partition-asset-subtitle">{{ partitionTaskTitle(row) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="110">
+            <template #default="{ row }">{{ partitionOperationText(row.operation) }}</template>
+          </el-table-column>
+          <el-table-column label="批次" min-width="170">
+            <template #default="{ row }">{{ row.batch_id || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="资产" width="72">
+            <template #default="{ row }">{{ row.asset_count ?? 0 }}</template>
+          </el-table-column>
+          <el-table-column label="时间" min-width="170">
+            <template #default="{ row }">{{ partitionTaskTimeText(row) }}</template>
+          </el-table-column>
+          <el-table-column label="结果" min-width="170">
+            <template #default="{ row }">
+              <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+              <el-button
+                v-if="partitionTaskCanArchiveBatch(row)"
+                size="small"
+                type="info"
+                :icon="FolderChecked"
+                :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
+                @click="archivePartitionTaskBatch(row)"
+              >
+                不再处理
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination
+          v-model:current-page="activePartitionTaskPage"
+          v-model:page-size="activePartitionTaskPageSize"
+          :total="activePartitionTaskTotal"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          class="partition-task-pagination"
+          @current-change="loadActivePartitionTasks"
+          @size-change="changeActivePartitionTaskPageSize"
+        />
       </div>
     </el-drawer>
 
@@ -3758,7 +4242,7 @@ onUnmounted(() => {
               :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionBatchDetail)"
               @click="archivePartitionBatch(partitionBatchDetail)"
             >
-              归档完成
+              不再处理
             </el-button>
           </div>
         </div>

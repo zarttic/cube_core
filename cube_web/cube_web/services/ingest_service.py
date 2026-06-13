@@ -10,6 +10,7 @@ from cube_split import runtime_config
 
 from cube_web.services import quality_service
 from cube_web.services.config_store import optical_ingest_defaults
+from cube_web.services.partition_job_store import get_partition_job_store
 from cube_web.services.quality_report_store import get_quality_report_store
 
 
@@ -34,6 +35,7 @@ def _ray_ingest_job():
 def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
     payload = _payload_with_defaults(payload, optical_ingest_defaults())
     run_dir, quality_report = _resolve_run(payload)
+    batch = _resolve_ingest_batch(payload, quality_report)
     versions = _resolve_versions(payload)
     rows_path = run_dir / "index_rows.jsonl"
     ray_ingest_job = _ray_ingest_job()
@@ -55,9 +57,13 @@ def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         asset_uri_map=asset_uri_map,
     )
     conflicts = _existing_conflicts(raw_records, cube_records)
+    if batch is not None:
+        batch = get_partition_job_store().update_ingest_status(str(batch["batch_id"]), "previewed") or batch
     return {
         "status": "ready",
         "mode": "pre_ingest_preview",
+        "ingest_status": "previewed",
+        "batch_id": None if batch is None else batch.get("batch_id"),
         "run_dir": str(run_dir),
         "report_id": quality_report.get("report_id"),
         "quality_status": quality_report.get("status", "UNKNOWN"),
@@ -83,6 +89,7 @@ def preview_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
 def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
     payload = _payload_with_defaults(payload, optical_ingest_defaults())
     run_dir, quality_report = _resolve_run(payload)
+    batch = _resolve_ingest_batch(payload, quality_report)
     quality_status = str(quality_report.get("status", "UNKNOWN"))
     if quality_status == "FAIL" and not bool(payload.get("allow_failed_quality", False)):
         raise ValueError("Quality status is FAIL; set allow_failed_quality=true to ingest anyway")
@@ -111,11 +118,26 @@ def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         cog_output_root=str(Path("/tmp") / "cube_web_ingest_demo" / "cog"),
         cog_materialize_mode="symlink",
     )
-    stats = _ray_ingest_job().run_ingest(args)
+    try:
+        stats = _ray_ingest_job().run_ingest(args)
+    except Exception as exc:
+        if batch is not None:
+            get_partition_job_store().update_ingest_status(str(batch["batch_id"]), "failed", error=str(exc))
+        raise
+    if batch is not None:
+        batch = get_partition_job_store().update_ingest_status(
+            str(batch["batch_id"]),
+            "ingested",
+            job_id=job_id,
+            ingested=True,
+        ) or batch
     return {
         "status": "succeeded",
         "mode": "confirmed_ingest",
+        "ingest_status": "ingested",
         "job_id": job_id,
+        "batch_id": None if batch is None else batch.get("batch_id"),
+        "ingested_at": None if batch is None else batch.get("ingested_at"),
         "report_id": quality_report.get("report_id"),
         "quality_status": quality_status,
         "asset_version": versions["asset_version"],
@@ -144,6 +166,17 @@ def _resolve_run(payload: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     if str(report.get("run_dir") or "") != str(run_dir):
         report = {"run_dir": str(run_dir), "status": "UNKNOWN"}
     return run_dir, report
+
+
+def _resolve_ingest_batch(payload: dict[str, Any], quality_report: dict[str, Any]) -> dict[str, Any] | None:
+    batch_id = str(payload.get("batch_id") or "").strip()
+    store = get_partition_job_store()
+    if batch_id:
+        return store.get_batch(batch_id)
+    report_id = str(payload.get("report_id") or quality_report.get("report_id") or "").strip()
+    if report_id:
+        return store.get_batch_by_quality_report_id("optical", report_id)
+    return None
 
 
 def _resolve_versions(payload: dict[str, Any]) -> dict[str, str]:

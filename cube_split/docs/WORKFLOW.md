@@ -308,6 +308,8 @@ Web 批处理会把剖分结果中的 `quality_status`、`quality_report_id`、`
 - queued 任务取消后，attempt、batch 和目标资产进入 `cancelled`。
 - running 任务先进入 `cancel_requested`；runner 检查取消信号后停止，最终标记为 `cancelled`。
 - 已生成的运行目录和外部存储对象不由取消接口自动删除。
+- `failed`、`manual_required` 或 `cancelled` 批次可调用 `/v1/partition/batches/{batch_id}/archive` 归档为
+  `archived`，表示不再继续处理；归档后批次从待处理列表移除，attempt 历史和错误信息保留。
 
 ## 9. AOI 读取
 

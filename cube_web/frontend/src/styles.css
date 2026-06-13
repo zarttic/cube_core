@@ -3628,6 +3628,10 @@ section {
     gap: 12px;
 }
 
+.partition-task-drawer-stats {
+    margin: 14px 0;
+}
+
 .partition-task-stat {
     padding: 14px 16px;
     border: 1px solid var(--border);
@@ -3665,6 +3669,11 @@ section {
 .partition-task-table-panel {
     padding: 12px;
     overflow: hidden;
+}
+
+.partition-task-pagination {
+    margin-top: 14px;
+    justify-content: flex-end;
 }
 
 .partition-task-table strong {

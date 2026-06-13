@@ -100,6 +100,7 @@ npm run build
 - `POST /v1/partition/batches/{batch_id}/run`
 - `POST /v1/partition/batches/{batch_id}/retry`
 - `POST /v1/partition/batches/{batch_id}/cancel`
+- `POST /v1/partition/batches/{batch_id}/archive`
 - `POST /v1/partition/assets/retry`
 
 `data_type` 当前支持：

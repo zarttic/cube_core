@@ -85,9 +85,22 @@ class PartitionWorkflowService:
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        return self.store.list_tasks(status=status, data_type=data_type, keyword=keyword, limit=limit)
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        offset = (page - 1) * page_size
+        return {
+            "tasks": self.store.list_tasks(
+                status=status,
+                data_type=data_type,
+                keyword=keyword,
+                limit=page_size,
+                offset=offset,
+            ),
+            "total": self.store.count_tasks(status=status, data_type=data_type, keyword=keyword),
+            "page": page,
+            "page_size": page_size,
+        }
 
     def get_task(self, task_id: str) -> PartitionTask:
         attempt = self.store.get_attempt(task_id)
@@ -414,7 +427,24 @@ def classify_partition_error(error: str) -> str:
 
 
 def _task_from_attempt(attempt: dict[str, Any], batch: dict[str, Any]) -> PartitionTask:
-    result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else None
+    raw_result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else None
+    result = None
+    if raw_result is not None:
+        result = dict(raw_result)
+        result.setdefault("batch_id", batch.get("batch_id"))
+        result.setdefault("batch_name", batch.get("batch_name"))
+        result["batch_status"] = batch.get("status")
+        for key in (
+            "quality_status",
+            "quality_report_id",
+            "quality_failure_reason",
+            "ingest_status",
+            "ingest_job_id",
+            "ingest_error",
+            "ingested_at",
+        ):
+            if batch.get(key) is not None:
+                result[key] = batch.get(key)
     return PartitionTask(
         task_id=str(attempt.get("task_id") or ""),
         status=_task_response_status(str(attempt.get("status") or "")),

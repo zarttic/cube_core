@@ -122,6 +122,7 @@ class QualityResponse(CubeWebModel):
 
 
 class OpticalIngestRequest(CubeWebModel):
+    batch_id: str | None = None
     run_dir: str | None = None
     report_id: str | None = None
     dataset: str = "demo_optical"
