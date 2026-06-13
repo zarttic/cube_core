@@ -4,8 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
-from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
-from grid_core.sdk import CubeEncoderSDK
+from grid_core.sdk import CubeEncoderSDK, GridCoreError, NotImplementedCapabilityError, ValidationError
 
 from cube_web.routes import partition as partition_route
 from cube_web.routes.auth import create_auth_router, require_auth_for_api
