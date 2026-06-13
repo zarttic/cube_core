@@ -118,16 +118,20 @@ def create_partition_router(
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = Query(default=100, ge=1, le=500),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        limit: int | None = Query(default=None, ge=1),
     ) -> dict:
-        return {
-            "tasks": workflow_service.list_tasks(
-                status=status,
-                data_type=data_type,
-                keyword=keyword,
-                limit=limit,
-            )
-        }
+        if limit is not None:
+            page = 1
+            page_size = limit
+        return workflow_service.list_tasks(
+            status=status,
+            data_type=data_type,
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/tasks/{task_id}", response_model=PartitionTaskResponse)
     def get_partition_task(task_id: str) -> dict:
