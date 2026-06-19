@@ -122,7 +122,7 @@ class PartitionJobStore:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
-    def start_attempt(self, task_id: str) -> None:
+    def start_attempt(self, task_id: str) -> bool:
         raise NotImplementedError
 
     def succeed_attempt(self, task_id: str, result: dict[str, Any]) -> None:
@@ -544,8 +544,12 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         self.attempts[task_id] = attempt
         return copy.deepcopy(attempt)
 
-    def start_attempt(self, task_id: str) -> None:
-        attempt = self.attempts[task_id]
+    def start_attempt(self, task_id: str) -> bool:
+        attempt = self.attempts.get(task_id)
+        if attempt is None:
+            return False
+        if str(attempt.get("status") or "") != "queued":
+            return False
         attempt["status"] = "running"
         attempt["started_at"] = attempt["started_at"] or _utc_now_iso()
         attempt["updated_at"] = _utc_now_iso()
@@ -554,6 +558,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["last_task_id"] = task_id
         batch["updated_at"] = _utc_now_iso()
         self._set_assets_status(attempt, "running")
+        return True
 
     def succeed_attempt(self, task_id: str, result: dict[str, Any]) -> None:
         attempt = self.attempts[task_id]
@@ -1525,8 +1530,34 @@ class PostgresPartitionJobStore(PartitionJobStore):
             conn.commit()
         return attempt
 
-    def start_attempt(self, task_id: str) -> None:
-        self._update_attempt_and_batch(task_id, "running", "running", started=True)
+    def start_attempt(self, task_id: str) -> bool:
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE partition_job_attempts
+                    SET status = 'running',
+                        started_at = COALESCE(started_at, now()),
+                        updated_at = now()
+                    WHERE task_id = %s
+                      AND status = 'queued'
+                    RETURNING batch_id, asset_ids
+                    """,
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    conn.commit()
+                    return False
+                batch_id, asset_ids = row
+                cur.execute(
+                    "UPDATE partition_batches SET status = 'running', last_task_id = %s, updated_at = now() WHERE batch_id = %s",
+                    (task_id, batch_id),
+                )
+                self._update_assets(cur, batch_id, asset_ids, "running")
+            conn.commit()
+        return True
 
     def succeed_attempt(self, task_id: str, result: dict[str, Any]) -> None:
         self.ensure_schema()

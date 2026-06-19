@@ -60,7 +60,19 @@ def run_task(task_id: str) -> int:
     payload["cancellation_check"] = cancellation_check
 
     runner = _runner_for_data_type(data_type)
-    workflow.on_task_started(task_id)
+    if _should_skip_cancelled_attempt(attempt, store, task_id):
+        store.mark_cancelled(task_id)
+        return 0
+
+    store.start_attempt(task_id)
+    attempt = store.get_attempt(task_id)
+    if attempt is None:
+        raise RuntimeError(f"Partition task not found after start: {task_id}")
+    if _should_skip_cancelled_attempt(attempt, store, task_id):
+        store.mark_cancelled(task_id)
+        return 0
+    if str(attempt.get("status") or "") != "running":
+        raise RuntimeError(f"Partition task could not enter running state: {task_id}")
     try:
         result = runner(payload)
     except Exception as exc:
@@ -73,6 +85,9 @@ def run_task(task_id: str) -> int:
     result = dict(result or {})
     result.setdefault("ray_task_id", task_id)
     result.setdefault("job_id", task_id)
+    if store.is_cancel_requested(task_id):
+        store.mark_cancelled(task_id)
+        return 0
     workflow.on_task_succeeded(task_id, result)
     return 0
 
@@ -98,3 +113,8 @@ def _error_text(exc: Exception) -> str:
             return detail.strip()
     text = str(exc).strip()
     return text or exc.__class__.__name__
+
+
+def _should_skip_cancelled_attempt(store_attempt: dict[str, Any], store, task_id: str) -> bool:
+    status = str(store_attempt.get("status") or "")
+    return status in {"cancel_requested", "cancelled"} or store.is_cancel_requested(task_id)

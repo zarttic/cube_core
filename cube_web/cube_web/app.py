@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request
@@ -16,6 +17,7 @@ from cube_web.routes.sdk import create_sdk_router
 from cube_web.services import health_service, quality_service
 
 ENCODER_SDK_CLASS = CubeEncoderSDK
+logger = logging.getLogger(__name__)
 
 
 def _repo_root():
@@ -49,7 +51,10 @@ def create_app() -> FastAPI:
 
     @web_app.on_event("startup")
     async def reconcile_partition_tasks() -> None:
-        partition_workflow_service.reconcile_orphaned_tasks()
+        try:
+            partition_workflow_service.reconcile_orphaned_tasks()
+        except Exception as exc:
+            logger.warning("Skipping partition task reconcile during startup: %s", exc)
 
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())

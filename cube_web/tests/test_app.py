@@ -35,6 +35,21 @@ from cube_web.services.quality_report_store import set_quality_report_store
 client = TestClient(app)
 
 
+def test_app_startup_reconcile_failure_does_not_block_requests(monkeypatch, caplog):
+    def broken_reconcile():
+        raise ValueError("PostgreSQL DSN is required")
+
+    monkeypatch.setattr(web_app.partition_workflow_service, "reconcile_orphaned_tasks", broken_reconcile)
+    caplog.set_level("WARNING", logger="cube_web.app")
+
+    with TestClient(web_app.create_app()) as startup_client:
+        response = startup_client.get("/")
+
+    assert response.status_code == 200
+    assert response.json() == {"service": "cube-web", "status": "ok"}
+    assert "Skipping partition task reconcile during startup: PostgreSQL DSN is required" in caplog.text
+
+
 def make_jwt(payload, secret="your-secret-key-here-change-in-production"):
     header = {"alg": "HS256", "typ": "JWT"}
 
@@ -4040,6 +4055,38 @@ def test_partition_task_cancel_marks_attempt_cancel_requested(monkeypatch):
     assert cancel_resp.json()["status"] in {"cancel_requested", "cancelled"}
 
 
+def test_partition_job_store_start_attempt_does_not_revive_cancelled_attempt():
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "BATCH_CANCEL_NO_REVIVE",
+            "batch_name": "Cancel no revive",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/no-revive.tif",
+                    "no-revive-scene",
+                    data_type="product",
+                    asset_id="no-revive-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-no-revive",
+        batch_id="BATCH_CANCEL_NO_REVIVE",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+        asset_ids=["no-revive-asset"],
+        requested_by="operator",
+    )
+    store.request_cancel("partition-no-revive")
+
+    assert store.start_attempt("partition-no-revive") is False
+    assert store.get_attempt("partition-no-revive")["status"] == "cancelled"
+    assert store.get_batch("BATCH_CANCEL_NO_REVIVE")["status"] == "cancelled"
+
+
 def test_partition_task_cancel_keeps_running_task_from_completing(monkeypatch):
     client.post(
         "/v1/partition/schemas/import",
@@ -4367,6 +4414,64 @@ def test_partition_remote_job_runs_persisted_attempt_and_stores_result(monkeypat
     attempt = store.get_attempt("partition-remote-task")
     assert attempt["status"] == "succeeded"
     assert attempt["runner_result"]["rows"] == 7
+
+
+def test_partition_remote_job_skips_cancelled_attempt_before_runner_start(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "REMOTE_TASK_CANCELLED_BATCH",
+            "batch_name": "Remote task cancelled batch",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/remote-cancelled.tif",
+                    "remote-cancelled-scene",
+                    data_type="product",
+                    asset_id="remote-cancelled-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-remote-cancelled",
+        batch_id="REMOTE_TASK_CANCELLED_BATCH",
+        operation="auto_run",
+        payload={
+            "partition_backend": "ray",
+            "ray_address": "10.3.100.182:6379",
+            "selected_assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/remote-cancelled.tif",
+                    "remote-cancelled-scene",
+                    data_type="product",
+                    asset_id="remote-cancelled-asset",
+                )
+            ],
+        },
+        asset_ids=["remote-cancelled-asset"],
+        requested_by="operator",
+    )
+    store.request_cancel("partition-remote-cancelled")
+    set_partition_job_store(store)
+
+    runner_called = {"value": False}
+
+    def fake_runner(payload=None):
+        runner_called["value"] = True
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
+
+    monkeypatch.setattr(partition_adapters, "partition_product_run", fake_runner)
+
+    try:
+        exit_code = run_remote_partition_task("partition-remote-cancelled")
+    finally:
+        set_partition_job_store(None)
+
+    assert exit_code == 0
+    assert runner_called["value"] is False
+    assert store.get_attempt("partition-remote-cancelled")["status"] == "cancelled"
+    assert store.get_batch("REMOTE_TASK_CANCELLED_BATCH")["status"] == "cancelled"
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
