@@ -937,7 +937,6 @@ class PostgresPartitionJobStore(PartitionJobStore):
                             sorted(INGEST_TRACKED_DATA_TYPES),
                             sorted(INGEST_TRACKED_DATA_TYPES),
                             sorted(INGEST_TRACKED_DATA_TYPES),
-                            sorted(INGEST_TRACKED_DATA_TYPES),
                         ),
                     )
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")

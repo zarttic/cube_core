@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import copy
+import os
+import shlex
 import time
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import HTTPException
 
+from cube_split import runtime_config
 from cube_web.services.partition_job_store import (
+    InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
     PartitionBatchArchivedError,
     PartitionJobStore,
@@ -20,6 +25,7 @@ from cube_web.services.partition_service import PartitionService, PartitionTask
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
+RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
 
 
 class PartitionWorkflowService:
@@ -109,10 +115,26 @@ class PartitionWorkflowService:
             "page_size": page_size,
         }
 
+    def reconcile_orphaned_tasks(self) -> int:
+        resolved = 0
+        for status in ACTIVE_TASK_STATUSES:
+            for task in self.store.list_tasks(status=status, limit=10_000, offset=0):
+                task_id = str(task.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                attempt = self.store.get_attempt(task_id)
+                if attempt is None:
+                    continue
+                refreshed = self._refresh_active_attempt(task_id, attempt)
+                if refreshed is not None and str(refreshed.get("status") or "") not in ACTIVE_TASK_STATUSES:
+                    resolved += 1
+        return resolved
+
     def get_task(self, task_id: str) -> PartitionTask:
         attempt = self.store.get_attempt(task_id)
         if attempt is None:
             return self.partition_service.get_task(task_id)
+        attempt = self._refresh_active_attempt(task_id, attempt) or attempt
         batch = self.store.get_batch(str(attempt.get("batch_id") or ""))
         return _task_from_attempt(attempt, batch or {})
 
@@ -184,14 +206,11 @@ class PartitionWorkflowService:
                     return active_task
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             self.store.mark_batch_queued(str(batch["batch_id"]), task_id, operation="auto_run")
-            return self.partition_service.submit(
-                data_type,
-                "run",
-                raw_payload,
+            return self._submit_attempt(
                 task_id=task_id,
-                on_started=self.on_task_started,
-                on_succeeded=self.on_task_succeeded,
-                on_failed=self.on_task_failed,
+                batch=batch,
+                data_type=data_type,
+                payload=raw_payload,
                 cancellation_check=cancellation_check,
             )
 
@@ -245,14 +264,11 @@ class PartitionWorkflowService:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             self.store.mark_batch_queued(batch_id, task_id, operation=operation)
             data_type = str(batch["data_type"])
-            return self.partition_service.submit(
-                data_type,
-                "run",
-                payload,
+            return self._submit_attempt(
                 task_id=task_id,
-                on_started=self.on_task_started,
-                on_succeeded=self.on_task_succeeded,
-                on_failed=self.on_task_failed,
+                batch=batch,
+                data_type=data_type,
+                payload=payload,
                 cancellation_check=cancellation_check,
             )
 
@@ -314,9 +330,17 @@ class PartitionWorkflowService:
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         attempt = self.store.request_cancel(task_id)
         task: PartitionTask | None = None
+        if attempt is not None and self._attempt_uses_remote_ray(attempt):
+            self._stop_remote_attempt(task_id)
+            refreshed = self._refresh_active_attempt(task_id, self.store.get_attempt(task_id) or attempt)
+            return refreshed or attempt
         try:
             task = self.partition_service.cancel_task(task_id)
         except HTTPException as exc:
+            if attempt is not None and exc.status_code == 404:
+                cancelled = self.store.mark_cancelled(task_id)
+                if cancelled is not None:
+                    return cancelled
             if attempt is None or exc.status_code != 404:
                 raise
         if attempt is None:
@@ -427,13 +451,209 @@ class PartitionWorkflowService:
         task_id = str(batch.get("last_task_id") or "").strip()
         if not task_id:
             return None
-        try:
-            task = self.partition_service.get_task(task_id)
-        except HTTPException:
+        attempt = self.store.get_attempt(task_id)
+        if attempt is None:
             return None
-        if task.status in ACTIVE_TASK_STATUSES:
-            return task
+        attempt = self._refresh_active_attempt(task_id, attempt) or attempt
+        if str(attempt.get("status") or "") in ACTIVE_TASK_STATUSES:
+            return _task_from_attempt(attempt, batch)
         return None
+
+    def _submit_attempt(
+        self,
+        *,
+        task_id: str,
+        batch: dict[str, Any],
+        data_type: str,
+        payload: dict[str, Any],
+        cancellation_check,
+    ) -> PartitionTask:
+        if self._payload_uses_remote_ray(data_type, payload):
+            self._submit_remote_ray_job(
+                task_id=task_id,
+                batch_id=str(batch["batch_id"]),
+                data_type=data_type,
+                payload=payload,
+            )
+            attempt = self.store.get_attempt(task_id)
+            return _task_from_attempt(attempt or {"task_id": task_id, "status": "queued", "operation": "auto_run"}, batch)
+        return self.partition_service.submit(
+            data_type,
+            "run",
+            payload,
+            task_id=task_id,
+            on_started=self.on_task_started,
+            on_succeeded=self.on_task_succeeded,
+            on_failed=self.on_task_failed,
+            cancellation_check=cancellation_check,
+        )
+
+    def _payload_uses_remote_ray(self, data_type: str, payload: dict[str, Any] | None) -> bool:
+        return (
+            self._supports_remote_ray_jobs()
+            and self._effective_partition_backend(data_type, payload) == "ray"
+            and bool(self._resolved_ray_address(payload))
+        )
+
+    def _supports_remote_ray_jobs(self) -> bool:
+        configured = getattr(self.store, "supports_remote_jobs", None)
+        if configured is not None:
+            return bool(configured)
+        return not isinstance(self.store, InMemoryPartitionJobStore)
+
+    def _attempt_uses_remote_ray(self, attempt: dict[str, Any], batch: dict[str, Any] | None = None) -> bool:
+        payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
+        batch = batch or self.store.get_batch(str(attempt.get("batch_id") or "")) or {}
+        data_type = str(batch.get("data_type") or payload.get("data_type") or "").strip().lower()
+        return self._payload_uses_remote_ray(data_type, payload)
+
+    def _effective_partition_backend(self, data_type: str, payload: dict[str, Any] | None) -> str:
+        options = payload if isinstance(payload, dict) else {}
+        requested = str(options.get("partition_backend") or self._default_partition_backend(data_type)).strip().lower()
+        ray_address = self._resolved_ray_address(options)
+        if data_type == "carbon":
+            if requested == "auto":
+                return "ray" if ray_address else "process"
+            return requested
+        if requested == "auto":
+            return "ray" if ray_address else "thread"
+        if requested in {"local", "process"}:
+            return "thread"
+        return requested
+
+    def _default_partition_backend(self, data_type: str) -> str:
+        if data_type == "radar":
+            return "thread"
+        if data_type == "carbon":
+            return str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray") or "ray")
+        return "ray"
+
+    def _resolved_ray_address(self, payload: dict[str, Any] | None = None) -> str:
+        options = payload if isinstance(payload, dict) else {}
+        return str(options.get("ray_address") or runtime_config.ray_address() or "").strip()
+
+    def _submit_remote_ray_job(
+        self,
+        *,
+        task_id: str,
+        batch_id: str,
+        data_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        client = _build_ray_job_client(self._resolved_ray_address(payload))
+        try:
+            client.submit_job(
+                entrypoint=f"python3.11 -m cube_web.services.partition_remote_job --task-id {shlex.quote(task_id)}",
+                submission_id=task_id,
+                runtime_env=_ray_job_runtime_env(),
+                metadata={
+                    "task_id": task_id,
+                    "batch_id": batch_id,
+                    "data_type": data_type,
+                    "operation": "run",
+                },
+            )
+        except Exception as exc:
+            self.store.fail_attempt(
+                task_id,
+                _error_text(exc),
+                manual_required=True,
+                error_type="ray_job_submit_failed",
+            )
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    def _refresh_active_attempt(self, task_id: str, attempt: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        attempt = attempt or self.store.get_attempt(task_id)
+        if attempt is None or str(attempt.get("status") or "") not in ACTIVE_TASK_STATUSES:
+            return attempt
+        if self._attempt_uses_remote_ray(attempt):
+            self._reconcile_remote_attempt(task_id, attempt)
+        else:
+            self._reconcile_local_attempt(task_id)
+        return self.store.get_attempt(task_id) or attempt
+
+    def _reconcile_local_attempt(self, task_id: str) -> None:
+        try:
+            current = self.partition_service.get_task(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            self.store.mark_cancelled(task_id)
+            return
+        if current.status == "cancelled":
+            self.store.mark_cancelled(task_id)
+            return
+        if current.status == "failed":
+            self.store.fail_attempt(
+                task_id,
+                current.error or "Partition task failed",
+                manual_required=True,
+                error_type="local_task_failed",
+            )
+            return
+        if current.status == "completed" and isinstance(current.result, dict):
+            self.store.succeed_attempt(task_id, current.result)
+
+    def _reconcile_remote_attempt(self, task_id: str, attempt: dict[str, Any]) -> None:
+        try:
+            client = _build_ray_job_client(self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}))
+            status = _ray_job_status_text(client.get_job_status(task_id))
+        except Exception as exc:
+            if _is_missing_ray_job_error(exc):
+                if str(attempt.get("status") or "") in {"cancel_requested", "cancelled"}:
+                    self.store.mark_cancelled(task_id)
+                else:
+                    self.store.fail_attempt(
+                        task_id,
+                        f"Ray job not found: {task_id}",
+                        manual_required=True,
+                        error_type="ray_job_missing",
+                    )
+            return
+        if status == "RUNNING" and str(attempt.get("status") or "") == "queued":
+            self.store.start_attempt(task_id)
+            return
+        if status in RAY_JOB_RUNNING_STATUSES:
+            return
+        if status == "STOPPED":
+            self.store.mark_cancelled(task_id)
+            return
+        if status == "SUCCEEDED":
+            refreshed = self.store.get_attempt(task_id)
+            if refreshed is not None and str(refreshed.get("status") or "") in ACTIVE_TASK_STATUSES:
+                self.store.fail_attempt(
+                    task_id,
+                    "Ray job succeeded but partition result was not persisted",
+                    manual_required=True,
+                    error_type="ray_job_state_mismatch",
+                )
+            return
+        if status == "FAILED":
+            info = None
+            try:
+                info = client.get_job_info(task_id)
+            except Exception:
+                info = None
+            error_message = _ray_job_failure_message(info) or f"Ray job failed: {task_id}"
+            if "cancel" in error_message.lower():
+                self.store.mark_cancelled(task_id)
+                return
+            self.store.fail_attempt(
+                task_id,
+                error_message,
+                manual_required=True,
+                error_type="ray_job_failed",
+            )
+
+    def _stop_remote_attempt(self, task_id: str) -> None:
+        attempt = self.store.get_attempt(task_id)
+        if attempt is None or not self._attempt_uses_remote_ray(attempt):
+            return
+        try:
+            client = _build_ray_job_client(self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}))
+            client.stop_job(task_id)
+        except Exception:
+            return
 
 
 def classify_partition_error(error: str) -> str:
@@ -447,6 +667,89 @@ def classify_partition_error(error: str) -> str:
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
         return "permission"
     return "unknown"
+
+
+def _ray_job_runtime_env() -> dict[str, Any]:
+    from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
+
+    runtime_env = dict(_ray_runtime_env_from_env() or {})
+    env_vars = dict(runtime_env.get("env_vars") or {})
+    for name in (
+        "CUBE_WEB_POSTGRES_DSN",
+        "POSTGRES_DSN",
+        "DATABASE_URL",
+        "CUBE_WEB_RAY_ADDRESS",
+        "RAY_ADDRESS",
+        "CUBE_WEB_MINIO_ENDPOINT",
+        "MINIO_ENDPOINT",
+        "CUBE_WEB_MINIO_ACCESS_KEY",
+        "MINIO_ACCESS_KEY",
+        "CUBE_WEB_MINIO_SECRET_KEY",
+        "MINIO_SECRET_KEY",
+        "CUBE_WEB_MINIO_BUCKET",
+        "MINIO_BUCKET",
+        "CUBE_WEB_CARBON_PARTITION_BACKEND",
+        "CUBE_WEB_ENV_FILE",
+    ):
+        value = os.environ.get(name)
+        if value:
+            env_vars[name] = value
+    if env_vars:
+        runtime_env["env_vars"] = env_vars
+    return runtime_env
+
+
+def _build_ray_job_client(ray_address: str):
+    from ray.job_submission import JobSubmissionClient
+
+    dashboard_url = _ray_job_dashboard_url(ray_address)
+    if not dashboard_url:
+        raise RuntimeError("Ray address is required for durable partition jobs")
+    return JobSubmissionClient(dashboard_url)
+
+
+def _ray_job_dashboard_url(ray_address: str) -> str:
+    address = str(ray_address or "").strip()
+    if not address:
+        return ""
+    if address.startswith("http://") or address.startswith("https://"):
+        return address.rstrip("/")
+    if address.startswith("ray://"):
+        parsed = urlparse(address)
+        host = parsed.hostname or parsed.netloc.replace("ray://", "")
+        return f"http://{host}:8265"
+    host = address.split("://", 1)[-1].split("/", 1)[0]
+    if ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return f"http://{host}:8265"
+
+
+def _ray_job_status_text(status: Any) -> str:
+    value = getattr(status, "value", status)
+    return str(value or "").strip().upper()
+
+
+def _ray_job_failure_message(info: Any) -> str | None:
+    for name in ("message", "error_type"):
+        value = getattr(info, name, None)
+        if value:
+            return str(value)
+    if isinstance(info, dict):
+        for name in ("message", "error_type"):
+            value = info.get(name)
+            if value:
+                return str(value)
+    return None
+
+
+def _is_missing_ray_job_error(exc: Exception) -> bool:
+    message = _error_text(exc).lower()
+    return "job does not exist" in message or "does not exist" in message or "not found" in message
+
+
+def _error_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    return text or exc.__class__.__name__
 
 
 def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, Any]) -> dict[str, Any]:

@@ -47,6 +47,10 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         return health_service.health_report([*(checks or []), *(check or [])])
 
+    @web_app.on_event("startup")
+    async def reconcile_partition_tasks() -> None:
+        partition_workflow_service.reconcile_orphaned_tasks()
+
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())
     api_router.include_router(create_ingest_router())

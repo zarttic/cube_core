@@ -11,7 +11,21 @@ function authHeaders(headers = {}) {
 
 async function parseResponse(response) {
   const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
+  let body = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch (_error) {
+      if (!response.ok) {
+        const error = new Error(text.trim() || `请求失败: ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      const error = new Error('服务返回了非 JSON 响应');
+      error.status = response.status;
+      throw error;
+    }
+  }
   if (!response.ok) {
     const message = body?.error?.message || body?.detail || `请求失败: ${response.status}`;
     const error = new Error(message);

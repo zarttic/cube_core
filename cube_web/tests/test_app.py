@@ -27,6 +27,7 @@ from cube_web.services.config_store import set_config_store
 from cube_web.services.partition_defaults import default_grid_level_for_resolution
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
+from cube_web.services.partition_remote_job import run_task as run_remote_partition_task
 from cube_web.services.partition_service import PartitionBackend, PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
 from cube_web.services.quality_report_store import set_quality_report_store
@@ -1461,7 +1462,10 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
 
     monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
 
-    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "s2", "grid_level": 5})
+    submit_resp = client.post(
+        "/v1/partition/product/tasks/run",
+        json={"grid_type": "s2", "grid_level": 5, "partition_backend": "thread"},
+    )
 
     assert submit_resp.status_code == 202
     submitted = submit_resp.json()
@@ -1482,6 +1486,44 @@ def test_partition_run_can_run_as_async_task(monkeypatch):
     assert task_body["status"] == "completed"
     assert task_body["result"]["mode"] == "partition_run"
     assert task_body["result"]["rows"] == 20
+
+
+def test_partition_run_submits_remote_ray_job_for_ray_backend(monkeypatch):
+    submitted = {}
+    store = web_app.partition_workflow_service.store
+    setattr(store, "supports_remote_jobs", True)
+
+    class FakeRayClient:
+        def submit_job(self, **kwargs):
+            submitted.update(kwargs)
+            return kwargs.get("submission_id") or kwargs.get("job_id")
+
+    monkeypatch.setattr("cube_web.services.partition_workflow._build_ray_job_client", lambda address: FakeRayClient())
+
+    try:
+        submit_resp = client.post(
+            "/v1/partition/product/tasks/run",
+            json={
+                "grid_type": "s2",
+                "grid_level": 5,
+                "partition_backend": "ray",
+                "ray_address": "10.3.100.182:6379",
+                "selected_assets": [ard_raster_asset("s3://cube/cube/source/product/remote-run.tif", "remote-run-scene", data_type="product")],
+            },
+        )
+
+        assert submit_resp.status_code == 202
+        body = submit_resp.json()
+        assert body["status"] == "queued"
+        assert submitted["submission_id"] == body["task_id"]
+        assert "cube_web.services.partition_remote_job" in submitted["entrypoint"]
+        assert submitted["metadata"]["data_type"] == "product"
+        task = web_app.partition_workflow_service.store.get_attempt(body["task_id"])
+        assert task is not None
+        assert task["status"] == "queued"
+    finally:
+        if hasattr(store, "supports_remote_jobs"):
+            delattr(store, "supports_remote_jobs")
 
 
 def test_partition_task_detail_reads_persisted_attempt_without_memory_task():
@@ -1541,7 +1583,12 @@ def test_partition_task_cancel_uses_persisted_attempt_when_memory_task_missing()
         }
     )
     task_id = "partition-persisted-cancel"
-    store.create_attempt(task_id=task_id, batch_id="PERSISTED_TASK_CANCEL", operation="auto_run", payload={})
+    store.create_attempt(
+        task_id=task_id,
+        batch_id="PERSISTED_TASK_CANCEL",
+        operation="auto_run",
+        payload={"partition_backend": "thread"},
+    )
     store.start_attempt(task_id)
     service = PartitionService({"product": PartitionBackend(data_type="product", run=lambda payload=None: {})})
     workflow = PartitionWorkflowService(service, store=store)
@@ -1552,8 +1599,57 @@ def test_partition_task_cancel_uses_persisted_attempt_when_memory_task_missing()
     cancel_resp = route_client.post(f"/partition/tasks/{task_id}/cancel")
 
     assert cancel_resp.status_code == 200
-    assert cancel_resp.json()["status"] == "cancel_requested"
-    assert store.get_attempt(task_id)["status"] == "cancel_requested"
+    assert cancel_resp.json()["status"] == "cancelled"
+    assert store.get_attempt(task_id)["status"] == "cancelled"
+
+
+def test_partition_task_cancel_stops_remote_ray_job_when_memory_task_missing(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.supports_remote_jobs = True
+    store.upsert_schema(
+        {
+            "batch_id": "PERSISTED_TASK_CANCEL_RAY",
+            "batch_name": "Persisted task cancel ray",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/persisted-cancel-ray.tif",
+                    "persisted-cancel-ray-scene",
+                    data_type="product",
+                    asset_id="persisted-cancel-ray",
+                )
+            ],
+        }
+    )
+    task_id = "partition-persisted-cancel-ray"
+    store.create_attempt(
+        task_id=task_id,
+        batch_id="PERSISTED_TASK_CANCEL_RAY",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+    )
+    store.start_attempt(task_id)
+    service = PartitionService({"product": PartitionBackend(data_type="product", run=lambda payload=None: {})})
+    workflow = PartitionWorkflowService(service, store=store)
+
+    stopped = {}
+
+    class FakeRayClient:
+        def stop_job(self, job_id):
+            stopped["job_id"] = job_id
+            return True
+
+        def get_job_status(self, job_id):
+            stopped["status_job_id"] = job_id
+            return "STOPPED"
+
+    monkeypatch.setattr("cube_web.services.partition_workflow._build_ray_job_client", lambda address: FakeRayClient())
+
+    result = workflow.cancel_task(task_id)
+
+    assert stopped["job_id"] == task_id
+    assert result["status"] == "cancelled"
+    assert store.get_attempt(task_id)["status"] == "cancelled"
 
 
 def test_partition_workflow_throttles_cancellation_checks(monkeypatch):
@@ -2116,7 +2212,7 @@ def test_postgres_store_ensure_schema_backfills_supported_and_unsupported_ingest
     tracked = sorted(partition_job_store_module.INGEST_TRACKED_DATA_TYPES)
     assert "WHERE data_type = ANY(%s::text[])" in sql
     assert "NOT (data_type = ANY(%s::text[]))" in sql
-    assert params == (tracked, tracked, tracked, tracked, tracked)
+    assert params == (tracked, tracked, tracked, tracked)
 
 
 def test_postgres_mark_batch_queued_resets_ingest_status_for_tracked_types(monkeypatch):
@@ -4012,6 +4108,265 @@ def test_partition_cancelled_runner_marks_batch_cancelled(monkeypatch):
     batch = client.get("/v1/partition/batches/BATCH_CANCEL_EXCEPTION").json()
     assert task["status"] == "cancelled"
     assert batch["status"] == "cancelled"
+
+
+def test_partition_cancel_orphaned_running_ray_task_marks_attempt_cancelled(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.supports_remote_jobs = True
+    store.upsert_schema(
+        {
+            "batch_id": "BATCH_ORPHAN_CANCEL",
+            "batch_name": "Orphan cancel",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/orphan.tif",
+                    "orphan-scene",
+                    data_type="product",
+                    asset_id="orphan-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-orphan-cancel",
+        batch_id="BATCH_ORPHAN_CANCEL",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+        asset_ids=["orphan-asset"],
+        requested_by="operator",
+    )
+    store.start_attempt("partition-orphan-cancel")
+    store.request_cancel("partition-orphan-cancel")
+
+    workflow = PartitionWorkflowService(PartitionService({}), store=store)
+    stopped = {}
+
+    class FakeRayClient:
+        def stop_job(self, job_id):
+            stopped["job_id"] = job_id
+            return True
+
+        def get_job_status(self, job_id):
+            return "STOPPED"
+
+    monkeypatch.setattr("cube_web.services.partition_workflow._build_ray_job_client", lambda address: FakeRayClient())
+
+    result = workflow.cancel_task("partition-orphan-cancel")
+    batch = workflow.get_batch("BATCH_ORPHAN_CANCEL")
+
+    assert stopped["job_id"] == "partition-orphan-cancel"
+    assert result["status"] == "cancelled"
+    assert store.get_attempt("partition-orphan-cancel")["status"] == "cancelled"
+    assert batch["status"] == "cancelled"
+
+
+def test_partition_active_task_lookup_keeps_remote_running_attempt_active(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.supports_remote_jobs = True
+    store.upsert_schema(
+        {
+            "batch_id": "BATCH_ORPHAN_ACTIVE",
+            "batch_name": "Orphan active",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/orphan-active.tif",
+                    "orphan-active-scene",
+                    data_type="product",
+                    asset_id="orphan-active-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-orphan-active",
+        batch_id="BATCH_ORPHAN_ACTIVE",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+        asset_ids=["orphan-active-asset"],
+        requested_by="operator",
+    )
+    batch = store.get_batch("BATCH_ORPHAN_ACTIVE")
+    assert batch is not None
+
+    workflow = PartitionWorkflowService(PartitionService({}), store=store)
+    monkeypatch.setattr(
+        "cube_web.services.partition_workflow._build_ray_job_client",
+        lambda address: type(
+            "FakeRayClient",
+            (),
+            {"get_job_status": lambda self, job_id: "RUNNING"},
+        )(),
+    )
+
+    active = workflow._active_task_for_batch(batch)
+
+    assert active is not None
+    assert active.task_id == "partition-orphan-active"
+    assert store.get_attempt("partition-orphan-active")["status"] == "running"
+    assert workflow.get_batch("BATCH_ORPHAN_ACTIVE")["status"] == "running"
+
+
+def test_partition_reconcile_orphaned_tasks_marks_stopped_remote_attempts_cancelled(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.supports_remote_jobs = True
+    store.upsert_schema(
+        {
+            "batch_id": "BATCH_ORPHAN_RECONCILE",
+            "batch_name": "Orphan reconcile",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/orphan-reconcile.tif",
+                    "orphan-reconcile-scene",
+                    data_type="product",
+                    asset_id="orphan-reconcile-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-orphan-reconcile",
+        batch_id="BATCH_ORPHAN_RECONCILE",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+        asset_ids=["orphan-reconcile-asset"],
+        requested_by="operator",
+    )
+    store.start_attempt("partition-orphan-reconcile")
+
+    workflow = PartitionWorkflowService(PartitionService({}), store=store)
+    monkeypatch.setattr(
+        "cube_web.services.partition_workflow._build_ray_job_client",
+        lambda address: type(
+            "FakeRayClient",
+            (),
+            {"get_job_status": lambda self, job_id: "STOPPED"},
+        )(),
+    )
+
+    cancelled = workflow.reconcile_orphaned_tasks()
+
+    assert cancelled == 1
+    assert store.get_attempt("partition-orphan-reconcile")["status"] == "cancelled"
+    assert workflow.get_batch("BATCH_ORPHAN_RECONCILE")["status"] == "cancelled"
+
+
+def test_partition_reconcile_orphaned_tasks_marks_failed_remote_attempts_failed(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.supports_remote_jobs = True
+    store.upsert_schema(
+        {
+            "batch_id": "BATCH_ORPHAN_FAILED",
+            "batch_name": "Orphan failed",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/orphan-failed.tif",
+                    "orphan-failed-scene",
+                    data_type="product",
+                    asset_id="orphan-failed-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-orphan-failed",
+        batch_id="BATCH_ORPHAN_FAILED",
+        operation="auto_run",
+        payload={"partition_backend": "ray", "ray_address": "10.3.100.182:6379"},
+        asset_ids=["orphan-failed-asset"],
+        requested_by="operator",
+    )
+    store.start_attempt("partition-orphan-failed")
+
+    class FakeRayClient:
+        def get_job_status(self, job_id):
+            return "FAILED"
+
+        def get_job_info(self, job_id):
+            return type("Info", (), {"message": "ray worker crashed", "error_type": "RuntimeError"})()
+
+    workflow = PartitionWorkflowService(PartitionService({}), store=store)
+    monkeypatch.setattr("cube_web.services.partition_workflow._build_ray_job_client", lambda address: FakeRayClient())
+
+    resolved = workflow.reconcile_orphaned_tasks()
+
+    assert resolved == 1
+    attempt = store.get_attempt("partition-orphan-failed")
+    assert attempt["status"] == "failed"
+    assert attempt["error_message"] == "ray worker crashed"
+    assert workflow.get_batch("BATCH_ORPHAN_FAILED")["status"] == "manual_required"
+
+
+def test_partition_remote_job_runs_persisted_attempt_and_stores_result(monkeypatch):
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "REMOTE_TASK_BATCH",
+            "batch_name": "Remote task batch",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/remote-task.tif",
+                    "remote-task-scene",
+                    data_type="product",
+                    asset_id="remote-task-asset",
+                )
+            ],
+        }
+    )
+    store.create_attempt(
+        task_id="partition-remote-task",
+        batch_id="REMOTE_TASK_BATCH",
+        operation="auto_run",
+        payload={
+            "partition_backend": "ray",
+            "ray_address": "10.3.100.182:6379",
+            "selected_assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/remote-task.tif",
+                    "remote-task-scene",
+                    data_type="product",
+                    asset_id="remote-task-asset",
+                )
+            ],
+        },
+        asset_ids=["remote-task-asset"],
+        requested_by="operator",
+    )
+    set_partition_job_store(store)
+
+    captured = {}
+
+    def fake_runner(payload=None):
+        captured["job_id"] = payload["job_id"]
+        captured["batch_id"] = payload["batch_id"]
+        captured["asset_ids"] = [asset["asset_id"] for asset in payload["selected_assets"]]
+        return {
+            "status": "completed",
+            "mode": "partition_run",
+            "data_type": "product",
+            "rows": 7,
+        }
+
+    monkeypatch.setattr(partition_adapters, "partition_product_run", fake_runner)
+
+    try:
+        exit_code = run_remote_partition_task("partition-remote-task")
+    finally:
+        set_partition_job_store(None)
+
+    assert exit_code == 0
+    assert captured == {
+        "job_id": "partition-remote-task",
+        "batch_id": "REMOTE_TASK_BATCH",
+        "asset_ids": ["remote-task-asset"],
+    }
+    attempt = store.get_attempt("partition-remote-task")
+    assert attempt["status"] == "succeeded"
+    assert attempt["runner_result"]["rows"] == 7
 
 
 def test_optical_partition_test_endpoint(monkeypatch):
