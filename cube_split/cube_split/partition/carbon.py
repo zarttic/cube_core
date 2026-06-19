@@ -103,7 +103,7 @@ def partition_observation(
         time_granularity=config.time_granularity,
     ).st_code
     return {
-        "data_type": "carbon_satellite",
+        "data_type": "carbon",
         "satellite": observation.satellite,
         "product_type": normalize_carbon_product_type(config.product_type),
         "observation_id": observation.observation_id,
@@ -412,7 +412,7 @@ def _partition_observation_chunk(
     for observation, cell in zip(observations, located):
         rows.append(
             {
-                "data_type": "carbon_satellite",
+                "data_type": "carbon",
                 "satellite": observation.satellite,
                 "product_type": normalize_carbon_product_type(config.product_type),
                 "observation_id": observation.observation_id,
@@ -651,7 +651,7 @@ def _partition_chunks_with_ray(
 
 
 class CarbonSatellitePartitionService:
-    data_type = "carbon_satellite"
+    data_type = "carbon"
     supported_product_types = supported_carbon_product_types()
 
     def run(

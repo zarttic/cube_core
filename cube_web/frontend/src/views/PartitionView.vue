@@ -111,10 +111,6 @@ const resultLoading = ref(false);
 const resultRows = ref([]);
 const lastPartitionResult = ref(null);
 const lastPartitionRequest = ref(null);
-const ingestLoading = ref(false);
-const ingestConfirmLoading = ref(false);
-const ingestPreview = ref(null);
-const ingestResult = ref(null);
 const partitionStartedAt = ref(null);
 const partitionFinishedAt = ref(null);
 const partitionElapsedSec = ref(0);
@@ -125,7 +121,7 @@ const partitionStages = ref([
   { key: 'prepare', label: '准备任务', detail: '等待选择数据批次与剖分参数。', status: 'pending' },
   { key: 'queue', label: '读取数据队列', detail: '解析已载入资产、批次、波段与时间信息。', status: 'pending' },
   { key: 'partition', label: '执行剖分', detail: '生成 COG、按格网覆盖切分窗口并输出索引行。', status: 'pending' },
-  { key: 'persist', label: '质检入库', detail: '执行自动质检并保存质检报告，正式入库需人工确认。', status: 'pending' },
+  { key: 'persist', label: '质检入库', detail: '执行自动质检并保存质检报告，同步当前批次的入库状态。', status: 'pending' },
 ]);
 const partitionStageDetailVisible = ref(false);
 const selectedPartitionStageKey = ref('');
@@ -147,12 +143,6 @@ const qualityHistoryTotal = ref(0);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
 const qualityReportDataTypes = new Set(['optical', 'product', 'carbon']);
-const ingestDefaults = ref({
-  dataset: 'optical',
-  sensor: 'optical_mosaic',
-  quality_rule: 'best_quality_wins',
-  allow_failed_quality: false,
-});
 
 function parseResolution(value) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
@@ -324,20 +314,25 @@ function partitionStatusType(status) {
   return map[status] || 'info';
 }
 
+function partitionSupportsIngestStatus(dataType) {
+  return ['optical', 'entity', 'radar', 'product'].includes(dataType);
+}
+
+function initialPartitionIngestStatus(dataType) {
+  return partitionSupportsIngestStatus(dataType) ? 'not_ready' : 'not_supported';
+}
+
 function partitionIngestStatus(result = lastPartitionResult.value) {
   if (!result) return 'not_ready';
   const dataType = result.data_type || activeModule.value;
-  if (dataType !== 'optical') {
+  if (!partitionSupportsIngestStatus(dataType)) {
     return ['completed', 'succeeded'].includes(result.status) ? 'not_supported' : 'not_ready';
   }
-  if (ingestResult.value?.ingest_status === 'ingested' || ingestResult.value?.status === 'succeeded') return 'ingested';
-  if (result.ingest_status === 'ingested' || result.ingest_status === 'failed' || result.ingest_status === 'previewed') return result.ingest_status;
-  if (ingestPreview.value) return 'previewed';
   if (result.ingest_status) return result.ingest_status;
   const qualityStatus = result.quality_status || result.quality_report?.status || '';
   const reportId = result.quality_report_id || result.quality_report?.report_id || '';
   if (['completed', 'succeeded'].includes(result.status) && reportId && !['FAIL', 'WARN'].includes(String(qualityStatus).toUpperCase())) {
-    return 'ready';
+    return result.ingest_enabled === false ? 'ready' : 'ingested';
   }
   return 'not_ready';
 }
@@ -346,12 +341,24 @@ function partitionIngestStatusText(status) {
   const map = {
     not_supported: '剖分完成，暂不支持入库',
     not_ready: '未就绪',
-    ready: '待入库',
+    ready: '待补入库',
     previewed: '已预入库校验',
     ingested: '已入库',
     failed: '入库失败',
   };
   return map[status] || status || '未就绪';
+}
+
+function partitionPersistDoneText(result, fallback) {
+  const prefix = result.quality_report_id ? `质检报告已保存：${result.quality_report_id}。` : fallback;
+  const ingestStatus = partitionIngestStatus(result);
+  if (ingestStatus === 'ingested') {
+    return `${prefix}自动入库已完成。`;
+  }
+  if (ingestStatus === 'ready') {
+    return `${prefix}当前批次未自动入库。`;
+  }
+  return prefix;
 }
 
 function partitionAttemptStatusText(status) {
@@ -505,7 +512,8 @@ function partitionBatchArchiveActionKey(batch) {
 function partitionBatchSummary(batch) {
   const attemptCount = Number(batch.attempt_count || 0);
   const lastError = batch.last_error ? `最近错误：${batch.last_error}` : '暂无错误信息';
-  return `${partitionStatusText(batch.status)} · 尝试 ${attemptCount} 次 · ${lastError}`;
+  const ingestSummary = partitionBatchNeedsIngestAttention(batch) ? ` · ${partitionIngestStatusText(batch.ingest_status)}` : '';
+  return `${partitionStatusText(batch.status)}${ingestSummary} · 尝试 ${attemptCount} 次 · ${lastError}`;
 }
 
 function partitionBatchDetailPayloadRows(batch) {
@@ -922,6 +930,7 @@ function applySyncedPartitionTaskRow(row) {
       ingest_error: completedResult.ingest_error || row.ingest_error || result.ingest_error,
     };
     resultRows.value = formatRows(lastPartitionResult.value);
+    setPartitionStage('persist', 'done', partitionPersistDoneText(lastPartitionResult.value, '执行结果已返回。'));
     stopPartitionTaskSync();
     loadPartitionBatches();
     return;
@@ -932,10 +941,21 @@ function applySyncedPartitionTaskRow(row) {
       status: rowStatus,
       batch_id: batchId,
       batch_status: batchStatus,
-      error: row.error_message || '剖分任务已取消',
+      error: row.error_message || (rowStatus === 'cancel_requested' ? '剖分任务正在取消' : '剖分任务已取消'),
     };
     resultRows.value = formatRows(lastPartitionResult.value);
-    stopPartitionTaskSync();
+    partitionStages.value = partitionStages.value.map((item) => (
+      item.status === 'running' || item.status === 'pending' ? { ...item, status: 'cancelled' } : item
+    ));
+    setPartitionStage('partition', 'cancelled', lastPartitionResult.value.error || '剖分任务已取消');
+    setPartitionStage(
+      'persist',
+      'cancelled',
+      rowStatus === 'cancel_requested' ? '取消请求已提交，等待后台停止任务。' : '任务取消后不整理执行结果。',
+    );
+    if (rowStatus === 'cancelled') {
+      stopPartitionTaskSync();
+    }
     loadPartitionBatches();
   }
 }
@@ -1044,8 +1064,6 @@ async function runPartitionBatchFromDetail() {
   resultLoading.value = true;
   resultRows.value = [];
   lastPartitionResult.value = null;
-  ingestPreview.value = null;
-  ingestResult.value = null;
   startPartitionTimer();
   resetPartitionStages();
   try {
@@ -1073,7 +1091,7 @@ async function runPartitionBatchFromDetail() {
       applyPartitionCancelledResult(result, operation === 'retry' ? '批次重试已取消' : '批次执行已取消');
     } else {
       setPartitionStage('partition', 'done', `已生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '执行结果已返回。');
+      setPartitionStage('persist', 'done', partitionPersistDoneText(result, '执行结果已返回。'));
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
       if (activeModule.value === 'quality') {
@@ -1118,8 +1136,6 @@ async function retrySelectedPartitionAssetsFromDetail() {
   resultLoading.value = true;
   resultRows.value = [];
   lastPartitionResult.value = null;
-  ingestPreview.value = null;
-  ingestResult.value = null;
   startPartitionTimer();
   resetPartitionStages();
   try {
@@ -1149,7 +1165,7 @@ async function retrySelectedPartitionAssetsFromDetail() {
       applyPartitionCancelledResult(result, '失败资产重试已取消');
     } else {
       setPartitionStage('partition', 'done', `失败资产重试完成，生成 ${result.rows ?? result.total_index_rows ?? 0} 条索引行。`);
-      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+      setPartitionStage('persist', 'done', partitionPersistDoneText(result, '重试结果已返回。'));
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
       if (activeModule.value === 'quality') {
@@ -1861,38 +1877,6 @@ const partitionFailureMessage = computed(() => (
   lastPartitionResult.value?.status === 'failed' ? lastPartitionResult.value.error || '剖分失败' : ''
 ));
 
-const opticalIngestStatus = computed(() => partitionIngestStatus(lastPartitionResult.value));
-const opticalIngestReady = computed(() => activeModule.value === 'optical' && ['ready', 'previewed', 'failed'].includes(opticalIngestStatus.value));
-const opticalIngestConfirmReady = computed(() => activeModule.value === 'optical' && ['previewed', 'failed'].includes(opticalIngestStatus.value));
-
-const ingestPreviewRows = computed(() => {
-  if (!ingestPreview.value) return [];
-  const preview = ingestPreview.value;
-  return [
-    { label: '入库模式', value: preview.mode === 'pre_ingest_preview' ? '预入库校验' : preview.mode },
-    { label: '质检状态', value: preview.quality_status || '-' },
-    { label: '资产版本', value: preview.asset_version || '-' },
-    { label: '立方体版本', value: preview.cube_version || '-' },
-    { label: '索引行数', value: preview.input_rows ?? '-' },
-    { label: '资产记录', value: `${preview.raw_asset_rows ?? 0} 条，已有 ${preview.existing_raw_asset_rows ?? 0} 条` },
-    { label: '格网事实', value: `${preview.cube_fact_rows ?? 0} 条，已有 ${preview.existing_cube_fact_rows ?? 0} 条` },
-  ];
-});
-
-const ingestResultRows = computed(() => {
-  if (!ingestResult.value) return [];
-  const result = ingestResult.value;
-  return [
-    { label: '入库状态', value: partitionIngestStatusText(result.ingest_status || result.status) },
-    { label: '任务 ID', value: result.job_id || '-' },
-    { label: '资产版本', value: result.asset_version || '-' },
-    { label: '立方体版本', value: result.cube_version || '-' },
-    { label: '资产记录', value: result.raw_asset_rows ?? '-' },
-    { label: '格网事实', value: result.cube_fact_rows ?? '-' },
-    { label: '元数据后端', value: result.metadata_backend || '-' },
-  ];
-});
-
 function openDataDrawer() {
   dataSearch.value = '';
   dataDrawerVisible.value = true;
@@ -2131,12 +2115,20 @@ function normalizeManagedBatch(batch) {
   };
 }
 
+function partitionBatchNeedsIngestAttention(batch) {
+  return batch?.status === 'succeeded' && ['ready', 'previewed', 'failed'].includes(batch?.ingest_status);
+}
+
+function shouldDisplayManagedBatch(batch) {
+  return batch?.status !== 'archived' && (batch?.status !== 'succeeded' || partitionBatchNeedsIngestAttention(batch));
+}
+
 async function loadPartitionBatches() {
   partitionBatchLoading.value = true;
   try {
     const { partitionPrefix } = apiPrefixes();
-    const response = await requestGet(`${partitionPrefix}/batches?include_succeeded=false&limit=200`);
-    const batches = response.batches || [];
+    const response = await requestGet(`${partitionPrefix}/batches?include_succeeded=true&limit=500`);
+    const batches = (response.batches || []).filter(shouldDisplayManagedBatch);
     managedOpticalBatches.value = batches.filter((batch) => batch.data_type === 'optical').map(normalizeManagedBatch);
     managedCarbonBatches.value = batches.filter((batch) => batch.data_type === 'carbon').map(normalizeManagedBatch);
     managedRadarBatches.value = batches.filter((batch) => batch.data_type === 'radar').map(normalizeManagedBatch);
@@ -2294,10 +2286,11 @@ function buildPartitionFailureResult(error, request = {}) {
   const endpoint = request.endpoint || partitionEndpointsByModule[activeModule.value] || activeModule.value;
   const operation = request.operation || 'run';
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
+  const dataType = payload.data_type || activeModule.value;
   return {
     status: 'failed',
     mode: operation === 'test' ? 'partition_test_no_ingest' : operation === 'retry' ? 'partition_retry' : 'partition_run',
-    data_type: activeModule.value,
+    data_type: dataType,
     endpoint: apiPath,
     grid_type: payload.grid_type || selectedMapGridType.value || '-',
     grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
@@ -2314,20 +2307,21 @@ function buildPartitionFailureResult(error, request = {}) {
     error: errorText(error),
     started_at: partitionStartedAt.value || '',
     elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
-    ingest_status: activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
+    ingest_status: initialPartitionIngestStatus(dataType),
   };
 }
 
 function buildPartitionCancelledResult(task, taskId) {
+  const dataType = task.data_type || activeModule.value;
   return {
     status: task.status === 'cancel_requested' ? 'cancel_requested' : 'cancelled',
     mode: 'partition_cancelled',
-    data_type: task.data_type || activeModule.value,
+    data_type: dataType,
     partition_task_id: task.task_id || taskId,
     error: task.error || (task.status === 'cancel_requested' ? '剖分任务正在取消' : '剖分任务已取消'),
     started_at: partitionStartedAt.value || '',
     elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
-    ingest_status: activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
+    ingest_status: initialPartitionIngestStatus(dataType),
   };
 }
 
@@ -2365,7 +2359,11 @@ async function waitForPartitionTask(partitionPrefix, taskId) {
     if (task.status === 'failed') {
       throw new Error(task.error || `剖分任务 ${taskId} 执行失败`);
     }
-    if (['cancel_requested', 'cancelled'].includes(task.status)) {
+    if (task.status === 'cancel_requested') {
+      await sleep(partitionTaskPollIntervalMs);
+      continue;
+    }
+    if (task.status === 'cancelled') {
       return buildPartitionCancelledResult(task, taskId);
     }
     if (!['queued', 'running'].includes(task.status)) {
@@ -2407,10 +2405,11 @@ async function submitPartitionOperation(partitionPrefix, endpoint, operation, pa
 
 function buildPartitionSubmittedResult(submitted, request, selectedCount) {
   const payload = request.payload || {};
+  const dataType = submitted.data_type || payload.data_type || activeModule.value;
   return {
     status: submitted.status || 'queued',
     mode: 'partition_task_submitted',
-    data_type: submitted.data_type || activeModule.value,
+    data_type: dataType,
     operation: submitted.operation || request.operation || 'run',
     endpoint: request.apiPath,
     partition_task_id: submitted.task_id,
@@ -2420,7 +2419,7 @@ function buildPartitionSubmittedResult(submitted, request, selectedCount) {
     batch_name: payload.batch_name || selectedDataName.value,
     selected_count: selectedCount,
     submitted_at: new Date().toISOString(),
-    ingest_status: submitted.data_type === 'optical' || activeModule.value === 'optical' ? 'not_ready' : 'not_supported',
+    ingest_status: initialPartitionIngestStatus(dataType),
     message: '剖分任务已提交，后台将连接 Ray 集群异步执行。',
   };
 }
@@ -2869,8 +2868,6 @@ async function runDemo() {
   resultLoading.value = true;
   resultRows.value = [];
   lastPartitionResult.value = null;
-  ingestPreview.value = null;
-  ingestResult.value = null;
   startPartitionTimer();
   resetPartitionStages();
   setPartitionStage('prepare', 'done', '已锁定当前参数与数据选择。');
@@ -2932,21 +2929,6 @@ async function runDemo() {
   }
 }
 
-function currentIngestPayload() {
-  const result = lastPartitionResult.value || {};
-  const reportId = result.quality_report_id || result.quality_report?.report_id || '';
-  const payload = { ...ingestDefaults.value };
-  if (result.batch_id) {
-    payload.batch_id = result.batch_id;
-  }
-  if (reportId) {
-    payload.report_id = reportId;
-  } else if (result.run_dir) {
-    payload.run_dir = result.run_dir;
-  }
-  return payload;
-}
-
 async function loadManagedConfig() {
   try {
     const { configPrefix } = apiPrefixes();
@@ -2954,101 +2936,12 @@ async function loadManagedConfig() {
     const config = response.config || {};
     const optical = config.partition?.optical || {};
     const quality = config.quality?.optical || {};
-    const ingest = config.ingest?.optical || {};
     opticalGridType.value = optical.grid_type || opticalGridType.value;
     opticalGridLevel.value = Number(optical.grid_level || opticalGridLevel.value);
     qualityTargetCrs.value = quality.target_crs || qualityTargetCrs.value;
     qualityHistoryLimit.value = Number(quality.history_limit || qualityHistoryLimit.value);
-    ingestDefaults.value = { ...ingestDefaults.value, ...ingest };
   } catch (error) {
     ElMessage.warning(`配置加载失败，保留当前配置：${error.message}`);
-  }
-}
-
-async function previewOpticalIngest() {
-  if (!opticalIngestReady.value) {
-    ElMessage.warning('请先完成一次光学剖分运行');
-    return;
-  }
-  ingestLoading.value = true;
-  ingestPreview.value = null;
-  ingestResult.value = null;
-  try {
-    const { ingestPrefix } = apiPrefixes();
-    ingestPreview.value = await requestJson(`${ingestPrefix}/optical/preview`, currentIngestPayload());
-    if (lastPartitionResult.value) {
-      lastPartitionResult.value = {
-        ...lastPartitionResult.value,
-        ingest_status: ingestPreview.value.ingest_status || 'previewed',
-        batch_id: ingestPreview.value.batch_id || lastPartitionResult.value.batch_id,
-      };
-      resultRows.value = formatRows(lastPartitionResult.value);
-    }
-    ElMessage.success('预入库校验完成');
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    ingestLoading.value = false;
-  }
-}
-
-async function confirmOpticalIngest() {
-  if (!opticalIngestConfirmReady.value) {
-    ElMessage.warning('请先完成预入库校验');
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      '确认后会将当前剖分结果写入生产版本，重复执行会按唯一键覆盖同版本记录。',
-      '确认入库',
-      { confirmButtonText: '确认入库', cancelButtonText: '取消', type: 'warning' },
-    );
-  } catch {
-    return;
-  }
-  ingestConfirmLoading.value = true;
-  ingestResult.value = null;
-  try {
-    const { ingestPrefix } = apiPrefixes();
-    ingestResult.value = await requestJson(`${ingestPrefix}/optical/confirm`, currentIngestPayload());
-    if (lastPartitionResult.value) {
-      lastPartitionResult.value = {
-        ...lastPartitionResult.value,
-        ingest_status: ingestResult.value.ingest_status || 'ingested',
-        ingest_job_id: ingestResult.value.job_id || lastPartitionResult.value.ingest_job_id,
-        ingested_at: ingestResult.value.ingested_at || lastPartitionResult.value.ingested_at,
-        ingest_error: '',
-        batch_id: ingestResult.value.batch_id || lastPartitionResult.value.batch_id,
-      };
-      resultRows.value = formatRows(lastPartitionResult.value);
-    }
-    ElMessage.success('生产版本入库完成');
-    if (!ingestPreview.value) {
-      ingestPreview.value = {
-        mode: 'pre_ingest_preview',
-        quality_status: ingestResult.value.quality_status,
-        asset_version: ingestResult.value.asset_version,
-        cube_version: ingestResult.value.cube_version,
-        input_rows: ingestResult.value.input_rows,
-        raw_asset_rows: ingestResult.value.raw_asset_rows,
-        cube_fact_rows: ingestResult.value.cube_fact_rows,
-        existing_raw_asset_rows: 0,
-        existing_cube_fact_rows: 0,
-      };
-    }
-  } catch (error) {
-    if (lastPartitionResult.value) {
-      lastPartitionResult.value = {
-        ...lastPartitionResult.value,
-        ingest_status: 'failed',
-        ingest_error: error.message,
-      };
-      resultRows.value = formatRows(lastPartitionResult.value);
-    }
-    ElMessage.error(error.message);
-  } finally {
-    ingestConfirmLoading.value = false;
-    loadPartitionBatches();
   }
 }
 
@@ -3064,8 +2957,6 @@ async function retryLastPartitionTask() {
   const retryResult = lastPartitionResult.value || {};
   let currentRetryRequest = null;
   lastPartitionResult.value = null;
-  ingestPreview.value = null;
-  ingestResult.value = null;
   startPartitionTimer();
   resetPartitionStages();
   setPartitionStage('prepare', 'done', '已使用上一次请求参数准备重试。');
@@ -3095,7 +2986,7 @@ async function retryLastPartitionTask() {
       setPartitionStage('persist', 'running', '正在更新结果与质检报告。');
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
-      setPartitionStage('persist', 'done', result.quality_report_id ? `质检报告已保存：${result.quality_report_id}` : '重试结果已返回。');
+      setPartitionStage('persist', 'done', partitionPersistDoneText(result, '重试结果已返回。'));
       if (activeModule.value === 'quality' && result.quality_report) {
         qualityDataType.value = qualityDataTypeForEndpoint(retryRequest.endpoint);
         qualityReport.value = result.quality_report;
@@ -3456,23 +3347,6 @@ onUnmounted(() => {
                   <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
                     {{ activeModule === 'quality' ? '刷新结果' : '提交剖分任务' }}
                   </el-button>
-                  <el-button
-	                    v-if="activeModule === 'optical'"
-	                    :loading="ingestLoading"
-	                    :disabled="!opticalIngestReady || opticalIngestStatus === 'ingested' || resultLoading"
-	                    @click="previewOpticalIngest"
-	                  >
-                    预入库校验
-                  </el-button>
-                  <el-button
-	                    v-if="activeModule === 'optical'"
-	                    type="success"
-	                    :loading="ingestConfirmLoading"
-	                    :disabled="!opticalIngestConfirmReady || resultLoading || ingestLoading"
-	                    @click="confirmOpticalIngest"
-                  >
-                    确认入库
-                  </el-button>
                 </div>
               </div>
             </div>
@@ -3710,20 +3584,6 @@ onUnmounted(() => {
                     <div v-if="partitionResultDetailRows.length" class="partition-metrics">
                       <div class="quality-section-title">执行明细</div>
                       <div v-for="item in partitionResultDetailRows" :key="item.label" class="quality-kv">
-                        <span>{{ item.label }}</span>
-                        <strong>{{ item.value }}</strong>
-                      </div>
-                    </div>
-                    <div v-if="activeModule === 'optical' && ingestPreviewRows.length" class="partition-metrics">
-                      <div class="quality-section-title">预入库校验</div>
-                      <div v-for="item in ingestPreviewRows" :key="item.label" class="quality-kv">
-                        <span>{{ item.label }}</span>
-                        <strong>{{ item.value }}</strong>
-                      </div>
-                    </div>
-                    <div v-if="activeModule === 'optical' && ingestResultRows.length" class="partition-metrics">
-                      <div class="quality-section-title">确认入库结果</div>
-                      <div v-for="item in ingestResultRows" :key="item.label" class="quality-kv">
                         <span>{{ item.label }}</span>
                         <strong>{{ item.value }}</strong>
                       </div>

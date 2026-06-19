@@ -707,7 +707,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     response = {
         "status": "completed",
         "mode": mode,
-        "data_type": "carbon_satellite",
+        "data_type": "carbon",
         **_task_metadata(mode, str(result["execution_engine"])),
         **_source_metadata(mode, str(input_dir if payload.get("input_dir") else sample.name)),
         "run_dir": result["run_dir"],
@@ -725,7 +725,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
         "ray_address": result["ray_address"],
-        "ingest_enabled": mode != "partition_test_no_ingest",
+        "ingest_enabled": False,
         "output_path": str(rows_path),
     }
     if quality_checks.run_carbon_quality_check is not None:

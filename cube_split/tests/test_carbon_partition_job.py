@@ -72,7 +72,7 @@ def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
     assert summary["status"] == "completed"
-    assert summary["data_type"] == "carbon_satellite"
+    assert summary["data_type"] == "carbon"
     assert summary["grid_type"] == "isea4h"
     assert summary["grid_level"] == 5
     assert summary["rows"] == 1

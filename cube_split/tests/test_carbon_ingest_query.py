@@ -12,7 +12,7 @@ from cube_split.read.carbon_query import _parse_args, summarize_xco2
 
 def _carbon_row(observation_id: str) -> dict:
     return {
-        "data_type": "carbon_satellite",
+        "data_type": "carbon",
         "satellite": "OCO2",
         "product_type": "xco2",
         "observation_id": observation_id,
