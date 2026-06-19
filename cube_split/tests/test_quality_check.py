@@ -206,7 +206,7 @@ def test_carbon_quality_check_passes_valid_observation_rows(tmp_path: Path):
     run_dir = tmp_path / "carbon_run"
     run_dir.mkdir()
     row = {
-        "data_type": "carbon_satellite",
+        "data_type": "carbon",
         "satellite": "OCO2",
         "product_type": "xco2",
         "observation_id": "2020123100010671",
@@ -241,7 +241,7 @@ def test_carbon_quality_check_fails_invalid_schema_coordinates_and_xco2(tmp_path
     run_dir = tmp_path / "carbon_run"
     run_dir.mkdir()
     row = {
-        "data_type": "carbon_satellite",
+        "data_type": "carbon",
         "satellite": "OCO2",
         "product_type": "xco2",
         "observation_id": "bad-observation",

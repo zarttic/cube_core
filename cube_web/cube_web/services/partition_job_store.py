@@ -14,6 +14,7 @@ BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_req
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
 BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 BATCH_HIDDEN_STATUSES = {"succeeded", "archived"}
+INGEST_TRACKED_DATA_TYPES = {"optical", "product", "radar", "entity"}
 
 
 class PartitionBatchAlreadyActiveError(RuntimeError):
@@ -567,7 +568,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
         self._refresh_batch_from_assets(attempt["batch_id"], now=now)
         self._apply_quality_result(attempt["batch_id"], result, now=now)
-        self._refresh_ingest_readiness(attempt["batch_id"], now=now)
+        self._refresh_ingest_readiness(attempt["batch_id"], result, now=now)
 
     def fail_attempt(
         self,
@@ -792,17 +793,16 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             batch["manual_required_at"] = batch.get("manual_required_at") or now
         batch["updated_at"] = now
 
-    def _refresh_ingest_readiness(self, batch_id: str, *, now: str) -> None:
+    def _refresh_ingest_readiness(self, batch_id: str, result: dict[str, Any], *, now: str) -> None:
         batch = self.batches[batch_id]
-        if batch.get("data_type") != "optical":
-            batch["ingest_status"] = "not_supported"
-        elif batch.get("status") == "succeeded" and batch.get("quality_report_id"):
-            batch["ingest_status"] = "ready"
-        else:
-            batch["ingest_status"] = "not_ready"
+        batch["ingest_status"] = _ingest_status_for_batch(
+            data_type=batch.get("data_type"),
+            batch_status=batch.get("status"),
+            result=result,
+        )
         batch["ingest_job_id"] = None
         batch["ingest_error"] = None
-        batch["ingested_at"] = None
+        batch["ingested_at"] = now if batch["ingest_status"] == "ingested" else None
         batch["updated_at"] = now
 
 
@@ -907,22 +907,38 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ")
                     cur.execute(
-                        """
+                        f"""
                         UPDATE partition_batches
                         SET ingest_status = CASE
-                          WHEN data_type <> 'optical' THEN 'not_supported'
-                          WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
-                          ELSE COALESCE(ingest_status, 'not_ready')
+                          WHEN data_type = ANY(%s::text[]) AND status = 'succeeded' THEN
+                            CASE
+                              WHEN COALESCE(LOWER(normalized_payload->>'ingest_enabled'), '') IN ('false', '0', 'no') THEN 'ready'
+                              WHEN data_type = 'radar'
+                               AND COALESCE(NULLIF(LOWER(normalized_payload->>'metadata_backend'), ''), 'none') IN ('none', 'local')
+                              THEN 'ready'
+                              WHEN data_type IN ('optical', 'product', 'entity')
+                               AND COALESCE(NULLIF(LOWER(normalized_payload->>'metadata_backend'), ''), 'postgres') IN ('none', 'local')
+                              THEN 'ready'
+                              ELSE 'ingested'
+                            END
+                          WHEN data_type = ANY(%s::text[]) THEN 'not_ready'
+                          ELSE 'not_supported'
                         END
-                        WHERE ingest_status IS NULL
-                           OR (data_type <> 'optical' AND ingest_status = 'not_ready')
+                        WHERE data_type = ANY(%s::text[])
+                           OR ingest_status IS NULL
                            OR (
-                             data_type = 'optical'
-                             AND status = 'succeeded'
-                             AND quality_report_id IS NOT NULL
-                             AND ingest_status = 'not_ready'
+                             NOT (data_type = ANY(%s::text[]))
+                             AND ingest_status <> 'not_supported'
                            )
                         """
+                        ,
+                        (
+                            sorted(INGEST_TRACKED_DATA_TYPES),
+                            sorted(INGEST_TRACKED_DATA_TYPES),
+                            sorted(INGEST_TRACKED_DATA_TYPES),
+                            sorted(INGEST_TRACKED_DATA_TYPES),
+                            sorted(INGEST_TRACKED_DATA_TYPES),
+                        ),
                     )
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
@@ -1460,7 +1476,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                             quality_status = NULL,
                             quality_report_id = NULL,
                             quality_failure_reason = NULL,
-                            ingest_status = CASE WHEN data_type = 'optical' THEN 'not_ready' ELSE 'not_supported' END,
+                            ingest_status = CASE
+                              WHEN data_type = ANY(%s::text[]) THEN 'not_ready'
+                              ELSE 'not_supported'
+                            END,
                             ingest_job_id = NULL,
                             ingest_error = NULL,
                             ingested_at = NULL,
@@ -1469,7 +1488,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                       AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested', 'archived')
                     RETURNING attempt_count
                     """,
-                    (batch_status, task_id, batch_id),
+                    (batch_status, task_id, sorted(INGEST_TRACKED_DATA_TYPES), batch_id),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -1528,7 +1547,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
                 self._refresh_batch_from_assets(cur, batch_id)
                 self._apply_quality_result(cur, batch_id, result)
-                self._refresh_ingest_readiness(cur, batch_id)
+                self._refresh_ingest_readiness(cur, batch_id, result)
             conn.commit()
 
     def fail_attempt(
@@ -1571,14 +1590,17 @@ class PostgresPartitionJobStore(PartitionJobStore):
                             quality_status = NULL,
                             quality_report_id = NULL,
                             quality_failure_reason = NULL,
-                            ingest_status = CASE WHEN data_type = 'optical' THEN 'not_ready' ELSE 'not_supported' END,
+                            ingest_status = CASE
+                              WHEN data_type = ANY(%s::text[]) THEN 'not_ready'
+                              ELSE 'not_supported'
+                            END,
                             ingest_job_id = NULL,
                             ingest_error = NULL,
                             ingested_at = NULL,
                             updated_at = now()
                         WHERE batch_id = %s
                     """,
-                    (status, task_id, batch_id),
+                    (status, task_id, sorted(INGEST_TRACKED_DATA_TYPES), batch_id),
                 )
             conn.commit()
 
@@ -1869,22 +1891,35 @@ class PostgresPartitionJobStore(PartitionJobStore):
             ),
         )
 
-    def _refresh_ingest_readiness(self, cur, batch_id: str) -> None:
+    def _refresh_ingest_readiness(self, cur, batch_id: str, result: dict[str, Any]) -> None:
+        cur.execute("SELECT data_type, status FROM partition_batches WHERE batch_id = %s", (batch_id,))
+        row = cur.fetchone()
+        if row is None:
+            return
+        data_type, batch_status = row
+        ingest_status = _ingest_status_for_batch(
+            data_type=data_type,
+            batch_status=batch_status,
+            result=result,
+        )
         cur.execute(
             """
             UPDATE partition_batches
-            SET ingest_status = CASE
-                  WHEN data_type <> 'optical' THEN 'not_supported'
-                  WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
-                  ELSE 'not_ready'
-                END,
+            SET ingest_status = %s,
                 ingest_job_id = NULL,
                 ingest_error = NULL,
-                ingested_at = NULL,
+                ingested_at = CASE
+                  WHEN %s = 'ingested' THEN now()
+                  ELSE NULL
+                END,
                 updated_at = now()
             WHERE batch_id = %s
             """,
-            (batch_id,),
+            (
+                ingest_status,
+                ingest_status,
+                batch_id,
+            ),
         )
 
     def _connect(self):
@@ -2597,7 +2632,40 @@ def _utc_now_iso() -> str:
 
 
 def _initial_ingest_status(data_type: Any) -> str:
-    return "not_ready" if str(data_type or "") == "optical" else "not_supported"
+    return "not_ready" if _supports_ingest_status(data_type) else "not_supported"
+
+
+def _supports_ingest_status(data_type: Any) -> bool:
+    return str(data_type or "").strip().lower() in INGEST_TRACKED_DATA_TYPES
+
+
+def _ingest_status_for_batch(*, data_type: Any, batch_status: Any, result: dict[str, Any]) -> str:
+    if not _supports_ingest_status(data_type):
+        return "not_supported"
+    if str(batch_status or "") != "succeeded":
+        return "not_ready"
+    explicit_status = _explicit_ingest_status(result)
+    if explicit_status:
+        return explicit_status
+    return "ingested" if _result_implies_ingested(result) else "ready"
+
+
+def _explicit_ingest_status(result: dict[str, Any]) -> str:
+    ingest_status = str(result.get("ingest_status") or "").strip().lower()
+    return ingest_status if ingest_status in {"not_ready", "ready", "previewed", "ingested", "failed"} else ""
+
+
+def _result_implies_ingested(result: dict[str, Any]) -> bool:
+    ingest_enabled = result.get("ingest_enabled")
+    if isinstance(ingest_enabled, bool):
+        return ingest_enabled
+    if isinstance(ingest_enabled, str):
+        value = ingest_enabled.strip().lower()
+        if value in {"false", "0", "no"}:
+            return False
+        if value in {"true", "1", "yes"}:
+            return True
+    return True
 
 
 def _max_auto_retries_value(primary: Any, fallback: Any = None) -> int:

@@ -317,7 +317,11 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const visibleRadarBatches = computed(() => managedRadarBatches.value);" in source
     assert "const visibleProductBatches = computed(() => managedProductBatches.value);" in source
     assert "async function loadPartitionBatches()" in source
-    assert "requestGet(`${partitionPrefix}/batches?include_succeeded=false&limit=200`)" in source
+    assert "requestGet(`${partitionPrefix}/batches?include_succeeded=true&limit=500`)" in source
+    assert "function partitionBatchNeedsIngestAttention(batch)" in source
+    assert "['ready', 'previewed', 'failed'].includes(batch?.ingest_status)" in source
+    assert "function shouldDisplayManagedBatch(batch)" in source
+    assert "batch?.status !== 'succeeded' || partitionBatchNeedsIngestAttention(batch)" in source
     assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
     assert "取消会立即请求执行层中断当前任务" in source
     assert "重试失败资产" in source
@@ -331,11 +335,18 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const cleanRow = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));" in source
     assert "{ label: '入库状态', value: partitionIngestStatusText(partitionIngestStatus(result)) }" in source
     assert "{ label: '正式入库'" not in source
-    assert "result.ingest_enabled === false" not in source
-    assert "const opticalIngestStatus = computed(() => partitionIngestStatus(lastPartitionResult.value));" in source
-    assert "const opticalIngestConfirmReady = computed" in source
-    assert "payload.batch_id = result.batch_id;" in source
-    assert "ingest_status: submitted.data_type === 'optical' || activeModule.value === 'optical' ? 'not_ready' : 'not_supported'" in source
+    assert "function partitionSupportsIngestStatus(dataType)" in source
+    assert "return ['optical', 'entity', 'radar', 'product'].includes(dataType);" in source
+    assert "function initialPartitionIngestStatus(dataType)" in source
+    assert "return result.ingest_enabled === false ? 'ready' : 'ingested';" in source
+    assert "ready: '待补入库'" in source
+    assert "async function previewOpticalIngest()" not in source
+    assert "async function confirmOpticalIngest()" not in source
+    assert "const opticalIngestConfirmReady = computed" not in source
+    assert "payload.batch_id = result.batch_id;" not in source
+    assert "ingest_status: initialPartitionIngestStatus(dataType)" in source
+    assert "setPartitionStage('persist', 'done', partitionPersistDoneText(lastPartitionResult.value, '执行结果已返回。'));" in source
+    assert "const ingestSummary = partitionBatchNeedsIngestAttention(batch) ? ` · ${partitionIngestStatusText(batch.ingest_status)}` : '';" in source
     assert "{ label: '批次状态', value: partitionStatusText(result.batch_status) }" in source
     assert "const activePartitionTasks = ref([]);" in source
     assert "const partitionTaskTotal = ref(0);" in source
@@ -886,7 +897,7 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
         return {
             "status": "completed",
             "mode": "partition_demo",
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
             "rows": 12,
             "distinct_space_codes": 5,
             "elapsed_sec": 0.12,
@@ -903,6 +914,7 @@ def test_carbon_partition_demo_endpoint(monkeypatch):
     body = partition_adapters.partition_carbon_demo()
 
     assert body["status"] == "completed"
+    assert body["data_type"] == "carbon"
     assert body["rows"] == 12
     assert body["distinct_space_codes"] == 5
 
@@ -915,7 +927,7 @@ def test_carbon_partition_test_endpoint(monkeypatch):
         return {
             "status": "completed",
             "mode": "partition_test_no_ingest",
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
             "rows": 12,
             "distinct_space_codes": 5,
             "elapsed_sec": 0.12,
@@ -937,7 +949,7 @@ def test_carbon_partition_test_endpoint(monkeypatch):
     body = resp.json()
     assert body["status"] == "completed"
     assert body["mode"] == "partition_test_no_ingest"
-    assert body["data_type"] == "carbon_satellite"
+    assert body["data_type"] == "carbon"
     assert body["ingest_enabled"] is False
     assert body["rows"] == 12
 
@@ -951,7 +963,7 @@ def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
         return {
             "status": "completed",
             "mode": mode,
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
             "ingest_enabled": mode != "partition_test_no_ingest",
         }
 
@@ -961,8 +973,45 @@ def test_carbon_partition_test_runner_marks_safe_mode(monkeypatch):
 
     assert captured["mode"] == "partition_test_no_ingest"
     assert captured["payload"]["selected_observations"][0]["source_index"] == 3
+    assert result["data_type"] == "carbon"
     assert result["mode"] == "partition_test_no_ingest"
     assert result["ingest_enabled"] is False
+
+
+def test_carbon_partition_demo_runner_does_not_claim_ingest_enabled(monkeypatch, tmp_path):
+    source_dir = tmp_path / "carbon-source"
+    source_dir.mkdir()
+    rows_path = tmp_path / "run-root" / "output" / "rows.jsonl"
+    rows_path.parent.mkdir(parents=True)
+    rows_path.write_text('{"space_code":"cell-1","quality_flag":"PASS"}\n', encoding="utf-8")
+
+    def fake_partition_run_dir(data_type, mode):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir(exist_ok=True)
+        return run_dir
+
+    def fake_run_carbon_partition(args):
+        assert Path(args.input_dir) == source_dir
+        return {
+            "run_dir": str(rows_path.parent),
+            "rows_path": str(rows_path),
+            "rows": 1,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "ray",
+            "execution_engine": "ray",
+            "ray_address": args.ray_address,
+        }
+
+    monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
+
+    result = partition_runners._run_carbon_partition_demo(payload={"input_dir": str(source_dir)})
+
+    assert result["data_type"] == "carbon"
+    assert result["ingest_enabled"] is False
+    assert result["rows"] == 1
 
 
 def test_carbon_partition_retry_runner_reuses_request_payload(monkeypatch):
@@ -974,7 +1023,7 @@ def test_carbon_partition_retry_runner_reuses_request_payload(monkeypatch):
         return {
             "status": "completed",
             "mode": mode,
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
         }
 
     monkeypatch.setattr(partition_runners, "_run_carbon_partition_demo", fake_run_carbon_partition_demo)
@@ -2027,6 +2076,152 @@ def test_postgres_store_ensure_schema_runs_only_once(monkeypatch):
     assert any("CREATE TABLE IF NOT EXISTS partition_batches" in sql for sql, _params in executed)
 
 
+def test_postgres_store_ensure_schema_backfills_supported_and_unsupported_ingest_statuses(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+
+    store.ensure_schema()
+
+    sql, params = next(
+        (sql, params)
+        for sql, params in executed
+        if "UPDATE partition_batches" in sql and "SET ingest_status = CASE" in sql
+    )
+
+    tracked = sorted(partition_job_store_module.INGEST_TRACKED_DATA_TYPES)
+    assert "WHERE data_type = ANY(%s::text[])" in sql
+    assert "NOT (data_type = ANY(%s::text[]))" in sql
+    assert params == (tracked, tracked, tracked, tracked, tracked)
+
+
+def test_postgres_mark_batch_queued_resets_ingest_status_for_tracked_types(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "ensure_schema", lambda: None)
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+
+    store.mark_batch_queued("PG_BATCH", "pg-task-1", operation="run")
+
+    sql, params = executed[0]
+    assert "data_type = ANY(%s::text[])" in sql
+    assert params == ("queued", "pg-task-1", sorted(partition_job_store_module.INGEST_TRACKED_DATA_TYPES), "PG_BATCH")
+
+
+def test_postgres_refresh_ingest_readiness_uses_batch_data_type(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchone_result = None
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+            if "SELECT data_type, status FROM partition_batches" in sql:
+                self._fetchone_result = ("entity", "succeeded")
+            else:
+                self._fetchone_result = None
+
+        def fetchone(self):
+            return self._fetchone_result
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+
+    store._refresh_ingest_readiness(
+        FakeCursor(),
+        "PG_ENTITY_BATCH",
+        {
+            "data_type": "carbon",
+            "ingest_enabled": True,
+        },
+    )
+
+    sql, params = executed[1]
+    assert "SET ingest_status = %s" in sql
+    assert params == ("ingested", "ingested", "PG_ENTITY_BATCH")
+
+
+def test_postgres_refresh_ingest_readiness_preserves_explicit_ingest_status(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchone_result = None
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+            if "SELECT data_type, status FROM partition_batches" in sql:
+                self._fetchone_result = ("optical", "succeeded")
+            else:
+                self._fetchone_result = None
+
+        def fetchone(self):
+            return self._fetchone_result
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+
+    store._refresh_ingest_readiness(
+        FakeCursor(),
+        "PG_OPTICAL_BATCH",
+        {
+            "ingest_status": "failed",
+            "ingest_enabled": True,
+        },
+    )
+
+    sql, params = executed[1]
+    assert "SET ingest_status = %s" in sql
+    assert params == ("failed", "failed", "PG_OPTICAL_BATCH")
+
+
 def test_postgres_schema_import_syncs_ard_loader_observation_tables(monkeypatch):
     executed = []
 
@@ -3054,11 +3249,60 @@ def test_partition_batch_run_persists_quality_pass(monkeypatch):
     assert batch["status"] == "succeeded"
     assert batch["quality_status"] == "PASS"
     assert batch["quality_report_id"] == "quality-pass-report"
-    assert batch["ingest_status"] == "ready"
+    assert batch["ingest_status"] == "ingested"
+    assert batch["ingested_at"]
     assert attempts[0]["runner_result"]["quality_status"] == "PASS"
     task = client.get(f"/v1/partition/tasks/{task_id}").json()
     assert task["result"]["quality_report_id"] == "quality-pass-report"
+    assert task["result"]["ingest_status"] == "ingested"
+    assert task["result"]["ingested_at"]
+
+
+def test_partition_batch_quality_pass_without_ingest_stays_ready(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_QUALITY_PASS_NO_INGEST",
+            "batch_name": "Quality pass without ingest",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/q-pass-no-ingest.tif", "q-pass-no-ingest")],
+        },
+    )
+
+    def fake_run_optical_partition_run(payload=None):
+        return {
+            "status": "completed",
+            "mode": "partition_run",
+            "data_type": "optical",
+            "rows": 3,
+            "ingest_enabled": False,
+            "quality_status": "PASS",
+            "quality_report_id": "quality-pass-no-ingest-report",
+            "quality_report": {
+                "report_id": "quality-pass-no-ingest-report",
+                "status": "PASS",
+                "checks": [{"name": "index_rows", "status": "PASS"}],
+            },
+        }
+
+    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
+
+    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_PASS_NO_INGEST/run", json={})
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
+        if task_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    batch = client.get("/v1/partition/batches/BATCH_QUALITY_PASS_NO_INGEST").json()
+    task = client.get(f"/v1/partition/tasks/{task_id}").json()
+    assert batch["status"] == "succeeded"
+    assert batch["quality_status"] == "PASS"
+    assert batch["ingest_status"] == "ready"
+    assert batch["ingested_at"] is None
     assert task["result"]["ingest_status"] == "ready"
+    assert task["result"].get("ingested_at") is None
 
 
 def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
@@ -4114,7 +4358,7 @@ def test_carbon_partition_retry_endpoint(monkeypatch):
         return {
             "status": "completed",
             "mode": "partition_retry",
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
             "rows": 10,
             "retry": {"strategy": "full_request"},
         }
@@ -4128,6 +4372,7 @@ def test_carbon_partition_retry_endpoint(monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["data_type"] == "carbon"
     assert body["mode"] == "partition_retry"
     assert body["retry"]["strategy"] == "full_request"
 

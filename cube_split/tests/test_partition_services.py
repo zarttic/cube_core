@@ -25,6 +25,7 @@ from cube_split.partition.radar_products import parse_radar_asset
 
 def test_partition_registry_separates_optical_and_carbon_services():
     assert isinstance(get_partition_service("optical"), OpticalPartitionService)
+    assert isinstance(get_partition_service("carbon"), CarbonSatellitePartitionService)
     assert isinstance(get_partition_service("carbon_satellite"), CarbonSatellitePartitionService)
     assert isinstance(get_partition_service("radar"), RadarPartitionService)
 
@@ -83,7 +84,7 @@ def test_carbon_observation_partition_outputs_observation_fact():
 
     row = partition_observation(observation, CarbonPartitionConfig())
 
-    assert row["data_type"] == "carbon_satellite"
+    assert row["data_type"] == "carbon"
     assert row["satellite"] == "OCO2"
     assert row["observation_id"] == "snd-1"
     assert row["xco2"] == 421.25
@@ -131,7 +132,7 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     rows_path = output_dir / "carbon_observation_rows.jsonl"
     assert result.rows_path == rows_path
     row = json.loads(rows_path.read_text(encoding="utf-8"))
-    assert row["data_type"] == "carbon_satellite"
+    assert row["data_type"] == "carbon"
     assert row["satellite"] == "OCO2"
 
 
@@ -410,7 +411,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     def fake_partition_observation(observation, config, sdk=None):
         _ = sdk
         return {
-            "data_type": "carbon_satellite",
+            "data_type": "carbon",
             "satellite": observation.satellite,
             "observation_id": observation.observation_id,
             "space_code": observation.observation_id,
@@ -613,7 +614,7 @@ def test_carbon_partition_can_use_ray_backend(monkeypatch):
         processed_chunks.append(len(chunk))
         return [
             {
-                "data_type": "carbon_satellite",
+                "data_type": "carbon",
                 "satellite": observation.satellite,
                 "observation_id": observation.observation_id,
                 "grid_type": config.grid_type,
@@ -698,7 +699,7 @@ def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
 
     assert result.total_rows == 3
     first_row = json.loads(result.rows_path.read_text(encoding="utf-8").splitlines()[0])
-    assert first_row["data_type"] == "carbon_satellite"
+    assert first_row["data_type"] == "carbon"
     assert first_row["satellite"] == "OCO2"
     assert first_row["observation_id"] == "2020123100010671"
     assert first_row["footprint_geojson"]["type"] == "Polygon"
