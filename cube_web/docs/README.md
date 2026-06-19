@@ -11,6 +11,11 @@
 旧版运行基线、早期 demo 前端、阶段规划稿和一次性验收报告已经清理出当前文档集。
 如需追溯历史，使用 Git 历史查看旧文档；当前 API 和运行说明以本文为准。
 
+## 当前文档
+
+- [PARTITION_INGEST_LOGIC.md](PARTITION_INGEST_LOGIC.md)：记录当前剖分提交后自动入库、
+  optical 预入库/确认入库按钮与现行状态机不一致的事实，以及后续调整建议。
+
 ## 1. 定位
 
 `cube_web` 提供 cube 项目的 Web 入口和 FastAPI API facade。它不实现格网算法、

@@ -1,6 +1,5 @@
 # 载入子系统数据载入与对账接口设计
 
-更新时间：2026-06-13
 
 本文档只定义载入子系统如何通过接口把四类数据交给剖分系统，以及双方如何对账。
 
@@ -447,3 +446,86 @@ Content-Type: application/json
 - `acq_time` 不是 ISO8601。
 - `corners` 不是 4 个 WGS84 经纬度点。
 - `resolution` 小于等于 0。
+
+
+
+回应
+元数据数据库里面已经定义了，你可以使用了  @zrfGlpfz 
+：class ArdPartitionBatch(Base):
+    """ARD 剖分系统批次主表 - 完美适配数据载入对账契约"""
+    __tablename__ = "ard_partition_batches"
+
+    schema_version = Column(String(20), default="1.0")  # 版本控制字段，便于未来无损在线升级和兼容性维护
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(String(100), unique=True, index=True, nullable=False) # 批次稳定 ID (幂等键)
+    batch_name = Column(String(200), nullable=True)                          # 批次展示名称
+    data_type = Column(String(50), nullable=False)                          # optical, radar, product, carbon
+    source_system = Column(String(50), default="loader")                    # 来源系统标识
+    loaded_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    raw_meta_uri = Column(String(500), nullable=True)                       # 原始 _meta.json 对象存储地址
+    priority = Column(Integer, default=0)                                   # 优先级
+    max_auto_retries = Column(Integer, default=1)                           # 最大自动重试次数
+    status = Column(String(50), default="pending")                          # pending, running, succeeded, failed
+
+    # 级联关系
+    assets = relationship("ArdPartitionAsset", back_populates="batch", cascade="all, delete-orphan")
+    observations = relationship("ArdPartitionObservation", back_populates="batch", cascade="all, delete-orphan")
+
+
+class ArdPartitionAsset(Base):
+    """ARD 栅格品类资产明细表（光学、雷达、信息产品共用）"""
+    __tablename__ = "ard_partition_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("ard_partition_batches.id", ondelete="CASCADE"), nullable=False)
+    asset_id = Column(String(100), unique=True, index=True, nullable=False) # 资产稳定 ID
+    source_uri = Column(String(500), nullable=False)                        # 生产级归档完结影像对象存储地址
+    scene_id = Column(String(100), nullable=True)                           # 场景 ID
+    acq_time = Column(DateTime, nullable=True)                              # 成像或代表时间
+    sensor = Column(String(100), nullable=True)                             # 传感器
+    product_family = Column(String(100), nullable=True)                     # 产品族
+    resolution = Column(Float, nullable=True)                               # 空间分辨率(米)
+    bbox = Column(JSON, nullable=True)                                      # 边界范围 [min_lon, min_lat, max_lon, max_lat]
+    corners = Column(JSON, nullable=True)                                   # 四角点点阵 WGS84
+    bands = Column(JSON, nullable=True)                                     # 多波段列表
+    band = Column(String(50), nullable=True)                                # 激活波段
+    file_format = Column(String(50), default="GeoTIFF")                     # 物理文件格式
+
+    # === 雷达遥感 (radar) 专属拓展字段 ===
+    polarization = Column(String(20), nullable=True)                        # 极化方式 (vv, vh 等)
+    sidecars = Column(JSON, nullable=True)                                  # 附属侧车文件结构 (如 .hdr 元数据外挂地址)
+    orbit_direction = Column(String(20), nullable=True)                     # 轨道方向
+    relative_orbit = Column(String(50), nullable=True)                      # 相对轨道号
+
+    # === 信息产品 (product) 专属拓展字段 ===
+    product_name = Column(String(200), nullable=True)                       # 产品全名
+    product_year = Column(Integer, nullable=True)                           # 业务统计年份
+    product_period = Column(String(50), nullable=True)                      # 统计周期 (yearly, monthly)
+    variable = Column(String(100), nullable=True)                           # 反演物理变量
+    unit = Column(String(50), nullable=True)                                # 变量计量单位
+
+    batch = relationship("ArdPartitionBatch", back_populates="assets")
+
+
+class ArdPartitionObservation(Base):
+    """ARD 非栅格品类碳卫星观测足迹足迹表 (carbon)"""
+    __tablename__ = "ard_partition_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("ard_partition_batches.id", ondelete="CASCADE"), nullable=False)
+    observation_id = Column(String(100), unique=True, index=True, nullable=False) # 观测稳定 ID
+    source_uri = Column(String(500), nullable=False)                        # 源科学文件地址
+    source_index = Column(Integer, default=0)                               # 文件内部科学矩阵索引号
+    acq_time = Column(DateTime, nullable=True)                              # 精确观测时刻
+    sensor = Column(String(100), nullable=True)                             # 固化传感器 (如 oco2)
+    product_family = Column(String(100), nullable=True)                     # 固化产品族 (如 xco2)
+    product_type = Column(String(100), nullable=True)                       # 产品物理类型
+    resolution = Column(Float, nullable=True)                               # 足迹等效分辨率
+    lon = Column(Float, nullable=True)                                      # 足迹中心点经度
+    lat = Column(Float, nullable=True)                                      # 足迹中心点纬度
+    xco2 = Column(Float, nullable=True)                                     # 物理观测核心指标值
+    quality_flag = Column(String(20), nullable=True)                        # 质量反演控制标签
+    corners = Column(JSON, nullable=True)                                   # 足迹多边形点阵
+
+    batch = relationship("ArdPartitionBatch", back_populates="observations")

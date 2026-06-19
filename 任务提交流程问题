@@ -1,0 +1,44 @@
+主要问题
+
+  1. 异步成功结果没有拿完整 runner result，入库依据可能不准。
+     前端异步同步用的是 /tasks?keyword=... 的列表 summary，而不是 /tasks/{task_id} 的完整结果。列表只给 result_summary，不带完整 quality_report_id 等字段。
+     相关位置：cube_web/frontend/src/views/PartitionView.vue:824，cube_web/cube_web/services/partition_job_store.py:1618
+     结果是：成功后前端可能只拿到 run_dir，入库服务再用 latest report 兜底判断质量，存在错配风险：cube_web/cube_web/services/ingest_service.py:139
+
+  2. “正式入库”显示逻辑和按钮启用逻辑冲突。
+     提交占位结果固定写 ingest_enabled: false：cube_web/frontend/src/views/PartitionView.vue:2357
+     但入库按钮只看 quality_report_id/run_dir：cube_web/frontend/src/views/PartitionView.vue:1798
+     所以可能出现“正式入库：否”，但“预入库/确认入库”按钮又可用。这里应改成明确的 ingest_status: not_ready / ready / previewed / ingested / failed。
+
+  3. 确认入库没有回写批次状态。
+     /ingest/optical/confirm 成功后只返回 confirmed_ingest，没有更新 partition_batches 或记录到任务链路：cube_web/cube_web/services/ingest_service.py:83
+     页面刷新后，用户看不到这个批次是否已经入库。成功剖分应该进入“待入库”，确认后进入“已入库”。
+
+  4. 只有光学有入库入口，其他成功任务没有后续语义。
+     前端入库按钮只在 activeModule === 'optical' 显示：cube_web/frontend/src/views/PartitionView.vue:3362
+     如果雷达/产品/碳卫星暂不支持入库，UI 应明确显示“剖分完成，暂不支持入库”或对应下游动作，否则“成功”后没有闭环。
+
+  5. 归档会把批次下所有资产状态改成 archived，粒度偏粗。
+     后端归档不仅改 batch，还把所有 assets 改成 archived：cube_web/cube_web/services/partition_job_store.py:835
+     这会丢掉资产原本的 succeeded/failed/manual_required 可视状态。更合理是 batch 有 archived_at/status=archived，资产保留原处理结果。
+
+  6. 任务队列统计仍可能把已归档失败任务算进“需处理”。
+     任务状态现在应该显示 attempt 自身成功/失败，但统计直接按 task.status 算：cube_web/frontend/src/views/PartitionView.vue:250
+     对已归档批次里的 failed attempt，应该显示为历史失败，但不应计入“需处理”。
+
+  建议改法
+
+  把状态拆清楚：
+
+  - task.status: 单次 attempt 状态，成功/失败/取消，永远不被归档覆盖。
+  - batch.status: 批次处理状态，succeeded/manual_required/archived。
+  - quality_status: PASS/WARN/FAIL。
+  - ingest_status: not_supported/not_ready/ready/previewed/ingested/failed。
+
+  具体优先级：
+
+  1. 异步完成后改为拉 /tasks/{task_id} 完整结果，不用任务列表 summary 更新结果面板。
+  2. 成功且质量可用后，把 UI 显示为“待入库”，不要再显示“正式入库：否”。
+  3. 确认入库成功后持久化 ingest_status/job_id/ingested_at 到批次或单独 ingest job 表。
+  4. 归档只关闭批次处理，不覆盖成功任务和资产原始结果。
+  5. “需处理”统计排除 batch_status === archived 的历史失败任务。
