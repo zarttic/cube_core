@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
 from cube_split import runtime_config
@@ -73,6 +74,36 @@ class PartitionJobStore:
         raise NotImplementedError
 
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_received_batches(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        updated_since: datetime | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_received_assets(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        asset_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_received_observations(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        observation_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def create_attempt(
@@ -150,6 +181,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         self.batches: dict[str, dict[str, Any]] = {}
         self.assets: dict[str, dict[str, Any]] = {}
         self.attempts: dict[str, dict[str, Any]] = {}
+        self.ard_batches: dict[str, dict[str, Any]] = {}
+        self.ard_assets: dict[str, dict[str, Any]] = {}
+        self.ard_observations: dict[str, dict[str, Any]] = {}
+        self._next_ard_batch_id = 1
 
     def ensure_schema(self) -> None:
         return None
@@ -193,6 +228,8 @@ class InMemoryPartitionJobStore(PartitionJobStore):
                 "created_at": existing_asset.get("created_at") or now,
                 "updated_at": now,
             }
+        if _should_sync_ard_loader_schema(record):
+            self._sync_ard_loader_schema_in_memory(schema, record)
         return copy.deepcopy(batch)
 
     def list_batches(
@@ -332,6 +369,124 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             rows = [row for row in rows if row["status"] == status]
         rows.sort(key=lambda row: row["asset_id"])
         return copy.deepcopy(rows)
+
+    def list_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        wanted = {str(asset_id) for asset_id in asset_ids if str(asset_id).strip()}
+        rows = [row for row in self.assets.values() if row["asset_id"] in wanted]
+        rows.sort(key=lambda row: row["asset_id"])
+        return copy.deepcopy(rows)
+
+    def list_received_batches(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        updated_since: datetime | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = list(self.ard_batches.values())
+        if batch_ids is not None:
+            wanted = {str(batch_id) for batch_id in batch_ids if str(batch_id).strip()}
+            rows = [row for row in rows if row["batch_id"] in wanted]
+        if source_system:
+            rows = [row for row in rows if str(row.get("source_system") or "") == source_system]
+        if updated_since is not None:
+            rows = [
+                row for row in rows
+                if (_ard_datetime_or_none(row.get("updated_at")) or _ard_datetime_or_none(row.get("loaded_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= updated_since
+            ]
+        rows.sort(key=lambda row: (str(row.get("updated_at") or ""), str(row.get("batch_id") or "")))
+        return copy.deepcopy(rows)
+
+    def list_received_assets(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        asset_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = list(self.ard_assets.values())
+        if asset_ids is not None:
+            wanted = {str(asset_id) for asset_id in asset_ids if str(asset_id).strip()}
+            rows = [row for row in rows if row["asset_id"] in wanted]
+        rows = self._filter_received_member_rows(rows, batch_ids=batch_ids, source_system=source_system)
+        rows.sort(key=lambda row: row["asset_id"])
+        return copy.deepcopy(rows)
+
+    def list_received_observations(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        observation_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = list(self.ard_observations.values())
+        if observation_ids is not None:
+            wanted = {str(observation_id) for observation_id in observation_ids if str(observation_id).strip()}
+            rows = [row for row in rows if row["observation_id"] in wanted]
+        rows = self._filter_received_member_rows(rows, batch_ids=batch_ids, source_system=source_system)
+        rows.sort(key=lambda row: row["observation_id"])
+        return copy.deepcopy(rows)
+
+    def _sync_ard_loader_schema_in_memory(self, schema: dict[str, Any], record: dict[str, Any]) -> None:
+        batch_row = _ard_loader_batch_record(schema, record)
+        existing = self.ard_batches.get(record["batch_id"])
+        batch_pk = int(existing["id"]) if existing is not None else self._next_ard_batch_id
+        if existing is None:
+            self._next_ard_batch_id += 1
+        self.ard_batches[record["batch_id"]] = {
+            **(existing or {}),
+            **batch_row,
+            "id": batch_pk,
+        }
+        if record["data_type"] == "carbon":
+            self.ard_assets = {key: value for key, value in self.ard_assets.items() if int(value.get("batch_id") or -1) != batch_pk}
+            observations = _ard_observations_from_record(record, batch_pk)
+            keep_ids = {row["observation_id"] for row in observations}
+            self.ard_observations = {
+                key: value
+                for key, value in self.ard_observations.items()
+                if not (int(value.get("batch_id") or -1) == batch_pk and key not in keep_ids)
+            }
+            for row in observations:
+                self.ard_observations[row["observation_id"]] = {**self.ard_observations.get(row["observation_id"], {}), **row}
+            return
+        self.ard_observations = {key: value for key, value in self.ard_observations.items() if int(value.get("batch_id") or -1) != batch_pk}
+        assets = _ard_assets_from_record(record, batch_pk)
+        keep_ids = {row["asset_id"] for row in assets}
+        self.ard_assets = {
+            key: value
+            for key, value in self.ard_assets.items()
+            if not (int(value.get("batch_id") or -1) == batch_pk and key not in keep_ids)
+        }
+        for row in assets:
+            self.ard_assets[row["asset_id"]] = {**self.ard_assets.get(row["asset_id"], {}), **row}
+
+    def _filter_received_member_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        batch_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        wanted_batch_ids = {str(batch_id) for batch_id in batch_ids or [] if str(batch_id).strip()}
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            batch = self._received_batch_for_member(int(row.get("batch_id") or -1))
+            if batch is None:
+                continue
+            batch_key = str(batch["batch_id"])
+            if wanted_batch_ids and batch_key not in wanted_batch_ids:
+                continue
+            if source_system and str(batch.get("source_system") or "") != source_system:
+                continue
+            filtered.append({**row, "batch_key": batch_key, "data_type": batch.get("data_type")})
+        return filtered
+
+    def _received_batch_for_member(self, batch_pk: int) -> dict[str, Any] | None:
+        for row in self.ard_batches.values():
+            if int(row.get("id") or -1) == batch_pk:
+                return row
+        return None
 
     def create_attempt(
         self,
@@ -656,116 +811,125 @@ class PostgresPartitionJobStore(PartitionJobStore):
         if not dsn:
             raise ValueError("PostgreSQL DSN is required")
         self.dsn = dsn
+        self._ard_loader_schema_available: bool | None = None
+        self._schema_ensured = False
+        self._schema_lock = Lock()
 
     def ensure_schema(self) -> None:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS partition_batches (
-                      batch_id TEXT PRIMARY KEY,
-                      batch_name TEXT NOT NULL,
-                      data_type TEXT NOT NULL,
-                      source_system TEXT,
-                      source_schema JSONB NOT NULL,
-                      normalized_payload JSONB NOT NULL,
-                      status TEXT NOT NULL DEFAULT 'pending',
-                      priority INT NOT NULL DEFAULT 0,
-                      attempt_count INT NOT NULL DEFAULT 0,
-                      max_auto_retries INT NOT NULL DEFAULT 1,
-                      last_task_id TEXT,
-                      last_error TEXT,
-                      quality_status TEXT,
-                      quality_report_id TEXT,
-                      quality_failure_reason TEXT,
-                      ingest_status TEXT NOT NULL DEFAULT 'not_ready',
-                      ingest_job_id TEXT,
-                      ingest_error TEXT,
-                      ingested_at TIMESTAMPTZ,
-                      partitioned_at TIMESTAMPTZ,
-                      manual_required_at TIMESTAMPTZ,
-                      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        if self._schema_ensured:
+            return
+        with self._schema_lock:
+            if self._schema_ensured:
+                return
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS partition_batches (
+                          batch_id TEXT PRIMARY KEY,
+                          batch_name TEXT NOT NULL,
+                          data_type TEXT NOT NULL,
+                          source_system TEXT,
+                          source_schema JSONB NOT NULL,
+                          normalized_payload JSONB NOT NULL,
+                          status TEXT NOT NULL DEFAULT 'pending',
+                          priority INT NOT NULL DEFAULT 0,
+                          attempt_count INT NOT NULL DEFAULT 0,
+                          max_auto_retries INT NOT NULL DEFAULT 1,
+                          last_task_id TEXT,
+                          last_error TEXT,
+                          quality_status TEXT,
+                          quality_report_id TEXT,
+                          quality_failure_reason TEXT,
+                          ingest_status TEXT NOT NULL DEFAULT 'not_ready',
+                          ingest_job_id TEXT,
+                          ingest_error TEXT,
+                          ingested_at TIMESTAMPTZ,
+                          partitioned_at TIMESTAMPTZ,
+                          manual_required_at TIMESTAMPTZ,
+                          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS partition_assets (
-                      asset_id TEXT PRIMARY KEY,
-                      batch_id TEXT NOT NULL REFERENCES partition_batches(batch_id) ON DELETE CASCADE,
-                      data_type TEXT NOT NULL,
-                      scene_id TEXT,
-                      source_uri TEXT NOT NULL,
-                      asset_payload JSONB NOT NULL,
-                      status TEXT NOT NULL DEFAULT 'pending',
-                      attempt_count INT NOT NULL DEFAULT 0,
-                      last_error TEXT,
-                      last_run_dir TEXT,
-                      partitioned_at TIMESTAMPTZ,
-                      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS partition_assets (
+                          asset_id TEXT PRIMARY KEY,
+                          batch_id TEXT NOT NULL REFERENCES partition_batches(batch_id) ON DELETE CASCADE,
+                          data_type TEXT NOT NULL,
+                          scene_id TEXT,
+                          source_uri TEXT NOT NULL,
+                          asset_payload JSONB NOT NULL,
+                          status TEXT NOT NULL DEFAULT 'pending',
+                          attempt_count INT NOT NULL DEFAULT 0,
+                          last_error TEXT,
+                          last_run_dir TEXT,
+                          partitioned_at TIMESTAMPTZ,
+                          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS partition_job_attempts (
-                      task_id TEXT PRIMARY KEY,
-                      batch_id TEXT NOT NULL REFERENCES partition_batches(batch_id) ON DELETE CASCADE,
-                      asset_ids TEXT[] NOT NULL DEFAULT '{}',
-                      operation TEXT NOT NULL,
-                      status TEXT NOT NULL,
-                      attempt_no INT NOT NULL,
-                      payload JSONB NOT NULL,
-                      runner_result JSONB,
-                      error_type TEXT,
-                      error_message TEXT,
-                      requested_by TEXT NOT NULL DEFAULT 'system',
-                      source_task_id TEXT,
-                      retry_strategy TEXT,
-                      failure_reason TEXT,
-                      started_at TIMESTAMPTZ,
-                      finished_at TIMESTAMPTZ,
-                      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS partition_job_attempts (
+                          task_id TEXT PRIMARY KEY,
+                          batch_id TEXT NOT NULL REFERENCES partition_batches(batch_id) ON DELETE CASCADE,
+                          asset_ids TEXT[] NOT NULL DEFAULT '{}',
+                          operation TEXT NOT NULL,
+                          status TEXT NOT NULL,
+                          attempt_no INT NOT NULL,
+                          payload JSONB NOT NULL,
+                          runner_result JSONB,
+                          error_type TEXT,
+                          error_message TEXT,
+                          requested_by TEXT NOT NULL DEFAULT 'system',
+                          source_task_id TEXT,
+                          retry_strategy TEXT,
+                          failure_reason TEXT,
+                          started_at TIMESTAMPTZ,
+                          finished_at TIMESTAMPTZ,
+                          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS error_type TEXT")
-                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS source_task_id TEXT")
-                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS retry_strategy TEXT")
-                cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS failure_reason TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_status TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_report_id TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_failure_reason TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_status TEXT DEFAULT 'not_ready'")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_job_id TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
-                cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ")
-                cur.execute(
-                    """
-                    UPDATE partition_batches
-                    SET ingest_status = CASE
-                      WHEN data_type <> 'optical' THEN 'not_supported'
-                      WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
-                      ELSE COALESCE(ingest_status, 'not_ready')
-                    END
-                    WHERE ingest_status IS NULL
-                       OR (data_type <> 'optical' AND ingest_status = 'not_ready')
-                       OR (
-                         data_type = 'optical'
-                         AND status = 'succeeded'
-                         AND quality_report_id IS NOT NULL
-                         AND ingest_status = 'not_ready'
-                       )
-                    """
-                )
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_attempts_batch ON partition_job_attempts(batch_id, created_at DESC)")
-            conn.commit()
+                    cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS error_type TEXT")
+                    cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS source_task_id TEXT")
+                    cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS retry_strategy TEXT")
+                    cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS failure_reason TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_status TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_report_id TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS quality_failure_reason TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_status TEXT DEFAULT 'not_ready'")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_job_id TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
+                    cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ")
+                    cur.execute(
+                        """
+                        UPDATE partition_batches
+                        SET ingest_status = CASE
+                          WHEN data_type <> 'optical' THEN 'not_supported'
+                          WHEN status = 'succeeded' AND quality_report_id IS NOT NULL THEN 'ready'
+                          ELSE COALESCE(ingest_status, 'not_ready')
+                        END
+                        WHERE ingest_status IS NULL
+                           OR (data_type <> 'optical' AND ingest_status = 'not_ready')
+                           OR (
+                             data_type = 'optical'
+                             AND status = 'succeeded'
+                             AND quality_report_id IS NOT NULL
+                             AND ingest_status = 'not_ready'
+                           )
+                        """
+                    )
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_status ON partition_batches(status)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_attempts_batch ON partition_job_attempts(batch_id, created_at DESC)")
+                conn.commit()
+            self._schema_ensured = True
 
     def upsert_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
         self.ensure_schema()
@@ -859,6 +1023,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         """,
                         _jsonb_record(asset, "asset_payload"),
                     )
+                if _should_sync_ard_loader_schema(record):
+                    self._sync_ard_loader_schema(cur, schema, record)
             conn.commit()
         return batch
 
@@ -1143,6 +1309,126 @@ class PostgresPartitionJobStore(PartitionJobStore):
             sql += " AND status = %s"
             params.append(status)
         sql += " ORDER BY asset_id"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    def list_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        wanted = [str(asset_id) for asset_id in asset_ids if str(asset_id).strip()]
+        if not wanted:
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM partition_assets WHERE asset_id = ANY(%s::text[]) ORDER BY asset_id",
+                    (wanted,),
+                )
+                return [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    def list_received_batches(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        updated_since: datetime | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        where = []
+        params: list[Any] = []
+        if batch_ids is not None:
+            wanted = [str(batch_id) for batch_id in batch_ids if str(batch_id).strip()]
+            if not wanted:
+                return []
+            where.append("batch_id = ANY(%s::varchar[])")
+            params.append(wanted)
+        if source_system:
+            where.append("source_system = %s")
+            params.append(source_system)
+        if updated_since is not None:
+            where.append("COALESCE(updated_at, loaded_at) >= %s")
+            params.append(updated_since.astimezone(timezone.utc).replace(tzinfo=None))
+        sql = "SELECT * FROM ard_partition_batches"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY COALESCE(updated_at, loaded_at), batch_id"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    def list_received_assets(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        asset_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        where = []
+        params: list[Any] = []
+        if batch_ids is not None:
+            wanted = [str(batch_id) for batch_id in batch_ids if str(batch_id).strip()]
+            if not wanted:
+                return []
+            where.append("b.batch_id = ANY(%s::varchar[])")
+            params.append(wanted)
+        if asset_ids is not None:
+            wanted_assets = [str(asset_id) for asset_id in asset_ids if str(asset_id).strip()]
+            if not wanted_assets:
+                return []
+            where.append("a.asset_id = ANY(%s::varchar[])")
+            params.append(wanted_assets)
+        if source_system:
+            where.append("b.source_system = %s")
+            params.append(source_system)
+        sql = """
+            SELECT a.*, b.batch_id AS batch_key, b.data_type
+            FROM ard_partition_assets a
+            JOIN ard_partition_batches b ON b.id = a.batch_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY a.asset_id"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    def list_received_observations(
+        self,
+        *,
+        batch_ids: list[str] | None = None,
+        observation_ids: list[str] | None = None,
+        source_system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        where = []
+        params: list[Any] = []
+        if batch_ids is not None:
+            wanted = [str(batch_id) for batch_id in batch_ids if str(batch_id).strip()]
+            if not wanted:
+                return []
+            where.append("b.batch_id = ANY(%s::varchar[])")
+            params.append(wanted)
+        if observation_ids is not None:
+            wanted_observations = [str(observation_id) for observation_id in observation_ids if str(observation_id).strip()]
+            if not wanted_observations:
+                return []
+            where.append("o.observation_id = ANY(%s::varchar[])")
+            params.append(wanted_observations)
+        if source_system:
+            where.append("b.source_system = %s")
+            params.append(source_system)
+        sql = """
+            SELECT o.*, b.batch_id AS batch_key, b.data_type
+            FROM ard_partition_observations o
+            JOIN ard_partition_batches b ON b.id = o.batch_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY o.observation_id"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
@@ -1613,6 +1899,204 @@ class PostgresPartitionJobStore(PartitionJobStore):
 
         return Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False))
 
+    def _sync_ard_loader_schema(self, cur, schema: dict[str, Any], record: dict[str, Any]) -> None:
+        if not self._has_ard_loader_schema(cur):
+            raise RuntimeError("ARD loader schema tables are required for partition schema import in PostgreSQL")
+        batch_row = _ard_loader_batch_record(schema, record)
+        cur.execute(
+            """
+            MERGE INTO ard_partition_batches target
+            USING (
+              SELECT
+                %(schema_version)s::varchar(20) AS schema_version,
+                %(batch_id)s::varchar(100) AS batch_id,
+                %(batch_name)s::varchar(200) AS batch_name,
+                %(data_type)s::varchar(50) AS data_type,
+                %(source_system)s::varchar(50) AS source_system,
+                %(loaded_at)s::timestamp AS loaded_at,
+                %(updated_at)s::timestamp AS updated_at,
+                %(raw_meta_uri)s::varchar(500) AS raw_meta_uri,
+                %(priority)s::int AS priority,
+                %(max_auto_retries)s::int AS max_auto_retries,
+                %(status)s::varchar(50) AS status
+            ) source
+            ON (target.batch_id = source.batch_id)
+            WHEN MATCHED THEN UPDATE SET
+              schema_version = source.schema_version,
+              batch_name = source.batch_name,
+              data_type = source.data_type,
+              source_system = source.source_system,
+              loaded_at = COALESCE(source.loaded_at, target.loaded_at),
+              updated_at = COALESCE(source.updated_at, target.updated_at),
+              raw_meta_uri = source.raw_meta_uri,
+              priority = source.priority,
+              max_auto_retries = source.max_auto_retries
+            WHEN NOT MATCHED THEN INSERT (
+              schema_version, batch_id, batch_name, data_type, source_system,
+              loaded_at, updated_at, raw_meta_uri, priority, max_auto_retries, status
+            ) VALUES (
+              source.schema_version, source.batch_id, source.batch_name, source.data_type, source.source_system,
+              source.loaded_at, source.updated_at, source.raw_meta_uri, source.priority, source.max_auto_retries, source.status
+            )
+            """,
+            batch_row,
+        )
+        cur.execute("SELECT id FROM ard_partition_batches WHERE batch_id = %s", (record["batch_id"],))
+        ard_batch_id = _dict_row(cur)["id"]
+        self._sync_ard_loader_batch_members(cur, ard_batch_id, record)
+
+    def _sync_ard_loader_batch_members(self, cur, ard_batch_id: int, record: dict[str, Any]) -> None:
+        data_type = str(record["data_type"])
+        if data_type == "carbon":
+            cur.execute("DELETE FROM ard_partition_assets WHERE batch_id = %s", (ard_batch_id,))
+            observations = _ard_observations_from_record(record, ard_batch_id)
+            for observation in observations:
+                cur.execute(
+                    """
+                    MERGE INTO ard_partition_observations target
+                    USING (
+                      SELECT
+                        %(batch_id)s::int AS batch_id,
+                        %(observation_id)s::varchar(100) AS observation_id,
+                        %(source_uri)s::varchar(500) AS source_uri,
+                        %(source_index)s::int AS source_index,
+                        %(acq_time)s::timestamp AS acq_time,
+                        %(sensor)s::varchar(100) AS sensor,
+                        %(product_family)s::varchar(100) AS product_family,
+                        %(product_type)s::varchar(100) AS product_type,
+                        %(resolution)s::double precision AS resolution,
+                        %(lon)s::double precision AS lon,
+                        %(lat)s::double precision AS lat,
+                        %(xco2)s::double precision AS xco2,
+                        %(quality_flag)s::varchar(20) AS quality_flag,
+                        %(corners)s::json AS corners
+                    ) source
+                    ON (target.observation_id = source.observation_id)
+                    WHEN MATCHED THEN UPDATE SET
+                      batch_id = source.batch_id,
+                      source_uri = source.source_uri,
+                      source_index = source.source_index,
+                      acq_time = source.acq_time,
+                      sensor = source.sensor,
+                      product_family = source.product_family,
+                      product_type = source.product_type,
+                      resolution = source.resolution,
+                      lon = source.lon,
+                      lat = source.lat,
+                      xco2 = source.xco2,
+                      quality_flag = source.quality_flag,
+                      corners = source.corners
+                    WHEN NOT MATCHED THEN INSERT (
+                      batch_id, observation_id, source_uri, source_index, acq_time, sensor,
+                      product_family, product_type, resolution, lon, lat, xco2, quality_flag, corners
+                    ) VALUES (
+                      source.batch_id, source.observation_id, source.source_uri, source.source_index, source.acq_time, source.sensor,
+                      source.product_family, source.product_type, source.resolution, source.lon, source.lat, source.xco2, source.quality_flag, source.corners
+                    )
+                    """,
+                    _json_record(observation, "corners"),
+                )
+            observation_ids = [row["observation_id"] for row in observations]
+            if observation_ids:
+                cur.execute(
+                    "DELETE FROM ard_partition_observations WHERE batch_id = %s AND NOT (observation_id = ANY(%s::varchar[]))",
+                    (ard_batch_id, observation_ids),
+                )
+            else:
+                cur.execute("DELETE FROM ard_partition_observations WHERE batch_id = %s", (ard_batch_id,))
+            return
+
+        cur.execute("DELETE FROM ard_partition_observations WHERE batch_id = %s", (ard_batch_id,))
+        assets = _ard_assets_from_record(record, ard_batch_id)
+        for asset in assets:
+            cur.execute(
+                """
+                MERGE INTO ard_partition_assets target
+                USING (
+                  SELECT
+                    %(batch_id)s::int AS batch_id,
+                    %(asset_id)s::varchar(100) AS asset_id,
+                    %(source_uri)s::varchar(500) AS source_uri,
+                    %(scene_id)s::varchar(100) AS scene_id,
+                    %(acq_time)s::timestamp AS acq_time,
+                    %(sensor)s::varchar(100) AS sensor,
+                    %(product_family)s::varchar(100) AS product_family,
+                    %(resolution)s::double precision AS resolution,
+                    %(bbox)s::json AS bbox,
+                    %(corners)s::json AS corners,
+                    %(bands)s::json AS bands,
+                    %(band)s::varchar(50) AS band,
+                    %(file_format)s::varchar(50) AS file_format,
+                    %(polarization)s::varchar(20) AS polarization,
+                    %(sidecars)s::json AS sidecars,
+                    %(orbit_direction)s::varchar(20) AS orbit_direction,
+                    %(relative_orbit)s::varchar(50) AS relative_orbit,
+                    %(product_name)s::varchar(200) AS product_name,
+                    %(product_year)s::int AS product_year,
+                    %(product_period)s::varchar(50) AS product_period,
+                    %(variable)s::varchar(100) AS variable,
+                    %(unit)s::varchar(50) AS unit
+                ) source
+                ON (target.asset_id = source.asset_id)
+                WHEN MATCHED THEN UPDATE SET
+                  batch_id = source.batch_id,
+                  source_uri = source.source_uri,
+                  scene_id = source.scene_id,
+                  acq_time = source.acq_time,
+                  sensor = source.sensor,
+                  product_family = source.product_family,
+                  resolution = source.resolution,
+                  bbox = source.bbox,
+                  corners = source.corners,
+                  bands = source.bands,
+                  band = source.band,
+                  file_format = source.file_format,
+                  polarization = source.polarization,
+                  sidecars = source.sidecars,
+                  orbit_direction = source.orbit_direction,
+                  relative_orbit = source.relative_orbit,
+                  product_name = source.product_name,
+                  product_year = source.product_year,
+                  product_period = source.product_period,
+                  variable = source.variable,
+                  unit = source.unit
+                WHEN NOT MATCHED THEN INSERT (
+                  batch_id, asset_id, source_uri, scene_id, acq_time, sensor,
+                  product_family, resolution, bbox, corners, bands, band, file_format,
+                  polarization, sidecars, orbit_direction, relative_orbit,
+                  product_name, product_year, product_period, variable, unit
+                ) VALUES (
+                  source.batch_id, source.asset_id, source.source_uri, source.scene_id, source.acq_time, source.sensor,
+                  source.product_family, source.resolution, source.bbox, source.corners, source.bands, source.band, source.file_format,
+                  source.polarization, source.sidecars, source.orbit_direction, source.relative_orbit,
+                  source.product_name, source.product_year, source.product_period, source.variable, source.unit
+                )
+                """,
+                _json_record(asset, "bbox", "corners", "bands", "sidecars"),
+            )
+        asset_ids = [row["asset_id"] for row in assets]
+        if asset_ids:
+            cur.execute(
+                "DELETE FROM ard_partition_assets WHERE batch_id = %s AND NOT (asset_id = ANY(%s::varchar[]))",
+                (ard_batch_id, asset_ids),
+            )
+        else:
+            cur.execute("DELETE FROM ard_partition_assets WHERE batch_id = %s", (ard_batch_id,))
+
+    def _has_ard_loader_schema(self, cur) -> bool:
+        if self._ard_loader_schema_available is not None:
+            return self._ard_loader_schema_available
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+              AND table_name IN ('ard_partition_batches', 'ard_partition_assets', 'ard_partition_observations')
+            """
+        )
+        self._ard_loader_schema_available = int(cur.fetchone()[0]) == 3
+        return self._ard_loader_schema_available
+
 
 _store: PartitionJobStore | None = None
 
@@ -1639,6 +2123,10 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
     batch_id = str(schema.get("batch_id") or schema.get("id") or "").strip()
     if not batch_id:
         raise ValueError("batch_id is required")
+    if schema.get("loaded_at") not in {None, ""}:
+        _parse_iso_datetime(schema.get("loaded_at"), "loaded_at")
+    if schema.get("updated_at") not in {None, ""}:
+        _parse_iso_datetime(schema.get("updated_at"), "updated_at")
     data_type = str(schema.get("data_type") or "optical").strip().lower()
     if data_type not in {"optical", "product", "carbon", "radar"}:
         raise ValueError("data_type must be one of: optical, product, carbon, radar")
@@ -1658,13 +2146,106 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
         "batch_id": batch_id,
         "batch_name": batch_name,
         "data_type": data_type,
-        "source_system": schema.get("source_system"),
+        "source_system": _optional_text(schema.get("source_system")) or "loader",
         "source_schema": copy.deepcopy(schema),
         "normalized_payload": payload,
         "priority": int(schema.get("priority") or 0),
         "max_auto_retries": int(schema.get("max_auto_retries") if schema.get("max_auto_retries") is not None else 1),
         "ingest_status": _initial_ingest_status(data_type),
     }
+
+
+def _should_sync_ard_loader_schema(record: dict[str, Any]) -> bool:
+    source_system = str(record.get("source_system") or "").strip().lower()
+    if source_system == "runtime":
+        return False
+    if source_system.startswith("standard_loaded_"):
+        return False
+    return True
+
+
+def _ard_loader_batch_record(schema: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": str(schema.get("schema_version") or "1.0").strip() or "1.0",
+        "batch_id": record["batch_id"],
+        "batch_name": record["batch_name"],
+        "data_type": record["data_type"],
+        "source_system": _optional_text(schema.get("source_system")) or "loader",
+        "loaded_at": _optional_datetime(schema.get("loaded_at")),
+        "updated_at": _optional_datetime(schema.get("updated_at")),
+        "raw_meta_uri": _optional_text(schema.get("raw_meta_uri")),
+        "priority": record["priority"],
+        "max_auto_retries": record["max_auto_retries"],
+        "status": "pending",
+    }
+
+
+def _ard_assets_from_record(record: dict[str, Any], ard_batch_id: int) -> list[dict[str, Any]]:
+    payload = record["normalized_payload"]
+    rows: list[dict[str, Any]] = []
+    for base_row, item in zip(_assets_from_record(record), payload.get("selected_assets") or []):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "batch_id": ard_batch_id,
+                "asset_id": base_row["asset_id"],
+                "source_uri": base_row["source_uri"],
+                "scene_id": base_row["scene_id"],
+                "acq_time": _optional_datetime(item.get("acq_time")),
+                "sensor": _optional_text(item.get("sensor")),
+                "product_family": _optional_text(item.get("product_family")),
+                "resolution": _optional_resolution(item.get("resolution")),
+                "bbox": _json_value(item.get("bbox")),
+                "corners": _json_value(item.get("corners")),
+                "bands": _json_value(item.get("bands")),
+                "band": _optional_text(item.get("band")),
+                "file_format": _optional_text(item.get("file_format")) or "GeoTIFF",
+                "polarization": _optional_text(item.get("polarization")),
+                "sidecars": _json_value(item.get("sidecars")),
+                "orbit_direction": _optional_text(item.get("orbit_direction")),
+                "relative_orbit": _optional_text(item.get("relative_orbit")),
+                "product_name": _optional_text(item.get("product_name")),
+                "product_year": _optional_int(item.get("product_year")),
+                "product_period": _optional_text(item.get("product_period")),
+                "variable": _optional_text(item.get("variable")),
+                "unit": _optional_text(item.get("unit")),
+            }
+        )
+    return rows
+
+
+def _ard_observations_from_record(record: dict[str, Any], ard_batch_id: int) -> list[dict[str, Any]]:
+    payload = record["normalized_payload"]
+    rows: list[dict[str, Any]] = []
+    for item in payload.get("selected_observations") or []:
+        if not isinstance(item, dict):
+            continue
+        observation_id = _optional_text(item.get("observation_id"))
+        if not observation_id:
+            continue
+        source_uri = _optional_text(item.get("source_uri"))
+        if not source_uri:
+            continue
+        rows.append(
+            {
+                "batch_id": ard_batch_id,
+                "observation_id": observation_id,
+                "source_uri": source_uri,
+                "source_index": _optional_int(item.get("source_index"), default=0),
+                "acq_time": _optional_datetime(item.get("acq_time")),
+                "sensor": _optional_text(item.get("sensor")),
+                "product_family": _optional_text(item.get("product_family")),
+                "product_type": _optional_text(item.get("product_type")),
+                "resolution": _optional_resolution(item.get("resolution")),
+                "lon": _optional_float(item.get("lon")),
+                "lat": _optional_float(item.get("lat")),
+                "xco2": _optional_float(item.get("xco2")),
+                "quality_flag": _optional_text(item.get("quality_flag")),
+                "corners": _json_value(item.get("corners")),
+            }
+        )
+    return rows
 
 
 def _assets_from_record(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1950,6 +2531,60 @@ def _resolution_value(value: Any, label: str) -> float:
     return _float_value(value, label)
 
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_datetime(value: Any) -> datetime | None:
+    text = _optional_text(value)
+    if not text:
+        return None
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _ard_datetime_or_none(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = _optional_text(value)
+        if not text:
+            return None
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _optional_int(value: Any, *, default: int | None = None) -> int | None:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _optional_resolution(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return _resolution_value(value, "resolution")
+
+
+def _json_value(value: Any) -> Any:
+    return None if value is None else copy.deepcopy(value)
+
+
 def _stable_asset_key(value: str, idx: int) -> str:
     import hashlib
 
@@ -2061,6 +2696,15 @@ def _jsonb_record(record: dict[str, Any], *json_keys: str) -> dict[str, Any]:
 
     return {
         key: (Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False)) if key in json_keys else value)
+        for key, value in record.items()
+    }
+
+
+def _json_record(record: dict[str, Any], *json_keys: str) -> dict[str, Any]:
+    from psycopg.types.json import Json
+
+    return {
+        key: (Json(value, dumps=lambda item: json.dumps(item, ensure_ascii=False)) if key in json_keys else value)
         for key, value in record.items()
     }
 

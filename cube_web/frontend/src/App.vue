@@ -4,7 +4,7 @@ import { navItems, normalizePath } from '@/data/navigation';
 import HomeView from '@/views/HomeView.vue';
 import PartitionView from '@/views/PartitionView.vue';
 import EncodingView from '@/views/EncodingView.vue';
-import { authRequired, loadAuthRuntimeConfig } from '@/config';
+import { authRequired, loadAuthRuntimeConfig, runtimeNavigation } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
 
 const currentPath = ref(normalizePath(window.location.pathname));
@@ -48,6 +48,15 @@ function targetFromAuthState(stateValue) {
   return '';
 }
 
+function redirectToPortalHomeIfNeeded() {
+  if (currentPath.value !== '/') return false;
+  const homeItem = runtimeNavigation().find((item) => item?.label === '首页' && item?.kind === 'external' && item?.url);
+  const target = String(homeItem?.url || '').trim();
+  if (!target || target === window.location.href) return false;
+  window.location.replace(target);
+  return true;
+}
+
 async function initializeAuth() {
   await loadAuthRuntimeConfig();
   const params = new URLSearchParams(window.location.search);
@@ -60,11 +69,13 @@ async function initializeAuth() {
     sessionStorage.removeItem('oauth_state');
     window.history.replaceState({}, '', target);
     currentPath.value = normalizePath(window.location.pathname);
+    if (redirectToPortalHomeIfNeeded()) return;
     return;
   }
   if (localStorage.getItem('access_token')) {
     try {
       await userStore.fetchUserInfo();
+      if (redirectToPortalHomeIfNeeded()) return;
       return;
     } catch {
       localStorage.removeItem('access_token');
@@ -73,7 +84,9 @@ async function initializeAuth() {
   }
   if (authRequired()) {
     userStore.redirectToAuth(window.location.pathname + window.location.search);
+    return;
   }
+  redirectToPortalHomeIfNeeded();
 }
 
 async function handleLogout() {

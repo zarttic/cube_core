@@ -9,6 +9,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
+import cube_split.ingest.product_ingest_job as product_ingest_job
 from cube_split.ingest.product_ingest_job import run_product_ingest
 from cube_split.jobs.product_partition_job import _prepare_product_task_rows, run_product_partition
 from cube_split.partition.product_products import parse_product_asset
@@ -442,3 +443,48 @@ def test_run_product_ingest_creates_product_tables(tmp_path: Path):
     assert facts[0][0] == 1980
     assert facts[0][1] == "product_value"
     assert "#window=" in facts[0][2]
+
+
+def test_run_product_ingest_reports_probe_metrics(monkeypatch, tmp_path: Path):
+    run_dir = tmp_path / "run_probe"
+    run_dir.mkdir()
+    asset = tmp_path / "product_1980_probe.tif"
+    _write_product_tif(asset)
+    (run_dir / "index_rows.jsonl").write_text(json.dumps(_product_row(asset, 1980)) + "\n", encoding="utf-8")
+    captured: list[product_ingest_job.TileProbeMetric] = []
+
+    def fake_report_tile_metrics(metrics):
+        captured.extend(list(metrics))
+
+    monkeypatch.setattr(product_ingest_job, "report_tile_metrics", fake_report_tile_metrics)
+
+    run_product_ingest(
+        Namespace(
+            run_dir=str(run_dir),
+            job_id="product-job-probe",
+            dataset="dianzhong_ecological_security",
+            product_name="滇中地区30米生态安全评价数据集",
+            asset_version="v1",
+            cube_version="product_v1",
+            metadata_backend="sqlite",
+            db_path=str(tmp_path / "product_probe.db"),
+            asset_storage_backend="local",
+            cog_output_root=str(tmp_path / "product_cog_store"),
+            cog_materialize_mode="copy",
+            postgres_dsn="",
+            minio_endpoint="",
+            minio_access_key="",
+            minio_secret_key="",
+            minio_bucket="",
+            minio_prefix="cube/product",
+            minio_secure=False,
+            minio_upload_workers=1,
+        )
+    )
+
+    assert len(captured) == 1
+    assert captured[0].task_name == "cube.partition.product.ingest"
+    assert captured[0].method_name == "merge.rs_product_cell_fact"
+    assert captured[0].attributes["cube.band"] == "product_value"
+    assert captured[0].attributes["cube.product_year"] == 1980
+    assert captured[0].attributes["cube.target_table"] == "rs_product_cell_fact"

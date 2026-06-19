@@ -75,15 +75,29 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
 
 
 class PartitionSchemaImportRequest(CubeWebModel):
+    schema_version: str | None = "1.0"
     batch_id: str = Field(min_length=1)
     batch_name: str | None = None
     data_type: Literal["optical", "product", "carbon", "radar"] = "optical"
     source_system: str | None = None
+    loaded_at: str | None = None
+    updated_at: str | None = None
+    raw_meta_uri: str | None = None
     assets: list[dict[str, Any]] | None = None
     observations: list[dict[str, Any]] | None = None
     normalized_payload: dict[str, Any] | None = None
     priority: int = 0
     max_auto_retries: int = Field(default=1, ge=0)
+
+
+class PartitionSchemaReconcileRequest(CubeWebModel):
+    source_system: str | None = None
+    batch_ids: list[str] | None = None
+    asset_ids: list[str] | None = None
+    observation_ids: list[str] | None = None
+    updated_since: str | None = None
+    include_assets: bool = True
+    include_attempts: bool = False
 
 
 class PartitionBatchRunRequest(CubeWebModel):

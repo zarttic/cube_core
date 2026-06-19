@@ -583,6 +583,7 @@ def test_health_selectively_runs_dependency_checks(monkeypatch):
 
 
 def test_auth_config_exposes_subsystem_client(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/tmp/cube-web-missing-env-file")
     monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://portal.example.test")
     monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
     monkeypatch.setenv("CUBE_WEB_AUTH_REDIRECT_URI", "http://web.example.test/callback")
@@ -610,8 +611,10 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
 
 
 def test_auth_config_uses_runtime_defaults_when_portal_env_is_empty(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/tmp/cube-web-missing-env-file")
     monkeypatch.delenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_MAIN_URL", raising=False)
+    monkeypatch.delenv("CUBE_WEB_PORTAL_HOME_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_DATA_INGEST_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_PARTITION_SERVICE_URL", raising=False)
     monkeypatch.delenv("CUBE_WEB_PORTAL_DISPATCH_URL", raising=False)
@@ -1504,6 +1507,63 @@ def test_partition_task_cancel_uses_persisted_attempt_when_memory_task_missing()
     assert store.get_attempt(task_id)["status"] == "cancel_requested"
 
 
+def test_partition_workflow_throttles_cancellation_checks(monkeypatch):
+    class CountingStore(InMemoryPartitionJobStore):
+        def __init__(self):
+            super().__init__()
+            self.cancel_check_count = 0
+
+        def is_cancel_requested(self, task_id: str) -> bool:
+            self.cancel_check_count += 1
+            return False
+
+    store = CountingStore()
+    service = PartitionService(
+        {
+            "product": PartitionBackend(
+                data_type="product",
+                run=lambda payload=None: {
+                    "status": "completed",
+                    "data_type": "product",
+                    "rows": sum(1 for _ in range(5) if payload["cancellation_check"]() is False),
+                },
+            )
+        }
+    )
+    workflow = PartitionWorkflowService(service, store=store)
+    monkeypatch.setattr("cube_web.services.partition_workflow.time.monotonic", lambda: 100.0)
+
+    task = workflow.run_payload(
+        "product",
+        {
+            "batch_id": "THROTTLED_CANCEL_CHECKS",
+            "batch_name": "Throttled cancel checks",
+            "grid_type": "s2",
+            "grid_level": 5,
+            "selected_assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/throttled-cancel.tif",
+                    "throttled-cancel",
+                    data_type="product",
+                    asset_id="throttled-cancel",
+                )
+            ],
+        },
+    )
+
+    task_state = None
+    for _ in range(20):
+        task_state = workflow.get_task(task.task_id)
+        if task_state.status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert task_state is not None
+    assert task_state.status == "completed"
+    assert task_state.result["rows"] == 5
+    assert store.cancel_check_count == 1
+
+
 def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch):
     payload = {
         "batch_id": "DIRECT_RUN_QUEUE",
@@ -1811,6 +1871,320 @@ def test_postgres_runtime_batch_refresh_resets_changed_assets_and_deletes_stale(
     assert delete_params == ("PG_RUNTIME_REFRESH", ["pg-refresh"])
 
 
+def test_postgres_schema_import_syncs_ard_loader_asset_tables(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.description = []
+            self._fetchone_result = None
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+            if "SELECT COUNT(*)" in sql and "information_schema.tables" in sql:
+                self.description = [("count",)]
+                self._fetchone_result = (3,)
+            elif "SELECT * FROM partition_batches" in sql:
+                self.description = [
+                    ("batch_id",),
+                    ("batch_name",),
+                    ("data_type",),
+                    ("source_system",),
+                    ("source_schema",),
+                    ("normalized_payload",),
+                    ("status",),
+                    ("priority",),
+                    ("attempt_count",),
+                    ("max_auto_retries",),
+                    ("created_at",),
+                    ("updated_at",),
+                ]
+                self._fetchone_result = (
+                    "ARD_SYNC_PRODUCT",
+                    "ARD sync product",
+                    "product",
+                    "loader",
+                    {},
+                    {},
+                    "pending",
+                    2,
+                    0,
+                    3,
+                    "2026-06-18T10:00:00Z",
+                    "2026-06-18T10:00:00Z",
+                )
+            elif "SELECT id FROM ard_partition_batches" in sql:
+                self.description = [("id",)]
+                self._fetchone_result = (42,)
+            else:
+                self.description = []
+                self._fetchone_result = None
+
+        def fetchone(self):
+            return self._fetchone_result
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "ensure_schema", lambda: None)
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+
+    batch = store.upsert_schema(
+        {
+            "schema_version": "1.0",
+            "batch_id": "ARD_SYNC_PRODUCT",
+            "batch_name": "ARD sync product",
+            "data_type": "product",
+            "source_system": "loader",
+            "loaded_at": "2026-06-18T10:00:00Z",
+            "updated_at": "2026-06-18T10:05:00Z",
+            "raw_meta_uri": "s3://cube/meta/product.json",
+            "priority": 2,
+            "max_auto_retries": 3,
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/ard-sync.tif",
+                    "product-scene",
+                    data_type="product",
+                    asset_id="product-asset-1",
+                )
+            ],
+        }
+    )
+
+    sql_text = "\n".join(sql for sql, _params in executed)
+    ard_batch_params = next(params for sql, params in executed if "MERGE INTO ard_partition_batches" in sql)
+    ard_asset_params = next(params for sql, params in executed if "MERGE INTO ard_partition_assets" in sql)
+
+    assert batch["batch_id"] == "ARD_SYNC_PRODUCT"
+    assert "MERGE INTO ard_partition_batches target" in sql_text
+    assert "MERGE INTO ard_partition_assets target" in sql_text
+    assert "DELETE FROM ard_partition_observations WHERE batch_id = %s" in sql_text
+    assert ard_batch_params["schema_version"] == "1.0"
+    assert ard_batch_params["source_system"] == "loader"
+    assert ard_batch_params["raw_meta_uri"] == "s3://cube/meta/product.json"
+    assert ard_asset_params["batch_id"] == 42
+    assert ard_asset_params["asset_id"] == "product-asset-1"
+    assert ard_asset_params["product_name"] == "test_product"
+
+
+def test_postgres_store_ensure_schema_runs_only_once(monkeypatch):
+    executed = []
+    connect_calls = 0
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_connect():
+        nonlocal connect_calls
+        connect_calls += 1
+        return FakeConnection()
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "_connect", fake_connect)
+
+    store.ensure_schema()
+    store.ensure_schema()
+
+    assert connect_calls == 1
+    assert any("CREATE TABLE IF NOT EXISTS partition_batches" in sql for sql, _params in executed)
+
+
+def test_postgres_schema_import_syncs_ard_loader_observation_tables(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.description = []
+            self._fetchone_result = None
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+            if "SELECT COUNT(*)" in sql and "information_schema.tables" in sql:
+                self.description = [("count",)]
+                self._fetchone_result = (3,)
+            elif "SELECT * FROM partition_batches" in sql:
+                self.description = [
+                    ("batch_id",),
+                    ("batch_name",),
+                    ("data_type",),
+                    ("source_system",),
+                    ("source_schema",),
+                    ("normalized_payload",),
+                ]
+                self._fetchone_result = (
+                    "ARD_SYNC_CARBON",
+                    "ARD sync carbon",
+                    "carbon",
+                    "loader",
+                    {},
+                    {},
+                )
+            elif "SELECT id FROM ard_partition_batches" in sql:
+                self.description = [("id",)]
+                self._fetchone_result = (84,)
+            else:
+                self.description = []
+                self._fetchone_result = None
+
+        def fetchone(self):
+            return self._fetchone_result
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "ensure_schema", lambda: None)
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+
+    store.upsert_schema(
+        {
+            "schema_version": "1.0",
+            "batch_id": "ARD_SYNC_CARBON",
+            "batch_name": "ARD sync carbon",
+            "data_type": "carbon",
+            "source_system": "loader",
+            "observations": [ard_carbon_observation("obs-carbon-1")],
+        }
+    )
+
+    sql_text = "\n".join(sql for sql, _params in executed)
+    ard_observation_params = next(params for sql, params in executed if "MERGE INTO ard_partition_observations" in sql)
+
+    assert "MERGE INTO ard_partition_batches target" in sql_text
+    assert "MERGE INTO ard_partition_observations target" in sql_text
+    assert "DELETE FROM ard_partition_assets WHERE batch_id = %s" in sql_text
+    assert ard_observation_params["batch_id"] == 84
+    assert ard_observation_params["observation_id"] == "obs-carbon-1"
+    assert ard_observation_params["sensor"] == "oco2"
+
+
+def test_postgres_schema_import_requires_ard_loader_tables(monkeypatch):
+    class FakeCursor:
+        def __init__(self):
+            self.description = []
+            self._fetchone_result = None
+
+        def execute(self, sql, params=None):
+            if "SELECT COUNT(*)" in sql and "information_schema.tables" in sql:
+                self.description = [("count",)]
+                self._fetchone_result = (0,)
+            elif "SELECT * FROM partition_batches" in sql:
+                self.description = [
+                    ("batch_id",),
+                    ("batch_name",),
+                    ("data_type",),
+                    ("source_system",),
+                    ("source_schema",),
+                    ("normalized_payload",),
+                ]
+                self._fetchone_result = (
+                    "ARD_SYNC_FAIL",
+                    "ARD sync fail",
+                    "product",
+                    "loader",
+                    {},
+                    {},
+                )
+            else:
+                self.description = []
+                self._fetchone_result = None
+
+        def fetchone(self):
+            return self._fetchone_result
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = partition_job_store_module.PostgresPartitionJobStore("postgresql://example")
+    monkeypatch.setattr(store, "ensure_schema", lambda: None)
+    monkeypatch.setattr(store, "_connect", lambda: FakeConnection())
+
+    with pytest.raises(RuntimeError, match="ARD loader schema tables are required"):
+        store.upsert_schema(
+            {
+                "batch_id": "ARD_SYNC_FAIL",
+                "data_type": "product",
+                "assets": [
+                    ard_raster_asset(
+                        "s3://cube/cube/source/product/fail.tif",
+                        "fail-scene",
+                        data_type="product",
+                    )
+                ],
+            }
+        )
+
+
 def test_partition_demo_task_endpoint_remains_compatible(monkeypatch):
     def fake_run_product_partition_demo(payload=None):
         assert payload == {"grid_type": "s2", "grid_level": 5}
@@ -1975,6 +2349,7 @@ def test_partition_schema_import_lists_batches_and_assets():
 
     assert import_resp.status_code == 200
     assert import_resp.json()["status"] == "pending"
+    assert import_resp.json()["source_system"] == "loader"
     assert list_resp.status_code == 200
     assert [batch["batch_id"] for batch in list_resp.json()["batches"]] == ["BATCH_IMPORT_1"]
     assert assets_resp.status_code == 200
@@ -2003,6 +2378,171 @@ def test_radar_partition_schema_import_lists_batches_and_assets():
     assets = assets_resp.json()["assets"]
     assert len(assets) == 1
     assert assets[0]["scene_id"] == "S1_20180615"
+
+
+def test_partition_schema_reconcile_by_batch_ids():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "RECONCILE_BATCH_A",
+            "batch_name": "Reconcile batch A",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/reconcile-a.tif", "reconcile-a", asset_id="reconcile-a")],
+        },
+    )
+
+    resp = client.post(
+        "/v1/partition/schemas/reconcile",
+        json={
+            "source_system": "loader",
+            "batch_ids": ["RECONCILE_BATCH_A", "RECONCILE_BATCH_MISSING"],
+            "include_assets": True,
+            "include_attempts": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source_system"] == "loader"
+    assert body["summary"]["requested_batches"] == 2
+    assert body["summary"]["known_batches"] == 1
+    assert body["summary"]["missing_batches"] == 1
+    assert body["missing_batch_ids"] == ["RECONCILE_BATCH_MISSING"]
+    known = next(item for item in body["batches"] if item["batch_id"] == "RECONCILE_BATCH_A")
+    missing = next(item for item in body["batches"] if item["batch_id"] == "RECONCILE_BATCH_MISSING")
+    assert known["known"] is True
+    assert known["status"] == "pending"
+    assert known["asset_counts"]["total"] == 1
+    assert known["assets"][0]["asset_id"] == "reconcile-a"
+    assert known["attempts"] == []
+    assert missing == {"batch_id": "RECONCILE_BATCH_MISSING", "known": False, "status": "missing"}
+
+
+def test_partition_schema_reconcile_by_asset_ids_and_attempts(monkeypatch):
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "RECONCILE_BATCH_B",
+            "batch_name": "Reconcile batch B",
+            "data_type": "product",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/product/reconcile-b.tif",
+                    "reconcile-b",
+                    data_type="product",
+                    asset_id="reconcile-b",
+                )
+            ],
+            "normalized_payload": {"grid_type": "s2", "grid_level": 5},
+        },
+    )
+
+    def fake_run_product_partition_run(payload=None):
+        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
+
+    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
+
+    submit_resp = client.post("/v1/partition/batches/RECONCILE_BATCH_B/run", json={})
+    assert submit_resp.status_code == 202
+    task_id = submit_resp.json()["task_id"]
+    for _ in range(20):
+        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    resp = client.post(
+        "/v1/partition/schemas/reconcile",
+        json={
+            "asset_ids": ["reconcile-b", "missing-asset"],
+            "include_assets": True,
+            "include_attempts": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["requested_assets"] == 2
+    assert body["summary"]["known_assets"] == 1
+    assert body["summary"]["missing_assets"] == 1
+    assert body["missing_asset_ids"] == ["missing-asset"]
+    batch = next(item for item in body["batches"] if item["batch_id"] == "RECONCILE_BATCH_B")
+    assert batch["known"] is True
+    assert batch["status"] == "pending"
+    assert batch["source_system"] == "loader"
+    assert batch["asset_counts"]["total"] == 1
+    assert batch["assets"][0]["asset_id"] == "reconcile-b"
+    assert batch["attempts"] == []
+
+
+def test_partition_schema_reconcile_by_updated_since():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "RECONCILE_BATCH_UPDATED",
+            "batch_name": "Reconcile updated",
+            "data_type": "carbon",
+            "updated_at": "2026-06-18T09:30:00Z",
+            "observations": [ard_carbon_observation("reconcile-obs-a")],
+        },
+    )
+
+    resp = client.post(
+        "/v1/partition/schemas/reconcile",
+        json={
+            "updated_since": "2026-06-18T09:00:00Z",
+            "include_assets": False,
+            "include_attempts": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    batch = next(item for item in body["batches"] if item["batch_id"] == "RECONCILE_BATCH_UPDATED")
+    assert batch["known"] is True
+    assert batch["status"] == "pending"
+    assert batch["asset_counts"]["total"] == 1
+    assert batch["assets"] == []
+    assert batch["attempts"] == []
+
+
+def test_partition_schema_reconcile_by_observation_ids():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "RECONCILE_BATCH_CARBON",
+            "batch_name": "Reconcile carbon batch",
+            "data_type": "carbon",
+            "observations": [ard_carbon_observation("reconcile-obs-b")],
+        },
+    )
+
+    resp = client.post(
+        "/v1/partition/schemas/reconcile",
+        json={
+            "observation_ids": ["reconcile-obs-b", "missing-obs"],
+            "include_assets": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["requested_observations"] == 2
+    assert body["summary"]["known_observations"] == 1
+    assert body["summary"]["missing_observations"] == 1
+    assert body["missing_observation_ids"] == ["missing-obs"]
+    batch = next(item for item in body["batches"] if item["batch_id"] == "RECONCILE_BATCH_CARBON")
+    assert batch["known"] is True
+    assert batch["status"] == "pending"
+    assert batch["asset_counts"]["total"] == 1
+    assert batch["assets"][0]["kind"] == "observation"
+    assert batch["assets"][0]["observation_id"] == "reconcile-obs-b"
+
+
+def test_partition_schema_reconcile_requires_selector():
+    resp = client.post("/v1/partition/schemas/reconcile", json={"include_assets": True})
+
+    assert resp.status_code == 422
+    assert "one of batch_ids, asset_ids, observation_ids, or updated_since is required" in resp.json()["detail"]
 
 
 def test_partition_job_store_reassigns_duplicate_asset_id_to_new_batch():
@@ -2081,6 +2621,21 @@ def test_partition_schema_import_rejects_incomplete_ard_asset():
 
     assert resp.status_code == 422
     assert "sensor is required" in resp.json()["detail"]
+
+
+def test_partition_schema_import_rejects_invalid_top_level_loaded_at():
+    resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_BAD_LOADED_AT",
+            "data_type": "optical",
+            "loaded_at": "not-a-datetime",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/a.tif", "scene-a")],
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "loaded_at must be an ISO8601 datetime" in resp.json()["detail"]
 
 
 def test_radar_schema_first_batch_run_accepts_non_sentinel_filename(monkeypatch):

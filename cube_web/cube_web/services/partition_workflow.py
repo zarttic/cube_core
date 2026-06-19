@@ -19,6 +19,7 @@ from cube_web.services.partition_service import PartitionService, PartitionTask
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
+CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 
 
 class PartitionWorkflowService:
@@ -36,6 +37,12 @@ class PartitionWorkflowService:
     def import_schema(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return self.store.upsert_schema(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    def reconcile_schemas(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _reconcile_partition_schemas(self.store, payload)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -150,9 +157,17 @@ class PartitionWorkflowService:
                 return active_task
 
             asset_ids = self._selected_asset_ids_for_payload(str(batch["batch_id"]), str(batch["data_type"]), raw_payload)
+            cancellation_state = {"last_checked_at": None, "last_result": False}
 
             def cancellation_check() -> bool:
-                return self.store.is_cancel_requested(task_id)
+                now = time.monotonic()
+                last_checked_at = cancellation_state["last_checked_at"]
+                if last_checked_at is not None and now - last_checked_at < CANCELLATION_CHECK_INTERVAL_SECONDS:
+                    return bool(cancellation_state["last_result"])
+                result = self.store.is_cancel_requested(task_id)
+                cancellation_state["last_checked_at"] = now
+                cancellation_state["last_result"] = result
+                return bool(result)
 
             try:
                 self.store.create_attempt(
@@ -199,9 +214,17 @@ class PartitionWorkflowService:
                 return active_task
             payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
             task_id = f"partition-{uuid4().hex[:12]}"
+            cancellation_state = {"last_checked_at": None, "last_result": False}
 
             def cancellation_check() -> bool:
-                return self.store.is_cancel_requested(task_id)
+                now = time.monotonic()
+                last_checked_at = cancellation_state["last_checked_at"]
+                if last_checked_at is not None and now - last_checked_at < CANCELLATION_CHECK_INTERVAL_SECONDS:
+                    return bool(cancellation_state["last_result"])
+                result = self.store.is_cancel_requested(task_id)
+                cancellation_state["last_checked_at"] = now
+                cancellation_state["last_result"] = result
+                return bool(result)
 
             try:
                 self.store.create_attempt(
@@ -424,6 +447,195 @@ def classify_partition_error(error: str) -> str:
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
         return "permission"
     return "unknown"
+
+
+def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    source_system = _text_or_none(payload.get("source_system")) or "loader"
+    batch_ids = _normalized_string_list(payload.get("batch_ids"))
+    asset_ids = _normalized_string_list(payload.get("asset_ids"))
+    observation_ids = _normalized_string_list(payload.get("observation_ids"))
+    updated_since = _text_or_none(payload.get("updated_since"))
+    include_assets = bool(payload.get("include_assets", True))
+    include_attempts = bool(payload.get("include_attempts", False))
+    if not batch_ids and not asset_ids and not observation_ids and not updated_since:
+        raise ValueError("one of batch_ids, asset_ids, observation_ids, or updated_since is required")
+    updated_since_dt = _parse_optional_iso_datetime(updated_since, "updated_since")
+
+    requested_batch_rows = store.list_received_batches(batch_ids=batch_ids, source_system=source_system) if batch_ids else []
+    matched_assets = store.list_received_assets(asset_ids=asset_ids, source_system=source_system) if asset_ids else []
+    matched_observations = (
+        store.list_received_observations(observation_ids=observation_ids, source_system=source_system)
+        if observation_ids
+        else []
+    )
+    updated_batches = store.list_received_batches(updated_since=updated_since_dt, source_system=source_system) if updated_since_dt is not None else []
+
+    related_batch_ids = [
+        *[str(row.get("batch_key") or "") for row in matched_assets],
+        *[str(row.get("batch_key") or "") for row in matched_observations],
+    ]
+    fetched_batch_map = {
+        str(row["batch_id"]): row
+        for row in [*requested_batch_rows, *updated_batches]
+    }
+    missing_related_batch_ids = [
+        batch_id
+        for batch_id in related_batch_ids
+        if batch_id and batch_id not in fetched_batch_map
+    ]
+    if missing_related_batch_ids:
+        for row in store.list_received_batches(batch_ids=missing_related_batch_ids, source_system=source_system):
+            fetched_batch_map[str(row["batch_id"])] = row
+
+    ordered_batch_ids: list[str] = []
+    seen_batch_ids: set[str] = set()
+    for batch_id in [*batch_ids, *related_batch_ids, *[str(row["batch_id"]) for row in updated_batches]]:
+        if batch_id and batch_id not in seen_batch_ids:
+            seen_batch_ids.add(batch_id)
+            ordered_batch_ids.append(batch_id)
+
+    known_batch_ids = [batch_id for batch_id in ordered_batch_ids if batch_id in fetched_batch_map]
+    all_assets = store.list_received_assets(batch_ids=known_batch_ids, source_system=source_system) if known_batch_ids else []
+    all_observations = store.list_received_observations(batch_ids=known_batch_ids, source_system=source_system) if known_batch_ids else []
+    members_by_batch: dict[str, list[dict[str, Any]]] = {}
+    for row in [*all_assets, *all_observations]:
+        members_by_batch.setdefault(str(row.get("batch_key") or ""), []).append(row)
+
+    batches: list[dict[str, Any]] = []
+    for batch_id in ordered_batch_ids:
+        batch = fetched_batch_map.get(batch_id)
+        if batch is None:
+            batches.append({"batch_id": batch_id, "known": False, "status": "missing"})
+            continue
+        members = members_by_batch.get(batch_id, [])
+        batches.append(_reconcile_received_batch_row(batch, members, include_assets=include_assets, include_attempts=include_attempts))
+
+    matched_asset_ids = {
+        str(asset["asset_id"])
+        for asset in matched_assets
+        if asset.get("asset_id")
+    }
+    matched_observation_ids = {
+        str(observation["observation_id"])
+        for observation in matched_observations
+        if observation.get("observation_id")
+    }
+    missing_batch_ids = [batch_id for batch_id in batch_ids if batch_id not in set(known_batch_ids)]
+    missing_asset_ids = [asset_id for asset_id in asset_ids if asset_id not in matched_asset_ids]
+    missing_observation_ids = [
+        observation_id for observation_id in observation_ids if observation_id not in matched_observation_ids
+    ]
+    return {
+        "source_system": source_system,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "batches": batches,
+        "missing_batch_ids": missing_batch_ids,
+        "missing_asset_ids": missing_asset_ids,
+        "missing_observation_ids": missing_observation_ids,
+        "summary": {
+            "requested_batches": len(batch_ids),
+            "known_batches": len(known_batch_ids),
+            "missing_batches": len(missing_batch_ids),
+            "requested_assets": len(asset_ids),
+            "known_assets": len(matched_asset_ids),
+            "missing_assets": len(missing_asset_ids),
+            "requested_observations": len(observation_ids),
+            "known_observations": len(matched_observation_ids),
+            "missing_observations": len(missing_observation_ids),
+        },
+    }
+
+
+def _normalized_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("batch_ids, asset_ids, and observation_ids must be arrays when provided")
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        rows.append(text)
+    return rows
+
+
+def _parse_optional_iso_datetime(value: str | None, label: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{label} must be an ISO8601 datetime") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def _asset_counts(assets: list[dict[str, Any]]) -> dict[str, int]:
+    return {"total": len(assets)}
+
+
+def _reconcile_received_batch_row(
+    batch: dict[str, Any],
+    members: list[dict[str, Any]],
+    *,
+    include_assets: bool,
+    include_attempts: bool,
+) -> dict[str, Any]:
+    return {
+        "batch_id": batch.get("batch_id"),
+        "known": True,
+        "data_type": batch.get("data_type"),
+        "batch_name": batch.get("batch_name"),
+        "source_system": batch.get("source_system"),
+        "status": batch.get("status") or "pending",
+        "loaded_at": _iso_datetime_or_none(batch.get("loaded_at")),
+        "updated_at": _iso_datetime_or_none(batch.get("updated_at")),
+        "raw_meta_uri": batch.get("raw_meta_uri"),
+        "asset_counts": _asset_counts(members),
+        "assets": [_reconcile_received_member_row(member) for member in members] if include_assets else [],
+        "attempts": [] if include_attempts else [],
+    }
+
+
+def _reconcile_received_member_row(member: dict[str, Any]) -> dict[str, Any]:
+    if member.get("asset_id"):
+        return {
+            "kind": "asset",
+            "asset_id": member.get("asset_id"),
+            "source_uri": member.get("source_uri"),
+            "scene_id": member.get("scene_id"),
+        }
+    return {
+        "kind": "observation",
+        "observation_id": member.get("observation_id"),
+        "source_uri": member.get("source_uri"),
+        "source_index": member.get("source_index"),
+    }
+
+
+def _iso_datetime_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _task_from_attempt(attempt: dict[str, Any], batch: dict[str, Any]) -> PartitionTask:

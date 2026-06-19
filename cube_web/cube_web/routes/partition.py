@@ -11,6 +11,7 @@ from cube_web.schemas import (
     PartitionResult,
     PartitionRetryRequest,
     PartitionSchemaImportRequest,
+    PartitionSchemaReconcileRequest,
     PartitionTaskCreateResponse,
     PartitionTaskResponse,
     payload_from_model,
@@ -144,6 +145,10 @@ def create_partition_router(
     @router.post("/schemas/import")
     def import_partition_schema(payload: PartitionSchemaImportRequest) -> dict:
         return workflow_service.import_schema(payload_from_model(payload))
+
+    @router.post("/schemas/reconcile")
+    def reconcile_partition_schema(payload: PartitionSchemaReconcileRequest) -> dict:
+        return workflow_service.reconcile_schemas(payload_from_model(payload))
 
     @router.get("/batches")
     def list_partition_batches(

@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import cube_split.ingest.ray_ingest_job as ray_ingest_job
 from cube_split.ingest.ray_ingest_job import (
     build_cube_fact_records,
     build_raw_asset_records,
@@ -157,6 +158,64 @@ def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):
     assert "/cog_store/" in cog_uri
     assert "#window=" in value_ref
     assert "/cog_store/" in value_ref
+
+
+def test_run_ingest_reports_probe_metrics_per_cube_fact(monkeypatch, tmp_path: Path):
+    run_dir = tmp_path / "run_probe"
+    run_dir.mkdir(parents=True)
+    rows_path = run_dir / "index_rows.jsonl"
+    source_dir = tmp_path / "source_assets"
+    source_dir.mkdir(parents=True)
+    b04_path = source_dir / "S1_b04.TIF"
+    b08_path = source_dir / "S1_b08.TIF"
+    b04_path.write_bytes(b"fake-cog-b04")
+    b08_path.write_bytes(b"fake-cog-b08")
+    rows = [
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="35f04", band="b04", asset_path=str(b04_path)),
+        _sample_row("S1", "2026-04-21T00:00:00Z", space_code="35f04", band="b08", asset_path=str(b08_path)),
+    ]
+    with rows_path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    captured: list[ray_ingest_job.TileProbeMetric] = []
+
+    def fake_report_tile_metrics(metrics):
+        captured.extend(list(metrics))
+
+    monkeypatch.setattr(ray_ingest_job, "report_tile_metrics", fake_report_tile_metrics)
+
+    run_ingest(
+        SimpleNamespace(
+            run_dir=str(run_dir),
+            db_path=str(tmp_path / "ingest_probe.db"),
+            job_id="job-probe",
+            dataset="landsat8",
+            sensor="L8",
+            asset_version="v1",
+            cube_version="v1",
+            quality_rule="best_quality_wins",
+            metadata_backend="sqlite",
+            asset_storage_backend="local",
+            cog_output_root=str(tmp_path / "cog_store"),
+            cog_materialize_mode="copy",
+            postgres_dsn="",
+            minio_endpoint="",
+            minio_access_key="",
+            minio_secret_key="",
+            minio_bucket="",
+            minio_prefix="cube/raw",
+            minio_secure=False,
+            minio_upload_workers=1,
+        )
+    )
+
+    assert len(captured) == 2
+    assert {metric.task_name for metric in captured} == {"cube.partition.logical.ingest.optical"}
+    assert {metric.method_name for metric in captured} == {"merge.rs_cube_cell_fact"}
+    assert {metric.attributes["cube.band"] for metric in captured} == {"b04", "b08"}
+    assert {metric.attributes["cube.space_code"] for metric in captured} == {"35f04"}
+    assert {metric.attributes["cube.target_table"] for metric in captured} == {"rs_cube_cell_fact"}
 
 
 def test_load_rows_rejects_empty_file(tmp_path: Path):

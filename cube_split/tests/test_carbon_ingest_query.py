@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import cube_split.ingest.carbon_ingest_job as carbon_ingest_job
 from cube_split.ingest.carbon_ingest_job import run_carbon_ingest
 from cube_split.read.carbon_query import _parse_args, summarize_xco2
 
@@ -54,6 +55,10 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
     rows_path = tmp_path / "run_001" / "carbon_observation_rows.jsonl"
     _write_rows(rows_path, [_carbon_row("snd-postgres")])
     calls: list[tuple[str, object]] = []
+    captured: list[carbon_ingest_job.TileProbeMetric] = []
+
+    def fake_report_tile_metrics(metrics):
+        captured.extend(list(metrics))
 
     class FakeCursor:
         def __enter__(self):
@@ -94,6 +99,7 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
             return FakeConnection()
 
     monkeypatch.setitem(sys.modules, "psycopg", FakePsycopg)
+    monkeypatch.setattr(carbon_ingest_job, "report_tile_metrics", fake_report_tile_metrics)
 
     stats = run_carbon_ingest(
         SimpleNamespace(
@@ -110,6 +116,12 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
     assert stats["metadata_backend"] == "postgres"
     assert ("connect", "postgresql://test_user:test_password@10.3.100.180:15400/postgres") in calls
     assert ("executemany", 1) in calls
+    assert len(captured) == 1
+    assert captured[0].task_name == "cube.partition.carbon.ingest"
+    assert captured[0].method_name == "merge.rs_carbon_observation_fact"
+    assert captured[0].attributes["cube.observation_id"] == "snd-postgres"
+    assert captured[0].attributes["cube.space_code"] == "85230a2ffffffff"
+    assert captured[0].attributes["cube.target_table"] == "rs_carbon_observation_fact"
 
 
 def test_summarize_xco2_reports_count_and_range():

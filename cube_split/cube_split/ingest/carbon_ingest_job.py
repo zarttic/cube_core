@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cube_split import runtime_config
+from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,33 @@ def build_carbon_facts(rows: list[dict[str, Any]], cube_version: str, run_id: st
             run_id=run_id,
         )
     return list(facts.values())
+
+
+def _report_carbon_fact_metrics(rows: list[CarbonObservationFact]) -> None:
+    report_tile_metrics(
+        TileProbeMetric(
+            task_name="cube.partition.carbon.ingest",
+            tile_type="ingest",
+            method_name="merge.rs_carbon_observation_fact",
+            attributes={
+                "cube.stage": "ingest",
+                "cube.target_table": "rs_carbon_observation_fact",
+                "cube.data_type": "carbon",
+                "cube.satellite": row.satellite,
+                "cube.product_type": row.product_type,
+                "cube.grid_type": row.grid_type,
+                "cube.grid_level": row.grid_level,
+                "cube.space_code": row.space_code,
+                "cube.time_bucket": row.time_bucket,
+                "cube.st_code": row.st_code,
+                "cube.observation_id": row.observation_id,
+                "cube.source_index": row.source_index,
+                "cube.run_id": row.run_id,
+                "cube.cube_version": row.cube_version,
+            },
+        )
+        for row in rows
+    )
 
 
 def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -> None:
@@ -385,6 +413,7 @@ def run_carbon_ingest(args: argparse.Namespace) -> dict[str, Any]:
                 output_snapshot=f"cube_version={args.cube_version},job_id={args.job_id}",
             )
             conn.commit()
+            _report_carbon_fact_metrics(facts)
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

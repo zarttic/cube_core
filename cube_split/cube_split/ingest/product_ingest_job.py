@@ -20,6 +20,7 @@ from cube_split.ingest.ray_ingest_job import (
     materialize_cog_assets,
     upload_assets_to_minio,
 )
+from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,33 @@ def build_product_fact_records(
             )
         )
     return facts
+
+
+def _report_product_fact_metrics(rows: list[ProductFactRecord]) -> None:
+    report_tile_metrics(
+        TileProbeMetric(
+            task_name="cube.partition.product.ingest",
+            tile_type="ingest",
+            method_name="merge.rs_product_cell_fact",
+            attributes={
+                "cube.stage": "ingest",
+                "cube.target_table": "rs_product_cell_fact",
+                "cube.data_type": "product",
+                "cube.dataset": row.dataset,
+                "cube.product_name": row.product_name,
+                "cube.product_year": row.product_year,
+                "cube.grid_type": row.grid_type,
+                "cube.grid_level": row.grid_level,
+                "cube.space_code": row.space_code,
+                "cube.time_bucket": row.time_bucket,
+                "cube.st_code": row.st_code,
+                "cube.band": row.product_band,
+                "cube.run_id": row.run_id,
+                "cube.cube_version": row.cube_version,
+            },
+        )
+        for row in rows
+    )
 
 
 def upsert_product_assets(conn: sqlite3.Connection, rows: list[ProductAssetRecord]) -> None:
@@ -541,6 +569,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            _report_product_fact_metrics(fact_records)
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -580,6 +609,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            _report_product_fact_metrics(fact_records)
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

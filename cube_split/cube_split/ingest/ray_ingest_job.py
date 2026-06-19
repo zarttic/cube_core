@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from cube_split import runtime_config
+from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 
 @dataclass(frozen=True)
@@ -460,6 +461,34 @@ def build_cube_fact_records(
     return facts
 
 
+def _report_cube_fact_metrics(rows: list[CubeFactRecord], *, data_type: str, dataset: str, sensor: str) -> None:
+    report_tile_metrics(
+        TileProbeMetric(
+            task_name=f"cube.partition.logical.ingest.{data_type}",
+            tile_type="ingest",
+            method_name="merge.rs_cube_cell_fact",
+            attributes={
+                "cube.stage": "ingest",
+                "cube.target_table": "rs_cube_cell_fact",
+                "cube.data_type": data_type,
+                "cube.dataset": dataset,
+                "cube.sensor": sensor,
+                "cube.grid_type": row.grid_type,
+                "cube.grid_level": row.grid_level,
+                "cube.space_code": row.space_code,
+                "cube.time_bucket": row.time_bucket,
+                "cube.st_code": row.st_code,
+                "cube.band": row.band,
+                "cube.source_scene_count": row.source_scene_count,
+                "cube.run_id": row.run_id,
+                "cube.cube_version": row.cube_version,
+                "cube.quality_rule": row.quality_rule,
+            },
+        )
+        for row in rows
+    )
+
+
 def upsert_raw_assets(conn: sqlite3.Connection, rows: list[RawAssetRecord]) -> None:
     conn.executemany(
         """
@@ -878,6 +907,12 @@ def run_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            _report_cube_fact_metrics(
+                cube_records,
+                data_type=str(getattr(args, "data_type", "optical") or "optical"),
+                dataset=str(args.dataset),
+                sensor=str(args.sensor),
+            )
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -932,6 +967,12 @@ def run_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            _report_cube_fact_metrics(
+                cube_records,
+                data_type=str(getattr(args, "data_type", "optical") or "optical"),
+                dataset=str(args.dataset),
+                sensor=str(args.sensor),
+            )
             return stats
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

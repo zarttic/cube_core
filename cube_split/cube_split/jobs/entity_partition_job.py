@@ -40,6 +40,7 @@ from cube_split.jobs.ray_partition_core import (
     cog_creation_options,
     resolve_asset_source_path,
 )
+from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
@@ -807,6 +808,34 @@ def _upsert_entity_tiles_postgres(
     with conn.cursor() as cur:
         cur.executemany(sql, values)
 
+
+def _report_entity_tile_metrics(rows: list[dict[str, Any]], *, dataset: str, sensor: str, tile_version: str, run_id: str) -> None:
+    report_tile_metrics(
+        TileProbeMetric(
+            task_name=f"cube.partition.entity.ingest.{row.get('data_type') or 'optical'}",
+            tile_type="ingest",
+            method_name="merge.rs_entity_tile_asset",
+            attributes={
+                "cube.stage": "ingest",
+                "cube.target_table": "rs_entity_tile_asset",
+                "cube.data_type": row.get("data_type") or "optical",
+                "cube.dataset": dataset,
+                "cube.sensor": sensor,
+                "cube.scene_id": row["scene_id"],
+                "cube.band": row["band"],
+                "cube.grid_type": row["grid_type"],
+                "cube.grid_level": int(row["grid_level"]),
+                "cube.space_code": row["space_code"],
+                "cube.time_bucket": row["time_bucket"],
+                "cube.st_code": row["st_code"],
+                "cube.tile_version": tile_version,
+                "cube.cover_mode": row["cover_mode"],
+                "cube.run_id": run_id,
+            },
+        )
+        for row in rows
+    )
+
 def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
     from cube_split.ingest.ray_ingest_job import _upsert_job_status_postgres
 
@@ -862,6 +891,7 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
                 finished_at=finished_at,
             )
             conn.commit()
+            _report_entity_tile_metrics(rows, dataset=dataset, sensor=sensor, tile_version=tile_version, run_id=run_id)
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             conn.rollback()

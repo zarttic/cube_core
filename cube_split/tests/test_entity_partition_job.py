@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,6 +301,109 @@ def test_entity_partition_ingest_disabled_skips_minio_and_postgres(monkeypatch, 
     assert report["metadata_backend"] == "none"
     assert report["uploaded_tile_count"] == 0
     assert report["metadata_rows"] == 0
+
+
+def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_path: Path):
+    captured: list[entity_partition_job.TileProbeMetric] = []
+    calls: list[tuple[str, object]] = []
+    rows = [
+        {
+            "scene_id": "scene-a",
+            "band": "sr_band2",
+            "acq_time": "2020-08-01T00:00:00Z",
+            "grid_type": "isea4h",
+            "grid_level": 6,
+            "space_code": "86283082fffffff",
+            "space_code_prefix": "862",
+            "st_code": "hx:6:86283082fffffff:20200801",
+            "time_bucket": "20200801",
+            "entity_tile_uri": "s3://entity-bucket/cube/entity/fake.tif",
+            "local_asset_path": str(tmp_path / "fake.tif"),
+            "asset_path": "s3://entity-bucket/cube/entity/fake.tif",
+            "source_asset_path": "s3://cube/cube/source/optocal/a.tif",
+            "cover_mode": "intersect",
+            "cell_min_lon": 116.0,
+            "cell_min_lat": 39.0,
+            "cell_max_lon": 117.0,
+            "cell_max_lat": 40.0,
+            "window_width": 256,
+            "window_height": 256,
+            "nodata": 0,
+            "valid_pixel_ratio": 1.0,
+            "partition_type": "entity",
+            "data_type": "optical",
+            "window_col_off": 0,
+            "window_row_off": 0,
+        }
+    ]
+
+    def fake_report_tile_metrics(metrics):
+        captured.extend(list(metrics))
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def execute(self, sql, params=None):
+            _ = params
+            calls.append(("execute", sql))
+            if "SELECT retry_count" in sql:
+                self._row = None
+
+        def executemany(self, sql, values):
+            calls.append(("executemany", len(values)))
+
+        def fetchone(self):
+            return getattr(self, "_row", None)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            calls.append(("commit", None))
+
+    class FakePsycopg:
+        @staticmethod
+        def connect(dsn, client_encoding="UTF8"):
+            _ = client_encoding
+            calls.append(("connect", dsn))
+            return FakeConnection()
+
+    monkeypatch.setitem(sys.modules, "psycopg", FakePsycopg)
+    monkeypatch.setattr(entity_partition_job, "report_tile_metrics", fake_report_tile_metrics)
+
+    stats = entity_partition_job._write_entity_metadata_postgres(
+        rows,
+        SimpleNamespace(
+            postgres_dsn="postgresql://example",
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            job_id="entity-job-probe",
+            asset_storage_backend="minio",
+        ),
+        tmp_path / "run_probe",
+    )
+
+    assert stats["entity_tile_rows"] == 1
+    assert ("connect", "postgresql://example") in calls
+    assert ("executemany", 1) in calls
+    assert len(captured) == 1
+    assert captured[0].task_name == "cube.partition.entity.ingest.optical"
+    assert captured[0].method_name == "merge.rs_entity_tile_asset"
+    assert captured[0].attributes["cube.scene_id"] == "scene-a"
+    assert captured[0].attributes["cube.space_code"] == "86283082fffffff"
+    assert captured[0].attributes["cube.target_table"] == "rs_entity_tile_asset"
 
 
 def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path):
