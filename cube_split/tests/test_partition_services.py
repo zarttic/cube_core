@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 import time
+import builtins
 from pathlib import Path
 
 import pytest
@@ -11,10 +12,14 @@ import pytest
 from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, RadarPartitionService, get_partition_service
 from cube_split.partition.carbon import (
+    CarbonObservationSourceSlice,
     CarbonPartitionConfig,
     CarbonSatelliteObservation,
+    _load_oco2_lite_observation_slice,
     _partition_chunks,
     _partition_observation_chunk,
+    _partition_source_slice_chunk,
+    _plan_oco2_lite_source_slices,
     _ray_runtime_env_from_env,
     load_oco2_lite_observations,
     partition_observation,
@@ -660,17 +665,386 @@ def test_carbon_partition_can_use_ray_backend(monkeypatch):
     assert remote_calls == ["init", "actor", "actor", "shutdown"]
 
 
+def test_carbon_partition_source_slice_uses_resolved_path_but_keeps_source_uri(monkeypatch):
+    calls: dict[str, object] = {}
+
+    def fake_load(path: Path, start_index: int, stop_index: int, *, source_uri: str | None = None):
+        calls["path"] = path
+        calls["start_index"] = start_index
+        calls["stop_index"] = stop_index
+        calls["source_uri"] = source_uri
+        return [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-a",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.391,
+                lat=39.907,
+                xco2=420.5,
+                source_uri=str(source_uri or path),
+                source_index=start_index,
+            )
+        ]
+
+    monkeypatch.setattr("cube_split.partition.carbon._load_oco2_lite_observation_slice", fake_load)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._partition_observation_chunk",
+        lambda observations, cfg: [{"source_uri": observations[0].source_uri, "grid_type": cfg.grid_type}],
+    )
+
+    rows = _partition_source_slice_chunk(
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/oco2.nc4", 2, 3),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        resolved_source_path="/tmp/worker-cache/oco2.nc4",
+    )
+
+    assert calls["path"] == Path("/tmp/worker-cache/oco2.nc4")
+    assert calls["start_index"] == 2
+    assert calls["stop_index"] == 3
+    assert calls["source_uri"] == "s3://cube/cube/source/carbon/oco2.nc4"
+    assert rows == [{"source_uri": "s3://cube/cube/source/carbon/oco2.nc4", "grid_type": "isea4h"}]
+
+
+def test_carbon_ray_source_slice_planning_uses_source_uris(monkeypatch):
+    counts = {
+        "s3://cube/cube/source/carbon/a.nc4": 5,
+        "s3://cube/cube/source/carbon/b.nc4": 3,
+    }
+
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._oco2_lite_observation_count_for_source",
+        lambda source_uri: counts[source_uri],
+    )
+
+    slices = _plan_oco2_lite_source_slices(
+        ["s3://cube/cube/source/carbon/a.nc4", "s3://cube/cube/source/carbon/b.nc4"],
+        CarbonPartitionConfig(partition_backend="ray", partition_chunk_size=2, max_observations=6),
+    )
+
+    assert slices == [
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 0, 2),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 2, 4),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 4, 5),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/b.nc4", 0, 1),
+    ]
+
+
+def test_carbon_partition_ray_retries_on_head_when_runtime_env_disk_is_full(monkeypatch):
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    init_calls: list[dict] = []
+    option_calls: list[dict] = []
+    shutdown_calls: list[str] = []
+    processed: list[str] = []
+
+    class RuntimeEnvSetupError(RuntimeError):
+        pass
+
+    class FakeRemoteMethod:
+        def __init__(self, fn):
+            self._fn = fn
+
+        def remote(self, *args, **kwargs):
+            return self._fn(*args, **kwargs)
+
+    class FakeActorHandle:
+        def __init__(self, prefer_head: bool):
+            self._prefer_head = prefer_head
+
+        @property
+        def process_chunk(self):
+            return FakeRemoteMethod(lambda chunk, cfg: ("future", self._prefer_head, chunk, cfg))
+
+    class FakeActorClass:
+        def __init__(self, cls):
+            self._cls = cls
+            self._prefer_head = False
+
+        def options(self, **kwargs):
+            option_calls.append(kwargs)
+            self._prefer_head = "scheduling_strategy" in kwargs
+            return self
+
+        def remote(self):
+            return FakeActorHandle(self._prefer_head)
+
+    class FakeRay:
+        def remote(self, cls):
+            return FakeActorClass(cls)
+
+        def init(self, **kwargs):
+            init_calls.append(kwargs)
+
+        def get(self, ref):
+            if isinstance(ref, list):
+                return [self.get(item) for item in ref]
+            _, prefer_head, chunk, cfg = ref
+            if not prefer_head:
+                raise RuntimeEnvSetupError("No space left on device")
+            processed.extend(observation.observation_id for observation in chunk)
+            return [
+                {
+                    "data_type": "carbon",
+                    "satellite": observation.satellite,
+                    "observation_id": observation.observation_id,
+                    "grid_type": cfg.grid_type,
+                    "grid_level": cfg.grid_level,
+                    "space_code": observation.observation_id,
+                }
+                for observation in chunk
+            ]
+
+        def wait(self, pending, num_returns=1, timeout=1.0):
+            return [pending[0]], pending[1:]
+
+        def cancel(self, ref, *, force):
+            _ = (ref, force)
+
+        def shutdown(self):
+            shutdown_calls.append("shutdown")
+
+        def nodes(self):
+            return [
+                {
+                    "Alive": True,
+                    "NodeID": "a2362ca71987bdd4036e21f1e2b9b55318489a42741adb914f6ea46f",
+                    "Resources": {"node:__internal_head__": 1.0},
+                }
+            ]
+
+    monkeypatch.setattr("cube_split.partition.carbon._load_ray", lambda: FakeRay())
+    chunks = [
+        [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-a",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.391,
+                lat=39.907,
+                xco2=420.5,
+            )
+        ]
+    ]
+
+    rows = _partition_chunks(
+        chunks,
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        worker_count=1,
+    )
+
+    assert [row["observation_id"] for row in rows] == ["snd-a"]
+    assert processed == ["snd-a"]
+    assert len(init_calls) == 2
+    assert len(shutdown_calls) == 2
+    assert "scheduling_strategy" not in option_calls[0]
+    assert isinstance(option_calls[1]["scheduling_strategy"], NodeAffinitySchedulingStrategy)
+    assert getattr(option_calls[1]["scheduling_strategy"], "node_id", "") == "a2362ca71987bdd4036e21f1e2b9b55318489a42741adb914f6ea46f"
+
+
 def test_carbon_ray_runtime_env_ships_project_code(monkeypatch):
     monkeypatch.delenv("RAY_RUNTIME_ENV_JSON", raising=False)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon.runtime_config.minio_settings",
+        lambda: type(
+            "MinioSettings",
+            (),
+            {
+                "endpoint": "10.3.100.179:9000",
+                "access_key": "minio-access",
+                "secret_key": "minio-secret",
+                "bucket": "cube",
+            },
+        )(),
+    )
 
     runtime_env = _ray_runtime_env_from_env()
 
     assert runtime_env is not None
     assert Path(runtime_env["working_dir"]).resolve() == Path(__file__).resolve().parents[2]
+    assert runtime_env["env_vars"]["CUBE_CARBON_RUNTIME_ENV_REV"] == "20260620"
+    assert runtime_env["env_vars"]["CUBE_WEB_MINIO_ENDPOINT"] == "10.3.100.179:9000"
+    assert runtime_env["env_vars"]["CUBE_WEB_MINIO_ACCESS_KEY"] == "minio-access"
+    assert runtime_env["env_vars"]["CUBE_WEB_MINIO_SECRET_KEY"] == "minio-secret"
     assert runtime_env["env_vars"]["PYTHONPATH"] == ".:./cube_encoder:./cube_split:./cube_web"
     assert "cube_split/data/**" in runtime_env["excludes"]
+    assert ".codegraph/**" in runtime_env["excludes"]
+    assert ".mypy_cache/**" in runtime_env["excludes"]
+    assert ".tmp/**" in runtime_env["excludes"]
 
 
+def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+    planned = [CarbonObservationSourceSlice("s3://cube/cube/source/carbon/oco2.nc4", 0, 1)]
+
+    monkeypatch.setattr("cube_split.partition.carbon._plan_oco2_lite_source_slices", lambda source_uris, config: planned)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._load_observation_chunks",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected local load")),
+    )
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._partition_chunks",
+        lambda chunks, config, worker_count: [
+            {
+                "data_type": "carbon",
+                "satellite": "OCO2",
+                "observation_id": "snd-a",
+                "grid_type": config.grid_type,
+                "grid_level": config.grid_level,
+                "space_code": "cell-a",
+                "st_code": "hx:5:cell-a:20260424",
+                "source_uri": "s3://cube/cube/source/carbon/oco2.nc4",
+            }
+        ],
+    )
+
+    result = CarbonSatellitePartitionService().run(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CarbonPartitionConfig(
+            grid_type="isea4h",
+            grid_level=5,
+            partition_backend="ray",
+            source_uris=("s3://cube/cube/source/carbon/oco2.nc4",),
+        ),
+        workers=4,
+    )
+
+    assert result.total_rows == 1
+    row = json.loads(result.rows_path.read_text(encoding="utf-8"))
+    assert row["source_uri"] == "s3://cube/cube/source/carbon/oco2.nc4"
+
+
+def test_carbon_netcdf4_loader_only_falls_back_when_module_missing(monkeypatch, tmp_path: Path):
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "netCDF4":
+            raise RuntimeWarning("numpy.ndarray size changed")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeWarning, match="numpy.ndarray size changed"):
+        load_oco2_lite_observations(tmp_path / "sample.nc4", max_observations=1)
+
+
+def test_carbon_loader_falls_back_to_h5dump_when_netcdf4_is_unavailable(monkeypatch, tmp_path: Path):
+    sentinel = [
+        CarbonSatelliteObservation(
+            satellite="OCO2",
+            observation_id="snd-1",
+            acq_time="2026-04-24T00:00:00Z",
+            lon=116.391,
+            lat=39.907,
+            xco2=420.5,
+        )
+    ]
+
+    monkeypatch.setattr("cube_split.partition.carbon._load_oco2_lite_with_netcdf4", lambda *args, **kwargs: None)
+    monkeypatch.setattr("cube_split.partition.carbon._load_oco2_lite_with_h5dump", lambda *args, **kwargs: sentinel)
+
+    assert load_oco2_lite_observations(tmp_path / "sample.nc4", max_observations=1) == sentinel
+
+
+def test_carbon_loader_reads_tansat_style_h5_via_generic_netcdf4_schema(monkeypatch, tmp_path: Path):
+    class FakeVar:
+        def __init__(self, values, **attrs):
+            self._values = values
+            for key, value in attrs.items():
+                setattr(self, key, value)
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, item):
+            return self._values[item]
+
+    class FakeDataset:
+        platform = "TanSat"
+
+        def __init__(self, path, mode):
+            _ = (path, mode)
+            self.variables = {
+                "exposure_id": FakeVar([9001, 9002]),
+                "latitude": FakeVar([10.5, 11.5]),
+                "longitude": FakeVar([100.5, 101.5]),
+                "time": FakeVar([0.0, 60.0], units="seconds since 2020-01-01 00:00:00"),
+                "xco2": FakeVar([411.2, 412.3]),
+                "xco2_quality_flag": FakeVar([0, 1]),
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    monkeypatch.setattr("cube_split.partition.carbon._netcdf4_dataset_class", lambda: FakeDataset)
+
+    observations = load_oco2_lite_observations(tmp_path / "TanSat_demo.h5", max_observations=2)
+
+    assert len(observations) == 2
+    assert observations[0].satellite == "TanSat"
+    assert observations[0].observation_id == "9001"
+    assert observations[0].acq_time == "2020-01-01T00:00:00Z"
+    assert observations[0].quality_flag == "0"
+    assert observations[0].source_index == 0
+    assert observations[0].footprint is None
+    assert observations[1].acq_time == "2020-01-01T00:01:00Z"
+    assert observations[1].metadata["schema_kind"] == "generic_xco2_netcdf"
+
+
+def test_carbon_loader_reads_tansat_style_h5_slice(monkeypatch, tmp_path: Path):
+    class FakeVar:
+        def __init__(self, values, **attrs):
+            self._values = values
+            for key, value in attrs.items():
+                setattr(self, key, value)
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, item):
+            return self._values[item]
+
+    class FakeDataset:
+        platform = "TanSat"
+
+        def __init__(self, path, mode):
+            _ = (path, mode)
+            self.variables = {
+                "exposure_id": FakeVar([9001, 9002, 9003]),
+                "latitude": FakeVar([10.5, 11.5, 12.5]),
+                "longitude": FakeVar([100.5, 101.5, 102.5]),
+                "time": FakeVar([0.0, 60.0, 120.0], units="seconds since 2020-01-01 00:00:00"),
+                "xco2": FakeVar([411.2, 412.3, 413.4]),
+                "xco2_quality_flag": FakeVar([0, 1, 1]),
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    monkeypatch.setattr("cube_split.partition.carbon._netcdf4_dataset_class", lambda: FakeDataset)
+
+    observations = _load_oco2_lite_observation_slice(
+        tmp_path / "TanSat_demo.h5",
+        1,
+        3,
+        source_uri="s3://cube/cube/source/carbon/TanSat_demo.h5",
+    )
+
+    assert [obs.observation_id for obs in observations] == ["9002", "9003"]
+    assert [obs.source_index for obs in observations] == [1, 2]
+    assert observations[0].source_uri == "s3://cube/cube/source/carbon/TanSat_demo.h5"
+    assert observations[1].acq_time == "2020-01-01T00:02:00Z"
+
+
+@pytest.mark.filterwarnings("ignore:numpy.ndarray size changed.*:RuntimeWarning")
 def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
     sample_path = Path(__file__).parents[1] / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
     if not sample_path.exists():

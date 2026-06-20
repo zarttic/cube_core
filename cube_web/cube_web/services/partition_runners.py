@@ -653,6 +653,23 @@ def _carbon_selected_source_indexes(payload: dict | None) -> tuple[int, ...] | N
     return tuple(sorted(set(indexes)))
 
 
+def _carbon_source_uris(payload: dict | None) -> tuple[str, ...] | None:
+    values: list[str] = []
+    top_level = str((payload or {}).get("source_uri") or "").strip()
+    if top_level:
+        values.append(top_level)
+    selected_observations = (payload or {}).get("selected_observations") or []
+    if isinstance(selected_observations, list):
+        for item in selected_observations:
+            if not isinstance(item, dict):
+                continue
+            source_uri = str(item.get("source_uri") or "").strip()
+            if source_uri:
+                values.append(source_uri)
+    unique = tuple(dict.fromkeys(values))
+    return unique or None
+
+
 def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | None = None) -> dict:
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
@@ -660,7 +677,8 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     if mode == "partition_run":
         _require_run_source(payload, data_type="carbon")
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
-    if not sample.exists() and not payload.get("input_dir"):
+    source_uris = _carbon_source_uris(payload)
+    if not sample.exists() and not payload.get("input_dir") and not source_uris:
         raise RuntimeError(f"Carbon demo data not found: {sample}")
 
     root = _partition_run_dir("carbon", mode)
@@ -671,7 +689,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         input_dir = Path(str(payload["input_dir"])).expanduser().resolve()
         if not input_dir.exists():
             raise FileNotFoundError(f"Carbon partition input_dir not found: {input_dir}")
-    else:
+    elif not source_uris:
         (input_dir / sample.name).symlink_to(sample)
     workers = _int_payload_value(payload, "partition_workers", 4)
     selected_source_indexes = _carbon_selected_source_indexes(payload)
@@ -690,6 +708,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         ray_address=str(payload.get("ray_address") or _ray_address()),
         ray_parallelism=workers,
         selected_source_indexes=selected_source_indexes,
+        source_uris=source_uris,
         cancellation_check=cancellation_check,
     )
     start = time.perf_counter()
@@ -704,12 +723,13 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
             space_codes.add(row["space_code"])
             quality = str(row.get("quality_flag"))
             quality_counts[quality] = quality_counts.get(quality, 0) + 1
+    source_label = str(input_dir) if payload.get("input_dir") else (source_uris[0] if source_uris else sample.name)
     response = {
         "status": "completed",
         "mode": mode,
         "data_type": "carbon",
         **_task_metadata(mode, str(result["execution_engine"])),
-        **_source_metadata(mode, str(input_dir if payload.get("input_dir") else sample.name)),
+        **_source_metadata(mode, source_label),
         "run_dir": result["run_dir"],
         "rows": result["rows"],
         "distinct_space_codes": len(space_codes),

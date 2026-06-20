@@ -1073,6 +1073,61 @@ def test_carbon_selected_source_indexes_are_normalized():
     assert partition_runners._carbon_selected_source_indexes(payload) == (1, 3)
 
 
+def test_carbon_source_uris_are_normalized():
+    payload = {
+        "source_uri": "s3://cube/cube/source/carbon/top.nc4",
+        "selected_observations": [
+            {"source_uri": "s3://cube/cube/source/carbon/top.nc4"},
+            {"source_uri": "s3://cube/cube/source/carbon/extra.nc4"},
+            {"source_uri": ""},
+            {},
+        ],
+    }
+
+    assert partition_runners._carbon_source_uris(payload) == (
+        "s3://cube/cube/source/carbon/top.nc4",
+        "s3://cube/cube/source/carbon/extra.nc4",
+    )
+
+
+def test_carbon_partition_demo_runner_passes_source_uris_from_payload(monkeypatch, tmp_path):
+    rows_path = tmp_path / "run-root" / "output" / "rows.jsonl"
+    rows_path.parent.mkdir(parents=True)
+    rows_path.write_text('{"space_code":"cell-1","quality_flag":"PASS"}\n', encoding="utf-8")
+    captured = {}
+
+    def fake_partition_run_dir(data_type, mode):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir(exist_ok=True)
+        return run_dir
+
+    def fake_run_carbon_partition(args):
+        captured["input_dir"] = Path(args.input_dir)
+        captured["source_uris"] = args.source_uris
+        return {
+            "run_dir": str(rows_path.parent),
+            "rows_path": str(rows_path),
+            "rows": 1,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "ray",
+            "execution_engine": "ray",
+            "ray_address": args.ray_address,
+        }
+
+    monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
+
+    result = partition_runners._run_carbon_partition_demo(
+        payload={"source_uri": "s3://cube/cube/source/carbon/oco2.nc4"}
+    )
+
+    assert result["data_type"] == "carbon"
+    assert captured["input_dir"] == tmp_path / "run-root" / "input"
+    assert captured["source_uris"] == ("s3://cube/cube/source/carbon/oco2.nc4",)
+
+
 def test_optical_partition_demo_endpoint(monkeypatch):
     def fake_run_optical_partition_demo(payload=None):
         assert payload is None
@@ -4398,7 +4453,7 @@ def test_partition_remote_job_runs_persisted_attempt_and_stores_result(monkeypat
             "rows": 7,
         }
 
-    monkeypatch.setattr(partition_adapters, "partition_product_run", fake_runner)
+    monkeypatch.setattr("cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None)
 
     try:
         exit_code = run_remote_partition_task("partition-remote-task")
@@ -4461,7 +4516,7 @@ def test_partition_remote_job_skips_cancelled_attempt_before_runner_start(monkey
         runner_called["value"] = True
         return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr(partition_adapters, "partition_product_run", fake_runner)
+    monkeypatch.setattr("cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None)
 
     try:
         exit_code = run_remote_partition_task("partition-remote-cancelled")
