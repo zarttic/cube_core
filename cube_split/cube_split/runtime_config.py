@@ -15,7 +15,8 @@ DEFAULT_MINIO_BUCKET = "cube"
 DEFAULT_AUTH_MAIN_SYSTEM_URL = ""
 DEFAULT_AUTH_CLIENT_ID = "system_ard"
 DEFAULT_AUTH_REDIRECT_URI = "/callback"
-DEFAULT_AUTH_TOKEN_PATH = "/api/token"
+DEFAULT_AUTH_AUTHORIZE_PATH = "/api/authorize"
+DEFAULT_AUTH_TOKEN_PATH = "/api/exchange_code"
 DEFAULT_AUTH_LOGOUT_PATH = "/api/logout"
 DEFAULT_PORTAL_DATA_PATH = "/ard"
 DEFAULT_PORTAL_ADMIN_PATH = "/admin"
@@ -43,6 +44,7 @@ class AuthSettings:
     redirect_uri: str
     jwt_secret_key: str
     jwt_algorithm: str
+    authorize_path: str
     token_path: str
     logout_path: str
     required: bool
@@ -124,6 +126,7 @@ def auth_settings() -> AuthSettings:
         redirect_uri=env_text("CUBE_WEB_AUTH_REDIRECT_URI") or DEFAULT_AUTH_REDIRECT_URI,
         jwt_secret_key=env_text("CUBE_WEB_AUTH_JWT_SECRET_KEY"),
         jwt_algorithm=env_text("CUBE_WEB_AUTH_JWT_ALGORITHM") or "HS256",
+        authorize_path=env_text("CUBE_WEB_AUTH_AUTHORIZE_PATH") or DEFAULT_AUTH_AUTHORIZE_PATH,
         token_path=env_text("CUBE_WEB_AUTH_TOKEN_PATH") or DEFAULT_AUTH_TOKEN_PATH,
         logout_path=env_text("CUBE_WEB_AUTH_LOGOUT_PATH") or DEFAULT_AUTH_LOGOUT_PATH,
         required=bool_option(env_text("CUBE_WEB_AUTH_REQUIRED"), False),

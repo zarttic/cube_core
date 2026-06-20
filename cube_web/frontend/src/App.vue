@@ -64,9 +64,7 @@ async function initializeAuth() {
   const state = params.get('state') || '';
   if (code) {
     await userStore.exchangeCode(code, state);
-    const target = sessionStorage.getItem('oauth_target') || targetFromAuthState(state) || normalizePath(window.location.pathname) || '/';
-    sessionStorage.removeItem('oauth_target');
-    sessionStorage.removeItem('oauth_state');
+    const target = targetFromAuthState(state) || '/';
     window.history.replaceState({}, '', target);
     currentPath.value = normalizePath(window.location.pathname);
     if (redirectToPortalHomeIfNeeded()) return;

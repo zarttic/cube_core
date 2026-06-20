@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import quote, unquote, urlencode, urljoin
 
 from fastapi import HTTPException
 
@@ -68,18 +69,69 @@ def user_info_from_token(token: str, settings: AuthSettings | None = None) -> di
     }
 
 
-def exchange_code_for_token(code: str, settings: AuthSettings | None = None) -> dict[str, Any]:
+def encode_state(target_path: str, redirect_uri: str | None = None) -> str:
+    payload = {
+        "nonce": hashlib.sha256(f"{target_path}:{time.time_ns()}".encode("utf-8")).hexdigest()[:16],
+        "target": target_path,
+    }
+    if redirect_uri:
+        payload["redirect_uri"] = redirect_uri
+    encoded = quote(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), safe="~()*!.'")
+    return base64.b64encode(encoded.encode("utf-8")).decode("ascii")
+
+
+def get_authorize_url(
+    *,
+    state: str | None = None,
+    redirect_uri: str | None = None,
+    settings: AuthSettings | None = None,
+) -> str:
+    settings = settings or auth_settings()
+    if not settings.main_system_url:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_MAIN_SYSTEM_URL is required")
+    effective_redirect_uri = (redirect_uri or settings.redirect_uri).strip()
+    if not effective_redirect_uri:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_REDIRECT_URI is required")
+    query = {
+        "client_id": settings.client_id,
+        "redirect_uri": effective_redirect_uri,
+    }
+    if state:
+        query["state"] = state
+    return f"{_endpoint_url(settings.main_system_url, settings.authorize_path)}?{urlencode(query)}"
+
+
+def decode_state(state: str | None) -> dict[str, Any]:
+    if not state:
+        return {}
+    try:
+        raw = base64.b64decode(state.encode("ascii")).decode("utf-8")
+        payload = json.loads(unquote(raw))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def exchange_code_for_token(
+    code: str,
+    settings: AuthSettings | None = None,
+    *,
+    redirect_uri: str | None = None,
+) -> dict[str, Any]:
     settings = settings or auth_settings()
     if not settings.client_secret:
         raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_CLIENT_SECRET is required")
+    effective_redirect_uri = (redirect_uri or settings.redirect_uri).strip()
+    if not effective_redirect_uri:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_REDIRECT_URI is required")
     payload = {
         "grant_type": "authorization_code",
         "client_id": settings.client_id,
         "client_secret": settings.client_secret,
-        "redirect_uri": settings.redirect_uri,
+        "redirect_uri": effective_redirect_uri,
         "code": code,
     }
-    return _post_json(settings.main_system_url + settings.token_path, payload)
+    return _post_form(_endpoint_url(settings.main_system_url, settings.token_path), payload)
 
 
 def notify_logout(token: str | None, settings: AuthSettings | None = None) -> dict[str, Any]:
@@ -87,7 +139,7 @@ def notify_logout(token: str | None, settings: AuthSettings | None = None) -> di
         return {"status": "skipped"}
     settings = settings or auth_settings()
     try:
-        return _post_json(settings.main_system_url + settings.logout_path, {}, token=token)
+        return _post_json(_endpoint_url(settings.main_system_url, settings.logout_path), {}, token=token)
     except HTTPException as exc:
         return {"status": "failed", "detail": exc.detail}
 
@@ -102,6 +154,23 @@ def _post_json(url: str, payload: dict[str, Any], token: str | None = None) -> d
         headers=headers,
         method="POST",
     )
+    return _send_request(request)
+
+
+def _post_form(url: str, payload: dict[str, Any], token: str | None = None) -> dict[str, Any]:
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        url,
+        data=urlencode(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    return _send_request(request)
+
+
+def _send_request(request: urllib.request.Request) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             text = response.read().decode("utf-8")
@@ -125,3 +194,9 @@ def _post_json(url: str, payload: dict[str, Any], token: str | None = None) -> d
 def _b64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def _endpoint_url(base_url: str, path: str) -> str:
+    if not base_url:
+        raise HTTPException(status_code=500, detail="CUBE_WEB_AUTH_MAIN_SYSTEM_URL is required")
+    return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))

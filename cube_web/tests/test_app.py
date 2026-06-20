@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import FastAPI
@@ -19,6 +20,7 @@ import cube_web.app as web_app
 import cube_web.routes.partition_adapters as partition_adapters
 import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.app import ENCODER_SDK_CLASS, app
+from cube_web.services import auth_service as auth_service_module
 from cube_web.services import config_store as config_store_module
 from cube_web.services import health_service, partition_runners
 from cube_web.services import partition_job_store as partition_job_store_module
@@ -241,16 +243,16 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert "normalizePath(window.location.pathname)" in app_source
 
 
-def test_auth_redirect_uses_clicked_page_as_redirect_uri():
+def test_auth_redirect_routes_through_backend_login_with_fixed_callback():
     store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(
         encoding="utf-8"
     )
 
-    assert "function authRedirectUri(targetPath)" in store_source
-    assert "base.pathname = target.pathname;" in store_source
-    assert "base.search = target.search;" in store_source
-    assert "sessionStorage.setItem('oauth_target', target);" in store_source
-    assert "const redirectUri = authRedirectUri(target);" in store_source
+    assert "function authRedirectUri()" in store_source
+    assert "redirect_uri: authRedirectUri()," in store_source
+    assert "window.location.href = `/api/auth/login?${query.toString()}`;" in store_source
+    assert "base.pathname = target.pathname;" not in store_source
+    assert "sessionStorage.setItem('oauth_target', target);" not in store_source
 
 
 def test_frontend_auth_bootstrap_uses_runtime_config_flag():
@@ -267,6 +269,7 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     assert "navigation" in config_source
     assert "http://10.136." not in config_source
     assert "if (authRequired()) {" in store_source
+    assert "const target = targetFromAuthState(state) || '/';" in app_source
 
 
 def test_partition_view_uses_explicit_module_endpoint_mapping():

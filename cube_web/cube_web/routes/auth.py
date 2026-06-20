@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from cube_web.services import auth_service, runtime_config
 
@@ -23,9 +23,18 @@ def create_auth_router() -> APIRouter:
             "navigation": _navigation_items(),
         }
 
+    @router.get("/auth/login")
+    def auth_login(target: str = "/", redirect_uri: str | None = None) -> RedirectResponse:
+        state = auth_service.encode_state(_safe_target_path(target), redirect_uri=redirect_uri)
+        return RedirectResponse(
+            url=auth_service.get_authorize_url(state=state, redirect_uri=redirect_uri),
+            status_code=307,
+        )
+
     @router.get("/callback")
     def auth_callback(code: str, state: str | None = None) -> dict:
-        token_response = auth_service.exchange_code_for_token(code)
+        state_payload = auth_service.decode_state(state)
+        token_response = auth_service.exchange_code_for_token(code, redirect_uri=state_payload.get("redirect_uri"))
         token = token_response.get("access_token") or token_response.get("token")
         if not token:
             raise HTTPException(status_code=502, detail="Auth service did not return access_token")
@@ -47,16 +56,35 @@ def create_auth_router() -> APIRouter:
         token = auth_service.bearer_token(authorization)
         return auth_service.user_info_from_token(token)
 
+    @router.get("/auth/me")
+    def auth_me_alias(authorization: str | None = Header(default=None)) -> dict:
+        return auth_me(authorization)
+
     @router.post("/logout")
     def auth_logout(authorization: str | None = Header(default=None)) -> dict:
         token = auth_service.bearer_token(authorization) if authorization else None
         return auth_service.notify_logout(token)
+
+    @router.post("/auth/logout")
+    def auth_logout_alias(authorization: str | None = Header(default=None)) -> dict:
+        return auth_logout(authorization)
+
+    @router.get("/auth/verify")
+    def auth_verify_alias(authorization: str | None = Header(default=None)) -> dict:
+        return auth_verify(authorization)
 
     return router
 
 
 def _navigation_items() -> list[dict[str, str]]:
     return runtime_config.navigation_items()
+
+
+def _safe_target_path(target: str) -> str:
+    value = str(target or "/").strip() or "/"
+    if not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
 
 
 async def require_auth_for_api(request: Request, call_next):
