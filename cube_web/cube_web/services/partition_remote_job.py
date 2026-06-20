@@ -6,10 +6,8 @@ import os
 from importlib import import_module
 from typing import Any
 
-from fastapi import HTTPException
-
-from cube_web.routes.partition import create_partition_service
 from cube_web.services.partition_job_store import get_partition_job_store
+from cube_web.services.partition_service import PartitionService, build_production_partition_registry
 from cube_web.services.partition_workflow import PartitionWorkflowService
 
 
@@ -20,13 +18,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _runner_for_data_type(data_type: str):
-    adapters = import_module("cube_web.routes.partition_adapters")
+    runners = import_module("cube_web.services.partition_runners")
     mapping = {
-        "optical": adapters.partition_optical_run,
-        "product": adapters.partition_product_run,
-        "radar": adapters.partition_radar_run,
-        "entity": adapters.partition_entity_run,
-        "carbon": adapters.partition_carbon_run,
+        "optical": lambda payload: runners._run_optical_partition_from_payload(payload, mode="partition_run"),
+        "product": lambda payload: runners._run_product_partition_demo(payload, mode="partition_run"),
+        "radar": lambda payload: runners._run_radar_partition_demo(payload, mode="partition_run"),
+        "entity": lambda payload: runners._run_entity_partition_from_payload(payload, mode="partition_run"),
+        "carbon": lambda payload: runners._run_carbon_partition_demo(mode="partition_run", payload=payload),
     }
     try:
         return mapping[data_type]
@@ -34,9 +32,21 @@ def _runner_for_data_type(data_type: str):
         raise RuntimeError(f"Unsupported partition data_type for remote job: {data_type}") from exc
 
 
+def _create_remote_partition_service() -> PartitionService:
+    return PartitionService(
+        build_production_partition_registry(
+            optical_run=_runner_for_data_type("optical"),
+            carbon_run=_runner_for_data_type("carbon"),
+            product_run=_runner_for_data_type("product"),
+            radar_run=_runner_for_data_type("radar"),
+            entity_run=_runner_for_data_type("entity"),
+        )
+    )
+
+
 def run_task(task_id: str) -> int:
     store = get_partition_job_store()
-    workflow = PartitionWorkflowService(create_partition_service(), store=store)
+    workflow = PartitionWorkflowService(_create_remote_partition_service(), store=store)
     attempt = store.get_attempt(task_id)
     if attempt is None:
         raise RuntimeError(f"Partition task not found: {task_id}")
@@ -102,15 +112,10 @@ def main() -> int:
     return run_task(task_id)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def _error_text(exc: Exception) -> str:
-    if isinstance(exc, HTTPException):
-        detail = exc.detail
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
     text = str(exc).strip()
     return text or exc.__class__.__name__
 
@@ -118,3 +123,7 @@ def _error_text(exc: Exception) -> str:
 def _should_skip_cancelled_attempt(store_attempt: dict[str, Any], store, task_id: str) -> bool:
     status = str(store_attempt.get("status") or "")
     return status in {"cancel_requested", "cancelled"} or store.is_cancel_requested(task_id)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

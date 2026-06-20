@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import HTTPException
+from cube_web.services.http_errors import HTTPException
 
 
 def repo_root() -> Path:

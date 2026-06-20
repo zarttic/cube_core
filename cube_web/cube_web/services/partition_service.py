@@ -7,7 +7,7 @@ from threading import Lock
 from typing import Callable, Dict, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import HTTPException
+from cube_web.services.http_errors import HTTPException
 
 PartitionRunner = Callable[[Optional[dict]], dict]
 TaskHook = Callable[[str], None]

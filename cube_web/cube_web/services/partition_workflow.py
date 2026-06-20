@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import HTTPException
+from cube_web.services.http_errors import HTTPException
 
 from cube_split import runtime_config
 from cube_web.services.partition_job_store import (
@@ -674,6 +674,16 @@ def _ray_job_runtime_env() -> dict[str, Any]:
 
     runtime_env = dict(_ray_runtime_env_from_env() or {})
     env_vars = dict(runtime_env.get("env_vars") or {})
+    minio = runtime_config.minio_settings()
+    resolved_defaults = {
+        "CUBE_WEB_POSTGRES_DSN": runtime_config.postgres_dsn(),
+        "CUBE_WEB_RAY_ADDRESS": runtime_config.ray_address(),
+        "CUBE_WEB_MINIO_ENDPOINT": minio.endpoint,
+        "CUBE_WEB_MINIO_ACCESS_KEY": minio.access_key,
+        "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
+        "CUBE_WEB_MINIO_BUCKET": minio.bucket,
+        "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1",
+    }
     for name in (
         "CUBE_WEB_POSTGRES_DSN",
         "POSTGRES_DSN",
@@ -690,8 +700,11 @@ def _ray_job_runtime_env() -> dict[str, Any]:
         "MINIO_BUCKET",
         "CUBE_WEB_CARBON_PARTITION_BACKEND",
         "CUBE_WEB_ENV_FILE",
+        "RAY_OVERRIDE_JOB_RUNTIME_ENV",
     ):
         value = os.environ.get(name)
+        if not value:
+            value = resolved_defaults.get(name, "")
         if value:
             env_vars[name] = value
     if env_vars:
