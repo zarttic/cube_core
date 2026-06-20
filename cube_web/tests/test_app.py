@@ -5598,11 +5598,7 @@ def test_optical_quality_report_txt_endpoint_reads_database_without_rerun(monkey
 
 
 def test_quality_report_txt_routes_are_registered():
-    route_paths = {
-        path
-        for route in app.routes
-        if isinstance(path := getattr(route, "path", None), str)
-    }
+    route_paths = set(app.openapi()["paths"])
 
     assert "/v1/quality/optical/report/txt" in route_paths
     assert "/v1/quality/product/report/txt" in route_paths
