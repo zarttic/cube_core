@@ -152,6 +152,11 @@ def _partition_groups_ray(
 
     @ray.remote
     class ProductTaskProcessor:
+        def __init__(self) -> None:
+            self._local_cog_by_source: dict[str, str] = {}
+            self._converted_asset_by_source: dict[str, dict[str, Any]] = {}
+            self._remote_cog_by_local_path: dict[str, str] = {}
+
         def process_groups(
             self,
             task_groups: list[list[dict]],
@@ -176,7 +181,12 @@ def _partition_groups_ray(
             )
 
             from cube_split.jobs.product_partition_job import _process_group_chunk
-            from cube_split.jobs.ray_partition_core import asset_record_from_dict, convert_asset_to_cog, upload_cog_to_minio
+            from cube_split.jobs.ray_partition_core import (
+                asset_record_from_dict,
+                asset_record_to_dict,
+                convert_asset_to_cog,
+                upload_cog_to_minio,
+            )
 
             env_options = dict(cog_upload_options_value or source_options_value or {})
             if env_options.get("endpoint"):
@@ -187,14 +197,13 @@ def _partition_groups_ray(
                 os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
             prepared_groups: list[list[dict]] = []
-            local_cog_by_source: dict[str, str] = {}
-            converted_asset_by_source: dict[str, dict[str, Any]] = {}
+            used_local_cog_paths: set[str] = set()
             worker_cog_root = Path(cog_input_dir_value) / f"ray_worker_{os.getpid()}"
             for group in task_groups:
                 if not group:
                     continue
                 source_path = str(group[0]["asset_path"])
-                local_cog_path = local_cog_by_source.get(source_path)
+                local_cog_path = self._local_cog_by_source.get(source_path)
                 if local_cog_path is None:
                     asset = asset_record_from_dict(assets_by_path_value[source_path])
                     converted = convert_asset_to_cog(
@@ -206,51 +215,53 @@ def _partition_groups_ray(
                         source_options=source_options_value,
                     )
                     local_cog_path = str(converted.path)
-                    local_cog_by_source[source_path] = local_cog_path
-                    converted_asset_by_source[source_path] = {
-                        "scene_id": converted.scene_id,
-                        "band": converted.band,
-                        "path": converted.path,
-                        "acq_time": converted.acq_time,
-                        "product_family": converted.product_family,
-                        "sensor": converted.sensor,
-                        "bbox": converted.bbox,
-                        "corners": converted.corners,
-                        "resolution": converted.resolution,
-                    }
+                    self._local_cog_by_source[source_path] = local_cog_path
+                    self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
+                used_local_cog_paths.add(local_cog_path)
                 prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
 
             rows = _process_group_chunk(prepared_groups, include_sample_mean_value)
-            remote_cog_by_local_path: dict[str, str] = {}
-            for source_path, local_cog_path in local_cog_by_source.items():
-                converted = asset_record_from_dict(converted_asset_by_source[source_path])
-                remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(converted, Path(local_cog_path), cog_upload_options_value)
+            for source_path, local_cog_path in self._local_cog_by_source.items():
+                if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
+                    continue
+                converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
+                self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
+                    converted,
+                    Path(local_cog_path),
+                    cog_upload_options_value,
+                )
             for row in rows:
-                row["asset_path"] = remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
+                row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
             return rows
 
     actor_cls = ProductTaskProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
     rows: list[dict] = []
+
+    def submit_chunk(idx: int, actor_idx: int):
+        return actors[actor_idx].process_groups.remote(
+            task_chunks[idx],
+            include_sample_mean,
+            assets_by_path,
+            cog_input_dir,
+            cog_overwrite,
+            cog_options,
+            target_crs,
+            source_options,
+            cog_upload_options,
+        )
+
     try:
         next_idx = 0
         pending = []
+        pending_actor_by_ref: dict[Any, int] = {}
         while next_idx < len(task_chunks) and len(pending) < parallelism:
             if cancellation_check is not None and cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            pending.append(
-                actors[next_idx % parallelism].process_groups.remote(
-                    task_chunks[next_idx],
-                    include_sample_mean,
-                    assets_by_path,
-                    cog_input_dir,
-                    cog_overwrite,
-                    cog_options,
-                    target_crs,
-                    source_options,
-                    cog_upload_options,
-                )
-            )
+            actor_idx = next_idx % parallelism
+            ref = submit_chunk(next_idx, actor_idx)
+            pending.append(ref)
+            pending_actor_by_ref[ref] = actor_idx
             next_idx += 1
         while pending:
             if cancellation_check is not None and cancellation_check():
@@ -259,24 +270,15 @@ def _partition_groups_ray(
             if not ready:
                 continue
             for ready_ref in ready:
+                actor_idx = pending_actor_by_ref.pop(ready_ref)
                 rows.extend(ray.get(ready_ref))
-            while next_idx < len(task_chunks) and len(pending) < parallelism:
-                if cancellation_check is not None and cancellation_check():
-                    raise PartitionCancelledError("Partition task cancelled")
-                pending.append(
-                    actors[next_idx % parallelism].process_groups.remote(
-                        task_chunks[next_idx],
-                        include_sample_mean,
-                        assets_by_path,
-                        cog_input_dir,
-                        cog_overwrite,
-                        cog_options,
-                        target_crs,
-                        source_options,
-                        cog_upload_options,
-                    )
-                )
-                next_idx += 1
+                if next_idx < len(task_chunks):
+                    if cancellation_check is not None and cancellation_check():
+                        raise PartitionCancelledError("Partition task cancelled")
+                    ref = submit_chunk(next_idx, actor_idx)
+                    pending.append(ref)
+                    pending_actor_by_ref[ref] = actor_idx
+                    next_idx += 1
     except PartitionCancelledError:
         cancel_ray_refs(ray, pending)
         raise

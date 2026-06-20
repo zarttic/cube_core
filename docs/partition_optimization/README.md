@@ -4,4 +4,5 @@
 
 ## 目录
 
+- [实体剖分优化探索记录（2026-06-20）](./entity_partition_optimization_20260620.md)
 - [碳卫星剖分优化记录（2026-06-20）](./carbon_partition_optimization_20260620.md)

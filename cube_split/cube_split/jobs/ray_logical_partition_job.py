@@ -191,6 +191,14 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
         return loaded
 
     project_root = Path(__file__).resolve().parents[3]
+    env_vars = {
+        "CUBE_PROJECT_ROOT": ".",
+        "PYTHONPATH": ".:./cube_encoder:./cube_split:./cube_web",
+    }
+    source_cache_dir = os.environ.get("CUBE_SOURCE_CACHE_DIR", "").strip()
+    if source_cache_dir:
+        env_vars["CUBE_SOURCE_CACHE_DIR"] = source_cache_dir
+
     return {
         "working_dir": str(project_root),
         "excludes": [
@@ -206,10 +214,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "cube_web/frontend/node_modules/**",
             "cube_web/frontend/dist/**",
         ],
-        "env_vars": {
-            "CUBE_PROJECT_ROOT": ".",
-            "PYTHONPATH": ".:./cube_encoder:./cube_split:./cube_web",
-        },
+        "env_vars": env_vars,
     }
 
 
@@ -336,7 +341,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         partition_prefix_len=args.partition_prefix_len,
         time_granularity=args.time_granularity,
     )
-    grouped_tasks = _group_tasks_for_local_processing(task_rows)
+    grouped_tasks = _group_tasks_for_local_processing(task_rows, split_by_space_prefix=(backend == "ray"))
     parallelism = _resolve_ray_parallelism(len(grouped_tasks), args.ray_parallelism)
     chunk_size = _resolve_ray_chunk_size(len(grouped_tasks), parallelism, args.chunk_size)
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
@@ -385,6 +390,11 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
         @ray.remote
         class AssetTaskProcessor:
+            def __init__(self) -> None:
+                self._local_cog_by_source: dict[str, str] = {}
+                self._converted_asset_by_source: dict[str, dict[str, Any]] = {}
+                self._remote_cog_by_local_path: dict[str, str] = {}
+
             def process_groups(
                 self,
                 task_groups: list[list[dict]],
@@ -412,6 +422,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                 from cube_split.jobs.ray_partition_core import (
                     _process_local_task_group,
                     asset_record_from_dict,
+                    asset_record_to_dict,
                     convert_asset_to_cog,
                     upload_cog_to_minio,
                 )
@@ -425,14 +436,13 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
                 prepared_groups: list[list[dict]] = []
-                local_cog_by_source: dict[str, str] = {}
-                converted_asset_by_source: dict[str, dict[str, Any]] = {}
+                used_local_cog_paths: set[str] = set()
                 worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
                 for group in task_groups:
                     if not group:
                         continue
                     source_path = str(group[0]["asset_path"])
-                    local_cog_path = local_cog_by_source.get(source_path)
+                    local_cog_path = self._local_cog_by_source.get(source_path)
                     if local_cog_path is None:
                         asset = asset_record_from_dict(assets_by_path_value[source_path])
                         converted = convert_asset_to_cog(
@@ -444,19 +454,25 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                             source_options=source_options_value,
                         )
                         local_cog_path = str(converted.path)
-                        local_cog_by_source[source_path] = local_cog_path
-                        converted_asset_by_source[source_path] = asset_record_to_dict(converted)
+                        self._local_cog_by_source[source_path] = local_cog_path
+                        self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
+                    used_local_cog_paths.add(local_cog_path)
                     prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
 
                 rows_out: list[dict] = []
                 for group in prepared_groups:
                     rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
-                remote_cog_by_local_path: dict[str, str] = {}
-                for source_path, local_cog_path in local_cog_by_source.items():
-                    converted = asset_record_from_dict(converted_asset_by_source[source_path])
-                    remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(converted, Path(local_cog_path), cog_upload_options_value)
+                for source_path, local_cog_path in self._local_cog_by_source.items():
+                    if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
+                        continue
+                    converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
+                    self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
+                        converted,
+                        Path(local_cog_path),
+                        cog_upload_options_value,
+                    )
                 for row in rows_out:
-                    row["asset_path"] = remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
+                    row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
                 return rows_out
 
         actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
@@ -468,9 +484,10 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             "secret_key": str(getattr(args, "minio_secret_key", "")),
             "secure": bool(getattr(args, "minio_secure", False)),
         }
-        futures = [
-            actors[idx % parallelism].process_groups.remote(
-                chunk,
+
+        def submit_chunk(idx: int, actor_idx: int):
+            return actors[actor_idx].process_groups.remote(
+                task_chunks[idx],
                 args.time_granularity,
                 include_sample_mean,
                 assets_by_path,
@@ -494,17 +511,32 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     "asset_version": str(getattr(args, "asset_version", "v1")),
                 },
             )
-            for idx, chunk in enumerate(task_chunks)
-        ]
-        pending = list(futures)
+
+        pending = []
+        pending_actor_by_ref: dict[Any, int] = {}
         try:
+            next_idx = 0
+            while next_idx < len(task_chunks) and len(pending) < parallelism:
+                check_cancelled(args)
+                actor_idx = next_idx % parallelism
+                ref = submit_chunk(next_idx, actor_idx)
+                pending.append(ref)
+                pending_actor_by_ref[ref] = actor_idx
+                next_idx += 1
             while pending:
                 check_cancelled(args)
                 ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
                 if not ready:
                     continue
                 for ready_ref in ready:
+                    actor_idx = pending_actor_by_ref.pop(ready_ref)
                     out_rows.extend(ray.get(ready_ref))
+                    if next_idx < len(task_chunks):
+                        check_cancelled(args)
+                        ref = submit_chunk(next_idx, actor_idx)
+                        pending.append(ref)
+                        pending_actor_by_ref[ref] = actor_idx
+                        next_idx += 1
         except PartitionCancelledError:
             cancel_ray_refs(ray, pending)
             raise

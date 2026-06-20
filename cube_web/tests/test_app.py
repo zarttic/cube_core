@@ -679,6 +679,55 @@ def test_auth_config_exposes_runtime_auth_switch(monkeypatch):
     assert resp.json()["auth_required"] is True
 
 
+def test_auth_login_redirects_to_oauth_provider_with_encoded_target(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://portal.example.test")
+    monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
+    redirect_uri = "http://web.example.test/callback"
+
+    resp = client.get(
+        "/api/auth/login",
+        params={"target": "/partition?tab=quality", "redirect_uri": redirect_uri},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 307
+    location = resp.headers["location"]
+    parsed = urlsplit(location)
+    query = parse_qs(parsed.query)
+    state = query["state"][0]
+
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://portal.example.test/api/authorize"
+    assert query["client_id"] == ["system_ard"]
+    assert query["redirect_uri"] == [redirect_uri]
+    assert auth_service_module.decode_state(state)["target"] == "/partition?tab=quality"
+    assert auth_service_module.decode_state(state)["redirect_uri"] == redirect_uri
+
+
+def test_auth_callback_uses_redirect_uri_from_state(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://portal.example.test")
+    monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_ID", "system_ard")
+    monkeypatch.setenv("CUBE_WEB_AUTH_CLIENT_SECRET", "ard_secret_abc123")
+    captured: dict[str, Any] = {}
+
+    def fake_post_form(url: str, payload: dict[str, Any], token: str | None = None) -> dict[str, Any]:
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["token"] = token
+        return {"access_token": "access-token-123", "token_type": "bearer", "expires_in": 1800}
+
+    monkeypatch.setattr(auth_service_module, "_post_form", fake_post_form)
+    redirect_uri = "http://web.example.test/callback"
+    state = auth_service_module.encode_state("/partition", redirect_uri=redirect_uri)
+
+    resp = client.get("/api/callback", params={"code": "code-123", "state": state})
+
+    assert resp.status_code == 200
+    assert resp.json()["access_token"] == "access-token-123"
+    assert captured["url"] == "http://portal.example.test/api/exchange_code"
+    assert captured["payload"]["redirect_uri"] == redirect_uri
+    assert captured["payload"]["code"] == "code-123"
+
+
 def test_auth_verify_and_me_accept_hs256_jwt():
     token = make_jwt(
         {
@@ -1338,6 +1387,7 @@ def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypa
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 9
     assert captured["target_pixels_per_hex_edge"] == 512
+    assert captured["ray_parallelism"] == 0
 
 
 def test_optical_partition_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):
@@ -5081,6 +5131,7 @@ def test_product_partition_test_runner_dispatches_isea4h_to_entity_partition(mon
     assert captured["target_pixels_per_hex_edge"] == 512
     assert captured["time_granularity"] == "year"
     assert captured["ingest_enabled"] is False
+    assert captured["ray_parallelism"] == 0
 
 
 def test_product_partition_test_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):
@@ -5325,6 +5376,7 @@ def test_radar_partition_test_runner_dispatches_isea4h_to_entity_partition(monke
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"
     assert captured["ingest_enabled"] is False
+    assert captured["ray_parallelism"] == 0
 
 
 def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition(monkeypatch, tmp_path):

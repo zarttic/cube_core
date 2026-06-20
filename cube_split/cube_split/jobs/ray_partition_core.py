@@ -531,10 +531,15 @@ def _bbox_intersection(
     return min_lon, min_lat, max_lon, max_lat
 
 
-def _group_tasks_for_local_processing(tasks: list[dict]) -> list[list[dict]]:
-    grouped: dict[str, list[dict]] = defaultdict(list)
+def _group_tasks_for_local_processing(
+    tasks: list[dict],
+    split_by_space_prefix: bool = False,
+) -> list[list[dict]]:
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for task in tasks:
-        grouped[task["asset_path"]].append(task)
+        asset_path = str(task["asset_path"])
+        prefix = str(task.get("space_code_prefix") or "") if split_by_space_prefix else ""
+        grouped[(asset_path, prefix)].append(task)
     return [
         sorted(rows, key=lambda row: row["space_code"])
         for _, rows in sorted(grouped.items(), key=lambda item: item[0])

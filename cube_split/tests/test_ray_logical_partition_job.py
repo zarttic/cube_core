@@ -6,12 +6,65 @@ from types import SimpleNamespace
 
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_tasks_for_ray,
+    _ray_runtime_env_from_env,
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
     _should_run_ingest,
     run_logical_partition,
 )
-from cube_split.jobs.ray_partition_core import _prepare_task_rows_for_partitioning
+from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
+
+
+class _FakeObjectRef:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeRemoteMethod:
+    def __init__(self, func):
+        self._func = func
+
+    def remote(self, *args, **kwargs):
+        return _FakeObjectRef(self._func(*args, **kwargs))
+
+
+class _FakeActorHandle:
+    def __init__(self, actor_cls):
+        self._instance = actor_cls()
+
+    def __getattr__(self, name):
+        return _FakeRemoteMethod(getattr(self._instance, name))
+
+
+class _FakeActorClass:
+    def __init__(self, actor_cls):
+        self._actor_cls = actor_cls
+
+    def options(self, **kwargs):
+        return self
+
+    def remote(self):
+        return _FakeActorHandle(self._actor_cls)
+
+
+class _FakeRay:
+    def __init__(self):
+        self.shutdown_calls = 0
+
+    def remote(self, actor_cls):
+        return _FakeActorClass(actor_cls)
+
+    def init(self, **kwargs):
+        return None
+
+    def wait(self, pending, num_returns=1, timeout=1.0):
+        return pending[:num_returns], pending[num_returns:]
+
+    def get(self, ref):
+        return ref.value
+
+    def shutdown(self):
+        self.shutdown_calls += 1
 
 
 def test_chunk_tasks_for_ray_preserves_order_and_chunk_size():
@@ -31,6 +84,15 @@ def test_resolve_ray_parallelism_auto_uses_task_count_ceiling(monkeypatch):
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.os.cpu_count", lambda: 64)
 
     assert _resolve_ray_parallelism(task_group_count=8, requested_parallelism=0) == 8
+
+
+def test_ray_runtime_env_passes_source_cache_dir(monkeypatch):
+    monkeypatch.setenv("CUBE_SOURCE_CACHE_DIR", "/data/cube_split_source_cache")
+
+    runtime_env = _ray_runtime_env_from_env()
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"]["CUBE_SOURCE_CACHE_DIR"] == "/data/cube_split_source_cache"
 
 
 def test_resolve_ray_chunk_size_auto_prefers_full_fanout_for_small_runs():
@@ -56,6 +118,18 @@ def test_prepare_task_rows_for_partitioning_adds_prefix_and_time_bucket():
 
     assert rows[0]["space_code_prefix"] == "35f"
     assert rows[0]["time_bucket"] == "20210312"
+
+
+def test_group_tasks_can_split_single_asset_by_space_prefix():
+    tasks = [
+        {"asset_path": "/source/a.tif", "space_code": "35f04", "space_code_prefix": "35f"},
+        {"asset_path": "/source/a.tif", "space_code": "35f05", "space_code_prefix": "35f"},
+        {"asset_path": "/source/a.tif", "space_code": "36a01", "space_code_prefix": "36a"},
+    ]
+
+    grouped = _group_tasks_for_local_processing(tasks, split_by_space_prefix=True)
+
+    assert [[row["space_code"] for row in group] for group in grouped] == [["35f04", "35f05"], ["36a01"]]
 
 
 def test_should_run_ingest_uses_metadata_backend_and_explicit_override():
@@ -197,54 +271,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
 
 
 def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, tmp_path: Path):
-    class FakeObjectRef:
-        def __init__(self, value):
-            self.value = value
-
-    class FakeRemoteMethod:
-        def __init__(self, func):
-            self._func = func
-
-        def remote(self, *args, **kwargs):
-            return FakeObjectRef(self._func(*args, **kwargs))
-
-    class FakeActorHandle:
-        def __init__(self, actor_cls):
-            self._instance = actor_cls()
-
-        def __getattr__(self, name):
-            return FakeRemoteMethod(getattr(self._instance, name))
-
-    class FakeActorClass:
-        def __init__(self, actor_cls):
-            self._actor_cls = actor_cls
-
-        def options(self, **kwargs):
-            return self
-
-        def remote(self):
-            return FakeActorHandle(self._actor_cls)
-
-    class FakeRay:
-        def __init__(self):
-            self.shutdown_calls = 0
-
-        def remote(self, actor_cls):
-            return FakeActorClass(actor_cls)
-
-        def init(self, **kwargs):
-            return None
-
-        def wait(self, pending, num_returns=1, timeout=1.0):
-            return pending[:num_returns], pending[num_returns:]
-
-        def get(self, ref):
-            return ref.value
-
-        def shutdown(self):
-            self.shutdown_calls += 1
-
-    fake_ray = FakeRay()
+    fake_ray = _FakeRay()
     source_asset = SimpleNamespace(
         path="/source/scene_a.tif",
         scene_id="SCENE_A",
@@ -308,7 +335,7 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
     )
     monkeypatch.setattr(
         "cube_split.jobs.ray_logical_partition_job._group_tasks_for_local_processing",
-        lambda task_rows: [[task_rows[0]], [task_rows[1]]],
+        lambda task_rows, **kwargs: [[task_rows[0]], [task_rows[1]]],
     )
     monkeypatch.setattr(
         "cube_split.jobs.ray_logical_partition_job.asset_record_to_dict",
@@ -425,3 +452,166 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
     rows = [line for line in rows_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert all("s3://cube/cube/raw/scene_a_cog.tif" in row for row in rows)
     assert fake_ray.shutdown_calls == 1
+
+
+def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch, tmp_path: Path):
+    fake_ray = _FakeRay()
+    source_asset = SimpleNamespace(
+        path="/source/scene_a.tif",
+        scene_id="SCENE_A",
+        band="b04",
+        acq_time="2026-04-21T00:00:00Z",
+        product_family="other",
+        sensor="optical_mosaic",
+        bbox=None,
+        corners=[[116.1, 39.9], [116.2, 39.9], [116.2, 39.8], [116.1, 39.8]],
+        resolution=30,
+    )
+    worker_cog_path = tmp_path / "worker" / "scene_a_cog.tif"
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._load_ray", lambda: fake_ray)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_runtime_env_from_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._prepend_sys_paths", lambda paths: None)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_project_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_actor_options_from_env", lambda: {})
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.build_manifest", lambda *args, **kwargs: [source_asset])
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.build_grid_tasks_driver",
+        lambda **kwargs: [
+            {
+                "scene_id": "SCENE_A",
+                "band": "b04",
+                "asset_path": source_asset.path,
+                "acq_time": "2026-04-21T00:00:00Z",
+                "grid_type": "s2",
+                "grid_level": 5,
+                "space_code": "35f4",
+                "cell_min_lon": 116.1,
+                "cell_min_lat": 39.8,
+                "cell_max_lon": 116.2,
+                "cell_max_lat": 39.9,
+                "cover_mode": "intersect",
+            },
+            {
+                "scene_id": "SCENE_A",
+                "band": "b04",
+                "asset_path": source_asset.path,
+                "acq_time": "2026-04-21T00:00:00Z",
+                "grid_type": "s2",
+                "grid_level": 5,
+                "space_code": "36a1",
+                "cell_min_lon": 116.2,
+                "cell_min_lat": 39.8,
+                "cell_max_lon": 116.3,
+                "cell_max_lat": 39.9,
+                "cover_mode": "intersect",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.asset_record_to_dict",
+        lambda asset: {
+            "scene_id": asset.scene_id,
+            "band": asset.band,
+            "path": asset.path,
+            "acq_time": asset.acq_time,
+            "product_family": asset.product_family,
+            "sensor": asset.sensor,
+            "bbox": asset.bbox,
+            "corners": asset.corners,
+            "resolution": asset.resolution,
+        },
+    )
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.asset_record_from_dict", lambda row: SimpleNamespace(**row))
+
+    def fake_convert_asset_to_cog(asset, **kwargs):
+        worker_cog_path.parent.mkdir(parents=True, exist_ok=True)
+        worker_cog_path.write_bytes(b"cog")
+        calls.append(("convert", asset.path))
+        return SimpleNamespace(
+            scene_id=asset.scene_id,
+            band=asset.band,
+            path=worker_cog_path,
+            acq_time=asset.acq_time,
+            product_family=asset.product_family,
+            sensor=asset.sensor,
+            bbox=asset.bbox,
+            corners=asset.corners,
+            resolution=asset.resolution,
+        )
+
+    def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
+        calls.append(("process", str(group[0]["asset_path"])))
+        row = dict(group[0])
+        row["st_code"] = f"{row['space_code']}:{row['time_bucket']}"
+        row["sample_mean_band1"] = None
+        row["intersect_min_lon"] = row["cell_min_lon"]
+        row["intersect_min_lat"] = row["cell_min_lat"]
+        row["intersect_max_lon"] = row["cell_max_lon"]
+        row["intersect_max_lat"] = row["cell_max_lat"]
+        return [row]
+
+    def fake_upload_cog_to_minio(asset, local_path, options):
+        calls.append(("upload", str(local_path)))
+        return f"s3://cube/cube/raw/{Path(local_path).name}"
+
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.convert_asset_to_cog", fake_convert_asset_to_cog)
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core._process_local_task_group", fake_process_local_task_group)
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
+
+    report = run_logical_partition(
+        Namespace(
+            input_dir=str(tmp_path),
+            manifest_path="",
+            product_family="auto",
+            output_dir=str(tmp_path / "output"),
+            cog_input_dir=str(tmp_path / "cog"),
+            cog_overwrite=True,
+            cog_workers=1,
+            cog_compress="LZW",
+            cog_predictor=2,
+            cog_level=0,
+            cog_num_threads="ALL_CPUS",
+            target_crs="EPSG:4326",
+            grid_type="s2",
+            grid_level=5,
+            cover_mode="intersect",
+            time_granularity="day",
+            max_cells_per_asset=20000,
+            ray_parallelism=1,
+            ray_address="10.3.100.182:6379",
+            chunk_size=1,
+            partition_backend="ray",
+            partition_prefix_len=3,
+            timing_mode=False,
+            skip_verify=False,
+            sample_mean=False,
+            job_id="",
+            data_type="optical",
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            cube_version="v1",
+            quality_rule="best_quality_wins",
+            metadata_backend="none",
+            postgres_dsn="postgresql://postgres:postgres@127.0.0.1:5432/cube",
+            db_path="",
+            asset_storage_backend="local",
+            minio_endpoint="10.3.100.179:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/raw",
+            minio_secure=False,
+            minio_upload_workers=2,
+            cog_output_root=str(tmp_path / "local_cog"),
+            cog_materialize_mode="copy",
+        )
+    )
+
+    assert [name for name, _ in calls] == ["convert", "process", "upload", "process"]
+    assert calls.count(("convert", source_asset.path)) == 1
+    assert calls.count(("upload", str(worker_cog_path))) == 1
+    assert report["chunk_size"] == 1
+    assert report["total_index_rows"] == 2

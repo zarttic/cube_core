@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import math
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,15 +34,14 @@ from cube_split.jobs.ray_logical_partition_job import (
 from cube_split.jobs.ray_partition_core import (
     AssetRecord,
     _dataset_bounds_wgs84,
-    asset_record_to_dict,
     build_grid_tasks_driver,
     build_manifest,
-    cog_creation_options,
     resolve_asset_source_path,
 )
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
+DEFAULT_ENTITY_TASKS_PER_GROUP = 64
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
 
 
@@ -179,6 +178,7 @@ def _write_entity_tiles(
     time_granularity: str,
     partition_prefix_len: int,
     data_type: str = "optical",
+    source_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     data_type = _normalize_data_type(data_type)
     sdk = CubeEncoderSDK()
@@ -189,7 +189,7 @@ def _write_entity_tiles(
         task_groups.setdefault(str(task["asset_path"]), []).append(task)
 
     for asset_path, asset_tasks in sorted(task_groups.items()):
-        local_asset_path = resolve_asset_source_path(asset_path)
+        local_asset_path = resolve_asset_source_path(asset_path, source_options)
         with rasterio.open(local_asset_path) as ds:
             for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
                 geom = _hex_geometry_for_dataset(sdk, ds, str(task["space_code"]))
@@ -266,7 +266,7 @@ def _write_entity_tiles(
                             "scene_id": task["scene_id"],
                             "band": band_name,
                             "asset_path": str(tile_path.resolve()),
-                            "source_asset_path": asset_path,
+                            "source_asset_path": str(task.get("source_asset_path") or asset_path),
                             "output_path": str(tile_path.resolve()),
                             "acq_time": acq_time,
                             "grid_type": "isea4h",
@@ -292,12 +292,99 @@ def _write_entity_tiles(
     return rows
 
 
-def _group_tasks_for_parallel_processing(tasks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    return [[task] for task in sorted(tasks, key=lambda row: (str(row["asset_path"]), str(row["space_code"])))]
+def _prepare_entity_source_tasks(
+    tasks: list[dict[str, Any]],
+    source_options: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    local_by_source = {
+        asset_path: resolve_asset_source_path(asset_path, source_options)
+        for asset_path in sorted({str(task["asset_path"]) for task in tasks})
+    }
+    prepared: list[dict[str, Any]] = []
+    for task in tasks:
+        source_asset_path = str(task.get("source_asset_path") or task["asset_path"])
+        local_asset_path = local_by_source[str(task["asset_path"])]
+        prepared.append({**task, "asset_path": local_asset_path, "source_asset_path": source_asset_path})
+    return prepared
+
+
+def _group_tasks_for_parallel_processing(
+    tasks: list[dict[str, Any]],
+    partition_prefix_len: int,
+    max_tasks_per_group: int = DEFAULT_ENTITY_TASKS_PER_GROUP,
+) -> list[list[dict[str, Any]]]:
+    prefix_len = max(1, int(partition_prefix_len))
+    group_limit = max(1, int(max_tasks_per_group))
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for task in tasks:
+        asset_path = str(task["asset_path"])
+        space_code = str(task["space_code"])
+        buckets.setdefault((asset_path, space_code[:prefix_len]), []).append(task)
+
+    groups: list[list[dict[str, Any]]] = []
+    for key in sorted(buckets):
+        bucket = sorted(buckets[key], key=lambda row: str(row["space_code"]))
+        for idx in range(0, len(bucket), group_limit):
+            groups.append(bucket[idx : idx + group_limit])
+    return groups
 
 
 def _flatten_task_groups(task_groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return [task for group in task_groups for task in group]
+
+
+def _assign_entity_task_groups_to_actors(
+    task_chunks: list[list[list[dict[str, Any]]]],
+    parallelism: int,
+) -> list[list[list[dict[str, Any]]]]:
+    all_task_groups = [group for chunk in task_chunks for group in chunk]
+    actor_count = max(1, min(int(parallelism), len(all_task_groups)))
+    task_groups_by_actor: list[list[list[dict[str, Any]]]] = [[] for _ in range(actor_count)]
+    groups_by_asset: dict[str, list[list[dict[str, Any]]]] = {}
+    for group in all_task_groups:
+        asset_path = str(group[0]["asset_path"])
+        groups_by_asset.setdefault(asset_path, []).append(group)
+
+    asset_items = sorted(groups_by_asset.items())
+    if len(asset_items) <= actor_count:
+        slots_by_asset = {asset_path: 1 for asset_path, _ in asset_items}
+        remaining_slots = actor_count - len(asset_items)
+        total_group_count = max(1, len(all_task_groups))
+        fractions: list[tuple[float, int, str]] = []
+        for asset_path, groups in asset_items:
+            ideal_slots = actor_count * (len(groups) / total_group_count)
+            whole_slots = max(1, min(len(groups), math.floor(ideal_slots)))
+            slots_by_asset[asset_path] = whole_slots
+            remaining_slots -= whole_slots - 1
+            fractions.append((ideal_slots - math.floor(ideal_slots), len(groups), asset_path))
+        while remaining_slots > 0:
+            allocated = False
+            for _, _, asset_path in sorted(fractions, reverse=True):
+                if slots_by_asset[asset_path] >= len(groups_by_asset[asset_path]):
+                    continue
+                slots_by_asset[asset_path] += 1
+                remaining_slots -= 1
+                allocated = True
+                if remaining_slots == 0:
+                    break
+            if not allocated:
+                break
+
+        actor_idx = 0
+        for asset_path, groups in asset_items:
+            slot_count = slots_by_asset[asset_path]
+            actor_indices = list(range(actor_idx, actor_idx + slot_count))
+            actor_idx += slot_count
+            for group_idx, group in enumerate(groups):
+                task_groups_by_actor[actor_indices[group_idx % slot_count]].append(group)
+    else:
+        actor_loads = [0] * actor_count
+        for _, groups in sorted(asset_items, key=lambda item: len(item[1]), reverse=True):
+            actor_idx = min(range(actor_count), key=lambda idx: actor_loads[idx])
+            task_groups_by_actor[actor_idx].extend(groups)
+            actor_loads[actor_idx] += len(groups)
+
+    return [groups for groups in task_groups_by_actor if groups]
 
 
 def _resolve_backend(requested_backend: str, ray_address: str) -> str:
@@ -340,16 +427,10 @@ def _write_entity_tile_chunks_ray(
     parallelism: int,
     ray_address: str,
     data_type: str = "optical",
-    assets_by_path: dict[str, dict[str, Any]] | None = None,
-    cog_input_dir: str = "",
-    cog_overwrite: bool = False,
-    cog_options: dict[str, str] | None = None,
-    target_crs: str = "",
     source_options: dict[str, Any] | None = None,
-    cog_upload_options: dict[str, Any] | None = None,
     tile_upload_options: dict[str, Any] | None = None,
     cancellation_check: Any | None = None,
-) -> tuple[list[dict[str, Any]], float]:
+) -> tuple[list[dict[str, Any]], float, float, float, float, float]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
     ray_init_start = time.perf_counter()
@@ -372,6 +453,31 @@ def _write_entity_tile_chunks_ray(
 
     @ray.remote
     class EntityTileProcessor:
+        def __init__(self) -> None:
+            self._source_path_by_uri: dict[str, str] = {}
+
+        def prepare_sources(
+            self,
+            source_uris: list[str],
+            source_options_value: dict[str, Any] | None,
+        ) -> dict[str, Any]:
+            import os
+
+            env_options = dict(source_options_value or {})
+            if env_options.get("endpoint"):
+                os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
+            if env_options.get("access_key"):
+                os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
+            if env_options.get("secret_key"):
+                os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
+
+            from cube_split.jobs.ray_partition_core import resolve_asset_source_path as resolve_source
+
+            started = time.perf_counter()
+            for source_uri in sorted(set(source_uris)):
+                self._source_path_by_uri[str(source_uri)] = resolve_source(str(source_uri), source_options_value)
+            return {"source_prepare_elapsed_sec": time.perf_counter() - started}
+
         def process_groups(
             self,
             task_groups: list[list[dict[str, Any]]],
@@ -379,15 +485,9 @@ def _write_entity_tile_chunks_ray(
             time_granularity_text: str,
             prefix_len: int,
             data_type_text: str,
-            assets_by_path_value: dict[str, dict[str, Any]] | None,
-            cog_input_dir_value: str,
-            cog_overwrite_value: bool,
-            cog_options_value: dict[str, str] | None,
-            target_crs_value: str,
             source_options_value: dict[str, Any] | None,
-            cog_upload_options_value: dict[str, Any] | None,
             tile_upload_options_value: dict[str, Any] | None,
-        ) -> list[dict[str, Any]]:
+        ) -> dict[str, Any]:
             import os
             import sys
             from pathlib import Path
@@ -449,44 +549,30 @@ def _write_entity_tile_chunks_ray(
                 rows_with_asset_uris = module._rows_with_asset_uris
 
             flat_tasks = [task for group in task_groups for task in group]
-            if assets_by_path_value and cog_options_value and cog_upload_options_value:
-                from cube_split.jobs.ray_partition_core import asset_record_from_dict, convert_asset_to_cog, upload_cog_to_minio
+            env_options = dict(source_options_value or {})
+            if env_options.get("endpoint"):
+                os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
+            if env_options.get("access_key"):
+                os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
+            if env_options.get("secret_key"):
+                os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
-                env_options = dict(cog_upload_options_value or source_options_value or {})
-                if env_options.get("endpoint"):
-                    os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
-                if env_options.get("access_key"):
-                    os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
-                if env_options.get("secret_key"):
-                    os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
-
-                prepared: list[dict[str, Any]] = []
-                cog_uri_by_source: dict[str, str] = {}
-                worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_entity_cog") / f"ray_worker_{os.getpid()}"
-                for task in flat_tasks:
-                    source_path = str(task["asset_path"])
-                    cog_uri = cog_uri_by_source.get(source_path)
-                    if cog_uri is None:
-                        asset = asset_record_from_dict(assets_by_path_value[source_path])
-                        converted = convert_asset_to_cog(
-                            asset,
-                            cog_input_dir=worker_cog_root,
-                            overwrite=cog_overwrite_value,
-                            creation_options=cog_options_value,
-                            target_crs=target_crs_value or None,
-                            source_options=source_options_value,
-                        )
-                        cog_uri = upload_cog_to_minio(converted, Path(converted.path), cog_upload_options_value)
-                        cog_uri_by_source[source_path] = cog_uri
-                    prepared.append({**task, "asset_path": cog_uri})
-                flat_tasks = prepared
-
+            prepared_tasks = []
+            for task in flat_tasks:
+                source_asset_path = str(task.get("source_asset_path") or task["asset_path"])
+                local_asset_path = self._source_path_by_uri.get(str(task["asset_path"]))
+                if local_asset_path is None:
+                    local_asset_path = prepare_source_tasks([task], source_options_value)[0]["asset_path"]
+                    self._source_path_by_uri[str(task["asset_path"])] = local_asset_path
+                prepared_tasks.append({**task, "asset_path": local_asset_path, "source_asset_path": source_asset_path})
+            partition_start = time.perf_counter()
             rows = writer(
-                flat_tasks,
+                prepared_tasks,
                 run_dir=Path(run_dir_text),
                 time_granularity=time_granularity_text,
                 partition_prefix_len=prefix_len,
                 data_type=data_type_text,
+                source_options=None,
             )
             if tile_upload_options_value:
                 import argparse
@@ -494,58 +580,86 @@ def _write_entity_tile_chunks_ray(
                 from cube_split.jobs.entity_partition_job import _upload_entity_tiles_to_minio
 
                 asset_uri_map = _upload_entity_tiles_to_minio(rows, argparse.Namespace(**tile_upload_options_value))
-                rows = rows_with_asset_uris(rows, asset_uri_map)
-            return rows
+                rows = rows_with_asset_uris(rows, asset_uri_map, keep_local_asset_path=False)
+            return {
+                "rows": rows,
+                "partition_elapsed_sec": time.perf_counter() - partition_start,
+            }
 
+    task_groups_by_actor = _assign_entity_task_groups_to_actors(task_chunks, parallelism)
+    actor_count = len(task_groups_by_actor)
     actor_cls = EntityTileProcessor.options(**_ray_actor_options_from_env())
-    actors = [actor_cls.remote() for _ in range(parallelism)]
-    def submit_chunk(idx: int):
-        return actors[idx % parallelism].process_groups.remote(
-            task_chunks[idx],
+    actors = [actor_cls.remote() for _ in range(actor_count)]
+
+    def submit_actor(actor_idx: int):
+        return actors[actor_idx].process_groups.remote(
+            task_groups_by_actor[actor_idx],
             str(run_dir),
             time_granularity,
             partition_prefix_len,
             data_type,
-            assets_by_path,
-            cog_input_dir,
-            cog_overwrite,
-            cog_options,
-            target_crs,
             source_options,
-            cog_upload_options,
             tile_upload_options,
         )
 
     rows: list[dict[str, Any]] = []
-    next_idx = 0
+    source_prepare_elapsed = 0.0
+    source_prepare_worker_elapsed = 0.0
+    partition_wall_start = time.perf_counter()
+    worker_partition_elapsed = 0.0
     pending = []
-    while next_idx < len(task_chunks) and len(pending) < parallelism:
+    pending_actor_by_ref: dict[Any, int] = {}
+    try:
         if cancellation_check is not None and cancellation_check():
             raise PartitionCancelledError("Partition task cancelled")
-        pending.append(submit_chunk(next_idx))
-        next_idx += 1
-    try:
+        source_prepare_start = time.perf_counter()
+        source_uris_by_actor: dict[int, set[str]] = {idx: set() for idx in range(actor_count)}
+        for actor_idx, task_groups in enumerate(task_groups_by_actor):
+            for group in task_groups:
+                for task in group:
+                    source_uris_by_actor[actor_idx].add(str(task["asset_path"]))
+        source_prepare_refs = [
+            actor.prepare_sources.remote(sorted(source_uris_by_actor[idx]), source_options) for idx, actor in enumerate(actors)
+        ]
+        try:
+            for prepare_result in ray.get(source_prepare_refs):
+                source_prepare_worker_elapsed += float(prepare_result.get("source_prepare_elapsed_sec") or 0.0)
+        except Exception:
+            cancel_ray_refs(ray, source_prepare_refs)
+            raise
+        source_prepare_elapsed = time.perf_counter() - source_prepare_start
+        partition_wall_start = time.perf_counter()
+        for actor_idx, task_groups in enumerate(task_groups_by_actor):
+            if not task_groups:
+                continue
+            if cancellation_check is not None and cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            ref = submit_actor(actor_idx)
+            pending.append(ref)
+            pending_actor_by_ref[ref] = actor_idx
         while pending:
             if cancellation_check is not None and cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
             ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
             if not ready:
                 continue
-            chunk_rows = ray.get(ready[0])
-            rows.extend(chunk_rows)
-            if next_idx < len(task_chunks):
-                if cancellation_check is not None and cancellation_check():
-                    raise PartitionCancelledError("Partition task cancelled")
-                pending.append(submit_chunk(next_idx))
-                next_idx += 1
+            for ready_ref in ready:
+                actor_idx = pending_actor_by_ref.pop(ready_ref)
+                chunk_result = ray.get(ready_ref)
+                chunk_rows = list(chunk_result.get("rows", []))
+                rows.extend(chunk_rows)
+                worker_partition_elapsed += float(chunk_result.get("partition_elapsed_sec") or 0.0)
     except PartitionCancelledError:
+        cancel_ray_refs(ray, pending)
+        raise
+    except Exception:
         cancel_ray_refs(ray, pending)
         raise
     finally:
         for actor in actors:
             ray.kill(actor, no_restart=True)
         ray.shutdown()
-    return rows, ray_init_elapsed
+    return rows, ray_init_elapsed, source_prepare_elapsed, time.perf_counter() - partition_wall_start, source_prepare_worker_elapsed, worker_partition_elapsed
 
 
 def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, str]:
@@ -612,18 +726,53 @@ def _entity_tile_object_key(row: dict[str, Any], source_path: Path, args: argpar
     )
 
 
-def _rows_with_asset_uris(rows: list[dict[str, Any]], asset_uri_map: dict[str, str]) -> list[dict[str, Any]]:
+def _rows_with_asset_uris(
+    rows: list[dict[str, Any]],
+    asset_uri_map: dict[str, str],
+    *,
+    keep_local_asset_path: bool = True,
+) -> list[dict[str, Any]]:
     updated: list[dict[str, Any]] = []
     for row in rows:
         next_row = dict(row)
         local_path = str(row["asset_path"])
         tile_uri = asset_uri_map.get(local_path, local_path)
-        next_row["local_asset_path"] = local_path
+        if keep_local_asset_path:
+            next_row["local_asset_path"] = local_path
+        else:
+            next_row.pop("local_asset_path", None)
         next_row["entity_tile_uri"] = tile_uri
         next_row["asset_path"] = tile_uri
         next_row["output_path"] = tile_uri
         updated.append(next_row)
     return updated
+
+
+def _entity_tile_upload_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "dataset": str(getattr(args, "dataset", "demo_optical")),
+        "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+        "asset_version": str(getattr(args, "asset_version", "v1")),
+        "minio_endpoint": str(getattr(args, "minio_endpoint", "")),
+        "minio_access_key": str(getattr(args, "minio_access_key", "")),
+        "minio_secret_key": str(getattr(args, "minio_secret_key", "")),
+        "minio_bucket": str(getattr(args, "minio_bucket", "")),
+        "minio_prefix": str(getattr(args, "minio_prefix", "cube/entity")),
+        "minio_secure": bool(getattr(args, "minio_secure", False)),
+        "minio_upload_workers": int(getattr(args, "minio_upload_workers", 8) or 8),
+    }
+
+
+def _validate_entity_tile_upload_options(options: dict[str, Any]) -> None:
+    if not all(str(options.get(key) or "") for key in ("minio_endpoint", "minio_access_key", "minio_secret_key", "minio_bucket")):
+        raise ValueError("Ray entity partition requires minio endpoint/access-key/secret-key/bucket for shared tile output")
+
+
+def _count_remote_entity_tiles(rows: list[dict[str, Any]]) -> int:
+    tile_paths = {str(row.get("asset_path") or "") for row in rows}
+    if any(not path.startswith("s3://") for path in tile_paths):
+        raise RuntimeError("Ray entity partition requires worker tile upload to MinIO; local worker paths are not shared")
+    return len(tile_paths)
 
 
 def _ensure_entity_tables_postgres(conn: Any) -> None:
@@ -959,11 +1108,17 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     if backend not in {"ray", "thread"}:
         raise ValueError("partition_backend must be one of: auto, ray, thread, local, process")
 
-    grouped_tasks = _group_tasks_for_parallel_processing(grid_tasks)
-    parallelism = _resolve_ray_parallelism(
-        len(grouped_tasks),
-        int(getattr(args, "ray_parallelism", 0) or 0),
+    requested_ray_parallelism = int(getattr(args, "ray_parallelism", 0) or 0)
+    initial_parallelism = _resolve_ray_parallelism(len(grid_tasks), requested_ray_parallelism)
+    max_tasks_per_group = max(1, math.ceil(len(grid_tasks) / max(1, initial_parallelism)))
+    max_tasks_per_group = min(DEFAULT_ENTITY_TASKS_PER_GROUP, max_tasks_per_group)
+    grouped_tasks = _group_tasks_for_parallel_processing(
+        grid_tasks,
+        int(args.partition_prefix_len),
+        max_tasks_per_group=max_tasks_per_group,
     )
+    parallelism = _resolve_ray_parallelism(len(grouped_tasks), requested_ray_parallelism)
+    parallelism = max(1, min(len(grouped_tasks), parallelism))
     chunk_size = _resolve_ray_chunk_size(
         len(grouped_tasks),
         parallelism,
@@ -972,16 +1127,36 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
 
     ray_init_elapsed = 0.0
+    source_prepare_elapsed = 0.0
+    source_prepare_worker_elapsed = 0.0
+    worker_partition_elapsed = 0.0
+    partition_stage_total_elapsed = 0.0
     partition_start = time.perf_counter()
+    requested_asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
+    if requested_asset_storage_backend not in {"local", "minio"}:
+        raise ValueError("asset_storage_backend must be one of: local, minio")
+    asset_storage_backend = "minio" if backend == "ray" else requested_asset_storage_backend
+    if backend == "ray" and requested_asset_storage_backend == "local":
+        # Ray workers may run on different nodes; worker-local tile paths are not valid driver outputs.
+        asset_storage_backend = "minio"
+
     if backend == "ray":
-        assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
         minio_options = {
             "endpoint": str(getattr(args, "minio_endpoint", "")),
             "access_key": str(getattr(args, "minio_access_key", "")),
             "secret_key": str(getattr(args, "minio_secret_key", "")),
             "secure": bool(getattr(args, "minio_secure", False)),
         }
-        rows, ray_init_elapsed = _write_entity_tile_chunks_ray(
+        tile_upload_options = _entity_tile_upload_options(args)
+        _validate_entity_tile_upload_options(tile_upload_options)
+        (
+            rows,
+            ray_init_elapsed,
+            source_prepare_elapsed,
+            partition_elapsed,
+            source_prepare_worker_elapsed,
+            worker_partition_elapsed,
+        ) = _write_entity_tile_chunks_ray(
             task_chunks=task_chunks,
             run_dir=run_dir,
             time_granularity=args.time_granularity,
@@ -989,44 +1164,11 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             parallelism=parallelism,
             ray_address=ray_address,
             data_type=data_type,
-            assets_by_path=assets_by_path,
-            cog_input_dir=str(getattr(args, "cog_input_dir", "") or "/tmp/cube_entity_cog"),
-            cog_overwrite=bool(getattr(args, "cog_overwrite", False)),
-            cog_options=cog_creation_options(
-                compress=str(getattr(args, "cog_compress", "LZW") or "LZW"),
-                predictor=int(getattr(args, "cog_predictor", 2) or 0),
-                level=(int(getattr(args, "cog_level", 0) or 0) or None),
-                overviews="NONE",
-                num_threads=str(getattr(args, "cog_num_threads", "ALL_CPUS") or ""),
-            ),
-            target_crs=str(getattr(args, "target_crs", "") or ""),
             source_options=minio_options,
-            cog_upload_options={
-                **minio_options,
-                "bucket": str(getattr(args, "minio_bucket", "")),
-                "prefix": "cube/entity_cog",
-                "dataset": str(getattr(args, "dataset", "demo_optical")),
-                "sensor": str(getattr(args, "sensor", "optical_mosaic")),
-                "asset_version": str(getattr(args, "asset_version", "v1")),
-            },
-            tile_upload_options=(
-                {
-                    "dataset": str(getattr(args, "dataset", "demo_optical")),
-                    "sensor": str(getattr(args, "sensor", "optical_mosaic")),
-                    "asset_version": str(getattr(args, "asset_version", "v1")),
-                    "minio_endpoint": str(getattr(args, "minio_endpoint", "")),
-                    "minio_access_key": str(getattr(args, "minio_access_key", "")),
-                    "minio_secret_key": str(getattr(args, "minio_secret_key", "")),
-                    "minio_bucket": str(getattr(args, "minio_bucket", "")),
-                    "minio_prefix": str(getattr(args, "minio_prefix", "cube/entity")),
-                    "minio_secure": bool(getattr(args, "minio_secure", False)),
-                    "minio_upload_workers": int(getattr(args, "minio_upload_workers", 8) or 8),
-                }
-                if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio"
-                else None
-            ),
+            tile_upload_options=tile_upload_options,
             cancellation_check=getattr(args, "cancellation_check", None),
         )
+        partition_stage_total_elapsed = source_prepare_elapsed + partition_elapsed
     else:
         rows = _write_entity_tile_chunks_thread(
             task_chunks=task_chunks,
@@ -1036,35 +1178,43 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             workers=parallelism,
             data_type=data_type,
         )
-    partition_elapsed = time.perf_counter() - partition_start
+        partition_elapsed = time.perf_counter() - partition_start
+        partition_stage_total_elapsed = partition_elapsed
     check_cancelled(args)
 
     upload_elapsed = 0.0
     metadata_elapsed = 0.0
     uploaded_tile_count = 0
     metadata_rows = 0
-    asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
     metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
     explicit_ingest = getattr(args, "ingest_enabled", True)
     ingest_enabled = True if explicit_ingest is None else bool(explicit_ingest)
     if not ingest_enabled:
-        asset_storage_backend = "local"
+        if backend != "ray":
+            asset_storage_backend = "local"
         metadata_backend = "none"
     asset_uri_map: dict[str, str] = {}
-    if asset_storage_backend == "minio":
+    if backend == "ray":
+        uploaded_tile_count = _count_remote_entity_tiles(rows)
+    elif asset_storage_backend == "minio":
         check_cancelled(args)
         upload_start = time.perf_counter()
         asset_uri_map = _upload_entity_tiles_to_minio(rows, args)
         upload_elapsed = time.perf_counter() - upload_start
         uploaded_tile_count = len(asset_uri_map)
         rows = _rows_with_asset_uris(rows, asset_uri_map)
-    elif asset_storage_backend != "local":
-        raise ValueError("asset_storage_backend must be one of: local, minio")
 
     if metadata_backend == "postgres":
         check_cancelled(args)
         metadata_start = time.perf_counter()
-        metadata_stats = _write_entity_metadata_postgres(rows, args, run_dir)
+        metadata_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "asset_storage_backend": asset_storage_backend,
+                "metadata_backend": metadata_backend,
+            }
+        )
+        metadata_stats = _write_entity_metadata_postgres(rows, metadata_args, run_dir)
         metadata_elapsed = time.perf_counter() - metadata_start
         metadata_rows = int(metadata_stats["entity_tile_rows"])
     elif metadata_backend not in {"none", "local"}:
@@ -1127,7 +1277,11 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
         "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
         "cog_elapsed_sec": 0.0,
+        "source_prepare_elapsed_sec": round(source_prepare_elapsed, 3),
+        "source_prepare_worker_elapsed_sec": round(source_prepare_worker_elapsed, 3),
         "partition_elapsed_sec": round(partition_elapsed, 3),
+        "partition_stage_total_elapsed_sec": round(partition_stage_total_elapsed, 3),
+        "worker_partition_elapsed_sec": round(worker_partition_elapsed, 3),
         "upload_elapsed_sec": round(upload_elapsed, 3),
         "metadata_elapsed_sec": round(metadata_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
@@ -1144,7 +1298,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--product-family", default="auto")
     parser.add_argument("--data-type", default="optical", choices=sorted(ENTITY_DATA_TYPES))
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--cog-input-dir", required=True)
+    parser.add_argument("--cog-input-dir", default="/tmp/cube_entity_cog")
     parser.add_argument("--cog-overwrite", action="store_true")
     parser.add_argument("--cog-workers", type=int, default=0)
     parser.add_argument("--cog-compress", default="LZW")

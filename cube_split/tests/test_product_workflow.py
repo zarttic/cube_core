@@ -17,6 +17,58 @@ from cube_split.partition.product_products import parse_product_asset
 from cube_split.quality.product_quality import run_quality_check
 
 
+class _FakeObjectRef:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeRemoteMethod:
+    def __init__(self, func):
+        self._func = func
+
+    def remote(self, *args, **kwargs):
+        return _FakeObjectRef(self._func(*args, **kwargs))
+
+
+class _FakeActorHandle:
+    def __init__(self, actor_cls):
+        self._instance = actor_cls()
+
+    def __getattr__(self, name):
+        return _FakeRemoteMethod(getattr(self._instance, name))
+
+
+class _FakeActorClass:
+    def __init__(self, actor_cls):
+        self._actor_cls = actor_cls
+
+    def options(self, **kwargs):
+        return self
+
+    def remote(self):
+        return _FakeActorHandle(self._actor_cls)
+
+
+class _FakeRay:
+    def __init__(self):
+        self.shutdown_calls = 0
+
+    def remote(self, actor_cls):
+        return _FakeActorClass(actor_cls)
+
+    def init(self, **kwargs):
+        return None
+
+    def wait(self, pending, num_returns=1, timeout=1.0):
+        return pending[:num_returns], pending[num_returns:]
+
+    def get(self, ref):
+        return ref.value
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
 def _write_product_tif(path: Path, *, crs: str = "EPSG:4326") -> None:
     data = np.arange(100, dtype=np.float32).reshape(1, 10, 10)
     with rasterio.open(
@@ -258,54 +310,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
 
 
 def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, tmp_path: Path):
-    class FakeObjectRef:
-        def __init__(self, value):
-            self.value = value
-
-    class FakeRemoteMethod:
-        def __init__(self, func):
-            self._func = func
-
-        def remote(self, *args, **kwargs):
-            return FakeObjectRef(self._func(*args, **kwargs))
-
-    class FakeActorHandle:
-        def __init__(self, actor_cls):
-            self._instance = actor_cls()
-
-        def __getattr__(self, name):
-            return FakeRemoteMethod(getattr(self._instance, name))
-
-    class FakeActorClass:
-        def __init__(self, actor_cls):
-            self._actor_cls = actor_cls
-
-        def options(self, **kwargs):
-            return self
-
-        def remote(self):
-            return FakeActorHandle(self._actor_cls)
-
-    class FakeRay:
-        def __init__(self):
-            self.shutdown_calls = 0
-
-        def remote(self, actor_cls):
-            return FakeActorClass(actor_cls)
-
-        def init(self, **kwargs):
-            return None
-
-        def wait(self, pending, num_returns=1, timeout=1.0):
-            return pending[:num_returns], pending[num_returns:]
-
-        def get(self, ref):
-            return ref.value
-
-        def shutdown(self):
-            self.shutdown_calls += 1
-
-    fake_ray = FakeRay()
+    fake_ray = _FakeRay()
     local_cog_path = tmp_path / "worker" / "product_cog.tif"
     calls: list[tuple[str, object]] = []
 
@@ -387,6 +392,84 @@ def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
         "s3://cube/cube/product/product_cog.tif",
     ]
     assert fake_ray.shutdown_calls == 1
+
+
+def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch, tmp_path: Path):
+    fake_ray = _FakeRay()
+    local_cog_path = tmp_path / "worker" / "product_cog.tif"
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._load_ray", lambda: fake_ray)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._ray_runtime_env_from_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._prepend_sys_paths", lambda paths: None)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._ray_project_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._ray_actor_options_from_env", lambda: {})
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.asset_record_from_dict", lambda row: SimpleNamespace(**row))
+
+    def fake_convert_asset_to_cog(asset, **kwargs):
+        local_cog_path.parent.mkdir(parents=True, exist_ok=True)
+        local_cog_path.write_bytes(b"cog")
+        calls.append(("convert", asset.path))
+        return SimpleNamespace(
+            scene_id=asset.scene_id,
+            band=asset.band,
+            path=local_cog_path,
+            acq_time=asset.acq_time,
+            product_family=asset.product_family,
+            sensor=asset.sensor,
+            bbox=asset.bbox,
+            corners=asset.corners,
+            resolution=asset.resolution,
+        )
+
+    def fake_process_group_chunk(chunk, include_sample_mean):
+        calls.append(("process", [group[0]["asset_path"] for group in chunk]))
+        return [{"scene_id": group[0]["scene_id"], "asset_path": group[0]["asset_path"]} for group in chunk]
+
+    def fake_upload_cog_to_minio(asset, local_path, options):
+        calls.append(("upload", str(local_path)))
+        return f"s3://cube/cube/product/{Path(local_path).name}"
+
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.convert_asset_to_cog", fake_convert_asset_to_cog)
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._process_group_chunk", fake_process_group_chunk)
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
+
+    rows, _ = _partition_groups_ray(
+        task_chunks=[
+            [[{"scene_id": "product-2020", "asset_path": "/source/product_2020.tif"}]],
+            [[{"scene_id": "product-2020-b", "asset_path": "/source/product_2020.tif"}]],
+        ],
+        parallelism=1,
+        ray_address="10.3.100.182:6379",
+        include_sample_mean=False,
+        assets_by_path={
+            "/source/product_2020.tif": {
+                "scene_id": "product-2020",
+                "band": "product_value",
+                "path": "/source/product_2020.tif",
+                "acq_time": "2020-01-01T00:00:00Z",
+                "product_family": "product",
+                "sensor": "data_product",
+                "bbox": None,
+                "corners": [[100.0, 25.0], [100.1, 25.0], [100.1, 24.9], [100.0, 24.9]],
+                "resolution": 30,
+            }
+        },
+        cog_input_dir=str(tmp_path / "cog"),
+        cog_overwrite=True,
+        cog_options={"COMPRESS": "LZW"},
+        target_crs="EPSG:4326",
+        source_options={"endpoint": "10.3.100.179:9000"},
+        cog_upload_options={"bucket": "cube", "prefix": "cube/product"},
+    )
+
+    assert [name for name, _ in calls] == ["convert", "process", "upload", "process"]
+    assert calls.count(("convert", "/source/product_2020.tif")) == 1
+    assert calls.count(("upload", str(local_cog_path))) == 1
+    assert [row["asset_path"] for row in rows] == [
+        "s3://cube/cube/product/product_cog.tif",
+        "s3://cube/cube/product/product_cog.tif",
+    ]
 
 
 def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_path: Path):
