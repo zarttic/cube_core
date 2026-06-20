@@ -187,14 +187,15 @@ def _partition_groups_ray(
                 os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
             prepared_groups: list[list[dict]] = []
-            cog_uri_by_source: dict[str, str] = {}
+            local_cog_by_source: dict[str, str] = {}
+            converted_asset_by_source: dict[str, dict[str, Any]] = {}
             worker_cog_root = Path(cog_input_dir_value) / f"ray_worker_{os.getpid()}"
             for group in task_groups:
                 if not group:
                     continue
                 source_path = str(group[0]["asset_path"])
-                cog_uri = cog_uri_by_source.get(source_path)
-                if cog_uri is None:
+                local_cog_path = local_cog_by_source.get(source_path)
+                if local_cog_path is None:
                     asset = asset_record_from_dict(assets_by_path_value[source_path])
                     converted = convert_asset_to_cog(
                         asset,
@@ -204,11 +205,29 @@ def _partition_groups_ray(
                         target_crs=target_crs_value or None,
                         source_options=source_options_value,
                     )
-                    cog_uri = upload_cog_to_minio(converted, Path(converted.path), cog_upload_options_value)
-                    cog_uri_by_source[source_path] = cog_uri
-                prepared_groups.append([{**row, "asset_path": cog_uri} for row in group])
+                    local_cog_path = str(converted.path)
+                    local_cog_by_source[source_path] = local_cog_path
+                    converted_asset_by_source[source_path] = {
+                        "scene_id": converted.scene_id,
+                        "band": converted.band,
+                        "path": converted.path,
+                        "acq_time": converted.acq_time,
+                        "product_family": converted.product_family,
+                        "sensor": converted.sensor,
+                        "bbox": converted.bbox,
+                        "corners": converted.corners,
+                        "resolution": converted.resolution,
+                    }
+                prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
 
-            return _process_group_chunk(prepared_groups, include_sample_mean_value)
+            rows = _process_group_chunk(prepared_groups, include_sample_mean_value)
+            remote_cog_by_local_path: dict[str, str] = {}
+            for source_path, local_cog_path in local_cog_by_source.items():
+                converted = asset_record_from_dict(converted_asset_by_source[source_path])
+                remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(converted, Path(local_cog_path), cog_upload_options_value)
+            for row in rows:
+                row["asset_path"] = remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
+            return rows
 
     actor_cls = ProductTaskProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
