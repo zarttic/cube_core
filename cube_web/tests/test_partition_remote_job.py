@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from cube_web.services import partition_remote_job
-from cube_web.services import partition_workflow
+from cube_web.services import partition_remote_job, partition_workflow
 
 
 class _Store:

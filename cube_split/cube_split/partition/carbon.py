@@ -16,6 +16,7 @@ from typing import Any
 
 from grid_core.sdk import CubeEncoderSDK
 
+from cube_split import runtime_config
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs
 from cube_split.partition.base import PartitionResult
 from cube_split.partition.carbon_products import (
@@ -23,7 +24,6 @@ from cube_split.partition.carbon_products import (
     normalize_carbon_product_type,
     supported_carbon_product_types,
 )
-from cube_split import runtime_config
 
 UTC = timezone.utc
 

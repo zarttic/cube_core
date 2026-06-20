@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import json
 import shutil
 import threading
 import time
-import builtins
 from pathlib import Path
 
 import pytest

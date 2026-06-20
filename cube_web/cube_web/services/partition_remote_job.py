@@ -53,7 +53,8 @@ def run_task(task_id: str) -> int:
     batch = store.get_batch(str(attempt.get("batch_id") or ""))
     if batch is None:
         raise RuntimeError(f"Partition batch not found for task: {task_id}")
-    payload = copy.deepcopy(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {})
+    raw_payload = attempt.get("payload")
+    payload: dict[str, Any] = copy.deepcopy(raw_payload) if isinstance(raw_payload, dict) else {}
     data_type = str(batch.get("data_type") or payload.get("data_type") or "").strip().lower()
     if not data_type:
         raise RuntimeError(f"Partition data_type missing for task: {task_id}")

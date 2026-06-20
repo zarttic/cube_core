@@ -10,9 +10,9 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from cube_web.services.http_errors import HTTPException
-
 from cube_split import runtime_config
+
+from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_job_store import (
     InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
@@ -502,9 +502,10 @@ class PartitionWorkflowService:
         return not isinstance(self.store, InMemoryPartitionJobStore)
 
     def _attempt_uses_remote_ray(self, attempt: dict[str, Any], batch: dict[str, Any] | None = None) -> bool:
-        payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
-        batch = batch or self.store.get_batch(str(attempt.get("batch_id") or "")) or {}
-        data_type = str(batch.get("data_type") or payload.get("data_type") or "").strip().lower()
+        raw_payload = attempt.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        resolved_batch: dict[str, Any] = batch or self.store.get_batch(str(attempt.get("batch_id") or "")) or {}
+        data_type = str(resolved_batch.get("data_type") or payload.get("data_type") or "").strip().lower()
         return self._payload_uses_remote_ray(data_type, payload)
 
     def _effective_partition_backend(self, data_type: str, payload: dict[str, Any] | None) -> str:

@@ -912,7 +912,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ")
                     cur.execute(
-                        f"""
+                        """
                         UPDATE partition_batches
                         SET ingest_status = CASE
                           WHEN data_type = ANY(%s::text[]) AND status = 'succeeded' THEN
