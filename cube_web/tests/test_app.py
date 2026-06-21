@@ -206,6 +206,7 @@ def quality_store(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.3.100.179:9000")
     monkeypatch.setenv("CUBE_WEB_MINIO_BUCKET", "cube")
     monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
     monkeypatch.delenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", raising=False)
     store = FakeQualityReportStore()
     set_quality_report_store(store)
@@ -5182,6 +5183,45 @@ def test_product_partition_test_runner_dispatches_tile_matrix_to_logical_partiti
     assert captured["grid_level"] == 5
     assert captured["partition_backend"] == "thread"
     assert captured["ingest_enabled"] is False
+
+
+def test_product_partition_runner_parses_minio_secure_string(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_product_partition(args):
+        captured["minio_secure"] = args.minio_secure
+        run_dir = tmp_path / "logical-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "product",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
+
+    partition_runners._run_product_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "tile_matrix",
+            "grid_level": 5,
+            "partition_backend": "thread",
+            "minio_secure": "false",
+        }
+    )
+
+    assert captured["minio_secure"] is False
 
 
 def test_product_partition_retry_endpoint(monkeypatch):

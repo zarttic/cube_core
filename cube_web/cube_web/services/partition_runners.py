@@ -96,14 +96,6 @@ def _parse_s3_source_name(source_uri: str) -> str:
     return Path(parsed.path).name
 
 
-def _minio_access_key(payload: dict | None = None) -> str:
-    return runtime_config.minio_settings(payload).access_key
-
-
-def _minio_secret_key(payload: dict | None = None) -> str:
-    return runtime_config.minio_settings(payload).secret_key
-
-
 def _resolve_optical_demo_source(source_uri: str, input_dir: Path) -> Path:
     if _is_s3_uri(source_uri):
         name = _parse_s3_source_name(source_uri)
@@ -390,22 +382,6 @@ def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
     return payload.get("_cancellation_check") or payload.get("cancellation_check")
 
 
-def _env_text(name: str, default: str = "") -> str:
-    return runtime_config.env_text(name, default)
-
-
-def _ray_address() -> str:
-    return runtime_config.require_ray_address()
-
-
-def _postgres_dsn() -> str:
-    return runtime_config.require_postgres_dsn()
-
-
-def _minio_settings(payload: dict | None = None, ingest_payload: dict | None = None) -> runtime_config.MinioSettings:
-    return runtime_config.minio_settings({**(ingest_payload or {}), **(payload or {})})
-
-
 def _warn_checks_from_result(result: dict) -> list[dict]:
     report = result.get("quality_report") if isinstance(result, dict) else None
     if not isinstance(report, dict):
@@ -497,6 +473,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         _require_run_source(raw_payload, data_type="entity")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
+    minio = runtime_config.minio_settings({**ingest_payload, **payload})
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
@@ -559,7 +536,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
-        ray_address=str(payload.get("ray_address") or _ray_address()),
+        ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
         job_id=str(payload.get("job_id") or payload.get("batch_id") or ""),
@@ -568,14 +545,14 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         asset_version=str(ingest_payload.get("asset_version") or "v1"),
         cube_version=str(ingest_payload.get("cube_version") or "v1"),
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
-        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        postgres_dsn=str(payload.get("postgres_dsn") or runtime_config.require_postgres_dsn()),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
-        minio_endpoint=_minio_settings(payload, ingest_payload).endpoint,
-        minio_access_key=_minio_access_key(payload),
-        minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=_minio_settings(payload, ingest_payload).bucket,
+        minio_endpoint=minio.endpoint,
+        minio_access_key=minio.access_key,
+        minio_secret_key=minio.secret_key,
+        minio_bucket=minio.bucket,
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
-        minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
+        minio_secure=minio.secure,
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
         cancellation_check=cancellation_check,
@@ -705,7 +682,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         partition_chunk_size=_int_payload_value(payload, "partition_chunk_size", 250),
         partition_workers=workers,
         partition_backend=str(payload.get("partition_backend") or os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray")),
-        ray_address=str(payload.get("ray_address") or _ray_address()),
+        ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
         ray_parallelism=workers,
         selected_source_indexes=selected_source_indexes,
         source_uris=source_uris,
@@ -784,6 +761,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     payload = payload or {}
     if mode == "partition_run":
         _require_run_source(payload, data_type="product")
+    minio = runtime_config.minio_settings(payload)
     cancellation_check = _cancellation_check_from_payload(payload)
     root = _partition_run_dir("product", mode)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _product_demo_input_dir()))).expanduser().resolve()
@@ -845,7 +823,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         partition_workers=_int_payload_value(payload, "partition_workers", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
-        ray_address=str(payload.get("ray_address") or _ray_address()),
+        ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
         sample_mean=bool(payload.get("sample_mean", False)),
@@ -855,15 +833,15 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         asset_version=str(payload.get("asset_version") or "v1"),
         cube_version=str(payload.get("cube_version") or "product_v1"),
         metadata_backend=str(payload.get("metadata_backend") or "postgres"),
-        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        postgres_dsn=str(payload.get("postgres_dsn") or runtime_config.require_postgres_dsn()),
         db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(payload.get("asset_storage_backend") or "minio"),
-        minio_endpoint=_minio_settings(payload).endpoint,
-        minio_access_key=_minio_access_key(payload),
-        minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=_minio_settings(payload).bucket,
+        minio_endpoint=minio.endpoint,
+        minio_access_key=minio.access_key,
+        minio_secret_key=minio.secret_key,
+        minio_bucket=minio.bucket,
         minio_prefix=str(payload.get("minio_prefix") or "cube/product"),
-        minio_secure=bool(payload.get("minio_secure", False)),
+        minio_secure=minio.secure,
         minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
         cog_output_root=str(payload.get("cog_output_root") or root / "product_cog_store"),
         cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
@@ -921,6 +899,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         payload["partition_backend"] = "thread"
     if "product_family" not in raw_payload:
         payload["product_family"] = "sentinel1"
+    minio = runtime_config.minio_settings(payload)
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     root = _partition_run_dir("radar", mode)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _radar_demo_input_dir()))).expanduser().resolve()
@@ -962,9 +941,13 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         raise ValueError("grid_level_mode must be one of: auto, manual")
     entity_grid_level = grid_level if grid_level_mode == "manual" else 0
     partition_backend = str(payload.get("partition_backend") or "thread")
-    ray_address = str(payload.get("ray_address") or (_ray_address() if partition_backend in {"auto", "ray"} else ""))
+    ray_address = str(
+        payload.get("ray_address") or (runtime_config.require_ray_address() if partition_backend in {"auto", "ray"} else "")
+    )
     metadata_backend = str(payload.get("metadata_backend") or "none")
-    postgres_dsn = str(payload.get("postgres_dsn") or (_postgres_dsn() if metadata_backend == "postgres" else ""))
+    postgres_dsn = str(
+        payload.get("postgres_dsn") or (runtime_config.require_postgres_dsn() if metadata_backend == "postgres" else "")
+    )
 
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
@@ -1004,12 +987,12 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         postgres_dsn=postgres_dsn,
         db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(payload.get("asset_storage_backend") or "local"),
-        minio_endpoint=_minio_settings(payload).endpoint,
-        minio_access_key=_minio_access_key(payload),
-        minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=_minio_settings(payload).bucket,
+        minio_endpoint=minio.endpoint,
+        minio_access_key=minio.access_key,
+        minio_secret_key=minio.secret_key,
+        minio_bucket=minio.bucket,
         minio_prefix=str(payload.get("minio_prefix") or "cube/radar"),
-        minio_secure=bool(payload.get("minio_secure", False)),
+        minio_secure=minio.secure,
         minio_upload_workers=_int_payload_value(payload, "minio_upload_workers", 8),
         cog_output_root=str(payload.get("cog_output_root") or root / "radar_cog_store"),
         cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),
@@ -1069,6 +1052,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         _require_run_source(raw_payload, data_type="optical")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
     ingest_payload = _payload_with_defaults(raw_payload, optical_ingest_defaults())
+    minio = runtime_config.minio_settings({**ingest_payload, **payload})
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
     if not input_dir.exists():
@@ -1134,7 +1118,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
-        ray_address=str(payload.get("ray_address") or _ray_address()),
+        ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
@@ -1148,15 +1132,15 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         cube_version=str(ingest_payload.get("cube_version") or "v1"),
         quality_rule=str(ingest_payload.get("quality_rule") or "best_quality_wins"),
         metadata_backend=str(ingest_payload.get("metadata_backend") or "none"),
-        postgres_dsn=str(payload.get("postgres_dsn") or _postgres_dsn()),
+        postgres_dsn=str(payload.get("postgres_dsn") or runtime_config.require_postgres_dsn()),
         db_path=str(payload.get("db_path") or ""),
         asset_storage_backend=str(ingest_payload.get("asset_storage_backend") or "local"),
-        minio_endpoint=_minio_settings(payload, ingest_payload).endpoint,
-        minio_access_key=_minio_access_key(payload),
-        minio_secret_key=_minio_secret_key(payload),
-        minio_bucket=_minio_settings(payload, ingest_payload).bucket,
+        minio_endpoint=minio.endpoint,
+        minio_access_key=minio.access_key,
+        minio_secret_key=minio.secret_key,
+        minio_bucket=minio.bucket,
         minio_prefix=str(payload.get("minio_prefix") or ingest_payload.get("minio_prefix") or "cube/entity"),
-        minio_secure=bool(payload.get("minio_secure", ingest_payload.get("minio_secure", False))),
+        minio_secure=minio.secure,
         minio_upload_workers=_int_payload_value(ingest_payload, "minio_upload_workers", 8),
         cog_output_root=str(payload.get("cog_output_root") or root / "optical_cog_store"),
         cog_materialize_mode=str(payload.get("cog_materialize_mode") or "copy"),

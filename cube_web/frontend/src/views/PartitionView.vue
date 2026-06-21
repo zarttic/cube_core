@@ -4,12 +4,11 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCloseFilled, Document, EditPen, FolderChecked, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
 import GlobeMap from '@/components/GlobeMap.vue';
-import ConfigView from '@/views/ConfigView.vue';
+import QualityHistoryDrawer from '@/components/QualityHistoryDrawer.vue';
 import { apiPrefixes, requestGet, requestJson } from '@/api/client';
 
 function initialModule() {
   if (window.location.pathname === '/quality') return 'quality';
-  if (window.location.pathname === '/config' || window.location.pathname === '/config.html') return 'config';
   return 'optical';
 }
 
@@ -1890,18 +1889,6 @@ function openQualityHistoryDrawer() {
   loadQualityHistory();
 }
 
-function qualityHistoryRowClass({ row }) {
-  return row.report_id === selectedQualityReportId.value ? 'selected-quality-history-row' : '';
-}
-
-function qualityHistoryProductYearsText(row) {
-  return row.summary?.product_years?.join(', ') || '-';
-}
-
-function qualityHistoryQualityFlagsText(row) {
-  return Object.entries(row.summary?.quality_counts || {}).map(([flag, count]) => `Q${flag}: ${count}`).join(', ') || '-';
-}
-
 async function changeQualityHistoryPage(page) {
   qualityHistoryPage.value = page;
   await loadQualityHistory();
@@ -3092,7 +3079,6 @@ onUnmounted(() => {
           <button class="module-tab" :class="{ active: activeModule === 'radar' }" @click="activeModule = 'radar'">雷达遥感</button>
           <button class="module-tab" :class="{ active: activeModule === 'product' }" @click="activeModule = 'product'">信息产品</button>
           <button class="module-tab" :class="{ active: activeModule === 'quality' }" @click="activeModule = 'quality'">自动化质检</button>
-          <button class="module-tab" :class="{ active: activeModule === 'config' }" @click="activeModule = 'config'">配置管理</button>
           <button class="module-tab" :class="{ active: activeModule === 'tasks' }" @click="activeModule = 'tasks'; loadPartitionTasks(1)">剖分任务队列</button>
         </div>
       </div>
@@ -3101,8 +3087,7 @@ onUnmounted(() => {
     <main class="main-content-area">
       <div class="container">
         <div class="module-content active">
-          <ConfigView v-if="activeModule === 'config'" />
-          <div v-else-if="activeModule === 'tasks'" class="partition-task-workspace">
+          <div v-if="activeModule === 'tasks'" class="partition-task-workspace">
             <div class="partition-task-page-header">
               <div>
                 <h3>剖分任务队列</h3>
@@ -3977,64 +3962,21 @@ onUnmounted(() => {
       </div>
     </el-drawer>
 
-    <el-drawer v-model="qualityHistoryDrawerVisible" title="历史质检记录" size="760px" direction="rtl">
-      <div class="quality-history-filterbar">
-        <el-input v-model="qualityHistorySearch" :prefix-icon="Search" placeholder="按数据集、批次或路径筛选" clearable />
-        <el-select v-model="qualityHistoryStatus" placeholder="状态" clearable>
-          <el-option label="通过" value="PASS" />
-          <el-option label="告警" value="WARN" />
-          <el-option label="失败" value="FAIL" />
-        </el-select>
-      </div>
-      <el-table
-        v-loading="qualityHistoryLoading"
-        :data="qualityHistory"
-        class="drawer-table quality-history-table"
-        highlight-current-row
-        :row-class-name="qualityHistoryRowClass"
-        @row-click="selectQualityRecord"
-      >
-        <el-table-column label="数据集" prop="dataset" min-width="130" />
-        <el-table-column label="批次" prop="run_name" min-width="170" />
-	        <el-table-column v-if="qualityDataType === 'product'" label="年份" min-width="150">
-	          <template #default="{ row }">
-              <div class="table-text-clamp" :title="qualityHistoryProductYearsText(row)">{{ qualityHistoryProductYearsText(row) }}</div>
-            </template>
-	        </el-table-column>
-	        <el-table-column v-if="qualityDataType === 'carbon'" label="质量标记" min-width="150">
-	          <template #default="{ row }">
-	            <div class="table-text-clamp" :title="qualityHistoryQualityFlagsText(row)">{{ qualityHistoryQualityFlagsText(row) }}</div>
-	          </template>
-	        </el-table-column>
-        <el-table-column label="状态" width="86">
-          <template #default="{ row }">
-            <el-tag :type="checkStatusType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="索引行" width="82">
-          <template #default="{ row }">{{ row.summary?.index_rows ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="告警/失败" width="98">
-          <template #default="{ row }">{{ row.summary?.warning_checks ?? 0 }}/{{ row.summary?.failed_checks ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="质检时间" min-width="160">
-          <template #default="{ row }">{{ formatQualityTime(row.generated_at || row.modified_at) }}</template>
-        </el-table-column>
-      </el-table>
-      <div class="quality-history-pagination">
-        <el-pagination
-          v-model:current-page="qualityHistoryPage"
-          v-model:page-size="qualityHistoryLimit"
-          :total="qualityHistoryTotal"
-          :page-sizes="[10, 20, 30, 50, 100]"
-          layout="total, sizes, prev, pager, next, jumper"
-          background
-          small
-          @current-change="changeQualityHistoryPage"
-          @size-change="changeQualityHistoryPageSize"
-        />
-      </div>
-    </el-drawer>
+    <QualityHistoryDrawer
+      v-model:visible="qualityHistoryDrawerVisible"
+      v-model:search="qualityHistorySearch"
+      v-model:status="qualityHistoryStatus"
+      v-model:page="qualityHistoryPage"
+      v-model:page-size="qualityHistoryLimit"
+      :rows="qualityHistory"
+      :total="qualityHistoryTotal"
+      :loading="qualityHistoryLoading"
+      :data-type="qualityDataType"
+      :selected-report-id="selectedQualityReportId"
+      @select="selectQualityRecord"
+      @page-change="changeQualityHistoryPage"
+      @page-size-change="changeQualityHistoryPageSize"
+    />
 
     <el-dialog v-model="partitionStageDetailVisible" title="剖分进程详情" width="520px">
       <div v-if="selectedPartitionStage" class="partition-stage-detail">

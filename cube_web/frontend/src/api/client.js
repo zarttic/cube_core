@@ -53,12 +53,7 @@ export async function requestGet(path) {
 }
 
 export async function requestPost(path, payload = {}) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: authHeaders(JSON_HEADERS),
-    body: JSON.stringify(payload),
-  });
-  return parseResponse(response);
+  return requestJson(path, payload);
 }
 
 export function apiPrefixes() {

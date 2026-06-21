@@ -4,6 +4,7 @@ import { navItems, normalizePath } from '@/data/navigation';
 import HomeView from '@/views/HomeView.vue';
 import PartitionView from '@/views/PartitionView.vue';
 import EncodingView from '@/views/EncodingView.vue';
+import ConfigView from '@/views/ConfigView.vue';
 import { authRequired, loadAuthRuntimeConfig, runtimeNavigation } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
 
@@ -15,7 +16,7 @@ const pageMap = {
   '/partition': PartitionView,
   '/quality': PartitionView,
   '/encoding': EncodingView,
-  '/config': PartitionView,
+  '/config': ConfigView,
 };
 
 const currentView = computed(() => pageMap[currentPath.value] || HomeView);
