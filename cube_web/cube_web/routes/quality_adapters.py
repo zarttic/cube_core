@@ -32,6 +32,30 @@ def quality_optical_history(payload: dict | None = None) -> dict:
     return _quality_history("optical", payload)
 
 
+def quality_radar_latest(payload: dict | None = None) -> dict:
+    payload_from_model(payload)
+    report = get_quality_report_store().latest_report("radar")
+    if report is None:
+        raise HTTPException(status_code=404, detail="No radar quality report found")
+    return report
+
+
+def quality_radar_report(payload: dict) -> dict:
+    return _quality_report("radar", payload)
+
+
+def quality_radar_report_pdf(payload: dict) -> Response:
+    return quality_report_pdf_response(quality_radar_report(payload), data_type="radar")
+
+
+def quality_radar_report_txt(payload: dict) -> Response:
+    return quality_report_text_response(quality_radar_report(payload), data_type="radar")
+
+
+def quality_radar_history(payload: dict | None = None) -> dict:
+    return _quality_history("radar", payload)
+
+
 def quality_product_history(payload: dict | None = None) -> dict:
     return _quality_history("product", payload)
 

@@ -68,7 +68,7 @@ def make_jwt(payload, secret="your-secret-key-here-change-in-production"):
 class FakeQualityReportStore:
     def __init__(self):
         self.reports = {}
-        self.history = {"optical": [], "product": []}
+        self.history = {"optical": [], "radar": [], "product": []}
 
     def upsert_report(self, data_type, run_dir, report):
         report = dict(report)
@@ -5450,8 +5450,13 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     def fail_entity_partition(_args):
         raise AssertionError("tile_matrix radar partition should use logical partition")
 
+    def fake_run_radar_quality_check(args):
+        captured["quality_run_dir"] = args.run_dir
+        return {"status": "PASS", "summary": {"index_rows": 1}, "checks": []}
+
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_radar_quality_check)
 
     result = partition_runners._run_radar_partition_test(
         {
@@ -5465,6 +5470,9 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     assert result["mode"] == "partition_test_no_ingest"
     assert result["data_type"] == "radar"
     assert result["output_path"].endswith("index_rows.jsonl")
+    assert result["quality_status"] == "PASS"
+    assert result["quality_report_id"]
+    assert captured["quality_run_dir"] == str(tmp_path / "logical-run")
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
     assert captured["grid_type"] == "tile_matrix"
@@ -5521,6 +5529,32 @@ def test_optical_quality_endpoint(monkeypatch):
     assert body["report_id"]
     assert body["run_dir"] == run_dir
     assert body["summary"]["index_rows"] == 3
+
+
+def test_radar_quality_endpoint(monkeypatch):
+    run_dir = "/tmp/cube_web_partition_demo/radar/run"
+
+    def fake_run_quality_check(args):
+        assert args.run_dir == run_dir
+        assert args.target_crs == "EPSG:4326"
+        return {
+            "status": "PASS",
+            "summary": {"index_rows": 4, "failed_checks": 0, "warning_checks": 0},
+            "checks": [{"name": "index_rows", "status": "PASS", "message": "ok"}],
+            "data_type": "radar",
+        }
+
+    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_quality_check)
+
+    resp = client.post("/v1/quality/radar/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "PASS"
+    assert body["data_type"] == "radar"
+    assert body["report_id"]
+    assert body["run_dir"] == run_dir
+    assert body["summary"]["index_rows"] == 4
 
 
 def test_carbon_quality_endpoint(monkeypatch):
@@ -5701,6 +5735,7 @@ def test_quality_report_txt_routes_are_registered():
     route_paths = set(app.openapi()["paths"])
 
     assert "/v1/quality/optical/report/txt" in route_paths
+    assert "/v1/quality/radar/report/txt" in route_paths
     assert "/v1/quality/product/report/txt" in route_paths
     assert "/v1/quality/carbon/report/txt" in route_paths
 

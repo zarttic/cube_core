@@ -67,6 +67,55 @@ def create_quality_router() -> APIRouter:
     def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
         return _quality_history("optical", payload_from_model(payload))
 
+    @router.post("/radar/run")
+    def quality_radar_run(payload: QualityRunRequest) -> dict:
+        payload = payload_from_model(payload)
+        if not quality_checks.run_radar_quality_check:
+            raise HTTPException(status_code=500, detail="cube_split radar quality module is not available")
+        run_dir_text = str(payload.get("run_dir", "")).strip()
+        if not run_dir_text:
+            raise HTTPException(status_code=422, detail="run_dir is required")
+        run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
+        args = quality_service.quality_args(run_dir, payload)
+        try:
+            report = quality_checks.run_radar_quality_check(args)
+            return get_quality_report_store().upsert_report("radar", run_dir, report)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.post("/radar/latest")
+    def quality_radar_latest(payload: QualityLatestRequest | None = None) -> dict:
+        payload_from_model(payload)
+        report = get_quality_report_store().latest_report("radar")
+        if report is None:
+            raise HTTPException(status_code=404, detail="No radar quality report found")
+        return report
+
+    @router.post("/radar/report")
+    def quality_radar_report(payload: QualityReportRequest) -> dict:
+        payload = payload_from_model(payload)
+        report_id = str(payload.get("report_id", "")).strip()
+        if not report_id:
+            raise HTTPException(status_code=422, detail="report_id is required")
+        report = get_quality_report_store().get_report("radar", report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Radar quality report not found: {report_id}")
+        return report
+
+    @router.post("/radar/report/pdf")
+    def quality_radar_report_pdf(payload: QualityReportRequest) -> Response:
+        report = quality_radar_report(payload)
+        return quality_report_pdf_response(report, data_type="radar")
+
+    @router.post("/radar/report/txt")
+    def quality_radar_report_txt(payload: QualityReportRequest) -> Response:
+        report = quality_radar_report(payload)
+        return quality_report_text_response(report, data_type="radar")
+
+    @router.post("/radar/history")
+    def quality_radar_history(payload: QualityHistoryRequest | None = None) -> dict:
+        return _quality_history("radar", payload_from_model(payload))
+
     @router.post("/product/run")
     def quality_product_run(payload: QualityRunRequest) -> dict:
         payload = payload_from_model(payload)

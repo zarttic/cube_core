@@ -1021,6 +1021,12 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     }
     response["data_type"] = "radar"
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
+    if quality_checks.run_radar_quality_check is not None:
+        quality_report = quality_checks.run_radar_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = get_quality_report_store().upsert_report("radar", run_dir, quality_report)
+        response["quality_status"] = quality_report.get("status")
+        response["quality_report"] = quality_report
+        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 
