@@ -2,7 +2,11 @@ import { runtimeNavigation } from '@/config';
 
 const defaultNavItems = [
   { label: '首页', kind: 'internal', path: '/' },
+  { label: 'ARD数据载入', kind: 'external', url: '/ard' },
   { label: '分析就绪数据剖分', kind: 'internal', path: '/partition' },
+  { label: '剖分数据服务', kind: 'internal', path: '/partition' },
+  { label: '资源调度', kind: 'external', url: '/dispatch' },
+  { label: '后台管理', kind: 'external', url: '/admin' },
   { label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' },
 ];
 
@@ -17,13 +21,11 @@ const headerLabelOrder = [
 ];
 
 export function navItems() {
-  const runtimeItems = runtimeNavigation();
-  const includeLocalHome = !runtimeItems.some((item) => item?.label === '首页');
-  const items = [
-    ...(includeLocalHome ? defaultNavItems.slice(0, 1) : []),
-    ...runtimeItems,
-    ...defaultNavItems.slice(1),
-  ];
+  const itemsByLabel = new Map(defaultNavItems.map((item) => [item.label, item]));
+  runtimeNavigation().forEach((item) => {
+    if (item?.label) itemsByLabel.set(item.label, item);
+  });
+  const items = [...itemsByLabel.values()];
   return [
     ...headerLabelOrder.flatMap((label) => items.filter((item) => item?.label === label)),
     ...items.filter((item) => !headerLabelOrder.includes(item?.label)),

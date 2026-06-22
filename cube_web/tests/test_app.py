@@ -228,7 +228,11 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
     assert "{ label: '自动化质检'," not in nav_source
+    assert "{ label: 'ARD数据载入', kind: 'external', url: '/ard' }" in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
+    assert "{ label: '剖分数据服务', kind: 'internal', path: '/partition' }" in nav_source
+    assert "{ label: '资源调度', kind: 'external', url: '/dispatch' }" in nav_source
+    assert "{ label: '后台管理', kind: 'external', url: '/admin' }" in nav_source
     assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
     order_source = nav_source.split("const headerLabelOrder = [", 1)[1].split("];", 1)[0]
     assert order_source.index("'首页'") < order_source.index("'ARD数据载入'")
@@ -238,6 +242,7 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert order_source.index("'资源调度'") < order_source.index("'后台管理'")
     assert order_source.index("'后台管理'") < order_source.index("'全球离散格网模型与编码'")
     assert "runtimeNavigation()" in nav_source
+    assert "itemsByLabel.set(item.label, item)" in nav_source
     assert ':href="item.path"' in app_source
     assert "currentNavItems" in app_source
     assert "targetFromAuthState(state)" in app_source
@@ -518,7 +523,7 @@ def test_config_view_does_not_expose_mgrs_partition_grid_type():
         encoding="utf-8"
     )
 
-    assert '<el-option label="S2 格网" value="s2" />' in source
+    assert '<el-option label="四边形格网" value="s2" />' in source
     assert '<el-option label="平面格网" value="tile_matrix" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS" value="mgrs" />' not in source
@@ -533,9 +538,9 @@ def test_encoding_view_displays_generic_grid_type_names():
     assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
     assert '<option value="tile_matrix">平面格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
-    assert "s2: 'S2 格网'" in source
+    assert "s2: '四边形格网'" in source
     assert '<input v-model="division.gridType" type="radio" value="s2">' in source
-    assert '<option value="s2">S2 格网</option>' in source
+    assert '<option value="s2">四边形格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="s2">' in source
     assert "MGRS" not in source
     assert "Tile Matrix" not in source
