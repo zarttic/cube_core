@@ -194,6 +194,10 @@ def create_partition_router(
     def archive_partition_batch(batch_id: str) -> dict:
         return workflow_service.archive_batch(batch_id)
 
+    @router.post("/batches/{batch_id}/requeue")
+    def requeue_partition_batch(batch_id: str) -> dict:
+        return workflow_service.requeue_batch(batch_id)
+
     @router.post("/batches/{batch_id}/cancel")
     def cancel_partition_batch(batch_id: str) -> dict:
         batch = workflow_service.get_batch(batch_id)

@@ -92,6 +92,15 @@ class PartitionWorkflowService:
             raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
         return batch
 
+    def requeue_batch(self, batch_id: str) -> dict[str, Any]:
+        try:
+            batch = self.store.requeue_batch(batch_id)
+        except PartitionBatchAlreadyActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if batch is None:
+            raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
+        return batch
+
     def list_tasks(
         self,
         *,

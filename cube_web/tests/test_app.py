@@ -353,11 +353,11 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "const visibleRadarBatches = computed(() => managedRadarBatches.value);" in source
     assert "const visibleProductBatches = computed(() => managedProductBatches.value);" in source
     assert "async function loadPartitionBatches()" in source
-    assert "requestGet(`${partitionPrefix}/batches?include_succeeded=true&limit=500`)" in source
+    assert "requestGet(`${partitionPrefix}/batches?limit=500`)" in source
     assert "function partitionBatchNeedsIngestAttention(batch)" in source
     assert "['ready', 'previewed', 'failed'].includes(batch?.ingest_status)" in source
     assert "function shouldDisplayManagedBatch(batch)" in source
-    assert "batch?.status !== 'succeeded' || partitionBatchNeedsIngestAttention(batch)" in source
+    assert "batch?.status !== 'archived' && batch?.status !== 'succeeded'" in source
     assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
     assert "取消会立即请求执行层中断当前任务" in source
     assert "重试失败资产" in source
@@ -399,6 +399,9 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert 'v-model:page-size="activePartitionTaskPageSize"' in source
     assert 'empty-text="当前类别暂无剖分任务"' in source
     assert "partitionTaskCanArchiveBatch(row)" in source
+    assert "function partitionTaskCanRequeueBatch(task)" in source
+    assert "requestJson(`${partitionPrefix}/batches/${batchId}/requeue`, {})" in source
+    assert "打回队列" in source
     assert "const partitionResultArchiveBatch = computed" in source
     assert "async function archiveLastPartitionResultBatch()" in source
     assert "function applyArchivedPartitionBatch(batchId, archivedBatch = null)" in source
@@ -438,6 +441,7 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "/tasks/${operation}" in source
     assert '<el-option label="碳卫星" value="carbon" />' in source
     assert '<el-option label="雷达遥感" value="radar" />' in source
+    assert "const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);" in source
     assert "carbon_rows: '观测行文件读取'" in source
     assert "function qualitySourceText()" in source
     assert "schema-grid" in source
@@ -2976,7 +2980,7 @@ def test_partition_schema_reconcile_requires_selector():
     assert "one of batch_ids, asset_ids, observation_ids, or updated_since is required" in resp.json()["detail"]
 
 
-def test_partition_job_store_reassigns_duplicate_asset_id_to_new_batch():
+def test_partition_job_store_keeps_duplicate_asset_id_batches_separate():
     store = InMemoryPartitionJobStore()
     first_batch = {
         "batch_id": "BATCH_IMPORT_DUPLICATE_1",
@@ -3021,16 +3025,57 @@ def test_partition_job_store_reassigns_duplicate_asset_id_to_new_batch():
 
     store.upsert_schema(second_batch)
 
-    assert store.list_assets("BATCH_IMPORT_DUPLICATE_1") == []
+    first_assets = store.list_assets("BATCH_IMPORT_DUPLICATE_1")
+    assert len(first_assets) == 1
+    assert first_assets[0]["asset_id"] == "asset-duplicate"
+    assert first_assets[0]["status"] == "manual_required"
     second_assets = store.list_assets("BATCH_IMPORT_DUPLICATE_2")
     assert len(second_assets) == 1
-    assert second_assets[0]["asset_id"] == "asset-duplicate"
+    assert second_assets[0]["asset_id"].startswith("BATCH_IMPORT_DUPLICATE_2:")
     assert second_assets[0]["scene_id"] == "scene-b"
     assert second_assets[0]["source_uri"] == "s3://cube/cube/source/optocal/duplicate-b.tif"
     assert second_assets[0]["status"] == "pending"
     assert second_assets[0]["attempt_count"] == 0
     assert second_assets[0]["last_error"] is None
     assert second_assets[0]["partitioned_at"] is None
+
+
+def test_partition_job_store_repairs_missing_assets_from_payload():
+    store = InMemoryPartitionJobStore()
+    first_batch = {
+        "batch_id": "BATCH_REPAIR_SOURCE",
+        "batch_name": "Repair source",
+        "data_type": "optical",
+        "assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/optocal/repair-source.tif",
+                "repair-source",
+                asset_id="shared-repair-asset",
+            )
+        ],
+    }
+    missing_batch = {
+        "batch_id": "BATCH_REPAIR_MISSING",
+        "batch_name": "Repair missing",
+        "data_type": "optical",
+        "assets": [
+            ard_raster_asset(
+                "s3://cube/cube/source/optocal/repair-missing.tif",
+                "repair-missing",
+                asset_id="shared-repair-asset",
+            )
+        ],
+    }
+    store.upsert_schema(missing_batch)
+    del store.assets["shared-repair-asset"]
+    store.upsert_schema(first_batch)
+
+    repaired = store.list_assets("BATCH_REPAIR_MISSING")
+
+    assert len(repaired) == 1
+    assert repaired[0]["asset_id"].startswith("BATCH_REPAIR_MISSING:")
+    assert repaired[0]["source_uri"] == "s3://cube/cube/source/optocal/repair-missing.tif"
+    assert repaired[0]["status"] == "pending"
 
 
 def test_partition_schema_import_rejects_incomplete_ard_asset():
@@ -3306,6 +3351,67 @@ def test_partition_batch_archive_marks_handled_and_hides_from_pending_list():
     assert "BATCH_ARCHIVE_HANDLED" in [batch["batch_id"] for batch in history_resp.json()["batches"]]
     assert run_resp.status_code == 409
     assert retry_resp.status_code == 409
+
+
+def test_partition_failed_batch_requeue_returns_to_pending_list():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_REQUEUE_FAILED",
+            "batch_name": "Requeue failed",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/requeue-a.tif", "requeue-a", asset_id="requeue-a")],
+        },
+    )
+    store = web_app.partition_workflow_service.store
+    store.create_attempt(
+        task_id="partition-requeue-failed",
+        batch_id="BATCH_REQUEUE_FAILED",
+        operation="auto_run",
+        payload={},
+    )
+    store.fail_attempt("partition-requeue-failed", "temporary failure", manual_required=True, error_type="validation")
+
+    requeue_resp = client.post("/v1/partition/batches/BATCH_REQUEUE_FAILED/requeue")
+    detail_resp = client.get("/v1/partition/batches/BATCH_REQUEUE_FAILED")
+    assets_resp = client.get("/v1/partition/batches/BATCH_REQUEUE_FAILED/assets")
+    pending_resp = client.get("/v1/partition/batches")
+    tasks_resp = client.get("/v1/partition/tasks", params={"keyword": "partition-requeue-failed"})
+
+    assert requeue_resp.status_code == 200
+    assert detail_resp.json()["status"] == "pending"
+    assert detail_resp.json()["last_error"] is None
+    assert {asset["status"] for asset in assets_resp.json()["assets"]} == {"pending"}
+    assert "BATCH_REQUEUE_FAILED" in [batch["batch_id"] for batch in pending_resp.json()["batches"]]
+    task_row = tasks_resp.json()["tasks"][0]
+    assert task_row["status"] == "failed"
+    assert task_row["batch_status"] == "pending"
+
+
+def test_partition_requeue_rejects_succeeded_batch():
+    client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "BATCH_REQUEUE_DONE",
+            "batch_name": "Requeue done",
+            "data_type": "product",
+            "assets": [ard_raster_asset("s3://cube/cube/source/product/requeue-done.tif", "requeue-done", data_type="product")],
+        },
+    )
+    store = web_app.partition_workflow_service.store
+    store.create_attempt(
+        task_id="partition-requeue-done",
+        batch_id="BATCH_REQUEUE_DONE",
+        operation="auto_run",
+        payload={},
+    )
+    store.succeed_attempt("partition-requeue-done", {"status": "completed", "data_type": "product", "rows": 1})
+
+    requeue_resp = client.post("/v1/partition/batches/BATCH_REQUEUE_DONE/requeue")
+    detail_resp = client.get("/v1/partition/batches/BATCH_REQUEUE_DONE")
+
+    assert requeue_resp.status_code == 404
+    assert detail_resp.json()["status"] == "succeeded"
 
 
 @pytest.mark.parametrize("start_attempt, expected_status", [(False, "queued"), (True, "running")])
@@ -4633,6 +4739,105 @@ def test_optical_partition_test_endpoint(monkeypatch):
     assert body["quality_status"] == "PASS"
 
 
+def test_optical_partition_test_runner_returns_generated_assets(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "generated_a.tif").write_text("a", encoding="utf-8")
+    (source / "ignored.txt").write_text("x", encoding="utf-8")
+
+    def fake_run_logical_partition(args):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "optical",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "thread",
+            "execution_engine": "thread",
+            "ray_parallelism": 0,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_optical_partition_test(
+        {"input_dir": str(source), "partition_backend": "thread", "grid_type": "s2", "grid_level": 5}
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["assets"] == [
+        {
+            "asset_id": "optical:generated_a",
+            "source_uri": str(source / "generated_a.tif"),
+            "scene_id": "generated_a",
+            "band": "b1",
+            "bands": ["b1"],
+            "sensor": "optical_mosaic",
+            "product_family": "other",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("data_type", "runner_name", "job_path", "quality_path"),
+    [
+        ("optical", "_run_optical_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition", "cube_web.services.quality_checks.run_optical_quality_check"),
+        ("product", "_run_product_partition_test", "cube_split.jobs.product_partition_job.run_product_partition", "cube_web.services.quality_checks.run_product_quality_check"),
+        ("radar", "_run_radar_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition", "cube_web.services.quality_checks.run_radar_quality_check"),
+    ],
+)
+def test_partition_test_runners_generate_real_assets_when_demo_data_is_missing(monkeypatch, tmp_path, data_type, runner_name, job_path, quality_path):
+    missing = tmp_path / "missing-input"
+    captured = {}
+
+    def fake_partition(args):
+        captured["input_dir"] = Path(args.input_dir)
+        run_dir = tmp_path / f"{data_type}-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": data_type,
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "thread",
+            "execution_engine": "thread",
+            "ray_parallelism": 0,
+            "ingest_enabled": False,
+        }
+
+    monkeypatch.setattr(job_path, fake_partition)
+    monkeypatch.setattr(quality_path, None)
+
+    result = getattr(partition_runners, runner_name)(
+        {"input_dir": str(missing), "partition_backend": "thread", "grid_type": "s2", "grid_level": 5}
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["ingest_enabled"] is False
+    assert result["selected_asset_count"] == 1
+    assert len(result["assets"]) == 1
+    source_path = Path(result["assets"][0]["source_uri"])
+    assert source_path.exists()
+    assert any(path.is_file() and path.suffix.lower() in {".tif", ".tiff"} for path in captured["input_dir"].iterdir())
+    import rasterio
+
+    with rasterio.open(source_path) as dataset:
+        assert dataset.crs.to_string() == "EPSG:4326"
+        assert dataset.width == 32
+        assert dataset.height == 32
+
+
 def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
     run_dir = Path("/tmp/cube_web_partition_demo/test_app_ingest_preview")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -5086,6 +5291,8 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
     assert captured["minio_bucket"] == "cube"
     assert captured["ingest_enabled"] is False
     assert result["selected_asset_count"] == 1
+    assert result["assets"][0]["source_uri"] == "product_1980.tif"
+    assert result["assets"][0]["product_year"] == 1980
     assert captured["files"] == ["product_1980.tif"]
     assert captured["input_dir"].name == "input"
     manifest = json.loads(captured["manifest_path"].read_text(encoding="utf-8"))
@@ -5358,6 +5565,8 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert result["mode"] == "partition_test_no_ingest"
     assert result["ingest_enabled"] is False
     assert result["selected_asset_count"] == 1
+    assert result["assets"][0]["source_uri"] == "schema_named_radar_asset.dat"
+    assert result["assets"][0]["scene_id"] == "SCHEMA_RADAR_SCENE"
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
     assert captured["grid_level"] == 7

@@ -14,6 +14,7 @@ BATCH_ACTIVE_STATUSES = {"pending", "queued", "running", "retrying", "cancel_req
 BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "cancelled"}
 BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 BATCH_HIDDEN_STATUSES = {"succeeded", "archived"}
+BATCH_REQUEUEABLE_STATUSES = {"failed", "manual_required", "cancelled"}
 INGEST_TRACKED_DATA_TYPES = {"optical", "product", "radar", "entity"}
 
 
@@ -50,6 +51,9 @@ class PartitionJobStore:
         raise NotImplementedError
 
     def archive_batch(self, batch_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def requeue_batch(self, batch_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def update_ingest_status(
@@ -215,7 +219,11 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "updated_at": now,
         }
         self.batches[batch["batch_id"]] = batch
-        for asset in _assets_from_record(batch):
+        assets = [
+            _dedupe_asset_id_for_batch(asset, existing_batch_id=self.assets.get(asset["asset_id"], {}).get("batch_id"))
+            for asset in _assets_from_record(batch)
+        ]
+        for asset in assets:
             existing_asset = self.assets.get(asset["asset_id"], {})
             same_batch = existing_asset.get("batch_id") == asset["batch_id"]
             self.assets[asset["asset_id"]] = {
@@ -274,6 +282,27 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         now = _utc_now_iso()
         batch["status"] = "archived"
         batch["updated_at"] = now
+        return copy.deepcopy(batch)
+
+    def requeue_batch(self, batch_id: str) -> dict[str, Any] | None:
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            return None
+        if str(batch.get("status") or "") in BATCH_RUN_ACTIVE_STATUSES:
+            raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
+        if str(batch.get("status") or "") not in BATCH_REQUEUEABLE_STATUSES:
+            return None
+        now = _utc_now_iso()
+        batch["status"] = "pending"
+        batch["last_error"] = None
+        batch["manual_required_at"] = None
+        batch["updated_at"] = now
+        for asset in self.assets.values():
+            if asset["batch_id"] != batch_id:
+                continue
+            asset["status"] = "pending"
+            asset["last_error"] = None
+            asset["updated_at"] = now
         return copy.deepcopy(batch)
 
     def update_ingest_status(
@@ -342,7 +371,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             "updated_at": now,
         }
         self.batches[batch_id] = batch
-        assets = _runtime_assets_from_payload(batch)
+        assets = [
+            _dedupe_asset_id_for_batch(asset, existing_batch_id=self.assets.get(asset["asset_id"], {}).get("batch_id"))
+            for asset in _runtime_assets_from_payload(batch)
+        ]
         asset_ids = {asset["asset_id"] for asset in assets}
         for asset_id, asset in list(self.assets.items()):
             if asset.get("batch_id") == batch_id and asset_id not in asset_ids:
@@ -365,6 +397,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         return copy.deepcopy(batch)
 
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
+        self._repair_missing_payload_assets(batch_id)
         rows = [row for row in self.assets.values() if row["batch_id"] == batch_id]
         if status:
             rows = [row for row in rows if row["status"] == status]
@@ -757,10 +790,36 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             return list(asset_ids)
         return [asset_id for asset_id, asset in self.assets.items() if asset["batch_id"] == batch_id]
 
+    def _repair_missing_payload_assets(self, batch_id: str) -> None:
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            return
+        now = _utc_now_iso()
+        for asset in _assets_from_record(batch):
+            if _batch_has_matching_asset(self.assets.values(), batch_id, asset):
+                continue
+            asset = _dedupe_asset_id_for_batch(asset, existing_batch_id=self.assets.get(asset["asset_id"], {}).get("batch_id"))
+            self.assets[asset["asset_id"]] = {
+                **asset,
+                "status": "pending",
+                "attempt_count": 0,
+                "last_error": None,
+                "last_run_dir": None,
+                "partitioned_at": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+
     def _refresh_batch_from_assets(self, batch_id: str, *, now: str) -> None:
         batch = self.batches[batch_id]
         assets = [asset for asset in self.assets.values() if asset["batch_id"] == batch_id]
-        if not assets or all(asset["status"] == "succeeded" for asset in assets):
+        if not assets:
+            batch["status"] = "failed"
+            batch["last_error"] = "No partition assets found for batch"
+            batch["manual_required_at"] = now
+            batch["updated_at"] = now
+            return
+        if all(asset["status"] == "succeeded" for asset in assets):
             batch["status"] = "succeeded"
             batch["last_error"] = None
             batch["partitioned_at"] = now
@@ -995,6 +1054,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (record["batch_id"],))
                 batch = _dict_row(cur)
                 for asset in _assets_from_record(record):
+                    cur.execute("SELECT batch_id FROM partition_assets WHERE asset_id = %s", (asset["asset_id"],))
+                    existing_asset = cur.fetchone()
+                    existing_batch_id = None if existing_asset is None else str(existing_asset[0] or "")
+                    asset = _dedupe_asset_id_for_batch(asset, existing_batch_id=existing_batch_id)
                     cur.execute(
                         """
                         MERGE INTO partition_assets target
@@ -1135,6 +1198,47 @@ class PostgresPartitionJobStore(PartitionJobStore):
             conn.commit()
         return batch
 
+    def requeue_batch(self, batch_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE partition_batches
+                    SET status = 'pending',
+                        last_error = NULL,
+                        manual_required_at = NULL,
+                        updated_at = now()
+                    WHERE batch_id = %s
+                      AND status NOT IN ('queued', 'running', 'retrying', 'cancel_requested')
+                      AND status = ANY(%s::text[])
+                    RETURNING *
+                    """,
+                    (batch_id, sorted(BATCH_REQUEUEABLE_STATUSES)),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute("SELECT status FROM partition_batches WHERE batch_id = %s", (batch_id,))
+                    status_row = cur.fetchone()
+                    if status_row is None:
+                        return None
+                    if str(status_row[0] or "") in BATCH_RUN_ACTIVE_STATUSES:
+                        raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
+                    return None
+                batch = _row_to_dict(cur, row)
+                cur.execute(
+                    """
+                    UPDATE partition_assets
+                    SET status = 'pending',
+                        last_error = NULL,
+                        updated_at = now()
+                    WHERE batch_id = %s
+                    """,
+                    (batch_id,),
+                )
+            conn.commit()
+        return batch
+
     def update_ingest_status(
         self,
         batch_id: str,
@@ -1240,7 +1344,13 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         "normalized_payload": payload,
                     }
                 )
+                stored_asset_ids: list[str] = []
                 for asset in assets:
+                    cur.execute("SELECT batch_id FROM partition_assets WHERE asset_id = %s", (asset["asset_id"],))
+                    existing_asset = cur.fetchone()
+                    existing_batch_id = None if existing_asset is None else str(existing_asset[0] or "")
+                    asset = _dedupe_asset_id_for_batch(asset, existing_batch_id=existing_batch_id)
+                    stored_asset_ids.append(asset["asset_id"])
                     cur.execute(
                         """
                         MERGE INTO partition_assets target
@@ -1312,7 +1422,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if assets:
                     cur.execute(
                         "DELETE FROM partition_assets WHERE batch_id = %s AND NOT (asset_id = ANY(%s::text[]))",
-                        (batch_id, [asset["asset_id"] for asset in assets]),
+                        (batch_id, stored_asset_ids),
                     )
                 else:
                     cur.execute("DELETE FROM partition_assets WHERE batch_id = %s", (batch_id,))
@@ -1323,6 +1433,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
 
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
         self.ensure_schema()
+        self._repair_missing_payload_assets(batch_id)
         params: list[Any] = [batch_id]
         sql = "SELECT * FROM partition_assets WHERE batch_id = %s"
         if status:
@@ -1834,6 +1945,57 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 (batch_id,),
             )
 
+    def _repair_missing_payload_assets(self, batch_id: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (batch_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return
+                batch = _row_to_dict(cur, row)
+                assets = _assets_from_record(batch)
+                if not assets:
+                    return
+                for asset in assets:
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM partition_assets
+                        WHERE batch_id = %s
+                          AND (asset_id = %s OR source_uri = %s OR scene_id IS NOT DISTINCT FROM %s)
+                        LIMIT 1
+                        """,
+                        (batch_id, asset["asset_id"], asset["source_uri"], asset["scene_id"]),
+                    )
+                    if cur.fetchone() is not None:
+                        continue
+                    cur.execute("SELECT batch_id FROM partition_assets WHERE asset_id = %s", (asset["asset_id"],))
+                    existing = cur.fetchone()
+                    existing_batch_id = None if existing is None else str(existing[0] or "")
+                    asset = _dedupe_asset_id_for_batch(asset, existing_batch_id=existing_batch_id)
+                    cur.execute(
+                        """
+                        MERGE INTO partition_assets target
+                        USING (
+                          SELECT
+                            %(asset_id)s::text AS asset_id,
+                            %(batch_id)s::text AS batch_id,
+                            %(data_type)s::text AS data_type,
+                            %(scene_id)s::text AS scene_id,
+                            %(source_uri)s::text AS source_uri,
+                            %(asset_payload)s::jsonb AS asset_payload
+                        ) source
+                        ON (target.asset_id = source.asset_id)
+                        WHEN NOT MATCHED THEN INSERT (
+                          asset_id, batch_id, data_type, scene_id, source_uri, asset_payload
+                        ) VALUES (
+                          source.asset_id, source.batch_id, source.data_type, source.scene_id, source.source_uri, source.asset_payload
+                        )
+                        """,
+                        _jsonb_record(asset, "asset_payload"),
+                    )
+            conn.commit()
+
     def _apply_asset_results(self, cur, batch_id: str, asset_ids: list[str], result: dict[str, Any]) -> None:
         self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
         for item in _asset_results(result):
@@ -1860,7 +2022,13 @@ class PostgresPartitionJobStore(PartitionJobStore):
     def _refresh_batch_from_assets(self, cur, batch_id: str) -> None:
         cur.execute("SELECT status, last_error FROM partition_assets WHERE batch_id = %s", (batch_id,))
         rows = cur.fetchall()
-        if not rows or all(row[0] == "succeeded" for row in rows):
+        if not rows:
+            cur.execute(
+                "UPDATE partition_batches SET status = 'failed', last_error = 'No partition assets found for batch', manual_required_at = now(), updated_at = now() WHERE batch_id = %s",
+                (batch_id,),
+            )
+            return
+        if all(row[0] == "succeeded" for row in rows):
             cur.execute(
                 "UPDATE partition_batches SET status = 'succeeded', last_error = NULL, partitioned_at = now(), manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
                 (batch_id,),
@@ -2364,6 +2532,31 @@ def _runtime_assets_from_payload(record: dict[str, Any]) -> list[dict[str, Any]]
             }
         )
     return assets
+
+
+def _dedupe_asset_id_for_batch(asset: dict[str, Any], *, existing_batch_id: str | None) -> dict[str, Any]:
+    if not existing_batch_id or existing_batch_id == asset["batch_id"]:
+        return asset
+    item = copy.deepcopy(asset.get("asset_payload") or {})
+    item.pop("asset_id", None)
+    source_uri = str(asset.get("source_uri") or "")
+    asset = dict(asset)
+    asset["asset_id"] = f"{asset['batch_id']}:{_stable_asset_key(source_uri, 0)}"
+    asset["asset_payload"] = item
+    return asset
+
+
+def _batch_has_matching_asset(assets: Any, batch_id: str, incoming: dict[str, Any]) -> bool:
+    for asset in assets:
+        if asset.get("batch_id") != batch_id:
+            continue
+        if asset.get("asset_id") == incoming.get("asset_id"):
+            return True
+        if asset.get("source_uri") == incoming.get("source_uri"):
+            return True
+        if incoming.get("scene_id") is not None and asset.get("scene_id") == incoming.get("scene_id"):
+            return True
+    return False
 
 
 def _same_runtime_asset(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:

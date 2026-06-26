@@ -141,7 +141,7 @@ const qualityHistoryPage = ref(1);
 const qualityHistoryTotal = ref(0);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
-const qualityReportDataTypes = new Set(['optical', 'product', 'carbon']);
+const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);
 
 function parseResolution(value) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
@@ -701,8 +701,38 @@ function partitionTaskCanArchiveBatch(task) {
   return canOpenPartitionTaskBatch(task) && partitionBatchCanArchive(partitionTaskBatchProxy(task));
 }
 
+function partitionTaskCanRequeueBatch(task) {
+  return canOpenPartitionTaskBatch(task) && ['failed', 'manual_required', 'cancelled'].includes(partitionTaskBatchProxy(task).status);
+}
+
 async function archivePartitionTaskBatch(task) {
   await archivePartitionBatch(partitionTaskBatchProxy(task));
+}
+
+async function requeuePartitionTaskBatch(task) {
+  const batch = partitionTaskBatchProxy(task);
+  const batchId = batch?.id || batch?.batch_id;
+  if (!batchId || !partitionTaskCanRequeueBatch(task)) return;
+  const actionKey = `requeue:${batchId}`;
+  partitionBatchDetailAction.value = actionKey;
+  try {
+    const { partitionPrefix } = apiPrefixes();
+    await requestJson(`${partitionPrefix}/batches/${batchId}/requeue`, {});
+    ElMessage.success('已打回已载入数据队列');
+    await Promise.all([
+      loadPartitionBatches(),
+      loadPartitionTasks(partitionTaskPage.value),
+      partitionTaskDrawerVisible.value && partitionModules.has(activeModule.value)
+        ? loadActivePartitionTasks(activePartitionTaskPage.value)
+        : Promise.resolve(),
+    ]);
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    if (partitionBatchDetailAction.value === actionKey) {
+      partitionBatchDetailAction.value = '';
+    }
+  }
 }
 
 function applyArchivedPartitionBatch(batchId, archivedBatch = null) {
@@ -1493,6 +1523,14 @@ function normalizedCornersKey(corners) {
   return values.map((value) => value.toFixed(6)).join(',');
 }
 
+function bboxText(bbox) {
+  return Array.isArray(bbox) ? bbox.join(', ') : '-';
+}
+
+function cornersText(corners) {
+  return Array.isArray(corners) ? corners.map((c) => `[${c?.[0]}, ${c?.[1]}]`).join(' ') : '-';
+}
+
 function joinUniqueLabels(values, limit = 4) {
   const labels = Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
   if (labels.length <= limit) return labels.join(', ');
@@ -2069,6 +2107,11 @@ function normalizeManagedBatch(batch) {
     name: batch.batch_name || batch.batch_id,
     status: batch.status || '待处理',
     schema: schemaFromManagedBatch(batch),
+    asset_count: batch.asset_count ?? (
+      batch.data_type === 'carbon'
+        ? (Array.isArray(payload.selected_observations) ? payload.selected_observations.length : 0)
+        : (Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0)
+    ),
   };
   if (batch.data_type === 'carbon') {
     return {
@@ -2107,14 +2150,14 @@ function partitionBatchNeedsIngestAttention(batch) {
 }
 
 function shouldDisplayManagedBatch(batch) {
-  return batch?.status !== 'archived' && (batch?.status !== 'succeeded' || partitionBatchNeedsIngestAttention(batch));
+  return batch?.status !== 'archived' && batch?.status !== 'succeeded';
 }
 
 async function loadPartitionBatches() {
   partitionBatchLoading.value = true;
   try {
     const { partitionPrefix } = apiPrefixes();
-    const response = await requestGet(`${partitionPrefix}/batches?include_succeeded=true&limit=500`);
+    const response = await requestGet(`${partitionPrefix}/batches?limit=500`);
     const batches = (response.batches || []).filter(shouldDisplayManagedBatch);
     managedOpticalBatches.value = batches.filter((batch) => batch.data_type === 'optical').map(normalizeManagedBatch);
     managedCarbonBatches.value = batches.filter((batch) => batch.data_type === 'carbon').map(normalizeManagedBatch);
@@ -3134,9 +3177,19 @@ onUnmounted(() => {
                     <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="180" fixed="right">
+                <el-table-column label="操作" width="240" fixed="right">
                   <template #default="{ row }">
                     <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+                    <el-button
+                      v-if="partitionTaskCanRequeueBatch(row)"
+                      size="small"
+                      type="warning"
+                      :icon="Refresh"
+                      :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
+                      @click="requeuePartitionTaskBatch(row)"
+                    >
+                      打回队列
+                    </el-button>
                     <el-button
                       v-if="partitionTaskCanArchiveBatch(row)"
                       size="small"
@@ -3676,7 +3729,7 @@ onUnmounted(() => {
                   <span>{{ asset.acq_time }}</span>
                 </div>
                 <div class="asset-source">{{ asset.source_uri }}</div>
-                <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+                <div class="asset-corners">corners: {{ cornersText(asset.corners) }}</div>
               </div>
             </div>
           </div>
@@ -3806,8 +3859,8 @@ onUnmounted(() => {
                     <span>{{ asset.acq_time }}</span>
                   </div>
                   <div class="asset-source">{{ asset.source_uri }}</div>
-                  <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
-                  <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+                  <div class="asset-corners">bbox: {{ bboxText(asset.bbox) }}</div>
+                  <div class="asset-corners">corners: {{ cornersText(asset.corners) }}</div>
                 </div>
               </div>
             </div>
@@ -3873,8 +3926,8 @@ onUnmounted(() => {
                   </div>
                   <div class="asset-source">{{ asset.source_uri }}</div>
                   <div class="asset-corners">product: {{ asset.product_name }} | {{ batch.target_crs }}</div>
-                  <div class="asset-corners">bbox: {{ asset.bbox.join(', ') }}</div>
-                  <div class="asset-corners">corners: {{ asset.corners.map((c) => `[${c[0]}, ${c[1]}]`).join(' ') }}</div>
+                  <div class="asset-corners">bbox: {{ bboxText(asset.bbox) }}</div>
+                  <div class="asset-corners">corners: {{ cornersText(asset.corners) }}</div>
                 </div>
               </div>
             </div>
@@ -3933,9 +3986,19 @@ onUnmounted(() => {
               <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="170" fixed="right">
+          <el-table-column label="操作" width="240" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+              <el-button
+                v-if="partitionTaskCanRequeueBatch(row)"
+                size="small"
+                type="warning"
+                :icon="Refresh"
+                :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
+                @click="requeuePartitionTaskBatch(row)"
+              >
+                打回队列
+              </el-button>
               <el-button
                 v-if="partitionTaskCanArchiveBatch(row)"
                 size="small"

@@ -85,6 +85,113 @@ def _radar_demo_input_dir() -> Path:
     return repo_root() / "cube_split" / "data" / "2018-2020年6月-8月江苏扬州10米Sentinel-1影像数据-01"
 
 
+def _test_asset_root(data_type: str) -> Path:
+    root = Path("/tmp") / "cube_web_partition_test_assets" / data_type
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _has_raster_assets(input_dir: Path, suffixes: set[str]) -> bool:
+    try:
+        return any(path.is_file() and path.suffix.lower() in suffixes for path in input_dir.rglob("*"))
+    except OSError:
+        return False
+
+
+def _ensure_test_raster_asset(data_type: str) -> tuple[Path, list[dict[str, Any]]]:
+    if data_type == "product":
+        filename = "cube_web_product_test_2026.tif"
+        scene_id = "cube_web_product_test_2026"
+        band = "product_value"
+        sensor = "data_product"
+        product_family = "product"
+        product_name = "测试信息产品"
+        product_year = 2026
+        corners = [[100.4, 25.5], [100.5, 25.5], [100.5, 25.4], [100.4, 25.4]]
+        value = 60
+    elif data_type == "radar":
+        filename = "cube_web_radar_test_20260620.tif"
+        scene_id = "cube_web_radar_test_20260620"
+        band = "vv"
+        sensor = "sentinel1_sar"
+        product_family = "sentinel1"
+        product_name = ""
+        product_year = None
+        corners = [[100.2, 25.3], [100.3, 25.3], [100.3, 25.2], [100.2, 25.2]]
+        value = 80
+    else:
+        filename = "cube_web_optical_test_20260620.tif"
+        scene_id = "cube_web_optical_test_20260620"
+        band = "b1"
+        sensor = "optical_mosaic"
+        product_family = "other"
+        product_name = ""
+        product_year = None
+        corners = [[100.0, 25.1], [100.1, 25.1], [100.1, 25.0], [100.0, 25.0]]
+        value = 120
+
+    path = _test_asset_root(data_type) / filename
+    if not path.exists():
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_bounds
+
+        lons = [point[0] for point in corners]
+        lats = [point[1] for point in corners]
+        transform = from_bounds(min(lons), min(lats), max(lons), max(lats), 32, 32)
+        data = np.full((32, 32), value, dtype="uint16")
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=32,
+            height=32,
+            count=1,
+            dtype=data.dtype,
+            crs="EPSG:4326",
+            transform=transform,
+        ) as dataset:
+            dataset.write(data, 1)
+
+    asset: dict[str, Any] = {
+        "asset_id": f"{data_type}:{scene_id}:{band}",
+        "source_uri": str(path),
+        "scene_id": scene_id,
+        "acq_time": "2026-06-20T00:00:00Z",
+        "bands": [band],
+        "band": band,
+        "resolution": 30,
+        "corners": corners,
+        "sensor": sensor,
+        "product_family": product_family,
+    }
+    if data_type == "product":
+        asset["product_name"] = product_name
+        asset["product_year"] = product_year
+    if data_type == "radar":
+        asset["polarization"] = band
+    return path.parent, [asset]
+
+
+def _payload_with_test_assets(payload: dict, data_type: str, input_dir: Path, suffixes: set[str]) -> tuple[dict, Path]:
+    if isinstance(payload.get("selected_assets"), list) and payload["selected_assets"]:
+        if not input_dir.exists() and all(_is_s3_uri(str(asset.get("source_uri") or "")) for asset in payload["selected_assets"] if isinstance(asset, dict)):
+            return {**payload, "input_dir": str(_test_asset_root(data_type))}, _test_asset_root(data_type).resolve()
+        return payload, input_dir
+    if input_dir.exists() and _has_raster_assets(input_dir, suffixes):
+        return payload, input_dir
+    generated_dir, assets = _ensure_test_raster_asset(data_type)
+    return {**payload, "input_dir": str(generated_dir), "selected_assets": assets}, generated_dir.resolve()
+
+
+def _raw_payload_with_test_assets(raw_payload: dict, payload: dict, input_dir: Path) -> dict:
+    if isinstance(raw_payload.get("selected_assets"), list) and raw_payload["selected_assets"]:
+        return raw_payload
+    if isinstance(payload.get("selected_assets"), list) and payload["selected_assets"]:
+        return {**raw_payload, "input_dir": str(input_dir), "selected_assets": payload["selected_assets"]}
+    return raw_payload
+
+
 def _is_s3_uri(value: str) -> bool:
     return str(value or "").strip().lower().startswith("s3://")
 
@@ -377,6 +484,50 @@ def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
     return result
 
 
+def _result_assets(payload: dict, input_dir: Path, *, data_type: str, suffixes: set[str]) -> list[dict]:
+    selected_assets = payload.get("selected_assets")
+    if isinstance(selected_assets, list) and selected_assets:
+        return [dict(asset) for asset in selected_assets if isinstance(asset, dict)]
+    assets: list[dict] = []
+    try:
+        paths = sorted(input_dir.iterdir())
+    except OSError:
+        return assets
+    for path in paths:
+        if len(assets) >= 100:
+            break
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        band = "product_value" if data_type == "product" else "vv" if data_type == "radar" else "b1"
+        assets.append(
+            {
+                "asset_id": f"{data_type}:{path.stem}",
+                "source_uri": str(path),
+                "scene_id": path.stem,
+                "band": band,
+                "bands": [band],
+                "sensor": "data_product" if data_type == "product" else "sentinel1_sar" if data_type == "radar" else "optical_mosaic",
+                "product_family": "product" if data_type == "product" else "sentinel1" if data_type == "radar" else "other",
+            }
+        )
+    return assets
+
+
+def _result_observations(payload: dict, source_label: str, selected_source_indexes: tuple[int, ...] | None) -> list[dict]:
+    selected_observations = payload.get("selected_observations")
+    if isinstance(selected_observations, list) and selected_observations:
+        return [dict(item) for item in selected_observations if isinstance(item, dict)]
+    indexes = selected_source_indexes or (0,)
+    return [
+        {
+            "observation_id": f"{Path(source_label).stem}:{idx}",
+            "source_uri": source_label,
+            "source_index": idx,
+        }
+        for idx in indexes
+    ]
+
+
 def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
     payload = payload or {}
     return payload.get("_cancellation_check") or payload.get("cancellation_check")
@@ -476,6 +627,9 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     minio = runtime_config.minio_settings({**ingest_payload, **payload})
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
+    if mode == "partition_test_no_ingest":
+        payload, input_dir = _payload_with_test_assets(payload, "optical", input_dir, {".tif", ".tiff"})
+        raw_payload = _raw_payload_with_test_assets(raw_payload, payload, input_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Entity partition input_dir not found: {input_dir}")
 
@@ -719,6 +873,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
         "selected_observation_count": len(selected_source_indexes or ()),
+        "observations": _result_observations(payload, source_label, selected_source_indexes),
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
         "ray_address": result["ray_address"],
@@ -765,6 +920,8 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     cancellation_check = _cancellation_check_from_payload(payload)
     root = _partition_run_dir("product", mode)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _product_demo_input_dir()))).expanduser().resolve()
+    if mode == "partition_test_no_ingest":
+        payload, input_dir = _payload_with_test_assets(payload, "product", input_dir, {".tif", ".tiff"})
     if not input_dir.exists():
         raise FileNotFoundError(f"Product partition input_dir not found: {input_dir}")
     run_input_dir = _selected_product_input_dir(payload, input_dir, root)
@@ -857,6 +1014,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["execution_engine"] = result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend
     result["batch_id"] = payload.get("batch_id") or ""
     result["batch_name"] = payload.get("batch_name") or ""
+    result["assets"] = _result_assets(payload, input_dir, data_type="product", suffixes={".tif", ".tiff"})
     result["selected_asset_count"] = len(payload.get("selected_assets") or [])
     result["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(result.get("ingest_enabled", False))
     if quality_checks.run_product_quality_check is not None:
@@ -903,6 +1061,9 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     root = _partition_run_dir("radar", mode)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _radar_demo_input_dir()))).expanduser().resolve()
+    if mode == "partition_test_no_ingest":
+        payload, input_dir = _payload_with_test_assets(payload, "radar", input_dir, {".dat", ".tif", ".tiff"})
+        raw_payload = _raw_payload_with_test_assets(raw_payload, payload, input_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Radar partition input_dir not found: {input_dir}")
     run_input_dir = _selected_radar_input_dir(payload, input_dir, root)
@@ -1015,6 +1176,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
         "workers": report.get("ray_parallelism", 0),
+        "assets": _result_assets(raw_payload, input_dir, data_type="radar", suffixes={".dat", ".tif", ".tiff"}),
         "selected_asset_count": len(raw_payload.get("selected_assets") or []),
         "ingest_enabled": bool(report.get("ingest_enabled", False)),
         **report,
@@ -1061,6 +1223,9 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     minio = runtime_config.minio_settings({**ingest_payload, **payload})
     cancellation_check = _cancellation_check_from_payload(raw_payload)
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _optical_demo_input_dir()))).expanduser().resolve()
+    if mode == "partition_test_no_ingest":
+        payload, input_dir = _payload_with_test_assets(payload, "optical", input_dir, {".tif", ".tiff"})
+        raw_payload = _raw_payload_with_test_assets(raw_payload, payload, input_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Optical partition input_dir not found: {input_dir}")
 
@@ -1170,6 +1335,8 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
         "workers": report.get("ray_parallelism", 0),
+        "assets": _result_assets(raw_payload, input_dir, data_type="optical", suffixes={".tif", ".tiff"}),
+        "selected_asset_count": len(raw_payload.get("selected_assets") or []),
         "ingest_enabled": bool(report.get("ingest_enabled", False)),
         **report,
     }

@@ -162,9 +162,19 @@ body {
     position: sticky;
     top: 0;
     z-index: 1000;
-    background: linear-gradient(90deg, #1758aa 0%, #1f72d4 45%, #2f91ea 100%);
     color: #fff;
-    box-shadow: 0 6px 20px rgba(20, 78, 150, 0.18);
+    background: linear-gradient(90deg, #1758aa 0%, #1f72d4 45%, #2f91ea 100%);
+    box-shadow: 0 10px 28px rgba(15, 78, 72, 0.24);
+}
+
+.portal-header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+        radial-gradient(360px 120px at 0% 0%, rgba(255, 255, 255, 0.15), transparent 70%),
+        linear-gradient(120deg, rgba(255, 255, 255, 0.08), transparent 30%);
 }
 
 .portal-header-inner {
@@ -249,15 +259,17 @@ body {
 .portal-nav a {
     color: rgba(255, 255, 255, 0.9);
     text-decoration: none;
-    padding: 0 24px;
-    font-size: 15px;
+    padding: 0 16px;
+    font-size: 14px;
     font-weight: 500;
-    transition: all 0.2s ease;
     min-height: 72px;
     display: flex;
     align-items: center;
+    justify-content: center;
     flex: 0 0 auto;
     white-space: nowrap;
+    border-bottom: 3px solid transparent;
+    transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .portal-nav a:hover {
@@ -268,6 +280,7 @@ body {
 .portal-nav a.active {
     background: rgba(255, 255, 255, 0.16);
     color: #fff;
+    border-bottom-color: #fff;
 }
 
 .portal-header-side {

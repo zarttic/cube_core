@@ -135,7 +135,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
             <a
               v-if="item.kind === 'internal'"
               :href="item.path"
-              :class="{ active: isNavActive(item) }"
+              :class="{ active: isNavActive(item), 'active-nav': isNavActive(item) }"
               @click.prevent="goInternal(item.path)"
             >
               {{ item.label }}
@@ -149,8 +149,9 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
               <circle cx="12" cy="7" r="4"></circle>
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
             </svg>
-            <span>{{ userStore.username.value || '访客' }} · {{ userStore.role.value || '普通用户' }}</span>
-            <button class="service-auth-btn service-auth-btn-compact" type="button" @click="handleLogout">退出</button>
+            <span>{{ userStore.username.value || userStore.role.value || '普通用户' }}</span>
+            <span v-if="userStore.username.value"> · {{ userStore.role.value || '普通用户' }}</span>
+            <button v-if="userStore.isAuthenticated.value" class="service-auth-btn service-auth-btn-compact" type="button" @click="handleLogout"> 退出 </button>
           </div>
         </div>
       </div>
