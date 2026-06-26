@@ -228,9 +228,10 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
     assert "{ label: '自动化质检'," not in nav_source
+    assert "{ label: '首页', kind: 'external', url: portalHomeUrl }" in nav_source
     assert "{ label: 'ARD数据载入', kind: 'external', url: '/ard' }" in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
-    assert "{ label: '剖分数据服务', kind: 'internal', path: '/partition' }" in nav_source
+    assert "{ label: '剖分数据服务', kind: 'external', url: '/partition' }" in nav_source
     assert "{ label: '资源调度', kind: 'external', url: '/dispatch' }" in nav_source
     assert "{ label: '后台管理', kind: 'external', url: '/admin' }" in nav_source
     assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
@@ -242,7 +243,9 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert order_source.index("'资源调度'") < order_source.index("'后台管理'")
     assert order_source.index("'后台管理'") < order_source.index("'全球离散格网模型与编码'")
     assert "runtimeNavigation()" in nav_source
-    assert "itemsByLabel.set(item.label, item)" in nav_source
+    assert "normalizeNavItem(item)" in nav_source
+    assert "HomeView" not in app_source
+    assert "'/':" not in app_source
     assert ':href="item.path"' in app_source
     assert "currentNavItems" in app_source
     assert "targetFromAuthState(state)" in app_source
@@ -275,7 +278,15 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     assert "navigation" in config_source
     assert "http://10.136." not in config_source
     assert "if (authRequired()) {" in store_source
-    assert "const target = targetFromAuthState(state) || '/';" in app_source
+    assert "const target = targetFromAuthState(state) || safeLocalTarget(params.get('target')) || '/';" in app_source
+    assert "function safeLocalTarget(value)" in app_source
+    initialize_source = app_source.split("async function initializeAuth()", 1)[1].split("async function handleLogout()", 1)[0]
+    mounted_source = app_source.split("onMounted(async () => {", 1)[1].split("});", 1)[0]
+    assert initialize_source.index("if (code) {") < initialize_source.index("syncPathFromLocation();")
+    assert "authReady.value = false;" in initialize_source
+    assert "authReady.value = true;" in initialize_source
+    assert "syncPathFromLocation();" not in mounted_source
+    assert '<component v-if="authReady" :is="currentView" />' in app_source
 
 
 def test_partition_view_uses_explicit_module_endpoint_mapping():

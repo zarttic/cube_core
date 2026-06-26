@@ -1,26 +1,30 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { navItems, normalizePath } from '@/data/navigation';
-import HomeView from '@/views/HomeView.vue';
+import { navItems, normalizePath, portalHomeUrl } from '@/data/navigation';
 import PartitionView from '@/views/PartitionView.vue';
 import EncodingView from '@/views/EncodingView.vue';
-import ConfigView from '@/views/ConfigView.vue';
-import { authRequired, loadAuthRuntimeConfig, runtimeNavigation } from '@/config';
+import { authRequired, loadAuthRuntimeConfig } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
 
 const currentPath = ref(normalizePath(window.location.pathname));
+const authReady = ref(false);
 const userStore = useSubUserStore();
 
 const pageMap = {
-  '/': HomeView,
   '/partition': PartitionView,
-  '/quality': PartitionView,
   '/encoding': EncodingView,
-  '/config': ConfigView,
 };
 
-const currentView = computed(() => pageMap[currentPath.value] || HomeView);
+const currentView = computed(() => pageMap[currentPath.value] || PartitionView);
 const currentNavItems = computed(() => navItems());
+
+function syncPathFromLocation() {
+  const normalized = normalizePath(window.location.pathname);
+  if (normalized !== '/' && normalized !== window.location.pathname) {
+    window.history.replaceState({}, '', normalized);
+  }
+  currentPath.value = normalized;
+}
 
 function goInternal(path) {
   if (path === currentPath.value) return;
@@ -29,52 +33,62 @@ function goInternal(path) {
 }
 
 function handlePopState() {
-  currentPath.value = normalizePath(window.location.pathname);
+  syncPathFromLocation();
 }
 
 function isNavActive(item) {
   if (item.path === currentPath.value) return true;
-  return item.path === '/partition' && currentPath.value === '/config';
+  return false;
 }
 
 function targetFromAuthState(stateValue) {
   if (!stateValue) return '';
   try {
     const payload = JSON.parse(decodeURIComponent(window.atob(stateValue)));
-    const target = String(payload.target || '');
-    if (target.startsWith('/') && !target.startsWith('//')) return target;
+    const target = safeLocalTarget(payload.target);
+    if (target) return target;
   } catch {
     return '';
   }
   return '';
 }
 
+function safeLocalTarget(value) {
+  const target = String(value || '');
+  if (target.startsWith('/') && !target.startsWith('//')) return target;
+  return '';
+}
+
 function redirectToPortalHomeIfNeeded() {
   if (currentPath.value !== '/') return false;
-  const homeItem = runtimeNavigation().find((item) => item?.label === '首页' && item?.kind === 'external' && item?.url);
-  const target = String(homeItem?.url || '').trim();
+  const target = portalHomeUrl;
   if (!target || target === window.location.href) return false;
   window.location.replace(target);
   return true;
 }
 
 async function initializeAuth() {
+  authReady.value = false;
   await loadAuthRuntimeConfig();
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
   const state = params.get('state') || '';
   if (code) {
     await userStore.exchangeCode(code, state);
-    const target = targetFromAuthState(state) || '/';
+    const target = targetFromAuthState(state) || safeLocalTarget(params.get('target')) || '/';
     window.history.replaceState({}, '', target);
-    currentPath.value = normalizePath(window.location.pathname);
+    syncPathFromLocation();
     if (redirectToPortalHomeIfNeeded()) return;
+    authReady.value = true;
     return;
   }
+  syncPathFromLocation();
+  if (redirectToPortalHomeIfNeeded()) return;
   if (localStorage.getItem('access_token')) {
     try {
       await userStore.fetchUserInfo();
       if (redirectToPortalHomeIfNeeded()) return;
+      authReady.value = true;
       return;
     } catch {
       localStorage.removeItem('access_token');
@@ -85,7 +99,7 @@ async function initializeAuth() {
     userStore.redirectToAuth(window.location.pathname + window.location.search);
     return;
   }
-  redirectToPortalHomeIfNeeded();
+  authReady.value = true;
 }
 
 async function handleLogout() {
@@ -130,23 +144,20 @@ onBeforeUnmount(() => window.removeEventListener('popstate', handlePopState));
           </template>
         </nav>
         <div class="portal-header-side">
-          <div class="user-profile">
-            <div class="user-info">
-              <img v-if="userStore.avatarUrl.value" :src="userStore.avatarUrl.value" class="user-avatar" alt="" />
-              <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                <circle cx="12" cy="7" r="4" />
-              </svg>
-              <span>{{ userStore.username.value || '访客' }} · {{ userStore.role.value || '普通用户' }}</span>
-            </div>
-            <button class="logout-btn" type="button" @click="handleLogout">退出</button>
+          <div class="service-role-switch">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class="service-user-icon">
+              <circle cx="12" cy="7" r="4"></circle>
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            </svg>
+            <span>{{ userStore.username.value || '访客' }} · {{ userStore.role.value || '普通用户' }}</span>
+            <button class="service-auth-btn service-auth-btn-compact" type="button" @click="handleLogout">退出</button>
           </div>
         </div>
       </div>
     </header>
 
     <main>
-      <component :is="currentView" />
+      <component v-if="authReady" :is="currentView" />
     </main>
   </div>
 </template>
