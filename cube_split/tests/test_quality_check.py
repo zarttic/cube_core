@@ -10,6 +10,7 @@ from rasterio.transform import from_origin
 
 from cube_split.quality.carbon_quality import run_quality_check as run_carbon_quality_check
 from cube_split.quality.optical_quality import run_quality_check
+from cube_split.quality.radar_quality import run_quality_check as run_radar_quality_check
 
 
 def _write_tif(path: Path, *, crs: str = "EPSG:4326") -> None:
@@ -80,6 +81,39 @@ def test_quality_check_passes_valid_partition_rows(tmp_path: Path):
     report_path = run_dir / "quality_report.json"
     assert report["report_path"] == str(report_path.resolve())
     assert json.loads(report_path.read_text(encoding="utf-8"))["summary"]["index_rows"] == 1
+
+
+def test_radar_quality_check_uses_raster_index_rules(tmp_path: Path):
+    asset = tmp_path / "radar_cog.tif"
+    _write_tif(asset)
+    run_dir = tmp_path / "radar-run"
+    run_dir.mkdir()
+    row = {
+        "scene_id": "radar-scene-1",
+        "band": "vv",
+        "asset_path": str(asset),
+        "acq_time": "2020-07-01T00:00:00Z",
+        "grid_type": "s2",
+        "grid_level": 5,
+        "space_code": "35f4",
+        "st_code": "s2:5:35f4:20200701",
+        "time_bucket": "20200701",
+        "cell_min_lon": 116.0,
+        "cell_min_lat": 39.9,
+        "cell_max_lon": 116.1,
+        "cell_max_lat": 40.0,
+        "window_col_off": 1,
+        "window_row_off": 2,
+        "window_width": 4,
+        "window_height": 5,
+    }
+    (run_dir / "index_rows.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    report = run_radar_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326"))
+
+    assert report["status"] == "PASS"
+    assert report["data_type"] == "radar"
+    assert report["summary"]["index_rows"] == 1
 
 
 def test_quality_check_allows_entity_tiles_for_same_scene_band(tmp_path: Path):

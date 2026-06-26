@@ -68,7 +68,7 @@ def make_jwt(payload, secret="your-secret-key-here-change-in-production"):
 class FakeQualityReportStore:
     def __init__(self):
         self.reports = {}
-        self.history = {"optical": [], "product": []}
+        self.history = {"optical": [], "radar": [], "product": []}
 
     def upsert_report(self, data_type, run_dir, report):
         report = dict(report)
@@ -228,7 +228,12 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
     assert "{ label: '自动化质检'," not in nav_source
+    assert "{ label: '首页', kind: 'external', url: portalHomeUrl }" in nav_source
+    assert "{ label: 'ARD数据载入', kind: 'external', url: '/ard' }" in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
+    assert "{ label: '剖分数据服务', kind: 'external', url: '/partition' }" in nav_source
+    assert "{ label: '资源调度', kind: 'external', url: '/dispatch' }" in nav_source
+    assert "{ label: '后台管理', kind: 'external', url: '/admin' }" in nav_source
     assert "{ label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' }" in nav_source
     order_source = nav_source.split("const headerLabelOrder = [", 1)[1].split("];", 1)[0]
     assert order_source.index("'首页'") < order_source.index("'ARD数据载入'")
@@ -238,6 +243,9 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert order_source.index("'资源调度'") < order_source.index("'后台管理'")
     assert order_source.index("'后台管理'") < order_source.index("'全球离散格网模型与编码'")
     assert "runtimeNavigation()" in nav_source
+    assert "normalizeNavItem(item)" in nav_source
+    assert "HomeView" not in app_source
+    assert "'/':" not in app_source
     assert ':href="item.path"' in app_source
     assert "currentNavItems" in app_source
     assert "targetFromAuthState(state)" in app_source
@@ -270,7 +278,15 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     assert "navigation" in config_source
     assert "http://10.136." not in config_source
     assert "if (authRequired()) {" in store_source
-    assert "const target = targetFromAuthState(state) || '/';" in app_source
+    assert "const target = targetFromAuthState(state) || safeLocalTarget(params.get('target')) || '/';" in app_source
+    assert "function safeLocalTarget(value)" in app_source
+    initialize_source = app_source.split("async function initializeAuth()", 1)[1].split("async function handleLogout()", 1)[0]
+    mounted_source = app_source.split("onMounted(async () => {", 1)[1].split("});", 1)[0]
+    assert initialize_source.index("if (code) {") < initialize_source.index("syncPathFromLocation();")
+    assert "authReady.value = false;" in initialize_source
+    assert "authReady.value = true;" in initialize_source
+    assert "syncPathFromLocation();" not in mounted_source
+    assert '<component v-if="authReady" :is="currentView" />' in app_source
 
 
 def test_partition_view_uses_explicit_module_endpoint_mapping():
@@ -518,7 +534,7 @@ def test_config_view_does_not_expose_mgrs_partition_grid_type():
         encoding="utf-8"
     )
 
-    assert '<el-option label="S2 格网" value="s2" />' in source
+    assert '<el-option label="四边形格网" value="s2" />' in source
     assert '<el-option label="平面格网" value="tile_matrix" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS" value="mgrs" />' not in source
@@ -533,9 +549,9 @@ def test_encoding_view_displays_generic_grid_type_names():
     assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
     assert '<option value="tile_matrix">平面格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
-    assert "s2: 'S2 格网'" in source
+    assert "s2: '四边形格网'" in source
     assert '<input v-model="division.gridType" type="radio" value="s2">' in source
-    assert '<option value="s2">S2 格网</option>' in source
+    assert '<option value="s2">四边形格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="s2">' in source
     assert "MGRS" not in source
     assert "Tile Matrix" not in source
@@ -5445,8 +5461,13 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     def fail_entity_partition(_args):
         raise AssertionError("tile_matrix radar partition should use logical partition")
 
+    def fake_run_radar_quality_check(args):
+        captured["quality_run_dir"] = args.run_dir
+        return {"status": "PASS", "summary": {"index_rows": 1}, "checks": []}
+
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_radar_quality_check)
 
     result = partition_runners._run_radar_partition_test(
         {
@@ -5460,6 +5481,9 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     assert result["mode"] == "partition_test_no_ingest"
     assert result["data_type"] == "radar"
     assert result["output_path"].endswith("index_rows.jsonl")
+    assert result["quality_status"] == "PASS"
+    assert result["quality_report_id"]
+    assert captured["quality_run_dir"] == str(tmp_path / "logical-run")
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
     assert captured["grid_type"] == "tile_matrix"
@@ -5516,6 +5540,32 @@ def test_optical_quality_endpoint(monkeypatch):
     assert body["report_id"]
     assert body["run_dir"] == run_dir
     assert body["summary"]["index_rows"] == 3
+
+
+def test_radar_quality_endpoint(monkeypatch):
+    run_dir = "/tmp/cube_web_partition_demo/radar/run"
+
+    def fake_run_quality_check(args):
+        assert args.run_dir == run_dir
+        assert args.target_crs == "EPSG:4326"
+        return {
+            "status": "PASS",
+            "summary": {"index_rows": 4, "failed_checks": 0, "warning_checks": 0},
+            "checks": [{"name": "index_rows", "status": "PASS", "message": "ok"}],
+            "data_type": "radar",
+        }
+
+    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_quality_check)
+
+    resp = client.post("/v1/quality/radar/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "PASS"
+    assert body["data_type"] == "radar"
+    assert body["report_id"]
+    assert body["run_dir"] == run_dir
+    assert body["summary"]["index_rows"] == 4
 
 
 def test_carbon_quality_endpoint(monkeypatch):
@@ -5696,6 +5746,7 @@ def test_quality_report_txt_routes_are_registered():
     route_paths = set(app.openapi()["paths"])
 
     assert "/v1/quality/optical/report/txt" in route_paths
+    assert "/v1/quality/radar/report/txt" in route_paths
     assert "/v1/quality/product/report/txt" in route_paths
     assert "/v1/quality/carbon/report/txt" in route_paths
 

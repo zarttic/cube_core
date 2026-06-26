@@ -70,7 +70,7 @@ const emptyText = computed(() => {
 });
 
 const gridTypeLabels = {
-  s2: 'S2 格网',
+  s2: '四边形格网',
   mgrs: '平面格网',
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
@@ -635,7 +635,7 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <div class="radio-group">
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>S2 格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
@@ -661,7 +661,7 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
-                      <option value="s2">S2 格网</option>
+                      <option value="s2">四边形格网</option>
                       <option value="tile_matrix">平面格网</option>
                       <option value="isea4h">六边形格网</option>
                     </select>
@@ -701,7 +701,7 @@ async function runDemo() {
                     <div class="form-group">
                       <label>格网类型</label>
                       <div class="radio-group">
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>S2 格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>
