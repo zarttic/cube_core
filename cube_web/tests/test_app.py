@@ -359,6 +359,8 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "function shouldDisplayManagedBatch(batch)" in source
     assert "batch?.status !== 'archived' && batch?.status !== 'succeeded'" in source
     assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
+    assert "partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };" in source
+    assert "return (batch.assets || []).map((asset) => {" in source
     assert "取消会立即请求执行层中断当前任务" in source
     assert "重试失败资产" in source
     assert "async function archivePartitionBatch(batch)" in source

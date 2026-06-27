@@ -568,7 +568,7 @@ function partitionBatchDetailPayloadRows(batch) {
 
 function partitionBatchAssetRows(batch) {
   if (!batch) return [];
-  return (partitionBatchDetail.value?.assets || []).map((asset) => {
+  return (batch.assets || []).map((asset) => {
     const payload = asset.asset_payload || {};
     if (batch.data_type === 'carbon') {
       return {
@@ -1047,6 +1047,7 @@ async function openPartitionBatchDetail(batch) {
     : batch;
   const batchId = resolved?.id || resolved?.batch_id || batch;
   if (!batchId) return;
+  partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };
   partitionBatchDetailVisible.value = true;
   partitionBatchDetailLoading.value = true;
   partitionBatchDetailAction.value = '';
