@@ -5,7 +5,7 @@ import { CircleCloseFilled, Document, EditPen, FolderChecked, Refresh, Search, V
 
 import GlobeMap from '@/components/GlobeMap.vue';
 import QualityHistoryDrawer from '@/components/QualityHistoryDrawer.vue';
-import { apiPrefixes, requestGet, requestJson } from '@/api/client';
+import { apiPrefixes, authHeaders, requestGet, requestJson } from '@/api/client';
 
 function initialModule() {
   if (window.location.pathname === '/quality') return 'quality';
@@ -2848,7 +2848,7 @@ async function exportQualityReport(format) {
     const { qualityPrefix } = apiPrefixes();
     const response = await fetch(`${qualityPrefix}/${qualityDataType.value}/report/${format}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ report_id: qualityReport.value.report_id }),
     });
     if (!response.ok) {

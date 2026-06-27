@@ -4,7 +4,7 @@ export function accessToken() {
   return localStorage.getItem('access_token') || '';
 }
 
-function authHeaders(headers = {}) {
+export function authHeaders(headers = {}) {
   const token = accessToken();
   return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
 }

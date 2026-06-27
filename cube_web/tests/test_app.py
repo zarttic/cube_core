@@ -1094,6 +1094,7 @@ def test_carbon_partition_demo_runner_does_not_claim_ingest_enabled(monkeypatch,
 
     monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
     monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr("cube_split.ingest.carbon_ingest_job.run_carbon_ingest", lambda args: (_ for _ in ()).throw(AssertionError("demo should not ingest")))
     monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
 
     result = partition_runners._run_carbon_partition_demo(payload={"input_dir": str(source_dir)})
@@ -1101,6 +1102,58 @@ def test_carbon_partition_demo_runner_does_not_claim_ingest_enabled(monkeypatch,
     assert result["data_type"] == "carbon"
     assert result["ingest_enabled"] is False
     assert result["rows"] == 1
+
+
+def test_carbon_partition_run_ingests_rows(monkeypatch, tmp_path):
+    source_dir = tmp_path / "carbon-source"
+    source_dir.mkdir()
+    rows_path = tmp_path / "run-root" / "output" / "carbon_observation_rows.jsonl"
+    rows_path.parent.mkdir(parents=True)
+    rows_path.write_text('{"space_code":"cell-1","quality_flag":"PASS"}\n', encoding="utf-8")
+    captured = {}
+
+    def fake_partition_run_dir(data_type, mode):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir(exist_ok=True)
+        return run_dir
+
+    def fake_run_carbon_partition(args):
+        return {
+            "run_dir": str(rows_path.parent),
+            "rows_path": str(rows_path),
+            "rows": 1,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "ray",
+            "execution_engine": "ray",
+            "ray_address": args.ray_address,
+        }
+
+    def fake_run_carbon_ingest(args):
+        captured.update(vars(args))
+        return {"input_rows": 1, "carbon_fact_rows": 1, "metadata_backend": args.metadata_backend}
+
+    monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr("cube_split.ingest.carbon_ingest_job.run_carbon_ingest", fake_run_carbon_ingest)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
+
+    result = partition_runners._run_carbon_partition_demo(
+        mode="partition_run",
+        payload={
+            "input_dir": str(source_dir),
+            "batch_id": "CARBON_RUN_INGEST",
+            "cube_version": "carbon-v1",
+            "metadata_backend": "postgres",
+        },
+    )
+
+    assert result["ingest_enabled"] is True
+    assert result["ingest_stats"]["carbon_fact_rows"] == 1
+    assert captured["job_id"] == "CARBON_RUN_INGEST"
+    assert captured["rows_path"] == str(rows_path)
+    assert captured["cube_version"] == "carbon-v1"
+    assert captured["metadata_backend"] == "postgres"
 
 
 def test_carbon_partition_retry_runner_reuses_request_payload(monkeypatch):
@@ -1144,6 +1197,17 @@ def test_carbon_selected_source_indexes_are_normalized():
     }
 
     assert partition_runners._carbon_selected_source_indexes(payload) == (1, 3)
+
+
+def test_carbon_selected_source_indexes_are_ignored_for_source_uri_payload():
+    payload = {
+        "selected_observations": [
+            {"source_uri": "s3://cube/cube/source/carbon/obs-a.nc4", "source_index": 0},
+            {"source_uri": "s3://cube/cube/source/carbon/obs-b.nc4", "source_index": 0},
+        ]
+    }
+
+    assert partition_runners._carbon_selected_source_indexes(payload) is None
 
 
 def test_carbon_source_uris_are_normalized():
@@ -1190,6 +1254,10 @@ def test_carbon_partition_demo_runner_passes_source_uris_from_payload(monkeypatc
 
     monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
     monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr(
+        "cube_split.ingest.carbon_ingest_job.run_carbon_ingest",
+        lambda args: {"input_rows": 1, "carbon_fact_rows": 1, "metadata_backend": "postgres"},
+    )
     monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
 
     result = partition_runners._run_carbon_partition_demo(
@@ -1199,6 +1267,55 @@ def test_carbon_partition_demo_runner_passes_source_uris_from_payload(monkeypatc
     assert result["data_type"] == "carbon"
     assert captured["input_dir"] == tmp_path / "run-root" / "input"
     assert captured["source_uris"] == ("s3://cube/cube/source/carbon/oco2.nc4",)
+
+
+def test_carbon_partition_run_accepts_selected_observation_source_uris(monkeypatch, tmp_path):
+    rows_path = tmp_path / "run-root" / "output" / "rows.jsonl"
+    rows_path.parent.mkdir(parents=True)
+    rows_path.write_text('{"space_code":"cell-1","quality_flag":"PASS"}\n', encoding="utf-8")
+    captured = {}
+
+    def fake_partition_run_dir(data_type, mode):
+        run_dir = tmp_path / "run-root"
+        run_dir.mkdir(exist_ok=True)
+        return run_dir
+
+    def fake_run_carbon_partition(args):
+        captured["source_uris"] = args.source_uris
+        return {
+            "run_dir": str(rows_path.parent),
+            "rows_path": str(rows_path),
+            "rows": 1,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": "ray",
+            "execution_engine": "ray",
+            "ray_address": args.ray_address,
+        }
+
+    monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
+    monkeypatch.setattr(
+        "cube_split.ingest.carbon_ingest_job.run_carbon_ingest",
+        lambda args: {"input_rows": 1, "carbon_fact_rows": 1, "metadata_backend": "postgres"},
+    )
+    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
+
+    result = partition_runners._run_carbon_partition_demo(
+        mode="partition_run",
+        payload={
+            "selected_observations": [
+                {"source_uri": "s3://cube/cube/source/carbon/obs-a.nc4", "source_index": 0},
+                {"source_uri": "s3://cube/cube/source/carbon/obs-b.nc4", "source_index": 0},
+            ]
+        },
+    )
+
+    assert result["data_type"] == "carbon"
+    assert captured["source_uris"] == (
+        "s3://cube/cube/source/carbon/obs-a.nc4",
+        "s3://cube/cube/source/carbon/obs-b.nc4",
+    )
 
 
 def test_optical_partition_demo_endpoint(monkeypatch):
@@ -1851,6 +1968,59 @@ def test_partition_workflow_throttles_cancellation_checks(monkeypatch):
     assert task_state.status == "completed"
     assert task_state.result["rows"] == 5
     assert store.cancel_check_count == 1
+
+
+def test_partition_workflow_direct_run_uses_stored_carbon_source_uris():
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "CARBON_DIRECT_SOURCE_URI",
+            "batch_name": "Carbon direct source uri",
+            "data_type": "carbon",
+            "observations": [
+                {
+                    **ard_carbon_observation("carbon-direct-obs"),
+                    "source_uri": "s3://cube/cube/source/carbon/stored.nc4",
+                }
+            ],
+        }
+    )
+    captured = {}
+    service = PartitionService(
+        {
+            "carbon": PartitionBackend(
+                data_type="carbon",
+                run=lambda payload=None: captured.setdefault("payload", payload or {}) or {"status": "completed"},
+            )
+        }
+    )
+    workflow = PartitionWorkflowService(service, store=store)
+
+    task = workflow.run_payload(
+        "carbon",
+        {
+            "batch_id": "CARBON_DIRECT_SOURCE_URI",
+            "batch_name": "Carbon direct source uri",
+            "grid_type": "isea4h",
+            "grid_level": 1,
+            "selected_observations": [
+                {
+                    "observation_id": "carbon-direct-obs",
+                    "source_uri": "",
+                }
+            ],
+        },
+    )
+
+    for _ in range(20):
+        if workflow.get_task(task.task_id).status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert captured["payload"]["selected_observations"][0]["source_uri"] == "s3://cube/cube/source/carbon/stored.nc4"
+    assert store.get_attempt(task.task_id)["payload"]["selected_observations"][0]["source_uri"] == (
+        "s3://cube/cube/source/carbon/stored.nc4"
+    )
 
 
 def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch):
@@ -2730,6 +2900,31 @@ def test_standard_loaded_schemas_do_not_overwrite_existing_batch_state():
     assert batch["status"] == "manual_required"
     assert batch["attempt_count"] == 1
     assert batch["last_error"] == "existing failure"
+
+
+def test_schema_upsert_removes_assets_no_longer_in_payload():
+    store = InMemoryPartitionJobStore()
+    store.upsert_schema(
+        {
+            "batch_id": "UPSERT_ASSET_TRIM",
+            "data_type": "optical",
+            "assets": [
+                ard_raster_asset("s3://cube/cube/source/optocal/a.tif", "scene-a"),
+                ard_raster_asset("s3://cube/cube/source/optocal/b.tif", "scene-b"),
+            ],
+        }
+    )
+
+    store.upsert_schema(
+        {
+            "batch_id": "UPSERT_ASSET_TRIM",
+            "data_type": "optical",
+            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/b.tif", "scene-b")],
+        }
+    )
+
+    assets = store.list_assets("UPSERT_ASSET_TRIM")
+    assert [asset["source_uri"] for asset in assets] == ["s3://cube/cube/source/optocal/b.tif"]
 
 
 def test_partition_job_store_does_not_seed_demo_schemas_by_default(monkeypatch):
@@ -5958,6 +6153,15 @@ def test_quality_report_txt_routes_are_registered():
     assert "/v1/quality/radar/report/txt" in route_paths
     assert "/v1/quality/product/report/txt" in route_paths
     assert "/v1/quality/carbon/report/txt" in route_paths
+
+
+def test_quality_report_export_frontend_sends_auth_header():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
+        encoding="utf-8"
+    )
+
+    assert "import { apiPrefixes, authHeaders, requestGet, requestJson } from '@/api/client';" in source
+    assert "headers: authHeaders({ 'Content-Type': 'application/json' })" in source
 
 
 def test_optical_quality_history_endpoint(quality_store):

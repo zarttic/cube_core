@@ -188,6 +188,12 @@ class PartitionWorkflowService:
                 return active_task
 
             asset_ids = self._selected_asset_ids_for_payload(str(batch["batch_id"]), str(batch["data_type"]), raw_payload)
+            if batch.get("source_system") != "runtime" and asset_ids:
+                key = "selected_observations" if batch["data_type"] == "carbon" else "selected_assets"
+                config_override = {name: value for name, value in raw_payload.items() if name != key}
+                attempt_payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
+            else:
+                attempt_payload = raw_payload
             cancellation_state = {"last_checked_at": None, "last_result": False}
 
             def cancellation_check() -> bool:
@@ -205,7 +211,7 @@ class PartitionWorkflowService:
                     task_id=task_id,
                     batch_id=str(batch["batch_id"]),
                     operation="auto_run",
-                    payload=raw_payload,
+                    payload=attempt_payload,
                     asset_ids=asset_ids,
                     requested_by=requested_by,
                 )
@@ -219,7 +225,7 @@ class PartitionWorkflowService:
                 task_id=task_id,
                 batch=batch,
                 data_type=data_type,
-                payload=raw_payload,
+                payload=attempt_payload,
                 cancellation_check=cancellation_check,
             )
 

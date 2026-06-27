@@ -15,7 +15,7 @@ BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "
 BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 BATCH_HIDDEN_STATUSES = {"succeeded", "archived"}
 BATCH_REQUEUEABLE_STATUSES = {"failed", "manual_required", "cancelled"}
-INGEST_TRACKED_DATA_TYPES = {"optical", "product", "radar", "entity"}
+INGEST_TRACKED_DATA_TYPES = {"optical", "product", "radar", "entity", "carbon"}
 
 
 class PartitionBatchAlreadyActiveError(RuntimeError):
@@ -223,6 +223,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             _dedupe_asset_id_for_batch(asset, existing_batch_id=self.assets.get(asset["asset_id"], {}).get("batch_id"))
             for asset in _assets_from_record(batch)
         ]
+        asset_ids = {asset["asset_id"] for asset in assets}
+        for asset_id, asset in list(self.assets.items()):
+            if asset.get("batch_id") == batch["batch_id"] and asset_id not in asset_ids:
+                del self.assets[asset_id]
         for asset in assets:
             existing_asset = self.assets.get(asset["asset_id"], {})
             same_batch = existing_asset.get("batch_id") == asset["batch_id"]
@@ -1053,11 +1057,14 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 )
                 cur.execute("SELECT * FROM partition_batches WHERE batch_id = %s", (record["batch_id"],))
                 batch = _dict_row(cur)
-                for asset in _assets_from_record(record):
+                assets = _assets_from_record(record)
+                stored_asset_ids: list[str] = []
+                for asset in assets:
                     cur.execute("SELECT batch_id FROM partition_assets WHERE asset_id = %s", (asset["asset_id"],))
                     existing_asset = cur.fetchone()
                     existing_batch_id = None if existing_asset is None else str(existing_asset[0] or "")
                     asset = _dedupe_asset_id_for_batch(asset, existing_batch_id=existing_batch_id)
+                    stored_asset_ids.append(asset["asset_id"])
                     cur.execute(
                         """
                         MERGE INTO partition_assets target
@@ -1106,6 +1113,13 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         """,
                         _jsonb_record(asset, "asset_payload"),
                     )
+                if assets:
+                    cur.execute(
+                        "DELETE FROM partition_assets WHERE batch_id = %s AND NOT (asset_id = ANY(%s::text[]))",
+                        (record["batch_id"], stored_asset_ids),
+                    )
+                else:
+                    cur.execute("DELETE FROM partition_assets WHERE batch_id = %s", (record["batch_id"],))
                 if _should_sync_ard_loader_schema(record):
                     self._sync_ard_loader_schema(cur, schema, record)
             conn.commit()

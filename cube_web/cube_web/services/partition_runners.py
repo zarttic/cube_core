@@ -63,9 +63,9 @@ def _source_metadata(mode: str, source: str) -> dict[str, str]:
 
 def _require_run_source(payload: dict, *, data_type: str) -> None:
     if data_type == "carbon":
-        if payload.get("input_dir"):
+        if payload.get("input_dir") or _carbon_source_uris(payload):
             return
-        raise ValueError("carbon partition run requires input_dir")
+        raise ValueError("carbon partition run requires input_dir or source_uri")
     if payload.get("input_dir") or payload.get("manifest_path"):
         return
     if data_type != "carbon" and payload.get("selected_assets"):
@@ -765,6 +765,8 @@ def _run_entity_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _carbon_selected_source_indexes(payload: dict | None) -> tuple[int, ...] | None:
+    if _carbon_source_uris(payload):
+        return None
     selected_observations = (payload or {}).get("selected_observations") or []
     if not isinstance(selected_observations, list):
         return None
@@ -802,6 +804,7 @@ def _carbon_source_uris(payload: dict | None) -> tuple[str, ...] | None:
 
 
 def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | None = None) -> dict:
+    from cube_split.ingest.carbon_ingest_job import run_carbon_ingest
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
     payload = payload or {}
@@ -846,6 +849,18 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     result = run_carbon_partition(args)
     elapsed = time.perf_counter() - start
     rows_path = Path(result["rows_path"])
+    ingest_stats = None
+    if mode == "partition_run":
+        ingest_stats = run_carbon_ingest(
+            SimpleNamespace(
+                run_dir=str(rows_path.parent),
+                rows_path=str(rows_path),
+                job_id=str(payload.get("job_id") or payload.get("task_id") or payload.get("batch_id") or uuid4().hex),
+                cube_version=str(payload.get("cube_version") or "v1"),
+                metadata_backend=str(payload.get("metadata_backend") or "postgres"),
+                postgres_dsn=str(payload.get("postgres_dsn") or runtime_config.require_postgres_dsn()),
+            )
+        )
     space_codes: set[str] = set()
     quality_counts: dict[str, int] = {}
     with rows_path.open("r", encoding="utf-8") as fh:
@@ -877,7 +892,9 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "partition_backend": result["partition_backend_used"],
         "execution_engine": result["execution_engine"],
         "ray_address": result["ray_address"],
-        "ingest_enabled": False,
+        "ingest_enabled": mode == "partition_run",
+        "ingest_stats": ingest_stats,
+        "metadata_backend": str(payload.get("metadata_backend") or ("postgres" if mode == "partition_run" else "none")),
         "output_path": str(rows_path),
     }
     if quality_checks.run_carbon_quality_check is not None:
