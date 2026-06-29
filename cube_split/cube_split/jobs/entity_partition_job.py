@@ -43,6 +43,10 @@ from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 DEFAULT_ENTITY_TASKS_PER_GROUP = 64
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
+_ENTITY_MODULE_SEARCH_ROOTS = (
+    os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
+    "/tmp/ray/session_latest/runtime_resources/working_dir_files",
+)
 
 
 def _normalize_data_type(value: Any) -> str:
@@ -112,6 +116,35 @@ def _st_time_granularity(granularity: str) -> str:
     # month/day/hour/minute/second. Match product logical partitioning by encoding
     # the concrete acquisition day and storing the annual bucket separately.
     return "day" if granularity == "year" else granularity
+
+
+def _resolve_entity_module_path() -> str | None:
+    entity_module_path = None
+    project_roots = _ray_project_roots()
+    for project_root in project_roots:
+        candidate = os.path.abspath(os.path.join(project_root, "cube_split", "cube_split", "jobs", "entity_partition_job.py"))
+        if entity_module_path is None and os.path.exists(candidate):
+            entity_module_path = candidate
+    for search_root in _ENTITY_MODULE_SEARCH_ROOTS:
+        if not search_root or not os.path.isdir(search_root):
+            continue
+        for dirpath, _, filenames in os.walk(search_root):
+            if "entity_partition_job.py" not in filenames:
+                continue
+            if entity_module_path is None:
+                entity_module_path = os.path.abspath(os.path.join(dirpath, "entity_partition_job.py"))
+            outer_cube_split = os.path.abspath(os.path.join(dirpath, "..", ".."))
+            project_root = os.path.abspath(os.path.join(dirpath, "..", "..", "..", ".."))
+            _prepend_sys_paths(
+                [
+                    project_root,
+                    os.path.join(project_root, "cube_encoder"),
+                    outer_cube_split,
+                    os.path.join(project_root, "cube_web"),
+                ]
+            )
+            return entity_module_path
+    return entity_module_path
 
 
 def _ensure_center_cell_tasks(
@@ -507,44 +540,10 @@ def _write_entity_tile_chunks_ray(
             import sys
             from pathlib import Path
 
-            entity_module_path = None
-            project_roots = _ray_project_roots()
-            for project_root in project_roots:
-                candidate = os.path.abspath(os.path.join(project_root, "cube_split", "cube_split", "jobs", "entity_partition_job.py"))
-                if entity_module_path is None and os.path.exists(candidate):
-                    entity_module_path = candidate
+            entity_module_path = _resolve_entity_module_path()
             _prepend_sys_paths(
-                [
-                    os.path.abspath(os.path.join(project_root, rel_path))
-                    for project_root in project_roots
-                    for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
-                ]
+                [os.path.abspath(os.path.join(project_root, rel_path)) for project_root in _ray_project_roots() for rel_path in ("", "cube_encoder", "cube_split", "cube_web")]
             )
-
-            for search_root in (
-                os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
-                "/tmp/ray/session_latest/runtime_resources/working_dir_files",
-            ):
-                if not search_root or not os.path.isdir(search_root):
-                    continue
-                for dirpath, _, filenames in os.walk(search_root):
-                    if "entity_partition_job.py" not in filenames:
-                        continue
-                    if entity_module_path is None:
-                        entity_module_path = os.path.abspath(os.path.join(dirpath, "entity_partition_job.py"))
-                    outer_cube_split = os.path.abspath(os.path.join(dirpath, "..", ".."))
-                    project_root = os.path.abspath(os.path.join(dirpath, "..", "..", "..", ".."))
-                    _prepend_sys_paths(
-                        [
-                            project_root,
-                            os.path.join(project_root, "cube_encoder"),
-                            outer_cube_split,
-                            os.path.join(project_root, "cube_web"),
-                        ]
-                    )
-                    break
-                if entity_module_path:
-                    break
 
             try:
                 from cube_split.jobs.entity_partition_job import _rows_with_asset_uris as rows_with_asset_uris

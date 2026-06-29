@@ -1,4 +1,5 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+const REQUEST_TIMEOUT_MS = 30000;
 
 export function accessToken() {
   return localStorage.getItem('access_token') || '';
@@ -35,21 +36,44 @@ async function parseResponse(response) {
   return body;
 }
 
+function timeoutSignal(timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    clear() {
+      window.clearTimeout(timer);
+    },
+  };
+}
+
 export async function requestJson(path, payload = {}) {
+  const { signal, clear } = timeoutSignal();
   const response = await fetch(path, {
     method: 'POST',
     headers: authHeaders(JSON_HEADERS),
     body: JSON.stringify(payload),
+    signal,
   });
-  return parseResponse(response);
+  try {
+    return await parseResponse(response);
+  } finally {
+    clear();
+  }
 }
 
 export async function requestGet(path) {
+  const { signal, clear } = timeoutSignal();
   const response = await fetch(path, {
     method: 'GET',
     headers: authHeaders(),
+    signal,
   });
-  return parseResponse(response);
+  try {
+    return await parseResponse(response);
+  } finally {
+    clear();
+  }
 }
 
 export async function requestPost(path, payload = {}) {

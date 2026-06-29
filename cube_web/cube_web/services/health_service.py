@@ -112,7 +112,9 @@ def _check_postgres() -> dict[str, Any]:
     try:
         import psycopg
 
-        with psycopg.connect(dsn, connect_timeout=3) as conn:
+        from cube_web.services.db_pool import _PostgresPool
+
+        with _PostgresPool.for_dsn(dsn).connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 cur.fetchone()

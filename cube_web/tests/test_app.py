@@ -498,6 +498,15 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "最近邻" not in source
 
 
+def test_api_client_uses_request_timeout():
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "api" / "client.js").read_text(encoding="utf-8")
+
+    assert "const REQUEST_TIMEOUT_MS = 30000;" in source
+    assert "AbortController" in source
+    assert "signal," in source
+    assert "timeoutSignal()" in source
+
+
 def test_partition_view_deduplicates_map_preview_and_grid_cover_requests():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
         encoding="utf-8"

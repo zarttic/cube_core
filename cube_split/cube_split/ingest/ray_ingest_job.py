@@ -404,7 +404,7 @@ def build_raw_asset_records(
                 scene_id=row["scene_id"],
                 band=row["band"],
                 acq_time=row["acq_time"],
-                raw_cog_uri=asset_uri_map[row["asset_path"]],
+                raw_cog_uri=_asset_uri_for_path(asset_uri_map, row["asset_path"]),
                 version=asset_version,
                 run_id=run_id,
             )
@@ -437,7 +437,7 @@ def build_cube_fact_records(
             "candidate_scene_ids": sorted({row["scene_id"] for row in candidates}),
             "rule": quality_rule,
         }
-        winner_asset_uri = asset_uri_map[winner["asset_path"]]
+        winner_asset_uri = _asset_uri_for_path(asset_uri_map, winner["asset_path"])
         facts.append(
             CubeFactRecord(
                 grid_type=key[0],
@@ -459,6 +459,10 @@ def build_cube_fact_records(
             )
         )
     return facts
+
+
+def _asset_uri_for_path(asset_uri_map: dict[str, str], asset_path: str) -> str:
+    return asset_uri_map.get(str(asset_path), str(asset_path))
 
 
 def _report_cube_fact_metrics(rows: list[CubeFactRecord], *, data_type: str, dataset: str, sensor: str) -> None:

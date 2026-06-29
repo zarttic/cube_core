@@ -1729,8 +1729,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     return
                 batch_id, asset_ids = row
                 cur.execute(
-                    f"UPDATE partition_batches SET status = %s, last_error = %s, manual_required_at = {'now()' if manual_required else 'manual_required_at'}, updated_at = now() WHERE batch_id = %s",
-                    (status, error, batch_id),
+                    "UPDATE partition_batches SET status = %s, last_error = %s, manual_required_at = CASE WHEN %s THEN now() ELSE manual_required_at END, updated_at = now() WHERE batch_id = %s",
+                    (status, error, manual_required, batch_id),
                 )
                 self._update_assets(cur, batch_id, asset_ids, status, last_error=error)
             conn.commit()

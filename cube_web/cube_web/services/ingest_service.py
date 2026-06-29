@@ -213,11 +213,11 @@ def _postgres_dsn() -> str:
 
 def _existing_conflicts(raw_records: list[Any], cube_records: list[Any]) -> dict[str, int]:
     try:
-        import psycopg
+        from cube_web.services.db_pool import _PostgresPool
     except ModuleNotFoundError:
         return {"raw_asset_rows": 0, "cube_fact_rows": 0}
 
-    with psycopg.connect(_postgres_dsn()) as conn:
+    with _PostgresPool.for_dsn(_postgres_dsn()).connection() as conn:
         ray_ingest_job = _ray_ingest_job()
         ray_ingest_job.ensure_tables_postgres(conn)
         with conn.cursor() as cur:
