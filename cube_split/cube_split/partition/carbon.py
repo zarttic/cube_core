@@ -945,7 +945,7 @@ def _ray_actor_options_from_env() -> dict[str, Any]:
     return {"resources": {node_resource: 0.001}}
 
 
-def _init_ray(ray: Any, ray_address: str) -> None:
+def _init_ray(ray: Any, ray_address: str) -> bool:
     runtime_env = _ray_runtime_env_from_env()
     init_kwargs = {
         "ignore_reinit_error": True,
@@ -962,6 +962,7 @@ def _init_ray(ray: Any, ray_address: str) -> None:
             ray.init(**init_kwargs)
     else:
         ray.init(**init_kwargs)
+    return True
 
 
 def _ray_head_node_id(ray: Any) -> str | None:
@@ -1102,6 +1103,7 @@ def _partition_chunks_with_ray(
     worker_count: int,
 ) -> list[dict[str, Any]]:
     ray = _load_ray()
+    ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     last_exc: Exception | None = None
     for prefer_head in (False, True):
         if prefer_head and last_exc is None:
@@ -1123,7 +1125,11 @@ def _partition_chunks_with_ray(
                 continue
             raise
         finally:
-            ray.shutdown()
+            if not ray_already_initialized:
+                try:
+                    ray.shutdown()
+                except Exception:
+                    pass
     assert last_exc is not None
     raise last_exc
 

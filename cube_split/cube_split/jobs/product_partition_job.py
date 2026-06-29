@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from cube_split import runtime_config
-from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled, shutdown_ray_if_needed
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_tasks_for_ray,
     _load_ray,
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
     parser.add_argument("--cog-input-dir", default="data/cog/product_epsg4326", help="Directory for standardized product COGs")
     parser.add_argument("--target-crs", default="EPSG:4326", help="Target CRS for standardized COG assets")
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "tile_matrix"], help="Grid type")
+    parser.add_argument("--grid-type", default="s2", choices=["s2", "tile_matrix", "isea4h"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--max-cells-per-asset", type=int, default=20000, help="Safety limit for cover cells per asset")
@@ -133,6 +133,7 @@ def _partition_groups_ray(
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
     ray_init_start = time.perf_counter()
+    ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     if ray_address:
         try:
             ray.init(
@@ -283,7 +284,7 @@ def _partition_groups_ray(
         cancel_ray_refs(ray, pending)
         raise
     finally:
-        ray.shutdown()
+        shutdown_ray_if_needed(ray, ray_already_initialized)
     return rows, ray_init_elapsed
 
 

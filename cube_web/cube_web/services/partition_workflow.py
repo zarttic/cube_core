@@ -21,11 +21,14 @@ from cube_web.services.partition_job_store import (
     get_partition_job_store,
 )
 from cube_web.services.partition_service import PartitionService, PartitionTask
+from cube_web.services.partition_defaults import normalize_partition_method
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
+PARTITION_SLOT_GRID_TYPES = ("tile_matrix", "s2", "isea4h")
+PARTITION_SLOT_METHODS = ("logical", "entity")
 
 
 class PartitionWorkflowService:
@@ -61,19 +64,20 @@ class PartitionWorkflowService:
         include_succeeded: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        return self.store.list_batches(
+        batches = self.store.list_batches(
             status=status,
             data_type=data_type,
             keyword=keyword,
             include_succeeded=include_succeeded,
             limit=limit,
         )
+        return [self._enrich_batch(batch) for batch in batches]
 
     def get_batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.store.get_batch(batch_id)
         if batch is None:
             raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
-        return batch
+        return self._enrich_batch(batch)
 
     def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
         self.get_batch(batch_id)
@@ -194,6 +198,8 @@ class PartitionWorkflowService:
                 attempt_payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
             else:
                 attempt_payload = raw_payload
+            attempt_payload = {**attempt_payload, "_operation": "auto_run"}
+            self._ensure_slot_not_completed(str(batch["batch_id"]), attempt_payload, batch=batch)
             cancellation_state = {"last_checked_at": None, "last_result": False}
 
             def cancellation_check() -> bool:
@@ -247,6 +253,12 @@ class PartitionWorkflowService:
             if active_task is not None:
                 return active_task
             payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
+            payload = {**payload, "_operation": operation}
+            self._ensure_slot_not_completed(batch_id, payload, batch=batch)
+            response_payload = dict(payload)
+            response_payload.pop("_cancellation_check", None)
+            response_payload.pop("cancellation_check", None)
+            response_payload.pop("_operation", None)
             task_id = f"partition-{uuid4().hex[:12]}"
             cancellation_state = {"last_checked_at": None, "last_result": False}
 
@@ -283,7 +295,7 @@ class PartitionWorkflowService:
                 task_id=task_id,
                 batch=batch,
                 data_type=data_type,
-                payload=payload,
+                payload=response_payload,
                 cancellation_check=cancellation_check,
             )
 
@@ -502,6 +514,36 @@ class PartitionWorkflowService:
             on_failed=self.on_task_failed,
             cancellation_check=cancellation_check,
         )
+
+    def _enrich_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        enriched = copy.deepcopy(batch)
+        attempts = self.store.list_attempts(str(batch["batch_id"]))
+        enriched["partition_slots"] = _partition_slots_for_batch(batch, attempts)
+        return enriched
+
+    def _ensure_slot_not_completed(self, batch_id: str, payload: dict[str, Any], *, batch: dict[str, Any] | None = None) -> None:
+        operation = str(payload.get("_operation") or payload.get("operation") or "").strip().lower()
+        if operation in {"retry", "auto_retry", "manual_retry", "manual_asset_retry"}:
+            return
+        current_batch = batch or self.get_batch(batch_id)
+        slot_key = _partition_slot_key(
+            grid_type=_partition_slot_grid_type(payload, current_batch),
+            partition_method=_partition_slot_method(payload, current_batch),
+        )
+        for slot in current_batch.get("partition_slots") or []:
+            if (
+                isinstance(slot, dict)
+                and _partition_slot_key(
+                    grid_type=str(slot.get("grid_type") or ""),
+                    partition_method=str(slot.get("partition_method") or ""),
+                )
+                == slot_key
+                and str(slot.get("status") or "") == "completed"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Partition slot already completed: {batch_id} {slot['grid_type']} {slot['partition_method']}",
+                )
 
     def _payload_uses_remote_ray(self, data_type: str, payload: dict[str, Any] | None) -> bool:
         return (
@@ -781,6 +823,97 @@ def _error_text(exc: Exception) -> str:
     return text or exc.__class__.__name__
 
 
+def _partition_slot_grid_type(payload: dict[str, Any], batch: dict[str, Any]) -> str:
+    payload_grid_type = str(payload.get("grid_type") or "").strip().lower()
+    if payload_grid_type:
+        return payload_grid_type
+    batch_grid_type = str((batch.get("normalized_payload") or {}).get("grid_type") or "").strip().lower()
+    return batch_grid_type or "s2"
+
+
+def _partition_slot_method(payload: dict[str, Any], batch: dict[str, Any]) -> str:
+    grid_type = _partition_slot_grid_type(payload, batch)
+    runner_result = payload.get("runner_result") if isinstance(payload.get("runner_result"), dict) else {}
+    return normalize_partition_method(
+        payload.get("partition_method")
+        or runner_result.get("partition_method")
+        or runner_result.get("partition_type"),
+        grid_type=grid_type,
+    )
+
+
+def _partition_slot_key(*, grid_type: str, partition_method: str) -> tuple[str, str]:
+    return str(grid_type or "").strip().lower(), str(partition_method or "").strip().lower()
+
+
+def _partition_slot_status(attempt_status: str) -> str:
+    status = str(attempt_status or "").strip().lower()
+    if status == "succeeded":
+        return "completed"
+    if status in {"queued", "running", "retrying"}:
+        return status
+    if status == "manual_required":
+        return "failed"
+    if status in {"failed", "cancelled", "cancel_requested"}:
+        return status
+    return "available"
+
+
+def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, str]:
+    grid_labels = {
+        "tile_matrix": "平面格网",
+        "s2": "四边形格网",
+        "isea4h": "六边形格网",
+    }
+    method_labels = {
+        "logical": "逻辑剖分",
+        "entity": "实体剖分",
+    }
+    return grid_labels.get(grid_type, grid_type), method_labels.get(partition_method, partition_method)
+
+
+def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    slots: dict[tuple[str, str], dict[str, Any]] = {}
+    for grid_type in PARTITION_SLOT_GRID_TYPES:
+        for partition_method in PARTITION_SLOT_METHODS:
+            grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
+            slots[(grid_type, partition_method)] = {
+                "grid_type": grid_type,
+                "grid_label": grid_label,
+                "partition_method": partition_method,
+                "method_label": method_label,
+                "status": "available",
+                "disabled": False,
+                "latest_task_id": None,
+                "finished_at": None,
+            }
+
+    sorted_attempts = sorted(
+        [attempt for attempt in attempts if isinstance(attempt, dict)],
+        key=lambda attempt: (
+            _parse_slot_datetime(attempt.get("finished_at")),
+            _parse_slot_datetime(attempt.get("updated_at")),
+            _parse_slot_datetime(attempt.get("created_at")),
+        ),
+        reverse=True,
+    )
+    for attempt in sorted_attempts:
+        payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
+        runner_result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
+        combined_payload = {**payload, "runner_result": runner_result}
+        grid_type = _partition_slot_grid_type(combined_payload, batch)
+        partition_method = _partition_slot_method(combined_payload, batch)
+        slot = slots.get(_partition_slot_key(grid_type=grid_type, partition_method=partition_method))
+        if slot is None or slot.get("latest_task_id") is not None:
+            continue
+        slot_status = _partition_slot_status(str(attempt.get("status") or ""))
+        slot["status"] = slot_status
+        slot["disabled"] = slot_status in {"completed", "queued", "running", "retrying"}
+        slot["latest_task_id"] = attempt.get("task_id")
+        slot["finished_at"] = attempt.get("finished_at")
+    return list(slots.values())
+
+
 def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -908,6 +1041,21 @@ def _parse_optional_iso_datetime(value: str | None, label: str) -> datetime | No
     else:
         parsed = parsed.astimezone(timezone.utc)
     return parsed
+
+
+def _parse_slot_datetime(value: Any) -> datetime:
+    if value is None or value == "":
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _asset_counts(assets: list[dict[str, Any]]) -> dict[str, int]:

@@ -20,7 +20,7 @@ from pyproj import Geod
 from rasterio.warp import transform_geom
 
 from cube_split import runtime_config
-from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled
+from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled, shutdown_ray_if_needed
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_tasks_for_ray,
     _load_ray,
@@ -50,6 +50,13 @@ def _normalize_data_type(value: Any) -> str:
     if data_type not in ENTITY_DATA_TYPES:
         raise ValueError("data_type must be one of: optical, product, radar")
     return data_type
+
+
+def _normalize_grid_type(value: Any) -> str:
+    grid_type = str(value or "isea4h").strip().lower()
+    if grid_type not in {"s2", "tile_matrix", "isea4h"}:
+        raise ValueError("grid_type must be one of: s2, tile_matrix, isea4h")
+    return grid_type
 
 
 def infer_isea4h_level_for_assets(
@@ -110,6 +117,7 @@ def _st_time_granularity(granularity: str) -> str:
 def _ensure_center_cell_tasks(
     assets: list[AssetRecord],
     tasks: list[dict[str, Any]],
+    grid_type: str,
     grid_level: int,
     cover_mode: str,
 ) -> list[dict[str, Any]]:
@@ -131,14 +139,14 @@ def _ensure_center_cell_tasks(
             with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
                 min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
         center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
-        cell = sdk.locate(grid_type="isea4h", level=grid_level, point=center)
+        cell = sdk.locate(grid_type=grid_type, level=grid_level, point=center)
         out.append(
             {
                 "scene_id": asset.scene_id,
                 "band": asset.band,
                 "asset_path": asset.path,
                 "acq_time": asset.acq_time,
-                "grid_type": "isea4h",
+                "grid_type": grid_type,
                 "grid_level": grid_level,
                 "space_code": cell.space_code,
                 "cell_min_lon": float(cell.bbox[0]),
@@ -155,8 +163,8 @@ def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
 
 
-def _hex_geometry_for_dataset(sdk: CubeEncoderSDK, ds: rasterio.DatasetReader, space_code: str) -> dict[str, Any]:
-    geom = sdk.code_to_geometry(grid_type="isea4h", code=space_code)
+def _cell_geometry_for_dataset(sdk: CubeEncoderSDK, ds: rasterio.DatasetReader, *, grid_type: str, space_code: str) -> dict[str, Any]:
+    geom = sdk.code_to_geometry(grid_type=grid_type, code=space_code)
     if ds.crs and ds.crs.to_string().upper() != "EPSG:4326":
         return transform_geom("EPSG:4326", ds.crs, geom)
     return geom
@@ -192,7 +200,12 @@ def _write_entity_tiles(
         local_asset_path = resolve_asset_source_path(asset_path, source_options)
         with rasterio.open(local_asset_path) as ds:
             for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
-                geom = _hex_geometry_for_dataset(sdk, ds, str(task["space_code"]))
+                geom = _cell_geometry_for_dataset(
+                    sdk,
+                    ds,
+                    grid_type=str(task["grid_type"]),
+                    space_code=str(task["space_code"]),
+                )
                 for band_index in range(1, ds.count + 1):
                     band_name = str(task["band"]) if ds.count == 1 else f"{task['band']}_band{band_index}"
                     nodata = _nodata_value(ds, band_index)
@@ -221,7 +234,7 @@ def _write_entity_tiles(
                         / "entity_tiles"
                         / _safe_name(data_type)
                         / _safe_name(str(task["scene_id"]))
-                        / "isea4h"
+                        / _safe_name(str(task["grid_type"]))
                         / f"L{int(task['grid_level'])}"
                         / _safe_name(str(task["space_code"]))
                     )
@@ -243,7 +256,7 @@ def _write_entity_tiles(
                     st_time_granularity = _st_time_granularity(time_granularity)
                     st_key = "|".join(
                         [
-                            "isea4h",
+                            str(task["grid_type"]),
                             str(int(task["grid_level"])),
                             str(task["space_code"]),
                             acq_time,
@@ -252,7 +265,7 @@ def _write_entity_tiles(
                     )
                     if st_key not in st_cache:
                         st_cache[st_key] = sdk.generate_st_code(
-                            grid_type="isea4h",
+                            grid_type=str(task["grid_type"]),
                             level=int(task["grid_level"]),
                             space_code=str(task["space_code"]),
                             timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
@@ -269,7 +282,8 @@ def _write_entity_tiles(
                             "source_asset_path": str(task.get("source_asset_path") or asset_path),
                             "output_path": str(tile_path.resolve()),
                             "acq_time": acq_time,
-                            "grid_type": "isea4h",
+                            "grid_type": str(task["grid_type"]),
+                            "partition_method": "entity",
                             "grid_level": int(task["grid_level"]),
                             "space_code": task["space_code"],
                             "space_code_prefix": str(task["space_code"])[: max(1, int(partition_prefix_len))],
@@ -434,6 +448,7 @@ def _write_entity_tile_chunks_ray(
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
     ray_init_start = time.perf_counter()
+    ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     if ray_address:
         try:
             ray.init(
@@ -658,7 +673,7 @@ def _write_entity_tile_chunks_ray(
     finally:
         for actor in actors:
             ray.kill(actor, no_restart=True)
-        ray.shutdown()
+        shutdown_ray_if_needed(ray, ray_already_initialized)
     return rows, ray_init_elapsed, source_prepare_elapsed, time.perf_counter() - partition_wall_start, source_prepare_worker_elapsed, worker_partition_elapsed
 
 
@@ -721,7 +736,7 @@ def _entity_tile_object_key(row: dict[str, Any], source_path: Path, args: argpar
     date_path = datetime.fromisoformat(str(row["acq_time"]).replace("Z", "+00:00")).strftime("%Y/%m/%d")
     return (
         f"{prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
-        f"scene_id={scene_id}/grid=isea4h/L{grid_level}/space_code={space_code}/"
+        f"scene_id={scene_id}/grid={_safe_name(str(row.get('grid_type') or 'isea4h'))}/L{grid_level}/space_code={space_code}/"
         f"band={band}/version={version}/{source_path.name}"
     )
 
@@ -1069,6 +1084,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
     data_type = _normalize_data_type(getattr(args, "data_type", "optical"))
+    grid_type = _normalize_grid_type(getattr(args, "grid_type", "isea4h"))
 
     source_assets = build_manifest(
         input_dir,
@@ -1085,17 +1101,19 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     requested_level = int(getattr(args, "grid_level", 0) or 0)
     target_pixels = int(getattr(args, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE) or DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
-    inferred_level = requested_level if requested_level > 0 else infer_isea4h_level_for_assets(assets, target_pixels)
+    inferred_level = requested_level if requested_level > 0 else (
+        infer_isea4h_level_for_assets(assets, target_pixels) if grid_type == "isea4h" else 6
+    )
     grid_level = requested_level if requested_level > 0 else inferred_level
 
     grid_tasks = build_grid_tasks_driver(
         assets=assets,
-        grid_type="isea4h",
+        grid_type=grid_type,
         grid_level=grid_level,
         cover_mode=args.cover_mode,
         max_cells_per_asset=0,
     )
-    grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_level, args.cover_mode)
+    grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_type, grid_level, args.cover_mode)
     check_cancelled(args)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1243,8 +1261,9 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "product_family": args.product_family,
         "data_type": data_type,
         "partition_type": "entity",
+        "partition_method": "entity",
         "grid_task_count": len(grid_tasks),
-        "grid_type": "isea4h",
+        "grid_type": grid_type,
         "grid_level": grid_level,
         "inferred_grid_level": inferred_level,
         "requested_grid_level": requested_level or None,
@@ -1291,7 +1310,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local entity partition job for ISEA4H raster tiles")
+    parser = argparse.ArgumentParser(description="Local entity partition job for raster tiles")
     minio = runtime_config.minio_settings()
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--manifest-path", default="")
@@ -1306,6 +1325,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cog-level", type=int, default=0)
     parser.add_argument("--cog-num-threads", default="ALL_CPUS")
     parser.add_argument("--target-crs", default="EPSG:4326")
+    parser.add_argument("--grid-type", default="isea4h", choices=["s2", "tile_matrix", "isea4h"])
     parser.add_argument("--grid-level", type=int, default=0)
     parser.add_argument("--target-pixels-per-hex-edge", type=int, default=DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])

@@ -6,6 +6,7 @@ from typing import Any
 
 DEFAULT_LOGICAL_GRID_LEVEL = 5
 DEFAULT_ISEA4H_GRID_LEVEL = 6
+DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 
 _RESOLUTION_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _RESOLUTION_KEYS = (
@@ -21,21 +22,46 @@ _RESOLUTION_KEYS = (
 )
 
 
+def normalize_partition_method(partition_method: Any, *, grid_type: str | None = None) -> str:
+    method = str(partition_method or "").strip().lower()
+    if method in {"logical", "entity"}:
+        return method
+    return "entity" if str(grid_type or "").lower() == "isea4h" else "logical"
+
+
 def default_grid_level_for_grid_type(grid_type: str | None) -> int:
     return DEFAULT_ISEA4H_GRID_LEVEL if str(grid_type or "").lower() == "isea4h" else DEFAULT_LOGICAL_GRID_LEVEL
+
+
+def default_grid_level_for_partition(
+    grid_type: str | None,
+    partition_method: Any,
+) -> int:
+    method = normalize_partition_method(partition_method, grid_type=grid_type)
+    if method == "entity":
+        return DEFAULT_ENTITY_GRID_LEVEL
+    return default_grid_level_for_grid_type(grid_type)
 
 
 def default_grid_level_for_resolution(
     resolution: Any,
     *,
     grid_type: str | None = None,
+    partition_method: Any = None,
     fallback: int | None = None,
 ) -> int:
+    method = normalize_partition_method(partition_method, grid_type=grid_type)
+    if method == "entity":
+        return fallback if fallback is not None else DEFAULT_ENTITY_GRID_LEVEL
     parsed = _parse_resolution(resolution)
     if parsed is None:
-        return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
-    if str(grid_type or "").lower() == "isea4h":
-        return DEFAULT_ISEA4H_GRID_LEVEL
+        return fallback if fallback is not None else default_grid_level_for_partition(grid_type, method)
+    if str(grid_type or "").lower() == "isea4h" and method == "logical":
+        if parsed < 10:
+            return 8
+        if parsed <= 30:
+            return 7
+        return 6
     if parsed < 10:
         return 8
     if parsed <= 30:
@@ -47,6 +73,7 @@ def default_grid_level_from_assets(
     assets: Iterable[Any] | None,
     *,
     grid_type: str | None = None,
+    partition_method: Any = None,
     fallback: int | None = None,
 ) -> int:
     resolutions: list[float] = [
@@ -57,8 +84,13 @@ def default_grid_level_from_assets(
         if resolution is not None
     ]
     if not resolutions:
-        return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
-    return default_grid_level_for_resolution(min(resolutions), grid_type=grid_type, fallback=fallback)
+        return fallback if fallback is not None else default_grid_level_for_partition(grid_type, partition_method)
+    return default_grid_level_for_resolution(
+        min(resolutions),
+        grid_type=grid_type,
+        partition_method=partition_method,
+        fallback=fallback,
+    )
 
 
 def apply_resolution_grid_defaults(
@@ -75,6 +107,7 @@ def apply_resolution_grid_defaults(
         payload["grid_level"] = default_grid_level_from_assets(
             payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
             grid_type=str(payload.get("grid_type") or "s2"),
+            partition_method=payload.get("partition_method"),
             fallback=fallback_grid_level,
         )
         payload.setdefault("grid_level_mode", "auto")

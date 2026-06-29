@@ -10,8 +10,10 @@ from cube_split.jobs.ray_logical_partition_job import (
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
     _should_run_ingest,
+    parse_args,
     run_logical_partition,
 )
+from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
 
 
@@ -50,11 +52,13 @@ class _FakeActorClass:
 class _FakeRay:
     def __init__(self):
         self.shutdown_calls = 0
+        self._initialized = False
 
     def remote(self, actor_cls):
         return _FakeActorClass(actor_cls)
 
     def init(self, **kwargs):
+        self._initialized = True
         return None
 
     def wait(self, pending, num_returns=1, timeout=1.0):
@@ -65,6 +69,10 @@ class _FakeRay:
 
     def shutdown(self):
         self.shutdown_calls += 1
+        self._initialized = False
+
+    def is_initialized(self):
+        return self._initialized
 
 
 def test_chunk_tasks_for_ray_preserves_order_and_chunk_size():
@@ -80,10 +88,25 @@ def test_resolve_ray_parallelism_caps_by_task_count():
     assert _resolve_ray_parallelism(task_group_count=4, requested_parallelism=2) == 2
 
 
+def test_parse_args_allows_isea4h_grid_type(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "isea4h"])
+    args = parse_args()
+    assert args.grid_type == "isea4h"
+
+
 def test_resolve_ray_parallelism_auto_uses_task_count_ceiling(monkeypatch):
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.os.cpu_count", lambda: 64)
 
     assert _resolve_ray_parallelism(task_group_count=8, requested_parallelism=0) == 8
+
+
+def test_shutdown_ray_if_needed_skips_already_initialized_ray():
+    fake_ray = _FakeRay()
+    fake_ray._initialized = True
+
+    shutdown_ray_if_needed(fake_ray, already_initialized=True)
+
+    assert fake_ray.shutdown_calls == 0
 
 
 def test_ray_runtime_env_passes_source_cache_dir(monkeypatch):
@@ -615,3 +638,12 @@ def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
     assert calls.count(("upload", str(worker_cog_path))) == 1
     assert report["chunk_size"] == 1
     assert report["total_index_rows"] == 2
+
+
+def test_logical_partition_does_not_shutdown_shared_ray(monkeypatch, tmp_path: Path):
+    fake_ray = _FakeRay()
+    fake_ray._initialized = True
+
+    shutdown_ray_if_needed(fake_ray, already_initialized=True)
+
+    assert fake_ray.shutdown_calls == 0

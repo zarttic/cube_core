@@ -22,3 +22,11 @@ def cancel_ray_refs(ray: Any, refs: list[Any]) -> None:
         except Exception:
             pass
 
+
+def shutdown_ray_if_needed(ray: Any, already_initialized: bool) -> None:
+    if already_initialized:
+        return
+    try:
+        ray.shutdown()
+    except Exception:
+        pass

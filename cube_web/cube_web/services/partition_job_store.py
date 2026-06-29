@@ -854,7 +854,7 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["quality_status"] = quality["quality_status"]
         batch["quality_report_id"] = quality.get("quality_report_id")
         batch["quality_failure_reason"] = quality.get("quality_failure_reason")
-        if quality["quality_status"] in {"FAIL", "WARN"}:
+        if quality["quality_status"] == "FAIL":
             reason = quality.get("quality_failure_reason") or f"Quality status is {quality['quality_status']}"
             batch["status"] = "manual_required"
             batch["last_error"] = reason
@@ -1326,7 +1326,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         WHEN target.source_system = 'runtime' THEN source.source_schema
                         ELSE target.source_schema
                       END,
-                      normalized_payload = source.normalized_payload,
+                      normalized_payload = CASE
+                        WHEN target.source_system = 'runtime' THEN source.normalized_payload
+                        ELSE target.normalized_payload
+                      END,
                       max_auto_retries = CASE
                         WHEN target.source_system = 'runtime' THEN source.max_auto_retries
                         ELSE target.max_auto_retries
@@ -1718,8 +1721,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'failed', error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
-                    (error_type, error, task_id),
+                    "UPDATE partition_job_attempts SET status = %s, error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
+                    (status, error_type, error, task_id),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -2063,7 +2066,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
         quality = _quality_result_summary(result)
         if quality is None:
             return
-        if quality["quality_status"] in {"FAIL", "WARN"}:
+        if quality["quality_status"] == "FAIL":
             reason = quality.get("quality_failure_reason") or f"Quality status is {quality['quality_status']}"
             cur.execute(
                 """
@@ -2136,10 +2139,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
 
     def _connect(self):
         try:
-            import psycopg
-        except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
+            from cube_web.services.db_pool import _PostgresPool
+        except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError("PostgreSQL partition job storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn, client_encoding="UTF8")
+        return _PostgresPool.for_dsn(self.dsn).connection()
 
     def _jsonb(self, value: dict[str, Any]):
         from psycopg.types.json import Jsonb
@@ -2385,6 +2388,7 @@ def _normalized_schema_record(schema: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("batch_name", batch_name)
     if data_type in {"optical", "product", "radar"}:
         payload.setdefault("selected_assets", copy.deepcopy(schema.get("assets") or schema.get("selected_assets") or []))
+        payload.setdefault("partition_method", schema.get("partition_method"))
         apply_resolution_grid_defaults(payload, data_type=data_type)
     elif data_type == "carbon":
         payload.setdefault("selected_observations", copy.deepcopy(schema.get("observations") or schema.get("selected_observations") or []))
@@ -2902,7 +2906,7 @@ def _result_implies_ingested(result: dict[str, Any]) -> bool:
             return False
         if value in {"true", "1", "yes"}:
             return True
-    return True
+    return False
 
 
 def _max_auto_retries_value(primary: Any, fallback: Any = None) -> int:
