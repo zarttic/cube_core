@@ -657,6 +657,73 @@ def convert_asset_to_cog(
     )
 
 
+def _prepare_actor_cog_groups(
+    task_groups: list[list[dict]],
+    *,
+    assets_by_path: dict[str, dict],
+    local_cog_by_source: dict[str, str],
+    converted_asset_by_source: dict[str, dict[str, Any]],
+    cog_input_dir: Path,
+    cog_overwrite: bool,
+    cog_options: dict[str, str],
+    target_crs: str,
+    source_options: dict[str, Any],
+    timing: dict[str, float] | None = None,
+) -> tuple[list[list[dict]], set[str]]:
+    prepared_groups: list[list[dict]] = []
+    used_local_cog_paths: set[str] = set()
+    for group in task_groups:
+        if not group:
+            continue
+        source_path = str(group[0]["asset_path"])
+        local_cog_path = local_cog_by_source.get(source_path)
+        if local_cog_path is None:
+            asset = asset_record_from_dict(assets_by_path[source_path])
+            converted = convert_asset_to_cog(
+                asset,
+                cog_input_dir=cog_input_dir,
+                overwrite=cog_overwrite,
+                creation_options=cog_options,
+                target_crs=target_crs or None,
+                source_options=source_options,
+                timing=timing,
+            )
+            local_cog_path = str(converted.path)
+            local_cog_by_source[source_path] = local_cog_path
+            converted_asset_by_source[source_path] = asset_record_to_dict(converted)
+        elif timing is not None:
+            timing["cog_cache_hit_count"] = timing.get("cog_cache_hit_count", 0.0) + 1.0
+        used_local_cog_paths.add(local_cog_path)
+        prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
+    return prepared_groups, used_local_cog_paths
+
+
+def _upload_actor_cogs(
+    *,
+    local_cog_by_source: dict[str, str],
+    converted_asset_by_source: dict[str, dict[str, Any]],
+    remote_cog_by_local_path: dict[str, str],
+    used_local_cog_paths: set[str],
+    cog_upload_options: dict[str, Any],
+    timing: dict[str, float] | None = None,
+) -> None:
+    for source_path, local_cog_path in local_cog_by_source.items():
+        if local_cog_path not in used_local_cog_paths or local_cog_path in remote_cog_by_local_path:
+            continue
+        converted = asset_record_from_dict(converted_asset_by_source[source_path])
+        upload_start = time.perf_counter()
+        remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
+            converted,
+            Path(local_cog_path),
+            cog_upload_options,
+        )
+        if timing is not None:
+            timing["cog_upload_elapsed_sec"] = timing.get("cog_upload_elapsed_sec", 0.0) + (
+                time.perf_counter() - upload_start
+            )
+            timing["cog_upload_count"] = timing.get("cog_upload_count", 0.0) + 1.0
+
+
 def _dataset_bounds_wgs84(ds: rasterio.DatasetReader) -> tuple[float, float, float, float]:
     b = ds.bounds
     if ds.crs and str(ds.crs).upper() != "EPSG:4326":

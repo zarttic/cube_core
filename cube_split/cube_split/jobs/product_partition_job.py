@@ -131,7 +131,7 @@ def _partition_groups_ray(
     source_options: dict,
     cog_upload_options: dict,
     cancellation_check: Any | None = None,
-) -> tuple[list[dict], float]:
+) -> tuple[list[dict], float, dict[str, float]]:
     chunk_size = max((len(chunk) for chunk in task_chunks), default=1)
     task_groups = [group for chunk in task_chunks for group in chunk]
     task_chunks_by_actor = _chunk_task_groups_by_actor(task_groups, parallelism, chunk_size)
@@ -175,7 +175,7 @@ def _partition_groups_ray(
             target_crs_value: str,
             source_options_value: dict,
             cog_upload_options_value: dict,
-        ) -> list[dict]:
+        ) -> dict[str, Any]:
             import os
             from pathlib import Path
 
@@ -189,10 +189,8 @@ def _partition_groups_ray(
 
             from cube_split.jobs.product_partition_job import _process_group_chunk
             from cube_split.jobs.ray_partition_core import (
-                asset_record_from_dict,
-                asset_record_to_dict,
-                convert_asset_to_cog,
-                upload_cog_to_minio,
+                _prepare_actor_cog_groups,
+                _upload_actor_cogs,
             )
 
             env_options = dict(cog_upload_options_value or source_options_value or {})
@@ -203,47 +201,47 @@ def _partition_groups_ray(
             if env_options.get("secret_key"):
                 os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
-            prepared_groups: list[list[dict]] = []
-            used_local_cog_paths: set[str] = set()
+            stats: dict[str, float] = {
+                "source_resolve_elapsed_sec": 0.0,
+                "cog_write_elapsed_sec": 0.0,
+                "cog_upload_elapsed_sec": 0.0,
+                "partition_rows_elapsed_sec": 0.0,
+                "cog_write_count": 0.0,
+                "cog_cache_hit_count": 0.0,
+                "cog_upload_count": 0.0,
+            }
             worker_cog_root = Path(cog_input_dir_value) / f"ray_worker_{os.getpid()}"
-            for group in task_groups:
-                if not group:
-                    continue
-                source_path = str(group[0]["asset_path"])
-                local_cog_path = self._local_cog_by_source.get(source_path)
-                if local_cog_path is None:
-                    asset = asset_record_from_dict(assets_by_path_value[source_path])
-                    converted = convert_asset_to_cog(
-                        asset,
-                        cog_input_dir=worker_cog_root,
-                        overwrite=cog_overwrite_value,
-                        creation_options=cog_options_value,
-                        target_crs=target_crs_value or None,
-                        source_options=source_options_value,
-                    )
-                    local_cog_path = str(converted.path)
-                    self._local_cog_by_source[source_path] = local_cog_path
-                    self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
-                used_local_cog_paths.add(local_cog_path)
-                prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
-
+            prepared_groups, used_local_cog_paths = _prepare_actor_cog_groups(
+                task_groups,
+                assets_by_path=assets_by_path_value,
+                local_cog_by_source=self._local_cog_by_source,
+                converted_asset_by_source=self._converted_asset_by_source,
+                cog_input_dir=worker_cog_root,
+                cog_overwrite=cog_overwrite_value,
+                cog_options=cog_options_value,
+                target_crs=target_crs_value,
+                source_options=source_options_value,
+                timing=stats,
+            )
+            partition_rows_start = time.perf_counter()
             rows = _process_group_chunk(prepared_groups, include_sample_mean_value)
-            for source_path, local_cog_path in self._local_cog_by_source.items():
-                if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
-                    continue
-                converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
-                self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
-                    converted,
-                    Path(local_cog_path),
-                    cog_upload_options_value,
-                )
+            stats["partition_rows_elapsed_sec"] += time.perf_counter() - partition_rows_start
+            _upload_actor_cogs(
+                local_cog_by_source=self._local_cog_by_source,
+                converted_asset_by_source=self._converted_asset_by_source,
+                remote_cog_by_local_path=self._remote_cog_by_local_path,
+                used_local_cog_paths=used_local_cog_paths,
+                cog_upload_options=cog_upload_options_value,
+                timing=stats,
+            )
             for row in rows:
                 row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
-            return rows
+            return {"rows": rows, "stats": stats}
 
     actor_cls = ProductTaskProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
     rows: list[dict] = []
+    ray_worker_stats: dict[str, float] = {}
 
     def submit_chunk(actor_idx: int, chunk_idx: int):
         return actors[actor_idx].process_groups.remote(
@@ -279,7 +277,13 @@ def _partition_groups_ray(
                 continue
             for ready_ref in ready:
                 actor_idx = pending_actor_by_ref.pop(ready_ref)
-                rows.extend(ray.get(ready_ref))
+                result = ray.get(ready_ref)
+                if isinstance(result, dict) and "rows" in result:
+                    rows.extend(result["rows"])
+                    for key, value in dict(result.get("stats") or {}).items():
+                        ray_worker_stats[key] = ray_worker_stats.get(key, 0.0) + float(value)
+                else:
+                    rows.extend(result)
                 if next_chunk_by_actor[actor_idx] < len(task_chunks_by_actor[actor_idx]):
                     if cancellation_check is not None and cancellation_check():
                         raise PartitionCancelledError("Partition task cancelled")
@@ -292,7 +296,7 @@ def _partition_groups_ray(
         raise
     finally:
         shutdown_ray_if_needed(ray, ray_already_initialized)
-    return rows, ray_init_elapsed
+    return rows, ray_init_elapsed, ray_worker_stats
 
 
 def _should_run_ingest(args: argparse.Namespace) -> bool:
@@ -423,6 +427,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
 
     worker_count = max(1, parallelism)
     ray_init_elapsed = 0.0
+    ray_worker_stats: dict[str, float] = {}
     start = time.perf_counter()
     if not grouped_tasks:
         out_rows = []
@@ -458,7 +463,11 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         }
         if "cancellation_check" in signature(_partition_groups_ray).parameters:
             partition_kwargs["cancellation_check"] = getattr(args, "cancellation_check", None)
-        out_rows, ray_init_elapsed = _partition_groups_ray(**partition_kwargs)
+        partition_result = _partition_groups_ray(**partition_kwargs)
+        out_rows = partition_result[0]
+        ray_init_elapsed = partition_result[1]
+        if len(partition_result) > 2:
+            ray_worker_stats = dict(partition_result[2] or {})
     else:
         out_rows = _partition_groups_thread(grouped_tasks, worker_count, bool(args.sample_mean))
     partition_elapsed = time.perf_counter() - start
@@ -508,6 +517,13 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
         "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
         "cog_elapsed_sec": round(cog_elapsed, 3),
+        "worker_source_resolve_elapsed_sec": round(ray_worker_stats.get("source_resolve_elapsed_sec", 0.0), 3),
+        "worker_cog_write_elapsed_sec": round(ray_worker_stats.get("cog_write_elapsed_sec", 0.0), 3),
+        "worker_cog_upload_elapsed_sec": round(ray_worker_stats.get("cog_upload_elapsed_sec", 0.0), 3),
+        "worker_partition_rows_elapsed_sec": round(ray_worker_stats.get("partition_rows_elapsed_sec", 0.0), 3),
+        "worker_cog_write_count": int(ray_worker_stats.get("cog_write_count", 0.0)),
+        "worker_cog_cache_hit_count": int(ray_worker_stats.get("cog_cache_hit_count", 0.0)),
+        "worker_cog_upload_count": int(ray_worker_stats.get("cog_upload_count", 0.0)),
         "partition_elapsed_sec": round(partition_elapsed, 3),
         "ingest_elapsed_sec": round(ingest_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
