@@ -249,7 +249,7 @@ def _write_entity_tiles(
     clip_mode = _normalize_entity_clip_mode(clip_mode)
     sdk = CubeEncoderSDK()
     st_cache: dict[str, str] = {}
-    geometry_cache: dict[tuple[str, str], dict[str, Any]] = {}
+    geometry_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
     upload_pool = None
     upload_futures = []
@@ -284,6 +284,11 @@ def _write_entity_tiles(
             open_start = time.perf_counter()
             with rasterio.open(local_asset_path) as ds:
                 _add_timing(timing, "entity_dataset_open_elapsed_sec", time.perf_counter() - open_start)
+                base_profile = ds.profile.copy()
+                for key in ("compress", "predictor", "zlevel", "level", "blockxsize", "blockysize"):
+                    base_profile.pop(key, None)
+                crs_key = ds.crs.to_string() if ds.crs else ""
+                exact_clip_cache: dict[tuple[str, str], tuple[Any, Any, np.ndarray]] = {}
                 ds_bounds_wgs84: tuple[float, float, float, float] | None = None
                 ds_wgs84_to_native: Transformer | None = None
                 if clip_mode == "bbox":
@@ -297,21 +302,44 @@ def _write_entity_tiles(
                     _add_timing(timing, "entity_dataset_bounds_elapsed_sec", time.perf_counter() - bounds_start)
                 for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
                     geom = None
+                    exact_clip = None
                     if clip_mode == "exact":
-                        geom_key = (str(task["grid_type"]), str(task["space_code"]))
+                        geom_key = (crs_key, str(task["grid_type"]), str(task["space_code"]))
                         geom = geometry_cache.get(geom_key)
                         if geom is None:
                             geom_start = time.perf_counter()
                             geom = _cell_geometry_for_dataset(
                                 sdk,
                                 ds,
-                                grid_type=geom_key[0],
-                                space_code=geom_key[1],
+                                grid_type=geom_key[1],
+                                space_code=geom_key[2],
                             )
                             geometry_cache[geom_key] = geom
                             _add_timing(timing, "entity_geometry_elapsed_sec", time.perf_counter() - geom_start)
                         else:
                             _add_timing(timing, "entity_geometry_cache_hit_count", 1.0)
+                        clip_key = (str(task["grid_type"]), str(task["space_code"]))
+                        exact_clip = exact_clip_cache.get(clip_key)
+                        if exact_clip is None:
+                            mask_start = time.perf_counter()
+                            try:
+                                shape_mask, out_transform, win = rasterio.mask.raster_geometry_mask(
+                                    ds,
+                                    [geom],
+                                    crop=True,
+                                )
+                            except ValueError:
+                                _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - mask_start)
+                                _add_timing(timing, "entity_tile_empty_count", 1.0)
+                                continue
+                            _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - mask_start)
+                            if shape_mask.size == 0 or bool(shape_mask.all()):
+                                _add_timing(timing, "entity_tile_empty_count", 1.0)
+                                continue
+                            exact_clip = (win, out_transform, shape_mask)
+                            exact_clip_cache[clip_key] = exact_clip
+                        else:
+                            _add_timing(timing, "entity_tile_mask_cache_hit_count", 1.0)
                     else:
                         assert ds_bounds_wgs84 is not None
                         inter = _bbox_intersection(
@@ -334,18 +362,17 @@ def _write_entity_tiles(
                         nodata = _nodata_value(ds, band_index)
                         read_start = time.perf_counter()
                         if clip_mode == "exact":
-                            try:
-                                data, out_transform = rasterio.mask.mask(
-                                    ds,
-                                    [geom],
-                                    crop=True,
-                                    filled=False,
-                                    indexes=band_index,
-                                )
-                            except ValueError:
-                                _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - read_start)
-                                continue
-                            _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - read_start)
+                            assert exact_clip is not None
+                            win, out_transform, shape_mask = exact_clip
+                            data = ds.read(band_index, window=win, masked=True)
+                            _add_timing(timing, "entity_tile_read_elapsed_sec", time.perf_counter() - read_start)
+                            apply_mask_start = time.perf_counter()
+                            data = np.ma.array(
+                                data,
+                                mask=np.logical_or(np.ma.getmaskarray(data), shape_mask),
+                                copy=False,
+                            )
+                            _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - apply_mask_start)
                         else:
                             data = ds.read(band_index, window=win, masked=True)
                             out_transform = ds.window_transform(win)
@@ -371,9 +398,7 @@ def _write_entity_tiles(
                         )
                         tile_dir.mkdir(parents=True, exist_ok=True)
                         tile_path = tile_dir / f"{_safe_name(band_name)}.tif"
-                        profile = ds.profile.copy()
-                        for key in ("compress", "predictor", "zlevel", "level", "blockxsize", "blockysize"):
-                            profile.pop(key, None)
+                        profile = base_profile.copy()
                         profile.update(
                             driver="GTiff",
                             height=int(filled.shape[-2]),
@@ -1510,6 +1535,8 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "worker_entity_dataset_bounds_elapsed_sec": round(float(worker_stats.get("entity_dataset_bounds_elapsed_sec", 0.0)), 3),
         "worker_entity_tile_read_elapsed_sec": round(float(worker_stats.get("entity_tile_read_elapsed_sec", 0.0)), 3),
         "worker_entity_tile_mask_elapsed_sec": round(float(worker_stats.get("entity_tile_mask_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_mask_cache_hit_count": int(worker_stats.get("entity_tile_mask_cache_hit_count", 0.0)),
+        "worker_entity_tile_empty_count": int(worker_stats.get("entity_tile_empty_count", 0.0)),
         "worker_entity_tile_write_elapsed_sec": round(float(worker_stats.get("entity_tile_write_elapsed_sec", 0.0)), 3),
         "worker_entity_writer_wall_elapsed_sec": round(float(worker_stats.get("entity_writer_wall_elapsed_sec", 0.0)), 3),
         "worker_entity_tile_upload_elapsed_sec": round(float(worker_stats.get("entity_tile_upload_elapsed_sec", 0.0)), 3),

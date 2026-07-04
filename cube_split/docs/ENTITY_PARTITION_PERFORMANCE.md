@@ -57,7 +57,34 @@
 | ZSTD + fast upload，上传未重叠 | L4 | 332 | 16.66s | 18.83s | 3.98s | 74.17s |
 | ZSTD + 上传重叠 | L4 | 332 | 8.83s | 19.10s | 4.65s | 43.58s |
 
-结论：
+### 3.1 worker 4 CPU/read/mask/write 复测
+
+本轮聚焦 exact clip 默认模式下的 CPU/read/mask/write 阶段，不改变实体剖分必须输出小 GeoTIFF
+瓦片的约束。测试仍使用上面的两个山东光学源资产，Ray 后端、MinIO 瓦片输出、`ray_parallelism=8`、
+`minio_upload_workers=8`、`metadata_backend=none`，每次运行使用唯一 `minio_prefix`。
+
+改动前 exact 路径每个 band 调一次 `rasterio.mask.mask`，`worker_entity_tile_mask_elapsed_sec`
+同时包含窗口计算、读取和 polygon mask。改动后 exact 路径每个 tile 先计算一次
+`raster_geometry_mask`，再按 band 窗口读取并复用同一个 2D mask，因此新增
+`worker_entity_tile_read_elapsed_sec` 的真实读数；对比 CPU 裁剪时应看 read + mask。
+
+| 场景 | 层级 | 小瓦片数 | 总耗时 | worker read | worker mask | read+mask | worker write | worker upload |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before，`cb618e9` | L3 | 62 | 5.57s | 0.00s | 18.31s | 18.31s | 2.48s | 18.23s |
+| after，手动 window/read/mask | L3 | 62 | 7.98s | 13.33s | 1.29s | 14.63s | 2.49s | 40.14s |
+| before，`cb618e9` | L4 | 332 | 11.14s | 0.00s | 18.79s | 18.79s | 4.51s | 60.90s |
+| after，手动 window/read/mask | L4 | 332 | 8.70s | 14.44s | 1.40s | 15.84s | 4.87s | 42.92s |
+
+整体结论：
+
+- exact CPU 裁剪阶段有收益：L3 read+mask 约 18.31s -> 14.63s，L4 约 18.79s -> 15.84s。
+- L4 端到端也下降：11.14s -> 8.70s。L3 单次端到端变慢主要来自 MinIO upload 聚合值从
+  18.23s 抖到 40.14s，而不是 read/mask 回退。
+- 新增空 tile 快速路径：`raster_geometry_mask` 结果全空时跳过 band 读取和写出。上述 after
+  运行分别跳过 L3 18 个、L4 146 个空 tile。
+- 默认仍保持 `entity_clip_mode=exact`。`bbox` 仅保留为实验对比，不作为默认模式。
+
+历史结论：
 
 - 实体剖分不能简单把 actor 数限制到资产数。L3 严格每资产一个 actor 后从 10.99s 变成 19.62s，明显变慢。
 - 输出 profile 是有效优化点。把小瓦片从继承源 LZW 条带改为 ZSTD tiled 后，L3 从约 10.99s 降到约 6.69s。
@@ -162,6 +189,8 @@ mask / write one tile
 - `worker_entity_dataset_bounds_elapsed_sec`
 - `worker_entity_tile_read_elapsed_sec`
 - `worker_entity_tile_mask_elapsed_sec`
+- `worker_entity_tile_mask_cache_hit_count`
+- `worker_entity_tile_empty_count`
 - `worker_entity_tile_write_elapsed_sec`
 - `worker_entity_writer_wall_elapsed_sec`
 - `worker_entity_tile_upload_elapsed_sec`
