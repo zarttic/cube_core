@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import cube_split.ingest.ray_ingest_job as ray_ingest_job
 from cube_split.ingest.ray_ingest_job import (
+    CubeFactRecord,
+    RawAssetRecord,
     build_cube_fact_records,
     build_raw_asset_records,
     ensure_tables,
@@ -14,6 +16,8 @@ from cube_split.ingest.ray_ingest_job import (
     materialize_cog_assets,
     run_ingest,
     upload_assets_to_minio,
+    upsert_cube_facts_postgres,
+    upsert_raw_assets_postgres,
 )
 
 
@@ -292,6 +296,69 @@ def test_run_ingest_reports_probe_metrics_per_cube_fact(monkeypatch, tmp_path: P
     assert {metric.attributes["cube.band"] for metric in captured} == {"b04", "b08"}
     assert {metric.attributes["cube.space_code"] for metric in captured} == {"35f04"}
     assert {metric.attributes["cube.target_table"] for metric in captured} == {"rs_cube_cell_fact"}
+
+
+def test_postgres_upserts_batch_merge_rows() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, tuple(params)))
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    raw_records = [
+        RawAssetRecord("dataset", "sensor", f"scene-{idx}", "b04", "2026-04-21T00:00:00Z", f"s3://cube/a{idx}.tif", "v1", "job")
+        for idx in range(3)
+    ]
+    cube_records = [
+        CubeFactRecord(
+            "s2",
+            7,
+            f"35f0{idx}",
+            "20260421",
+            "b04",
+            f"s2:7:35f0{idx}:20260421",
+            116.1,
+            39.8,
+            116.2,
+            39.9,
+            f"s3://cube/a{idx}.tif#window=0,0,256,256",
+            1,
+            '{"winner_scene_id":"scene"}',
+            "best_quality_wins",
+            "v1",
+            "job",
+        )
+        for idx in range(3)
+    ]
+
+    raw_conn = FakeConn()
+    cube_conn = FakeConn()
+
+    upsert_raw_assets_postgres(raw_conn, raw_records, batch_size=2)
+    upsert_cube_facts_postgres(cube_conn, cube_records, batch_size=2)
+
+    assert len(raw_conn.cursor_obj.calls) == 2
+    assert len(cube_conn.cursor_obj.calls) == 2
+    assert "VALUES" in raw_conn.cursor_obj.calls[0][0]
+    assert "VALUES" in cube_conn.cursor_obj.calls[0][0]
+    assert len(raw_conn.cursor_obj.calls[0][1]) == 16
+    assert len(raw_conn.cursor_obj.calls[1][1]) == 8
+    assert len(cube_conn.cursor_obj.calls[0][1]) == 32
+    assert len(cube_conn.cursor_obj.calls[1][1]) == 16
 
 
 def test_load_rows_rejects_empty_file(tmp_path: Path):

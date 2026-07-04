@@ -849,6 +849,69 @@ def test_run_product_ingest_creates_product_tables(tmp_path: Path):
     assert "#window=" in facts[0][2]
 
 
+def test_product_postgres_upserts_batch_merge_rows() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, tuple(params)))
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    asset_records = [
+        product_ingest_job.ProductAssetRecord("dataset", "product", f"scene-{idx}", 1980, "2026-04-21T00:00:00Z", f"s3://cube/p{idx}.tif", "v1", "job")
+        for idx in range(3)
+    ]
+    fact_records = [
+        product_ingest_job.ProductFactRecord(
+            "dataset",
+            "product",
+            1980,
+            "product_value",
+            "s2",
+            7,
+            f"35f0{idx}",
+            "1980",
+            f"s2:7:35f0{idx}:1980",
+            116.1,
+            39.8,
+            116.2,
+            39.9,
+            f"s3://cube/p{idx}.tif#window=0,0,256,256",
+            1.0,
+            "product_v1",
+            "job",
+        )
+        for idx in range(3)
+    ]
+    asset_conn = FakeConn()
+    fact_conn = FakeConn()
+
+    product_ingest_job.upsert_product_assets_postgres(asset_conn, asset_records, batch_size=2)
+    product_ingest_job.upsert_product_facts_postgres(fact_conn, fact_records, batch_size=2)
+
+    assert len(asset_conn.cursor_obj.calls) == 2
+    assert len(fact_conn.cursor_obj.calls) == 2
+    assert "VALUES" in asset_conn.cursor_obj.calls[0][0]
+    assert "VALUES" in fact_conn.cursor_obj.calls[0][0]
+    assert len(asset_conn.cursor_obj.calls[0][1]) == 16
+    assert len(asset_conn.cursor_obj.calls[1][1]) == 8
+    assert len(fact_conn.cursor_obj.calls[0][1]) == 34
+    assert len(fact_conn.cursor_obj.calls[1][1]) == 17
+
+
 def test_run_product_ingest_reports_probe_metrics(monkeypatch, tmp_path: Path):
     run_dir = tmp_path / "run_probe"
     run_dir.mkdir()

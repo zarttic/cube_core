@@ -115,6 +115,7 @@ def confirm_optical_ingest(payload: dict[str, Any]) -> dict[str, Any]:
         minio_prefix=str(payload.get("minio_prefix") or "cube/raw"),
         minio_secure=bool(payload.get("minio_secure", False)),
         minio_upload_workers=int(payload.get("minio_upload_workers") or 8),
+        postgres_batch_size=int(payload.get("postgres_batch_size") or 1000),
         cog_output_root=str(Path("/tmp") / "cube_web_ingest_demo" / "cog"),
         cog_materialize_mode="symlink",
     )

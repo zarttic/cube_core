@@ -47,6 +47,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "minio_prefix": "cube/entity",
             "minio_secure": False,
             "minio_upload_workers": 8,
+            "postgres_batch_size": 1000,
         }
     },
     "quality": {
@@ -222,6 +223,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     ingest["minio_prefix"] = _text_value(ingest.get("minio_prefix"), "minio_prefix")
     ingest["minio_secure"] = bool(ingest.get("minio_secure", False))
     ingest["minio_upload_workers"] = _int_value(ingest.get("minio_upload_workers"), "minio_upload_workers", minimum=1)
+    ingest["postgres_batch_size"] = _int_value(ingest.get("postgres_batch_size"), "postgres_batch_size", minimum=1)
 
     quality = merged["quality"]["optical"]
     quality["target_crs"] = _text_value(quality.get("target_crs"), "quality.target_crs")
