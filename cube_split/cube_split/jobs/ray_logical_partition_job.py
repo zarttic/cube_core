@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cog-overwrite", action="store_true", help="Force reconvert source TIF files to COG")
     parser.add_argument("--cog-workers", type=int, default=0, help="Parallel workers for TIF->COG conversion (0 means auto)")
-    parser.add_argument("--cog-compress", default="LZW", choices=["LZW", "DEFLATE", "ZSTD"], help="COG compression type")
+    parser.add_argument("--cog-compress", default="LZW", choices=["NONE", "LZW", "DEFLATE", "ZSTD"], help="COG compression type")
     parser.add_argument("--cog-predictor", type=int, default=2, help="COG predictor (0 disables predictor option)")
     parser.add_argument("--cog-level", type=int, default=0, help="COG compression level (0 means driver default)")
     parser.add_argument(
@@ -150,6 +150,33 @@ def _chunk_tasks_for_ray(tasks: list[Any], chunk_size: int) -> list[list[Any]]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be > 0")
     return [tasks[idx : idx + chunk_size] for idx in range(0, len(tasks), chunk_size)]
+
+
+def _resolve_ray_actor_parallelism(task_groups: list[list[dict]], requested_parallelism: int) -> int:
+    parallelism = _resolve_ray_parallelism(len(task_groups), requested_parallelism)
+    asset_count = len({str(group[0]["asset_path"]) for group in task_groups if group})
+    return min(parallelism, max(1, asset_count))
+
+
+def _chunk_task_groups_by_actor(
+    task_groups: list[list[dict]],
+    parallelism: int,
+    chunk_size: int,
+) -> list[list[list[list[dict]]]]:
+    if parallelism <= 0:
+        raise ValueError("parallelism must be > 0")
+    buckets: list[list[list[dict]]] = [[] for _ in range(parallelism)]
+    actor_by_asset: dict[str, int] = {}
+    for group in task_groups:
+        if not group:
+            continue
+        asset_path = str(group[0]["asset_path"])
+        actor_idx = actor_by_asset.get(asset_path)
+        if actor_idx is None:
+            actor_idx = len(actor_by_asset) % parallelism
+            actor_by_asset[asset_path] = actor_idx
+        buckets[actor_idx].append(group)
+    return [_chunk_tasks_for_ray(bucket, chunk_size) if bucket else [] for bucket in buckets]
 
 
 def _resolve_ray_parallelism(task_group_count: int, requested_parallelism: int) -> int:
@@ -378,9 +405,13 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     grouped_tasks = _group_tasks_for_local_processing(task_rows, split_by_space_prefix=(backend == "ray"))
     if not grouped_tasks:
         raise RuntimeError("No partition task groups produced after task preparation")
-    parallelism = _resolve_ray_parallelism(len(grouped_tasks), args.ray_parallelism)
+    if backend == "ray":
+        parallelism = _resolve_ray_actor_parallelism(grouped_tasks, args.ray_parallelism)
+    else:
+        parallelism = _resolve_ray_parallelism(len(grouped_tasks), args.ray_parallelism)
     chunk_size = _resolve_ray_chunk_size(len(grouped_tasks), parallelism, args.chunk_size)
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
+    task_chunks_by_actor = _chunk_task_groups_by_actor(grouped_tasks, parallelism, chunk_size) if backend == "ray" else []
     skip_verify = args.skip_verify or args.timing_mode
     check_cancelled(args)
 
@@ -394,6 +425,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     out_rows: list[dict] = []
     ray = None
     ray_already_initialized = False
+    ray_worker_stats: dict[str, float] = {}
     try:
         if backend == "ray":
             ray = _load_ray()
@@ -446,8 +478,9 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     target_crs_value: str,
                     source_options_value: dict[str, Any],
                     cog_upload_options_value: dict[str, Any],
-                ) -> list[dict]:
+                ) -> dict[str, Any]:
                     import os
+                    import time
                     from pathlib import Path
 
                     _prepend_sys_paths(
@@ -476,6 +509,15 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
                     prepared_groups: list[list[dict]] = []
                     used_local_cog_paths: set[str] = set()
+                    stats: dict[str, float] = {
+                        "source_resolve_elapsed_sec": 0.0,
+                        "cog_write_elapsed_sec": 0.0,
+                        "cog_upload_elapsed_sec": 0.0,
+                        "partition_rows_elapsed_sec": 0.0,
+                        "cog_write_count": 0.0,
+                        "cog_cache_hit_count": 0.0,
+                        "cog_upload_count": 0.0,
+                    }
                     worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
                     for group in task_groups:
                         if not group:
@@ -484,6 +526,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                         local_cog_path = self._local_cog_by_source.get(source_path)
                         if local_cog_path is None:
                             asset = asset_record_from_dict(assets_by_path_value[source_path])
+                            convert_timing: dict[str, float] = {}
                             converted = convert_asset_to_cog(
                                 asset,
                                 cog_input_dir=worker_cog_root,
@@ -491,28 +534,39 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                                 creation_options=cog_options_value,
                                 target_crs=target_crs_value or None,
                                 source_options=source_options_value,
+                                timing=convert_timing,
                             )
+                            for key, value in convert_timing.items():
+                                stats[key] = stats.get(key, 0.0) + float(value)
                             local_cog_path = str(converted.path)
                             self._local_cog_by_source[source_path] = local_cog_path
                             self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
                         used_local_cog_paths.add(local_cog_path)
                         prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
 
-                    rows_out: list[dict] = []
-                    for group in prepared_groups:
-                        rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
+                    prepared_rows = [row for group in prepared_groups for row in group]
+                    partition_rows_start = time.perf_counter()
+                    rows_out = _process_local_task_group(
+                        prepared_rows,
+                        time_granularity,
+                        include_sample_mean=include_sample_mean,
+                    )
+                    stats["partition_rows_elapsed_sec"] += time.perf_counter() - partition_rows_start
                     for source_path, local_cog_path in self._local_cog_by_source.items():
                         if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
                             continue
                         converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
+                        upload_start = time.perf_counter()
                         self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
                             converted,
                             Path(local_cog_path),
                             cog_upload_options_value,
                         )
+                        stats["cog_upload_elapsed_sec"] += time.perf_counter() - upload_start
+                        stats["cog_upload_count"] += 1.0
                     for row in rows_out:
                         row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
-                    return rows_out
+                    return {"rows": rows_out, "stats": stats}
 
             actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
             actors = [actor_cls.remote() for _ in range(parallelism)]
@@ -524,9 +578,9 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                 "secure": bool(getattr(args, "minio_secure", False)),
             }
 
-            def submit_chunk(idx: int, actor_idx: int):
+            def submit_chunk(actor_idx: int, chunk_idx: int):
                 return actors[actor_idx].process_groups.remote(
-                    task_chunks[idx],
+                    task_chunks_by_actor[actor_idx][chunk_idx],
                     args.time_granularity,
                     include_sample_mean,
                     assets_by_path,
@@ -554,14 +608,15 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             pending = []
             pending_actor_by_ref: dict[Any, int] = {}
             try:
-                next_idx = 0
-                while next_idx < len(task_chunks) and len(pending) < parallelism:
+                next_chunk_by_actor = [0 for _ in range(parallelism)]
+                for actor_idx, actor_chunks in enumerate(task_chunks_by_actor):
+                    if not actor_chunks:
+                        continue
                     check_cancelled(args)
-                    actor_idx = next_idx % parallelism
-                    ref = submit_chunk(next_idx, actor_idx)
+                    ref = submit_chunk(actor_idx, 0)
                     pending.append(ref)
                     pending_actor_by_ref[ref] = actor_idx
-                    next_idx += 1
+                    next_chunk_by_actor[actor_idx] = 1
                 while pending:
                     check_cancelled(args)
                     ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
@@ -569,13 +624,19 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                         continue
                     for ready_ref in ready:
                         actor_idx = pending_actor_by_ref.pop(ready_ref)
-                        out_rows.extend(ray.get(ready_ref))
-                        if next_idx < len(task_chunks):
+                        result = ray.get(ready_ref)
+                        if isinstance(result, dict) and "rows" in result:
+                            out_rows.extend(result["rows"])
+                            for key, value in dict(result.get("stats") or {}).items():
+                                ray_worker_stats[key] = ray_worker_stats.get(key, 0.0) + float(value)
+                        else:
+                            out_rows.extend(result)
+                        if next_chunk_by_actor[actor_idx] < len(task_chunks_by_actor[actor_idx]):
                             check_cancelled(args)
-                            ref = submit_chunk(next_idx, actor_idx)
+                            ref = submit_chunk(actor_idx, next_chunk_by_actor[actor_idx])
                             pending.append(ref)
                             pending_actor_by_ref[ref] = actor_idx
-                            next_idx += 1
+                            next_chunk_by_actor[actor_idx] += 1
             except PartitionCancelledError:
                 cancel_ray_refs(ray, pending)
                 raise
@@ -586,10 +647,8 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
             from cube_split.jobs.ray_partition_core import _process_local_task_group
 
             def process_chunk(chunk: list[list[dict]]) -> list[dict]:
-                rows_out: list[dict] = []
-                for group in chunk:
-                    rows_out.extend(_process_local_task_group(group, args.time_granularity, include_sample_mean=include_sample_mean))
-                return rows_out
+                rows = [row for group in chunk for row in group]
+                return _process_local_task_group(rows, args.time_granularity, include_sample_mean=include_sample_mean)
 
             with ThreadPoolExecutor(max_workers=parallelism) as pool:
                 for rows in pool.map(process_chunk, task_chunks):
@@ -674,6 +733,13 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
         "minio_prefix": str(getattr(args, "minio_prefix", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
         "cog_elapsed_sec": round(cog_elapsed, 3),
+        "worker_source_resolve_elapsed_sec": round(ray_worker_stats.get("source_resolve_elapsed_sec", 0.0), 3),
+        "worker_cog_write_elapsed_sec": round(ray_worker_stats.get("cog_write_elapsed_sec", 0.0), 3),
+        "worker_cog_upload_elapsed_sec": round(ray_worker_stats.get("cog_upload_elapsed_sec", 0.0), 3),
+        "worker_partition_rows_elapsed_sec": round(ray_worker_stats.get("partition_rows_elapsed_sec", 0.0), 3),
+        "worker_cog_write_count": int(ray_worker_stats.get("cog_write_count", 0.0)),
+        "worker_cog_cache_hit_count": int(ray_worker_stats.get("cog_cache_hit_count", 0.0)),
+        "worker_cog_upload_count": int(ray_worker_stats.get("cog_upload_count", 0.0)),
         "partition_elapsed_sec": round(elapsed, 3),
         "ingest_elapsed_sec": round(ingest_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),

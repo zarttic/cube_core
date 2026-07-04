@@ -16,7 +16,7 @@ import numpy as np
 import rasterio
 import rasterio.mask
 from grid_core.sdk import CubeEncoderSDK
-from pyproj import Geod
+from pyproj import Geod, Transformer
 from rasterio.warp import transform_geom
 
 from cube_split import runtime_config
@@ -40,6 +40,9 @@ from cube_split.jobs.ray_partition_core import (
     _local_file_identity,
     _object_identity,
     _read_identity_sidecar,
+    _bbox_intersection,
+    _safe_window_from_bounds,
+    _wgs84_to_dataset_bounds,
     _write_identity_sidecar,
     resolve_asset_source_path,
     upload_source_assets_to_minio,
@@ -67,6 +70,13 @@ def _normalize_grid_type(value: Any) -> str:
     if grid_type not in {"s2", "tile_matrix", "isea4h"}:
         raise ValueError("grid_type must be one of: s2, tile_matrix, isea4h")
     return grid_type
+
+
+def _normalize_entity_clip_mode(value: Any) -> str:
+    mode = str(value or "exact").strip().lower()
+    if mode not in {"bbox", "exact"}:
+        raise ValueError("entity_clip_mode must be one of: bbox, exact")
+    return mode
 
 
 def infer_isea4h_level_for_assets(
@@ -219,6 +229,11 @@ def _nodata_value(ds: rasterio.DatasetReader, band_index: int) -> float | int:
     return 0
 
 
+def _add_timing(timing: dict[str, float] | None, key: str, value: float) -> None:
+    if timing is not None:
+        timing[key] = timing.get(key, 0.0) + float(value)
+
+
 def _write_entity_tiles(
     tasks: list[dict[str, Any]],
     run_dir: Path,
@@ -226,93 +241,181 @@ def _write_entity_tiles(
     partition_prefix_len: int,
     data_type: str = "optical",
     source_options: dict[str, Any] | None = None,
+    timing: dict[str, float] | None = None,
+    clip_mode: str = "exact",
+    tile_upload_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     data_type = _normalize_data_type(data_type)
+    clip_mode = _normalize_entity_clip_mode(clip_mode)
     sdk = CubeEncoderSDK()
     st_cache: dict[str, str] = {}
+    geometry_cache: dict[tuple[str, str], dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
+    upload_pool = None
+    upload_futures = []
+    upload_start_time: float | None = None
+    upload_args = argparse.Namespace(**tile_upload_options) if tile_upload_options else None
+    upload_client = None
+    upload_bucket = ""
+    upload_fast = True
+    if upload_args is not None:
+        from minio import Minio
+
+        upload_bucket = str(getattr(upload_args, "minio_bucket", ""))
+        upload_client = Minio(
+            str(getattr(upload_args, "minio_endpoint", "")),
+            access_key=str(getattr(upload_args, "minio_access_key", "")),
+            secret_key=str(getattr(upload_args, "minio_secret_key", "")),
+            secure=bool(getattr(upload_args, "minio_secure", False)),
+        )
+        if not upload_client.bucket_exists(upload_bucket):
+            upload_client.make_bucket(upload_bucket)
+        upload_fast = bool(getattr(upload_args, "minio_fast_upload", True))
+        upload_pool = ThreadPoolExecutor(max_workers=max(1, int(getattr(upload_args, "minio_upload_workers", 8) or 8)))
     task_groups: dict[str, list[dict[str, Any]]] = {}
-    for task in tasks:
-        task_groups.setdefault(str(task["asset_path"]), []).append(task)
+    try:
+        for task in tasks:
+            task_groups.setdefault(str(task["asset_path"]), []).append(task)
 
-    for asset_path, asset_tasks in sorted(task_groups.items()):
-        local_asset_path = resolve_asset_source_path(asset_path, source_options)
-        with rasterio.open(local_asset_path) as ds:
-            for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
-                geom = _cell_geometry_for_dataset(
-                    sdk,
-                    ds,
-                    grid_type=str(task["grid_type"]),
-                    space_code=str(task["space_code"]),
-                )
-                for band_index in range(1, ds.count + 1):
-                    band_name = str(task["band"]) if ds.count == 1 else f"{task['band']}_band{band_index}"
-                    nodata = _nodata_value(ds, band_index)
-                    try:
-                        data, out_transform = rasterio.mask.mask(
-                            ds,
-                            [geom],
-                            crop=True,
-                            filled=False,
-                            indexes=band_index,
+        for asset_path, asset_tasks in sorted(task_groups.items()):
+            resolve_start = time.perf_counter()
+            local_asset_path = resolve_asset_source_path(asset_path, source_options)
+            _add_timing(timing, "entity_source_resolve_elapsed_sec", time.perf_counter() - resolve_start)
+            open_start = time.perf_counter()
+            with rasterio.open(local_asset_path) as ds:
+                _add_timing(timing, "entity_dataset_open_elapsed_sec", time.perf_counter() - open_start)
+                ds_bounds_wgs84: tuple[float, float, float, float] | None = None
+                ds_wgs84_to_native: Transformer | None = None
+                if clip_mode == "bbox":
+                    bounds_start = time.perf_counter()
+                    ds_bounds_wgs84 = _dataset_bounds_wgs84(ds)
+                    ds_wgs84_to_native = (
+                        Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
+                        if ds.crs and str(ds.crs).upper() != "EPSG:4326"
+                        else None
+                    )
+                    _add_timing(timing, "entity_dataset_bounds_elapsed_sec", time.perf_counter() - bounds_start)
+                for task in sorted(asset_tasks, key=lambda row: str(row["space_code"])):
+                    geom = None
+                    if clip_mode == "exact":
+                        geom_key = (str(task["grid_type"]), str(task["space_code"]))
+                        geom = geometry_cache.get(geom_key)
+                        if geom is None:
+                            geom_start = time.perf_counter()
+                            geom = _cell_geometry_for_dataset(
+                                sdk,
+                                ds,
+                                grid_type=geom_key[0],
+                                space_code=geom_key[1],
+                            )
+                            geometry_cache[geom_key] = geom
+                            _add_timing(timing, "entity_geometry_elapsed_sec", time.perf_counter() - geom_start)
+                        else:
+                            _add_timing(timing, "entity_geometry_cache_hit_count", 1.0)
+                    else:
+                        assert ds_bounds_wgs84 is not None
+                        inter = _bbox_intersection(
+                            ds_bounds_wgs84,
+                            (
+                                float(task["cell_min_lon"]),
+                                float(task["cell_min_lat"]),
+                                float(task["cell_max_lon"]),
+                                float(task["cell_max_lat"]),
+                            ),
                         )
-                    except ValueError:
-                        continue
-                    if data.size == 0:
-                        continue
+                        if inter is None:
+                            continue
+                        left, bottom, right, top = _wgs84_to_dataset_bounds(ds, *inter, transformer=ds_wgs84_to_native)
+                        win = _safe_window_from_bounds(ds, left, bottom, right, top)
+                        if win is None:
+                            continue
+                    for band_index in range(1, ds.count + 1):
+                        band_name = str(task["band"]) if ds.count == 1 else f"{task['band']}_band{band_index}"
+                        nodata = _nodata_value(ds, band_index)
+                        read_start = time.perf_counter()
+                        if clip_mode == "exact":
+                            try:
+                                data, out_transform = rasterio.mask.mask(
+                                    ds,
+                                    [geom],
+                                    crop=True,
+                                    filled=False,
+                                    indexes=band_index,
+                                )
+                            except ValueError:
+                                _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - read_start)
+                                continue
+                            _add_timing(timing, "entity_tile_mask_elapsed_sec", time.perf_counter() - read_start)
+                        else:
+                            data = ds.read(band_index, window=win, masked=True)
+                            out_transform = ds.window_transform(win)
+                            _add_timing(timing, "entity_tile_read_elapsed_sec", time.perf_counter() - read_start)
+                        if data.size == 0:
+                            continue
 
-                    valid_mask = ~np.ma.getmaskarray(data)
-                    valid_pixels = int(valid_mask.sum())
-                    total_pixels = int(data.size)
-                    if valid_pixels == 0 or total_pixels == 0:
-                        continue
+                        valid_mask = ~np.ma.getmaskarray(data)
+                        valid_pixels = int(valid_mask.sum())
+                        total_pixels = int(data.size)
+                        if valid_pixels == 0 or total_pixels == 0:
+                            continue
 
-                    filled = np.ma.filled(data, nodata)
-                    tile_dir = (
-                        run_dir
-                        / "entity_tiles"
-                        / _safe_name(data_type)
-                        / _safe_name(str(task["scene_id"]))
-                        / _safe_name(str(task["grid_type"]))
-                        / f"L{int(task['grid_level'])}"
-                        / _safe_name(str(task["space_code"]))
-                    )
-                    tile_dir.mkdir(parents=True, exist_ok=True)
-                    tile_path = tile_dir / f"{_safe_name(band_name)}.tif"
-                    profile = ds.profile.copy()
-                    profile.update(
-                        driver="GTiff",
-                        height=int(filled.shape[-2]),
-                        width=int(filled.shape[-1]),
-                        count=1,
-                        transform=out_transform,
-                        nodata=nodata,
-                    )
-                    with rasterio.open(tile_path, "w", **profile) as out_ds:
-                        out_ds.write(filled, 1)
+                        filled = np.ma.filled(data, nodata)
+                        tile_dir = (
+                            run_dir
+                            / "entity_tiles"
+                            / _safe_name(data_type)
+                            / _safe_name(str(task["scene_id"]))
+                            / _safe_name(str(task["grid_type"]))
+                            / f"L{int(task['grid_level'])}"
+                            / _safe_name(str(task["space_code"]))
+                        )
+                        tile_dir.mkdir(parents=True, exist_ok=True)
+                        tile_path = tile_dir / f"{_safe_name(band_name)}.tif"
+                        profile = ds.profile.copy()
+                        for key in ("compress", "predictor", "zlevel", "level", "blockxsize", "blockysize"):
+                            profile.pop(key, None)
+                        profile.update(
+                            driver="GTiff",
+                            height=int(filled.shape[-2]),
+                            width=int(filled.shape[-1]),
+                            count=1,
+                            transform=out_transform,
+                            nodata=nodata,
+                            compress="ZSTD",
+                            predictor=2,
+                            zstd_level=1,
+                            tiled=True,
+                            blockxsize=512,
+                            blockysize=512,
+                            num_threads="2",
+                        )
+                        write_start = time.perf_counter()
+                        with rasterio.open(tile_path, "w", **profile) as out_ds:
+                            out_ds.write(filled, 1)
+                        _add_timing(timing, "entity_tile_write_elapsed_sec", time.perf_counter() - write_start)
+                        _add_timing(timing, "entity_tile_count", 1.0)
 
-                    acq_time = str(task["acq_time"])
-                    st_time_granularity = _st_time_granularity(time_granularity)
-                    st_key = "|".join(
-                        [
-                            str(task["grid_type"]),
-                            str(int(task["grid_level"])),
-                            str(task["space_code"]),
-                            acq_time,
-                            st_time_granularity,
-                        ]
-                    )
-                    if st_key not in st_cache:
-                        st_cache[st_key] = sdk.generate_st_code(
-                            grid_type=str(task["grid_type"]),
-                            level=int(task["grid_level"]),
-                            space_code=str(task["space_code"]),
-                            timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
-                            time_granularity=st_time_granularity,
-                        ).st_code
+                        acq_time = str(task["acq_time"])
+                        st_time_granularity = _st_time_granularity(time_granularity)
+                        st_key = "|".join(
+                            [
+                                str(task["grid_type"]),
+                                str(int(task["grid_level"])),
+                                str(task["space_code"]),
+                                acq_time,
+                                st_time_granularity,
+                            ]
+                        )
+                        if st_key not in st_cache:
+                            st_cache[st_key] = sdk.generate_st_code(
+                                grid_type=str(task["grid_type"]),
+                                level=int(task["grid_level"]),
+                                space_code=str(task["space_code"]),
+                                timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
+                                time_granularity=st_time_granularity,
+                            ).st_code
 
-                    rows.append(
-                        {
+                        row = {
                             "partition_type": "entity",
                             "data_type": data_type,
                             "scene_id": task["scene_id"],
@@ -341,7 +444,30 @@ def _write_entity_tiles(
                             "nodata": nodata,
                             "valid_pixel_ratio": round(valid_pixels / total_pixels, 6),
                         }
-                    )
+                        rows.append(row)
+                        if upload_pool is not None and upload_client is not None and upload_args is not None:
+                            if upload_start_time is None:
+                                upload_start_time = time.perf_counter()
+                            upload_futures.append(
+                                upload_pool.submit(
+                                    _upload_entity_tile_file,
+                                    upload_client,
+                                    upload_bucket,
+                                    str(tile_path.resolve()),
+                                    row,
+                                    upload_args,
+                                    upload_fast,
+                                )
+                            )
+        if upload_pool is not None:
+            asset_uri_map = dict(future.result() for future in upload_futures)
+            if upload_start_time is not None:
+                _add_timing(timing, "entity_tile_upload_elapsed_sec", time.perf_counter() - upload_start_time)
+            _add_timing(timing, "entity_tile_upload_count", float(len(asset_uri_map)))
+            rows = _rows_with_asset_uris(rows, asset_uri_map, keep_local_asset_path=False)
+    finally:
+        if upload_pool is not None:
+            upload_pool.shutdown(wait=True)
     return rows
 
 
@@ -455,14 +581,17 @@ def _write_entity_tile_chunks_thread(
     partition_prefix_len: int,
     workers: int,
     data_type: str = "optical",
+    clip_mode: str = "exact",
 ) -> list[dict[str, Any]]:
     def process_chunk(chunk: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        tasks = _flatten_task_groups(chunk)
         return _write_entity_tiles(
-            _flatten_task_groups(chunk),
+            tasks,
             run_dir,
             time_granularity,
             partition_prefix_len,
             data_type=data_type,
+            clip_mode=clip_mode,
         )
 
     rows: list[dict[str, Any]] = []
@@ -483,7 +612,8 @@ def _write_entity_tile_chunks_ray(
     source_options: dict[str, Any] | None = None,
     tile_upload_options: dict[str, Any] | None = None,
     cancellation_check: Any | None = None,
-) -> tuple[list[dict[str, Any]], float, float, float, float, float]:
+    clip_mode: str = "exact",
+) -> tuple[list[dict[str, Any]], float, float, float, float, float, dict[str, float]]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
     ray_init_start = time.perf_counter()
@@ -541,6 +671,7 @@ def _write_entity_tile_chunks_ray(
             data_type_text: str,
             source_options_value: dict[str, Any] | None,
             tile_upload_options_value: dict[str, Any] | None,
+            clip_mode_text: str,
         ) -> dict[str, Any]:
             import os
             import sys
@@ -552,7 +683,6 @@ def _write_entity_tile_chunks_ray(
             )
 
             try:
-                from cube_split.jobs.entity_partition_job import _rows_with_asset_uris as rows_with_asset_uris
                 from cube_split.jobs.entity_partition_job import _write_entity_tiles as writer
             except ModuleNotFoundError:
                 if not entity_module_path:
@@ -566,7 +696,6 @@ def _write_entity_tile_chunks_ray(
                 sys.modules["_ray_entity_partition_job"] = module
                 spec.loader.exec_module(module)
                 writer = module._write_entity_tiles
-                rows_with_asset_uris = module._rows_with_asset_uris
 
             flat_tasks = [task for group in task_groups for task in group]
             env_options = dict(source_options_value or {})
@@ -586,6 +715,8 @@ def _write_entity_tile_chunks_ray(
                     self._source_path_by_uri[str(task["asset_path"])] = local_asset_path
                 prepared_tasks.append({**task, "asset_path": local_asset_path, "source_asset_path": source_asset_path})
             partition_start = time.perf_counter()
+            writer_timing: dict[str, float] = {}
+            writer_start = time.perf_counter()
             rows = writer(
                 prepared_tasks,
                 run_dir=Path(run_dir_text),
@@ -593,17 +724,15 @@ def _write_entity_tile_chunks_ray(
                 partition_prefix_len=prefix_len,
                 data_type=data_type_text,
                 source_options=None,
+                timing=writer_timing,
+                clip_mode=clip_mode_text,
+                tile_upload_options=tile_upload_options_value,
             )
-            if tile_upload_options_value:
-                import argparse
-
-                from cube_split.jobs.entity_partition_job import _upload_entity_tiles_to_minio
-
-                asset_uri_map = _upload_entity_tiles_to_minio(rows, argparse.Namespace(**tile_upload_options_value))
-                rows = rows_with_asset_uris(rows, asset_uri_map, keep_local_asset_path=False)
+            writer_timing["entity_writer_wall_elapsed_sec"] = time.perf_counter() - writer_start
             return {
                 "rows": rows,
                 "partition_elapsed_sec": time.perf_counter() - partition_start,
+                "stats": writer_timing,
             }
 
     task_groups_by_actor = _assign_entity_task_groups_to_actors(task_chunks, parallelism)
@@ -620,6 +749,7 @@ def _write_entity_tile_chunks_ray(
             data_type,
             source_options,
             tile_upload_options,
+            clip_mode,
         )
 
     rows: list[dict[str, Any]] = []
@@ -627,6 +757,7 @@ def _write_entity_tile_chunks_ray(
     source_prepare_worker_elapsed = 0.0
     partition_wall_start = time.perf_counter()
     worker_partition_elapsed = 0.0
+    worker_stats: dict[str, float] = {}
     pending = []
     pending_actor_by_ref: dict[Any, int] = {}
     try:
@@ -669,6 +800,8 @@ def _write_entity_tile_chunks_ray(
                 chunk_rows = list(chunk_result.get("rows", []))
                 rows.extend(chunk_rows)
                 worker_partition_elapsed += float(chunk_result.get("partition_elapsed_sec") or 0.0)
+                for key, value in dict(chunk_result.get("stats") or {}).items():
+                    worker_stats[key] = worker_stats.get(key, 0.0) + float(value or 0.0)
     except PartitionCancelledError:
         cancel_ray_refs(ray, pending)
         raise
@@ -679,13 +812,20 @@ def _write_entity_tile_chunks_ray(
         for actor in actors:
             ray.kill(actor, no_restart=True)
         shutdown_ray_if_needed(ray, ray_already_initialized)
-    return rows, ray_init_elapsed, source_prepare_elapsed, time.perf_counter() - partition_wall_start, source_prepare_worker_elapsed, worker_partition_elapsed
+    return (
+        rows,
+        ray_init_elapsed,
+        source_prepare_elapsed,
+        time.perf_counter() - partition_wall_start,
+        source_prepare_worker_elapsed,
+        worker_partition_elapsed,
+        worker_stats,
+    )
 
 
 def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, str]:
     try:
         from minio import Minio
-        from minio.error import S3Error
     except ModuleNotFoundError as exc:
         raise RuntimeError("MinIO backend requires `minio` package") from exc
 
@@ -704,32 +844,11 @@ def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Nam
     for row in rows:
         unique_tiles.setdefault(str(row["asset_path"]), row)
 
+    fast_upload = bool(getattr(args, "minio_fast_upload", True))
+
     def upload_one(item: tuple[str, dict[str, Any]]) -> tuple[str, str]:
         source_uri, row = item
-        if source_uri.startswith("s3://"):
-            return source_uri, source_uri
-        source_path = Path(source_uri)
-        if not source_path.exists():
-            raise FileNotFoundError(f"Entity tile file not found: {source_path}")
-        key = _entity_tile_object_key(row, source_path, args)
-        local_identity = _local_file_identity(source_path)
-        identity_state = _read_identity_sidecar(source_path)
-        try:
-            stat = client.stat_object(bucket, key)
-            remote_identity = _object_identity(stat)
-            if (
-                stat.size == source_path.stat().st_size
-                and identity_state.get("local") == local_identity
-                and identity_state.get("remote") == remote_identity
-            ):
-                return source_uri, f"s3://{bucket}/{key}"
-        except S3Error as exc:
-            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
-                raise
-        client.fput_object(bucket, key, str(source_path))
-        stat = client.stat_object(bucket, key)
-        _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
-        return source_uri, f"s3://{bucket}/{key}"
+        return _upload_entity_tile_file(client, bucket, source_uri, row, args, fast_upload)
 
     workers = max(1, int(getattr(args, "minio_upload_workers", 8) or 8))
     if workers == 1:
@@ -789,6 +908,7 @@ def _entity_tile_upload_options(args: argparse.Namespace) -> dict[str, Any]:
         "minio_prefix": str(getattr(args, "minio_prefix", "cube/entity")),
         "minio_secure": bool(getattr(args, "minio_secure", False)),
         "minio_upload_workers": int(getattr(args, "minio_upload_workers", 8) or 8),
+        "minio_fast_upload": bool(getattr(args, "minio_fast_upload", True)),
     }
 
 
@@ -802,6 +922,43 @@ def _count_remote_entity_tiles(rows: list[dict[str, Any]]) -> int:
     if any(not path.startswith("s3://") for path in tile_paths):
         raise RuntimeError("Ray entity partition requires worker tile upload to MinIO; local worker paths are not shared")
     return len(tile_paths)
+
+
+def _upload_entity_tile_file(
+    client: Any,
+    bucket: str,
+    source_uri: str,
+    row: dict[str, Any],
+    args: argparse.Namespace,
+    fast_upload: bool,
+) -> tuple[str, str]:
+    if source_uri.startswith("s3://"):
+        return source_uri, source_uri
+    source_path = Path(source_uri)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Entity tile file not found: {source_path}")
+    key = _entity_tile_object_key(row, source_path, args)
+    if fast_upload:
+        client.fput_object(bucket, key, str(source_path))
+        return source_uri, f"s3://{bucket}/{key}"
+    local_identity = _local_file_identity(source_path)
+    identity_state = _read_identity_sidecar(source_path)
+    try:
+        stat = client.stat_object(bucket, key)
+        remote_identity = _object_identity(stat)
+        if (
+            stat.size == source_path.stat().st_size
+            and identity_state.get("local") == local_identity
+            and identity_state.get("remote") == remote_identity
+        ):
+            return source_uri, f"s3://{bucket}/{key}"
+    except Exception as exc:
+        if exc.__class__.__name__ != "S3Error" or getattr(exc, "code", "") not in {"NoSuchKey", "NoSuchObject"}:
+            raise
+    client.fput_object(bucket, key, str(source_path))
+    stat = client.stat_object(bucket, key)
+    _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
+    return source_uri, f"s3://{bucket}/{key}"
 
 
 def _ensure_entity_tables_postgres(conn: Any) -> None:
@@ -1099,6 +1256,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
     data_type = _normalize_data_type(getattr(args, "data_type", "optical"))
     grid_type = _normalize_grid_type(getattr(args, "grid_type", "isea4h"))
+    entity_clip_mode = _normalize_entity_clip_mode(getattr(args, "entity_clip_mode", "exact"))
 
     source_uploader = None
     backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
@@ -1185,6 +1343,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     source_prepare_elapsed = 0.0
     source_prepare_worker_elapsed = 0.0
     worker_partition_elapsed = 0.0
+    worker_stats: dict[str, float] = {}
     partition_stage_total_elapsed = 0.0
     partition_start = time.perf_counter()
     requested_asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
@@ -1204,14 +1363,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         }
         tile_upload_options = _entity_tile_upload_options(args)
         _validate_entity_tile_upload_options(tile_upload_options)
-        (
-            rows,
-            ray_init_elapsed,
-            source_prepare_elapsed,
-            partition_elapsed,
-            source_prepare_worker_elapsed,
-            worker_partition_elapsed,
-        ) = _write_entity_tile_chunks_ray(
+        ray_result = _write_entity_tile_chunks_ray(
             task_chunks=task_chunks,
             run_dir=run_dir,
             time_granularity=args.time_granularity,
@@ -1222,7 +1374,18 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             source_options=minio_options,
             tile_upload_options=tile_upload_options,
             cancellation_check=getattr(args, "cancellation_check", None),
+            clip_mode=entity_clip_mode,
         )
+        (
+            rows,
+            ray_init_elapsed,
+            source_prepare_elapsed,
+            partition_elapsed,
+            source_prepare_worker_elapsed,
+            worker_partition_elapsed,
+            *stats_tail,
+        ) = ray_result
+        worker_stats = dict(stats_tail[0]) if stats_tail else {}
         partition_stage_total_elapsed = source_prepare_elapsed + partition_elapsed
     else:
         rows = _write_entity_tile_chunks_thread(
@@ -1232,6 +1395,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             partition_prefix_len=args.partition_prefix_len,
             workers=parallelism,
             data_type=data_type,
+            clip_mode=entity_clip_mode,
         )
         partition_elapsed = time.perf_counter() - partition_start
         partition_stage_total_elapsed = partition_elapsed
@@ -1299,6 +1463,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "data_type": data_type,
         "partition_type": "entity",
         "partition_method": "entity",
+        "entity_clip_mode": entity_clip_mode,
         "grid_task_count": len(grid_tasks),
         "grid_type": grid_type,
         "grid_level": grid_level,
@@ -1338,6 +1503,18 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "partition_elapsed_sec": round(partition_elapsed, 3),
         "partition_stage_total_elapsed_sec": round(partition_stage_total_elapsed, 3),
         "worker_partition_elapsed_sec": round(worker_partition_elapsed, 3),
+        "worker_entity_source_resolve_elapsed_sec": round(float(worker_stats.get("entity_source_resolve_elapsed_sec", 0.0)), 3),
+        "worker_entity_dataset_open_elapsed_sec": round(float(worker_stats.get("entity_dataset_open_elapsed_sec", 0.0)), 3),
+        "worker_entity_geometry_elapsed_sec": round(float(worker_stats.get("entity_geometry_elapsed_sec", 0.0)), 3),
+        "worker_entity_geometry_cache_hit_count": int(worker_stats.get("entity_geometry_cache_hit_count", 0.0)),
+        "worker_entity_dataset_bounds_elapsed_sec": round(float(worker_stats.get("entity_dataset_bounds_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_read_elapsed_sec": round(float(worker_stats.get("entity_tile_read_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_mask_elapsed_sec": round(float(worker_stats.get("entity_tile_mask_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_write_elapsed_sec": round(float(worker_stats.get("entity_tile_write_elapsed_sec", 0.0)), 3),
+        "worker_entity_writer_wall_elapsed_sec": round(float(worker_stats.get("entity_writer_wall_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_upload_elapsed_sec": round(float(worker_stats.get("entity_tile_upload_elapsed_sec", 0.0)), 3),
+        "worker_entity_tile_upload_count": int(worker_stats.get("entity_tile_upload_count", 0.0)),
+        "worker_entity_tile_count": int(worker_stats.get("entity_tile_count", 0.0)),
         "upload_elapsed_sec": round(upload_elapsed, 3),
         "metadata_elapsed_sec": round(metadata_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
@@ -1364,6 +1541,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-crs", default="EPSG:4326")
     parser.add_argument("--grid-type", default="isea4h", choices=["s2", "tile_matrix", "isea4h"])
     parser.add_argument("--grid-level", type=int, default=0)
+    parser.add_argument("--entity-clip-mode", default="exact", choices=["bbox", "exact"])
     parser.add_argument("--target-pixels-per-hex-edge", type=int, default=DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"])
@@ -1387,6 +1565,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-prefix", default="cube/entity")
     parser.add_argument("--minio-secure", action="store_true")
     parser.add_argument("--minio-upload-workers", type=int, default=8)
+    parser.set_defaults(minio_fast_upload=True)
+    parser.add_argument(
+        "--minio-safe-upload",
+        dest="minio_fast_upload",
+        action="store_false",
+        help="Check remote tile identity before upload",
+    )
     return parser.parse_args()
 
 

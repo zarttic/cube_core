@@ -198,7 +198,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=1)
     optical["cog_workers"] = _int_value(optical.get("cog_workers"), "cog_workers", minimum=0)
     optical["cog_compress"] = _choice(optical.get("cog_compress"), {"LZW", "DEFLATE", "ZSTD", "NONE"}, "cog_compress")
-    optical["cog_predictor"] = _int_value(optical.get("cog_predictor"), "cog_predictor", minimum=1)
+    optical["cog_predictor"] = _int_value(optical.get("cog_predictor"), "cog_predictor", minimum=0)
     optical["cog_level"] = _int_value(optical.get("cog_level"), "cog_level", minimum=0)
     optical["cog_num_threads"] = _text_value(optical.get("cog_num_threads"), "cog_num_threads")
     optical["partition_backend"] = _choice(optical.get("partition_backend"), {"ray", "thread", "process"}, "partition_backend")

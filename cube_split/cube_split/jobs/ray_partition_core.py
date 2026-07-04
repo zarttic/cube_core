@@ -511,16 +511,13 @@ def convert_assets_to_cog(
     worker_count = workers or min(len(assets), (os.cpu_count() or 1))
     worker_count = max(1, worker_count)
 
-    creation_options: dict[str, str] = {
-        "COMPRESS": str(compress).upper(),
-        "OVERVIEWS": overviews,
-    }
-    if predictor > 0:
-        creation_options["PREDICTOR"] = str(predictor)
-    if level is not None and level > 0:
-        creation_options["LEVEL"] = str(level)
-    if num_threads:
-        creation_options["NUM_THREADS"] = str(num_threads)
+    creation_options = cog_creation_options(
+        compress=compress,
+        predictor=predictor,
+        level=level,
+        overviews=overviews,
+        num_threads=num_threads,
+    )
 
     def convert_one(asset: AssetRecord) -> AssetRecord:
         if cancellation_check is not None and cancellation_check():
@@ -564,13 +561,14 @@ def cog_creation_options(
     overviews: str = "NONE",
     num_threads: str = "ALL_CPUS",
 ) -> dict[str, str]:
+    compress_value = str(compress or "NONE").upper()
     options: dict[str, str] = {
-        "COMPRESS": str(compress).upper(),
+        "COMPRESS": compress_value,
         "OVERVIEWS": overviews,
     }
-    if predictor > 0:
+    if compress_value != "NONE" and predictor > 0:
         options["PREDICTOR"] = str(predictor)
-    if level is not None and level > 0:
+    if compress_value != "NONE" and level is not None and level > 0:
         options["LEVEL"] = str(level)
     if num_threads:
         options["NUM_THREADS"] = str(num_threads)
@@ -612,9 +610,15 @@ def convert_asset_to_cog(
     creation_options: dict[str, str],
     target_crs: str | None = None,
     source_options: dict[str, Any] | None = None,
+    timing: dict[str, float] | None = None,
 ) -> AssetRecord:
     cog_input_dir.mkdir(parents=True, exist_ok=True)
+    resolve_start = time.perf_counter()
     local_source = Path(resolve_asset_source_path(asset.path, source_options))
+    if timing is not None:
+        timing["source_resolve_elapsed_sec"] = timing.get("source_resolve_elapsed_sec", 0.0) + (
+            time.perf_counter() - resolve_start
+        )
     if _is_s3_uri(asset.path):
         source_stem = Path(_parse_s3_uri(asset.path)[1]).stem
         digest = hashlib.sha1(asset.path.encode("utf-8")).hexdigest()[:10]
@@ -624,6 +628,7 @@ def convert_asset_to_cog(
     if overwrite and dst.exists():
         dst.unlink()
     if not dst.exists():
+        write_start = time.perf_counter()
         with rasterio.open(local_source) as ds:
             if target_crs and (ds.crs is None or ds.crs.to_string().upper() != target_crs.upper()):
                 if ds.crs is None:
@@ -632,6 +637,13 @@ def convert_asset_to_cog(
                     rio_copy(vrt, str(dst), driver="COG", **creation_options)
             else:
                 rio_copy(ds, str(dst), driver="COG", **creation_options)
+        if timing is not None:
+            timing["cog_write_elapsed_sec"] = timing.get("cog_write_elapsed_sec", 0.0) + (
+                time.perf_counter() - write_start
+            )
+            timing["cog_write_count"] = timing.get("cog_write_count", 0.0) + 1.0
+    elif timing is not None:
+        timing["cog_cache_hit_count"] = timing.get("cog_cache_hit_count", 0.0) + 1.0
     return AssetRecord(
         scene_id=asset.scene_id,
         band=asset.band,
@@ -829,13 +841,22 @@ def _wgs84_to_dataset_bounds(
     min_lat: float,
     max_lon: float,
     max_lat: float,
+    transformer: Transformer | None = None,
 ) -> tuple[float, float, float, float]:
-    if ds.crs and str(ds.crs).upper() != "EPSG:4326":
-        transformer = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
+    if transformer is not None:
         xs = [min_lon, min_lon, max_lon, max_lon]
         ys = [min_lat, max_lat, min_lat, max_lat]
         px, py = transformer.transform(xs, ys)
         return min(px), min(py), max(px), max(py)
+    if ds.crs and str(ds.crs).upper() != "EPSG:4326":
+        return _wgs84_to_dataset_bounds(
+            ds,
+            min_lon,
+            min_lat,
+            max_lon,
+            max_lat,
+            transformer=Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True),
+        )
     return min_lon, min_lat, max_lon, max_lat
 
 
@@ -863,6 +884,7 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
     open_path: str | None = None
     open_ds: rasterio.DatasetReader | None = None
     ds_bounds_wgs84: tuple[float, float, float, float] | None = None
+    ds_wgs84_to_native: Transformer | None = None
 
     try:
         for row in rows:
@@ -873,6 +895,11 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 open_ds = rasterio.open(local_asset_path)
                 open_path = row.asset_path
                 ds_bounds_wgs84 = _dataset_bounds_wgs84(open_ds)
+                ds_wgs84_to_native = (
+                    Transformer.from_crs("EPSG:4326", open_ds.crs, always_xy=True)
+                    if open_ds.crs and str(open_ds.crs).upper() != "EPSG:4326"
+                    else None
+                )
 
             assert open_ds is not None and ds_bounds_wgs84 is not None
 
@@ -904,7 +931,14 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 continue
             min_lon, min_lat, max_lon, max_lat = inter
 
-            left, bottom, right, top = _wgs84_to_dataset_bounds(open_ds, min_lon, min_lat, max_lon, max_lat)
+            left, bottom, right, top = _wgs84_to_dataset_bounds(
+                open_ds,
+                min_lon,
+                min_lat,
+                max_lon,
+                max_lat,
+                transformer=ds_wgs84_to_native,
+            )
             win = _safe_window_from_bounds(open_ds, left, bottom, right, top)
             if win is None:
                 continue

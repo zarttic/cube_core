@@ -12,7 +12,13 @@ from rasterio.transform import from_origin
 
 import cube_split.ingest.product_ingest_job as product_ingest_job
 from cube_split.ingest.product_ingest_job import run_product_ingest
-from cube_split.jobs.product_partition_job import _partition_groups_ray, _prepare_product_task_rows, parse_args, run_product_partition
+from cube_split.jobs.product_partition_job import (
+    _partition_groups_ray,
+    _prepare_product_task_rows,
+    _process_group_chunk,
+    parse_args,
+    run_product_partition,
+)
 from cube_split.partition.product_products import parse_product_asset
 from cube_split.quality.product_quality import run_quality_check
 
@@ -155,6 +161,31 @@ def test_prepare_product_task_rows_keeps_year_bucket_and_day_st_code_input():
     assert rows[0]["space_code_prefix"] == "372"
     assert rows[0]["time_bucket"] == "2010"
     assert rows[0]["st_time_granularity"] == "day"
+
+
+def test_process_group_chunk_batches_rows_for_one_dataset_open(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_process_local_task_group(rows, time_granularity, include_sample_mean=False):
+        captured["rows"] = rows
+        captured["time_granularity"] = time_granularity
+        captured["include_sample_mean"] = include_sample_mean
+        return list(rows)
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job._process_local_task_group", fake_process_local_task_group)
+
+    rows = _process_group_chunk(
+        [
+            [{"asset_path": "/source/product_2020.tif", "space_code": "35f4"}],
+            [{"asset_path": "/source/product_2020.tif", "space_code": "35f5"}],
+        ],
+        include_sample_mean=True,
+    )
+
+    assert [row["space_code"] for row in rows] == ["35f4", "35f5"]
+    assert captured["rows"] == rows
+    assert captured["time_granularity"] == "day"
+    assert captured["include_sample_mean"] is True
 
 
 def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monkeypatch, tmp_path: Path):
@@ -317,7 +348,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert str(tif.resolve()) in captured["assets_by_path"]
     assert captured["cog_input_dir"] == str(cog_dir)
     assert captured["cog_overwrite"] is True
-    assert "PREDICTOR" not in captured["cog_options"]
+    assert captured["cog_options"]["PREDICTOR"] == "2"
     assert captured["target_crs"] == "EPSG:4326"
     assert captured["source_options"]["endpoint"] == "10.3.100.179:9000"
     assert captured["source_options"]["access_key"] == "access"
@@ -456,7 +487,7 @@ def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
             [[{"scene_id": "product-2020", "asset_path": "/source/product_2020.tif"}]],
             [[{"scene_id": "product-2020-b", "asset_path": "/source/product_2020.tif"}]],
         ],
-        parallelism=1,
+        parallelism=2,
         ray_address="10.3.100.182:6379",
         include_sample_mean=False,
         assets_by_path={

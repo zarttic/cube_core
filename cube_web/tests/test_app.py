@@ -1153,6 +1153,13 @@ def test_stored_config_migrates_legacy_mgrs_grid_type():
     assert config["partition"]["optical"]["grid_type"] == "tile_matrix"
 
 
+def test_default_partition_config_uses_fastest_measured_cog_compression():
+    config = config_store_module.default_config()
+
+    assert config["partition"]["optical"]["cog_compress"] == "LZW"
+    assert config["partition"]["optical"]["cog_predictor"] == 2
+
+
 def test_config_update_rejects_invalid_values():
     resp = client.post("/v1/config/update", json={"config": {"partition": {"optical": {"grid_level": 0}}}})
 

@@ -12,14 +12,15 @@ from typing import Any
 from cube_split import runtime_config
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled, shutdown_ray_if_needed
 from cube_split.jobs.ray_logical_partition_job import (
+    _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
     _load_ray,
     _prepend_sys_paths,
     _ray_actor_options_from_env,
     _ray_project_roots,
     _ray_runtime_env_from_env,
+    _resolve_ray_actor_parallelism,
     _resolve_ray_chunk_size,
-    _resolve_ray_parallelism,
 )
 from cube_split.jobs.ray_partition_core import (
     _group_tasks_for_local_processing,
@@ -97,10 +98,8 @@ def _resolve_backend(requested_backend: str, ray_address: str) -> str:
 
 
 def _process_group_chunk(chunk: list[list[dict]], include_sample_mean: bool) -> list[dict]:
-    rows: list[dict] = []
-    for group in chunk:
-        rows.extend(_process_local_task_group(group, "day", include_sample_mean=include_sample_mean))
-    return rows
+    rows = [row for group in chunk for row in group]
+    return _process_local_task_group(rows, "day", include_sample_mean=include_sample_mean)
 
 
 def _partition_groups_thread(grouped_tasks: list[list[dict]], workers: int, include_sample_mean: bool) -> list[dict]:
@@ -133,6 +132,10 @@ def _partition_groups_ray(
     cog_upload_options: dict,
     cancellation_check: Any | None = None,
 ) -> tuple[list[dict], float]:
+    chunk_size = max((len(chunk) for chunk in task_chunks), default=1)
+    task_groups = [group for chunk in task_chunks for group in chunk]
+    task_chunks_by_actor = _chunk_task_groups_by_actor(task_groups, parallelism, chunk_size)
+
     ray = _load_ray()
     runtime_env = _ray_runtime_env_from_env()
     ray_init_start = time.perf_counter()
@@ -242,9 +245,9 @@ def _partition_groups_ray(
     actors = [actor_cls.remote() for _ in range(parallelism)]
     rows: list[dict] = []
 
-    def submit_chunk(idx: int, actor_idx: int):
+    def submit_chunk(actor_idx: int, chunk_idx: int):
         return actors[actor_idx].process_groups.remote(
-            task_chunks[idx],
+            task_chunks_by_actor[actor_idx][chunk_idx],
             include_sample_mean,
             assets_by_path,
             cog_input_dir,
@@ -256,17 +259,18 @@ def _partition_groups_ray(
         )
 
     try:
-        next_idx = 0
         pending = []
         pending_actor_by_ref: dict[Any, int] = {}
-        while next_idx < len(task_chunks) and len(pending) < parallelism:
+        next_chunk_by_actor = [0 for _ in range(parallelism)]
+        for actor_idx, actor_chunks in enumerate(task_chunks_by_actor):
+            if not actor_chunks:
+                continue
             if cancellation_check is not None and cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            actor_idx = next_idx % parallelism
-            ref = submit_chunk(next_idx, actor_idx)
+            ref = submit_chunk(actor_idx, 0)
             pending.append(ref)
             pending_actor_by_ref[ref] = actor_idx
-            next_idx += 1
+            next_chunk_by_actor[actor_idx] = 1
         while pending:
             if cancellation_check is not None and cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
@@ -276,13 +280,13 @@ def _partition_groups_ray(
             for ready_ref in ready:
                 actor_idx = pending_actor_by_ref.pop(ready_ref)
                 rows.extend(ray.get(ready_ref))
-                if next_idx < len(task_chunks):
+                if next_chunk_by_actor[actor_idx] < len(task_chunks_by_actor[actor_idx]):
                     if cancellation_check is not None and cancellation_check():
                         raise PartitionCancelledError("Partition task cancelled")
-                    ref = submit_chunk(next_idx, actor_idx)
+                    ref = submit_chunk(actor_idx, next_chunk_by_actor[actor_idx])
                     pending.append(ref)
                     pending_actor_by_ref[ref] = actor_idx
-                    next_idx += 1
+                    next_chunk_by_actor[actor_idx] += 1
     except PartitionCancelledError:
         cancel_ray_refs(ray, pending)
         raise
@@ -407,7 +411,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
 
     if grouped_tasks:
         if backend == "ray":
-            parallelism = _resolve_ray_parallelism(len(grouped_tasks), int(getattr(args, "ray_parallelism", 0) or 0))
+            parallelism = _resolve_ray_actor_parallelism(grouped_tasks, int(getattr(args, "ray_parallelism", 0) or 0))
         else:
             parallelism = int(getattr(args, "partition_workers", 0) or 0) or min(len(grouped_tasks), 8)
         chunk_size = _resolve_ray_chunk_size(len(grouped_tasks), parallelism, int(getattr(args, "chunk_size", 0) or 0))
@@ -432,7 +436,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
             "assets_by_path": assets_by_path,
             "cog_input_dir": str(args.cog_input_dir),
             "cog_overwrite": bool(args.cog_overwrite),
-            "cog_options": cog_creation_options("LZW", predictor=0, overviews="NONE", num_threads="ALL_CPUS"),
+            "cog_options": cog_creation_options("LZW", predictor=2, overviews="NONE", num_threads="ALL_CPUS"),
             "target_crs": str(args.target_crs or ""),
             "source_options": {
                 "endpoint": str(getattr(args, "minio_endpoint", "")),
