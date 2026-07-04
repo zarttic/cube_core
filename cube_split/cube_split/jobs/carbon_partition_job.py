@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from cube_split import runtime_config
+from cube_split.jobs.ray_partition_core import create_unique_run_dir
 from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
 
 
@@ -53,9 +54,7 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     total_start = time.perf_counter()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir = create_unique_run_dir(output_dir)
     report_path = run_dir / "job_report.json"
 
     backend = _resolve_backend(args.partition_backend, args.ray_address)

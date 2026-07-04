@@ -820,29 +820,35 @@ def _load_observation_chunks(
     chunks: list[list[CarbonSatelliteObservation]] = []
     normalized_product_type = normalize_carbon_product_type(config.product_type)
     selected_source_indexes = set(config.selected_source_indexes or ())
+    source_uris = tuple(str(source_uri).strip() for source_uri in (config.source_uris or ()) if str(source_uri).strip())
 
-    def load_one(path: Path, max_observations: int | None = None) -> list[CarbonSatelliteObservation]:
-        if normalized_product_type == "xco2":
-            return load_observations_from_file(path, max_observations=max_observations)
-        return load_observations_from_file(path, max_observations=max_observations, product_type=config.product_type)
+    def load_one(source: Path | str, max_observations: int | None = None) -> list[CarbonSatelliteObservation]:
+        if isinstance(source, Path):
+            if normalized_product_type == "xco2":
+                return load_observations_from_file(source, max_observations=max_observations)
+            return load_observations_from_file(source, max_observations=max_observations, product_type=config.product_type)
+        resolved = _resolve_oco2_lite_source_path(source)
+        return load_oco2_lite_observations(resolved, max_observations=max_observations)
 
     def select_observations(observations: list[CarbonSatelliteObservation]) -> list[CarbonSatelliteObservation]:
         if not selected_source_indexes:
             return observations
         return [obs for obs in observations if obs.source_index in selected_source_indexes]
 
-    if config.max_observations is None and worker_count > 1 and len(files) > 1:
+    sources: list[Path | str] = [*files, *source_uris]
+
+    if config.max_observations is None and worker_count > 1 and len(sources) > 1:
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            for observations in pool.map(load_one, files):
+            for observations in pool.map(load_one, sources):
                 observations = select_observations(observations)
                 chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
         return chunks
 
     remaining = config.max_observations
-    for path in files:
+    for source in sources:
         if remaining is not None and remaining <= 0:
             break
-        observations = load_one(path, max_observations=remaining)
+        observations = load_one(source, max_observations=remaining)
         observations = select_observations(observations)
         if remaining is not None:
             observations = observations[:remaining]

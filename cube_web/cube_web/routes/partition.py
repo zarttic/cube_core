@@ -88,7 +88,7 @@ def create_partition_router(
 
     @router.post("/{data_type}/run", response_model=PartitionResult)
     def partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return service.run(data_type, payload_from_model(payload))
+        return workflow_service.run_payload_sync(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/retry", response_model=PartitionResult)
     def partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:

@@ -14,7 +14,7 @@ TIME_FORMATS = {
 
 def normalize_to_utc(timestamp: datetime) -> datetime:
     if timestamp.tzinfo is None:
-        return timestamp.replace(tzinfo=timezone.utc)
+        raise ValidationError("timestamp must include timezone information")
     return timestamp.astimezone(timezone.utc)
 
 

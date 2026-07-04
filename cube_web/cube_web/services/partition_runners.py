@@ -16,7 +16,9 @@ from cube_web.services.config_store import optical_ingest_defaults, optical_part
 from cube_web.services.partition_defaults import (
     DEFAULT_ISEA4H_GRID_LEVEL,
     default_grid_level_for_grid_type,
+    default_grid_level_for_partition,
     default_grid_level_from_assets,
+    normalize_partition_method,
 )
 from cube_web.services.quality_report_store import get_quality_report_store
 from cube_web.services.quality_service import quality_args, repo_root
@@ -24,6 +26,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 PARTITION_GRID_TYPES = {"s2", "mgrs", "tile_matrix", "isea4h"}
+PARTITION_METHODS = {"logical", "entity"}
 
 
 def _new_run_dir(root_name: str, name: str) -> Path:
@@ -296,6 +299,17 @@ def _selected_optical_manifest_assets(payload: dict, input_dir: Path) -> list[di
     return manifest_assets
 
 
+def _run_input_dir_for_selected_assets(payload: dict, input_dir: Path, root: Path) -> Path:
+    selected_assets = payload.get("selected_assets") or []
+    if not isinstance(selected_assets, list) or not selected_assets:
+        return input_dir
+    if all(_is_s3_uri(str(asset.get("source_uri") or "")) for asset in selected_assets if isinstance(asset, dict)):
+        selected_input_dir = root / "input"
+        selected_input_dir.mkdir(parents=True, exist_ok=True)
+        return selected_input_dir
+    return input_dir
+
+
 def _selected_radar_input_dir(payload: dict, input_dir: Path, root: Path) -> Path:
     selected_assets = payload.get("selected_assets") or []
     if not selected_assets:
@@ -474,6 +488,13 @@ def _partition_grid_type(payload: dict) -> str:
     if grid_type not in PARTITION_GRID_TYPES:
         raise ValueError("grid_type must be one of: s2, mgrs, tile_matrix, isea4h")
     return grid_type
+
+
+def _partition_method(payload: dict | None, *, grid_type: str | None = None) -> str:
+    method = normalize_partition_method((payload or {}).get("partition_method"), grid_type=grid_type)
+    if method not in PARTITION_METHODS:
+        raise ValueError("partition_method must be one of: logical, entity")
+    return method
 
 
 def _payload_with_defaults(payload: dict | None, defaults: dict) -> dict:
@@ -656,10 +677,15 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         default_manifest = input_dir / "manifest.json"
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
+    grid_type = _partition_grid_type(raw_payload)
+    partition_method = normalize_partition_method(raw_payload.get("partition_method"), grid_type=grid_type)
+    if not str(raw_payload.get("partition_method") or "").strip():
+        partition_method = "entity"
     default_grid_level = DEFAULT_ENTITY_TEST_GRID_LEVEL if mode == "partition_test_no_ingest" else DEFAULT_ENTITY_GRID_LEVEL
     default_grid_level = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
-        grid_type="isea4h",
+        grid_type=grid_type,
+        partition_method=partition_method,
         fallback=default_grid_level,
     )
     grid_level = _int_payload_value(raw_payload, "grid_level", default_grid_level)
@@ -683,6 +709,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         cog_level=_int_payload_value(payload, "cog_level", 0),
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        grid_type=grid_type,
         grid_level=entity_grid_level,
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
@@ -731,6 +758,9 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         **report,
     }
     response["data_type"] = "entity"
+    response["partition_method"] = partition_method
+    response["partition_type"] = "entity"
+    response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
         quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
@@ -939,9 +969,10 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     input_dir = Path(str(payload.get("input_dir") or ("/" if mode == "partition_run" else _product_demo_input_dir()))).expanduser().resolve()
     if mode == "partition_test_no_ingest":
         payload, input_dir = _payload_with_test_assets(payload, "product", input_dir, {".tif", ".tiff"})
-    if not input_dir.exists():
+    run_input_dir = _run_input_dir_for_selected_assets(payload, input_dir, root)
+    if run_input_dir == input_dir and not input_dir.exists():
         raise FileNotFoundError(f"Product partition input_dir not found: {input_dir}")
-    run_input_dir = _selected_product_input_dir(payload, input_dir, root)
+    run_input_dir = _selected_product_input_dir(payload, run_input_dir, root)
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_product_manifest_assets(payload, input_dir, run_input_dir)
     if manifest_assets:
@@ -961,18 +992,21 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         )
 
     grid_type = _partition_grid_type(payload)
+    partition_method = _partition_method(payload, grid_type=grid_type)
     grid_level_default = default_grid_level_from_assets(
         payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
-        fallback=default_grid_level_for_grid_type(grid_type),
+        partition_method=partition_method,
+        fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
     grid_level = _int_payload_value(payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
-    grid_level_mode = str(payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
+    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level_mode = str(payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
+    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
 
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
@@ -989,7 +1023,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
         grid_type=grid_type,
-        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "year"),
@@ -1022,7 +1056,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
         cancellation_check=cancellation_check,
     )
-    result = run_entity_partition(args) if grid_type == "isea4h" else run_product_partition(args)
+    result = run_entity_partition(args) if partition_method == "entity" else run_product_partition(args)
     result["mode"] = mode
     result.update(_task_metadata(mode, str(result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend)))
     result.update(_source_metadata(mode, str(input_dir)))
@@ -1031,6 +1065,9 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["execution_engine"] = result.get("execution_engine") or result.get("partition_backend_used") or args.partition_backend
     result["batch_id"] = payload.get("batch_id") or ""
     result["batch_name"] = payload.get("batch_name") or ""
+    result["partition_method"] = partition_method
+    result["partition_type"] = "entity" if partition_method == "entity" else "logical"
+    result["grid_type"] = str(result.get("grid_type") or grid_type)
     result["assets"] = _result_assets(payload, input_dir, data_type="product", suffixes={".tif", ".tiff"})
     result["selected_asset_count"] = len(payload.get("selected_assets") or [])
     result["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(result.get("ingest_enabled", False))
@@ -1081,9 +1118,10 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     if mode == "partition_test_no_ingest":
         payload, input_dir = _payload_with_test_assets(payload, "radar", input_dir, {".dat", ".tif", ".tiff"})
         raw_payload = _raw_payload_with_test_assets(raw_payload, payload, input_dir)
-    if not input_dir.exists():
+    run_input_dir = _run_input_dir_for_selected_assets(payload, input_dir, root)
+    if run_input_dir == input_dir and not input_dir.exists():
         raise FileNotFoundError(f"Radar partition input_dir not found: {input_dir}")
-    run_input_dir = _selected_radar_input_dir(payload, input_dir, root)
+    run_input_dir = _selected_radar_input_dir(payload, run_input_dir, root)
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
     manifest_assets = _selected_radar_manifest_assets(payload, input_dir, run_input_dir)
     if manifest_assets:
@@ -1106,18 +1144,21 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
     grid_type = _partition_grid_type(payload)
+    partition_method = _partition_method(raw_payload, grid_type=grid_type)
     grid_level_default = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
-        fallback=default_grid_level_for_grid_type(grid_type),
+        partition_method=partition_method,
+        fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
     grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
-    grid_level_mode = str(raw_payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
+    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
+    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
     partition_backend = str(payload.get("partition_backend") or "thread")
     ray_address = str(
         payload.get("ray_address") or (runtime_config.require_ray_address() if partition_backend in {"auto", "ray"} else "")
@@ -1142,7 +1183,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
         grid_type=grid_type,
-        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
@@ -1177,7 +1218,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         ingest_enabled=False if mode == "partition_test_no_ingest" else None,
         cancellation_check=cancellation_check,
     )
-    report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
+    report = run_entity_partition(args) if partition_method == "entity" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])
     rows_path = Path(str(report.get("rows_path") or run_dir / "index_rows.jsonl"))
     response = {
@@ -1199,6 +1240,9 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         **report,
     }
     response["data_type"] = "radar"
+    response["partition_method"] = partition_method
+    response["partition_type"] = "entity" if partition_method == "entity" else "logical"
+    response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_radar_quality_check is not None:
         quality_report = quality_checks.run_radar_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
@@ -1243,13 +1287,13 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     if mode == "partition_test_no_ingest":
         payload, input_dir = _payload_with_test_assets(payload, "optical", input_dir, {".tif", ".tiff"})
         raw_payload = _raw_payload_with_test_assets(raw_payload, payload, input_dir)
-    if not input_dir.exists():
-        raise FileNotFoundError(f"Optical partition input_dir not found: {input_dir}")
-
     root = _partition_run_dir("optical", mode)
+    run_input_dir = _run_input_dir_for_selected_assets(payload, input_dir, root)
+    if run_input_dir == input_dir and not input_dir.exists():
+        raise FileNotFoundError(f"Optical partition input_dir not found: {input_dir}")
     output_root = root / "output"
     manifest_path = Path(str(payload.get("manifest_path") or "")).expanduser()
-    manifest_assets = _selected_optical_manifest_assets(payload, input_dir)
+    manifest_assets = _selected_optical_manifest_assets(payload, run_input_dir)
     if manifest_assets:
         manifest_path = root / "selected_assets_manifest.json"
         manifest_path.write_text(
@@ -1270,24 +1314,27 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
     grid_type = _partition_grid_type(payload)
-    grid_level_default = default_grid_level_for_grid_type(grid_type)
-    if mode == "partition_test_no_ingest" and grid_type == "isea4h":
+    partition_method = _partition_method(raw_payload, grid_type=grid_type)
+    grid_level_default = default_grid_level_for_partition(grid_type, partition_method)
+    if mode == "partition_test_no_ingest" and partition_method == "entity":
         grid_level_default = DEFAULT_ENTITY_TEST_GRID_LEVEL
     grid_level_default = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
         grid_type=grid_type,
+        partition_method=partition_method,
         fallback=grid_level_default,
     )
     grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
     if grid_level <= 0:
         raise ValueError("grid_level must be greater than 0")
-    grid_level_mode = str(raw_payload.get("grid_level_mode") or ("manual" if grid_type == "isea4h" else "auto")).lower()
+    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = grid_level if grid_level_mode == "manual" else 0
+    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
 
     args = SimpleNamespace(
-        input_dir=str(input_dir),
+        input_dir=str(run_input_dir),
         manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
         product_family=str(payload.get("product_family") or "auto"),
         output_dir=str(output_root),
@@ -1300,7 +1347,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
         target_crs=str(payload.get("target_crs") or "EPSG:4326"),
         grid_type=grid_type,
-        grid_level=entity_grid_level if grid_type == "isea4h" else grid_level,
+        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
@@ -1335,7 +1382,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         ingest_enabled=(False if mode == "partition_test_no_ingest" else None),
         cancellation_check=cancellation_check,
     )
-    report = run_entity_partition(args) if grid_type == "isea4h" else run_logical_partition(args)
+    report = run_entity_partition(args) if partition_method == "entity" else run_logical_partition(args)
     run_dir = Path(report["run_dir"])
     rows_path = Path(str(report.get("rows_path") or run_dir / "index_rows.jsonl"))
 
@@ -1344,7 +1391,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "mode": mode,
         "data_type": "optical",
         **_task_metadata(mode, str(report.get("execution_engine") or args.partition_backend)),
-        **_source_metadata(mode, str(input_dir)),
+        **_source_metadata(mode, str(run_input_dir)),
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
         "run_dir": str(run_dir),
@@ -1352,11 +1399,14 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         "output_path": str(rows_path),
         "rows": int(report.get("total_index_rows", 0)),
         "workers": report.get("ray_parallelism", 0),
-        "assets": _result_assets(raw_payload, input_dir, data_type="optical", suffixes={".tif", ".tiff"}),
+        "assets": _result_assets(raw_payload, run_input_dir, data_type="optical", suffixes={".tif", ".tiff"}),
         "selected_asset_count": len(raw_payload.get("selected_assets") or []),
         "ingest_enabled": bool(report.get("ingest_enabled", False)),
         **report,
     }
+    response["partition_method"] = partition_method
+    response["partition_type"] = "entity" if partition_method == "entity" else "logical"
+    response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
         quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))

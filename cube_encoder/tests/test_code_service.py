@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import h3
 import pytest
@@ -20,7 +20,7 @@ def test_generate_and_parse_st_code():
         grid_type=GridType.S2,
         level=7,
         space_code=code,
-        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity=TimeGranularity.MINUTE,
     )
     assert result.st_code == f"s2:7:{code}:202603091530"
@@ -40,8 +40,8 @@ def test_batch_generate_st_code():
         grid_type=GridType.S2,
         level=7,
         items=[
-            {"space_code": c1, "timestamp": datetime(2026, 3, 9, 15, 30, 0)},
-            {"space_code": c2, "timestamp": datetime(2026, 3, 9, 15, 31, 0)},
+            {"space_code": c1, "timestamp": datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)},
+            {"space_code": c2, "timestamp": datetime(2026, 3, 9, 15, 31, 0, tzinfo=timezone.utc)},
         ],
         time_granularity=TimeGranularity.MINUTE,
     )
@@ -58,7 +58,7 @@ def test_generate_and_parse_st_code_for_mgrs():
         grid_type=GridType.MGRS,
         level=5,
         space_code=mgrs_code,
-        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity=TimeGranularity.HOUR,
     )
     assert result.st_code.startswith("mgrs:5:")
@@ -77,7 +77,7 @@ def test_generate_and_parse_st_code_for_isea4h():
         grid_type=GridType.ISEA4H,
         level=4,
         space_code=cell,
-        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity=TimeGranularity.DAY,
     )
     assert result.st_code == f"hx:4:{cell}:20260309"
@@ -95,7 +95,7 @@ def test_generate_and_parse_st_code_for_tile_matrix():
         grid_type=GridType.TILE_MATRIX,
         level=3,
         space_code=tile_code,
-        timestamp=datetime(2026, 3, 9, 15, 30, 0),
+        timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
         time_granularity=TimeGranularity.DAY,
     )
     assert result.st_code == f"tm:3:{tile_code}:20260309"
@@ -125,7 +125,7 @@ def test_generate_st_code_rejects_invalid_s2_space_code():
             grid_type=GridType.S2,
             level=7,
             space_code="NOT_A_S2",
-            timestamp=datetime(2026, 3, 9, 15, 30, 0),
+            timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
             time_granularity=TimeGranularity.MINUTE,
         )
 
@@ -137,6 +137,20 @@ def test_generate_st_code_rejects_level_mismatch_for_h3():
         service.generate_st_code(
             grid_type=GridType.ISEA4H,
             level=6,
+            space_code=code,
+            timestamp=datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc),
+            time_granularity=TimeGranularity.MINUTE,
+        )
+
+
+def test_generate_st_code_rejects_naive_datetime():
+    service = CodeService()
+    code = S2Engine().locate_point(lon=116.391, lat=39.907, level=7).space_code
+
+    with pytest.raises(ValidationError):
+        service.generate_st_code(
+            grid_type=GridType.S2,
+            level=7,
             space_code=code,
             timestamp=datetime(2026, 3, 9, 15, 30, 0),
             time_granularity=TimeGranularity.MINUTE,

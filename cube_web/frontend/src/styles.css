@@ -2104,7 +2104,6 @@ section {
 
 .table-text-clamp,
 .quality-text-clamp,
-.quality-check-message,
 .quality-check-detail-title,
 .quality-check-detail-line {
     display: -webkit-box;
@@ -3461,6 +3460,91 @@ section {
     font-size: 12px;
 }
 
+.partition-slot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    padding: 0 12px 10px;
+}
+
+.partition-slot-grid.detail {
+    padding: 12px;
+}
+
+.partition-slot-group {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid #e6ebf2;
+    border-radius: 8px;
+    background: #f8fafc;
+    min-width: 0;
+}
+
+.partition-slot-group-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--dark);
+}
+
+.partition-slot-chip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid #dbe4ef;
+    border-radius: 7px;
+    background: #fff;
+    color: var(--dark);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.partition-slot-chip > span {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.partition-slot-chip .el-tag {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.partition-slot-chip:hover:not(:disabled) {
+    border-color: rgba(47, 145, 234, 0.45);
+    box-shadow: 0 0 0 2px rgba(47, 145, 234, 0.08);
+}
+
+.partition-slot-chip.active {
+    border-color: rgba(47, 145, 234, 0.5);
+    background: #f2f8ff;
+}
+
+.partition-slot-chip.disabled {
+    cursor: default;
+    background: #f8fafc;
+    color: #6b7280;
+}
+
+.partition-slot-chip.static {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    cursor: default;
+}
+
+.partition-slot-chip.static small {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    color: var(--gray);
+    line-height: 1.4;
+}
+
 .batch-footer {
     display: flex;
     align-items: center;
@@ -3679,10 +3763,15 @@ section {
     font-size: 13px;
 }
 
-.partition-task-table .table-text-clamp {
-    color: var(--gray);
-    font-size: 12px;
-    line-height: 1.5;
+.partition-task-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.partition-task-actions .el-button {
+    margin-left: 0;
 }
 
 .partition-warn-alert {
@@ -3853,11 +3942,17 @@ section {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 16px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: #fff;
     padding: 14px 16px;
+}
+
+.partition-batch-detail-head > :first-child {
+    flex: 1 1 360px;
+    min-width: 0;
 }
 
 .partition-batch-detail-subtitle {
@@ -3870,6 +3965,7 @@ section {
     color: var(--dark);
     font-size: 13px;
     line-height: 1.5;
+    min-width: 0;
 }
 
 .partition-batch-detail-actions {
@@ -3878,6 +3974,8 @@ section {
     justify-content: flex-end;
     gap: 8px;
     flex-wrap: wrap;
+    margin-left: auto;
+    max-width: 100%;
 }
 
 .partition-batch-detail-tabs {
@@ -3927,6 +4025,11 @@ section {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.partition-detail-slot-section {
+    border-top: 1px solid var(--border);
+    background: #fff;
 }
 
 .partition-detail-toolbar {
@@ -4426,5 +4529,15 @@ section {
 
     .parallel-showcase {
         padding: 20px 18px 18px;
+    }
+
+    .partition-batch-detail-actions {
+        width: 100%;
+        justify-content: flex-start;
+        margin-left: 0;
+    }
+
+    .partition-detail-grid {
+        grid-template-columns: 1fr;
     }
 }

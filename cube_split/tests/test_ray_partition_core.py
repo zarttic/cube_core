@@ -5,6 +5,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,7 +13,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 import cube_split.jobs.ray_partition_core as ray_partition_core
-from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, convert_assets_to_cog
+from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, convert_assets_to_cog, create_unique_run_dir, upload_source_assets_to_minio
 from cube_split.partition.optical_products import get_optical_product_adapter, supported_optical_product_families
 
 
@@ -223,6 +224,196 @@ def test_build_manifest_supports_unified_manifest_jsonl(tmp_path: Path):
     assert records[0].bbox == [117.0, 35.8, 117.2, 36.0]
     assert records[0].corners == [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]]
     assert records[0].resolution == 30
+
+
+def test_build_manifest_can_upload_source_assets_via_hook(tmp_path: Path):
+    source = tmp_path / "scene.tif"
+    _write_tif(source)
+    seen: list[str] = []
+
+    def fake_upload(assets):
+        seen.extend(asset.path for asset in assets)
+        return [AssetRecord(**{**asset.__dict__, "path": f"s3://cube/cube/source/{Path(asset.path).name}"}) for asset in assets]
+
+    records = build_manifest(
+        tmp_path,
+        source_uploader=fake_upload,
+    )
+
+    assert seen == [str(source.resolve())]
+    assert records[0].path == "s3://cube/cube/source/scene.tif"
+
+
+def test_upload_source_assets_to_minio_skips_existing_s3_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "scene.tif"
+    _write_tif(source)
+    uploaded: list[str] = []
+    local_identity = ray_partition_core._local_file_identity(source)
+    source.with_name(f"{source.name}.identity").write_text(
+        f"local={local_identity}\nremote=etag:remote-1",
+        encoding="utf-8",
+    )
+
+    class FakeStat:
+        size = source.stat().st_size
+        etag = "remote-1"
+        last_modified = None
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def make_bucket(self, _bucket):
+            raise AssertionError("bucket already exists")
+
+        def fput_object(self, _bucket, key, _path):
+            uploaded.append(key)
+            return None
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+
+    records = upload_source_assets_to_minio(
+        [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
+        prefix="cube/source",
+        options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+    )
+
+    assert uploaded == []
+    assert records[0].path.startswith("s3://cube/cube/source/")
+
+
+def test_upload_source_assets_to_minio_reuploads_when_local_identity_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "scene.tif"
+    _write_tif(source)
+    uploaded: list[str] = []
+    source.write_bytes(b"abcd")
+    identity_path = source.with_name(f"{source.name}.identity")
+    identity_path.write_text("local=size:4|mtime_ns:1\nremote=etag:old", encoding="utf-8")
+
+    class FakeStat:
+        size = 4
+        etag = "remote-new"
+        last_modified = None
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def make_bucket(self, _bucket):
+            raise AssertionError("bucket already exists")
+
+        def fput_object(self, _bucket, key, _path):
+            uploaded.append(key)
+            return None
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+
+    records = upload_source_assets_to_minio(
+        [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
+        prefix="cube/source",
+        options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+    )
+
+    assert uploaded
+    identity_text = identity_path.read_text(encoding="utf-8")
+    assert "local=size:4|mtime_ns:" in identity_text
+    assert "remote=etag:remote-new" in identity_text
+    assert records[0].path.startswith("s3://cube/cube/source/")
+
+
+def test_create_unique_run_dir_avoids_same_second_collisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.time.strftime", lambda fmt: "run_20260630_150000")
+
+    first = create_unique_run_dir(tmp_path)
+    second = create_unique_run_dir(tmp_path)
+
+    assert first.name == "run_20260630_150000"
+    assert second.name == "run_20260630_150000_01"
+    assert first.exists()
+    assert second.exists()
+
+
+def test_download_s3_object_refreshes_cache_when_remote_identity_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_root = tmp_path / "cache"
+    target = cache_root / "96f0feec2e4c6b31" / "source.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"abcd")
+    target.with_name("source.tif.identity").write_text("remote=etag:old", encoding="utf-8")
+
+    class FakeStat:
+        size = 4
+        etag = "remote-new"
+        last_modified = None
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def fget_object(self, _bucket, _key, path):
+            Path(path).write_bytes(b"wxyz")
+
+    monkeypatch.setattr(ray_partition_core, "_cache_target_for_uri", lambda uri, root: target)
+    monkeypatch.setattr(ray_partition_core, "_minio_client", lambda options=None: FakeMinio())
+
+    downloaded = ray_partition_core._download_s3_object("s3://cube/demo/source.tif", cache_root, {})
+
+    assert downloaded == target
+    assert target.read_bytes() == b"wxyz"
+    assert target.with_name("source.tif.identity").read_text(encoding="utf-8") == "remote=etag:remote-new"
+
+
+def test_upload_source_assets_to_minio_raises_on_non_missing_stat_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from minio.error import S3Error
+
+    source = tmp_path / "scene.tif"
+    _write_tif(source)
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def stat_object(self, _bucket, _key):
+            raise S3Error(
+                response=SimpleNamespace(status=403),
+                code="AccessDenied",
+                message="denied",
+                resource="/cube/scene.tif",
+                request_id="req",
+                host_id="host",
+            )
+
+        def make_bucket(self, _bucket):
+            raise AssertionError("bucket already exists")
+
+        def fput_object(self, _bucket, _key, _path):
+            raise AssertionError("should fail before upload")
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+
+    with pytest.raises(S3Error, match="AccessDenied"):
+        upload_source_assets_to_minio(
+            [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
+            prefix="cube/source",
+            options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+        )
 
 
 def test_build_manifest_manifest_jsonl_requires_required_fields(tmp_path: Path):

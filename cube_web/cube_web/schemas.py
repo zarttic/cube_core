@@ -25,6 +25,7 @@ class OpticalAssetSelection(CubeWebModel):
 
 
 class PartitionDemoRequest(CubeWebModel):
+    partition_method: Literal["logical", "entity"] | None = None
     grid_type: GridType | None = None
     grid_level: int | None = Field(default=None, ge=1)
     grid_level_mode: Literal["auto", "manual"] | None = None
@@ -133,6 +134,20 @@ class QualityHistoryRequest(CubeWebModel):
 class QualityResponse(CubeWebModel):
     status: str | None = None
     run_dir: str | None = None
+
+
+class SpatiotemporalQueryRequest(CubeWebModel):
+    data_type: Literal["carbon"] = "carbon"
+    point: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    time_start: str = Field(min_length=1)
+    time_end: str = Field(min_length=1)
+    quality_flags: list[str] | None = None
+    product_type: str = "xco2"
+    grid_type: GridType = "isea4h"
+    grid_level: int = Field(default=5, ge=1)
+    cube_version: str = "v1"
+    limit: int = Field(default=1000, ge=1, le=10000)
 
 
 class OpticalIngestRequest(CubeWebModel):

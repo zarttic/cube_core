@@ -30,7 +30,10 @@ from cube_split.jobs.ray_partition_core import (
     build_manifest,
     cog_creation_options,
     convert_assets_to_cog,
+    create_unique_run_dir,
+    upload_source_assets_to_minio,
 )
+from cube_split.partition.product_products import parse_product_asset
 
 
 def _prepare_product_task_rows(tasks: list[dict], partition_prefix_len: int) -> list[dict]:
@@ -306,7 +309,18 @@ def _run_product_partition_ingest(args: argparse.Namespace, run_dir: Path) -> di
     ingest_args = argparse.Namespace(**vars(args))
     ingest_args.run_dir = str(run_dir)
     ingest_args.job_id = str(getattr(args, "job_id", "") or "").strip() or run_dir.name
+    if str(getattr(args, "partition_backend", "thread") or "thread") == "ray":
+        ingest_args.asset_storage_backend = "minio"
     return run_product_ingest(ingest_args)
+
+
+def _resolve_product_name(args: argparse.Namespace, source_assets: list[Any]) -> str:
+    explicit = str(getattr(args, "product_name", "") or "").strip()
+    if explicit:
+        return explicit
+    if not source_assets:
+        raise ValueError("product_name is required when no source assets are available")
+    return parse_product_asset(Path(str(source_assets[0].path))).product_name
 
 
 def run_product_partition(args: argparse.Namespace) -> dict:
@@ -325,13 +339,31 @@ def run_product_partition(args: argparse.Namespace) -> dict:
 
     manifest_path_raw = str(getattr(args, "manifest_path", "") or "").strip()
     manifest_path = Path(manifest_path_raw).expanduser() if manifest_path_raw else None
+    source_uploader = None
+    if backend == "ray":
+        source_uploader = lambda assets: upload_source_assets_to_minio(
+            assets,
+            prefix="cube/source",
+            options={
+                "endpoint": str(getattr(args, "minio_endpoint", "")),
+                "access_key": str(getattr(args, "minio_access_key", "")),
+                "secret_key": str(getattr(args, "minio_secret_key", "")),
+                "secure": bool(getattr(args, "minio_secure", False)),
+                "bucket": str(getattr(args, "minio_bucket", "")),
+                "dataset": str(getattr(args, "dataset", "dianzhong_ecological_security")),
+                "sensor": str(getattr(args, "sensor", "data_product")),
+                "asset_version": str(getattr(args, "asset_version", "v1")),
+            },
+        )
     source_assets = build_manifest(
         input_dir,
         data_type="product",
         manifest_path=manifest_path,
+        **({"source_uploader": source_uploader} if source_uploader is not None else {}),
     )
     if not source_assets:
         raise RuntimeError(f"No product TIF assets found under: {input_dir}")
+    args.product_name = _resolve_product_name(args, source_assets)
     check_cancelled(args)
 
     cog_start = time.perf_counter()
@@ -364,11 +396,14 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     grouped_tasks = _group_tasks_for_local_processing(task_rows)
     check_cancelled(args)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir = create_unique_run_dir(output_dir)
     rows_path = run_dir / "index_rows.jsonl"
     report_path = run_dir / "job_report.json"
+
+    requested_asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
+    if requested_asset_storage_backend not in {"local", "minio"}:
+        raise ValueError("asset_storage_backend must be one of: local, minio")
+    asset_storage_backend = "minio" if backend == "ray" else requested_asset_storage_backend
 
     if grouped_tasks:
         if backend == "ray":
@@ -462,12 +497,12 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         "ingest_enabled": ingest_enabled,
         "ingest_stats": ingest_stats,
         "metadata_backend": str(getattr(args, "metadata_backend", "none") or "none"),
-        "asset_storage_backend": str(getattr(args, "asset_storage_backend", "local") or "local"),
+        "asset_storage_backend": asset_storage_backend,
         "dataset": str(getattr(args, "dataset", "")),
         "asset_version": str(getattr(args, "asset_version", "")),
         "cube_version": str(getattr(args, "cube_version", "")),
-        "minio_bucket": str(getattr(args, "minio_bucket", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
-        "minio_prefix": str(getattr(args, "minio_prefix", "")) if str(getattr(args, "asset_storage_backend", "local") or "local") == "minio" else "",
+        "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
+        "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
         "cog_elapsed_sec": round(cog_elapsed, 3),
         "partition_elapsed_sec": round(partition_elapsed, 3),
         "ingest_elapsed_sec": round(ingest_elapsed, 3),

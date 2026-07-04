@@ -1,11 +1,13 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCloseFilled, Document, EditPen, FolderChecked, Refresh, Search, VideoPlay } from '@element-plus/icons-vue';
 
-import GlobeMap from '@/components/GlobeMap.vue';
-import QualityHistoryDrawer from '@/components/QualityHistoryDrawer.vue';
 import { apiPrefixes, authHeaders, requestGet, requestJson } from '@/api/client';
+import ExpandableText from '@/components/ExpandableText.vue';
+
+const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
+const QualityHistoryDrawer = defineAsyncComponent(() => import('@/components/QualityHistoryDrawer.vue'));
 
 function initialModule() {
   if (window.location.pathname === '/quality') return 'quality';
@@ -37,6 +39,12 @@ const gridTypeLabels = {
   tile_matrix: '平面格网',
   isea4h: '六边形格网',
 };
+const partitionMethodLabels = {
+  logical: '逻辑剖分',
+  entity: '实体剖分',
+};
+const partitionGridTypes = ['tile_matrix', 's2', 'isea4h'];
+const partitionMethods = ['logical', 'entity'];
 const partitionArchiveableStatuses = ['failed', 'manual_required', 'cancelled'];
 const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];
 const partitionTaskPollIntervalMs = 1500;
@@ -44,12 +52,15 @@ const partitionTaskMaxPolls = 1200;
 const opticalGridType = ref('s2');
 const opticalGridLevel = ref(defaultLogicalGridLevel);
 const entityGridLevel = ref(defaultEntityGridLevel);
+const opticalPartitionMethod = ref('logical');
 const radarGridType = ref('s2');
 const radarGridLevel = ref(5);
 const radarEntityGridLevel = ref(defaultEntityGridLevel);
+const radarPartitionMethod = ref('logical');
 const productGridType = ref('s2');
 const productGridLevel = ref(5);
 const productEntityGridLevel = ref(defaultEntityGridLevel);
+const productPartitionMethod = ref('logical');
 const defaultOpticalSchemaFields = [
   { field: 'source_uri', type: 'string', meaning: '光学栅格源文件路径或 MinIO 对象 URL' },
   { field: 'scene_id', type: 'string', meaning: '光学场景标识' },
@@ -183,28 +194,43 @@ function assetResolution(asset) {
   return values.length ? Math.min(...values) : null;
 }
 
-function defaultGridLevelForGridType(gridType) {
-  return gridType === 'isea4h' ? defaultEntityGridLevel : defaultLogicalGridLevel;
+function partitionMethodText(partitionMethod) {
+  return partitionMethodLabels[partitionMethod] || partitionMethod || '-';
+}
+
+function defaultGridLevelForGridTypeAndMethod(gridType, partitionMethod) {
+  if (partitionMethod === 'entity') return defaultEntityGridLevel;
+  return defaultLogicalGridLevel;
 }
 
 function formatGridType(gridType) {
   return gridTypeLabels[gridType] || gridType || '-';
 }
 
-function defaultGridLevelForResolution(resolution, gridType, fallback = defaultGridLevelForGridType(gridType)) {
+function defaultGridLevelForResolution(
+  resolution,
+  gridType,
+  partitionMethod,
+  fallback = defaultGridLevelForGridTypeAndMethod(gridType, partitionMethod),
+) {
+  if (partitionMethod === 'entity') return defaultEntityGridLevel;
   if (!Number.isFinite(resolution) || resolution <= 0) return fallback;
-  if (gridType === 'isea4h') return defaultEntityGridLevel;
   if (resolution < 10) return 8;
   if (resolution <= 30) return 7;
   return 6;
 }
 
-function defaultGridLevelFromAssets(assets, gridType, fallback = defaultGridLevelForGridType(gridType)) {
+function defaultGridLevelFromAssets(
+  assets,
+  gridType,
+  partitionMethod,
+  fallback = defaultGridLevelForGridTypeAndMethod(gridType, partitionMethod),
+) {
   const resolutions = (Array.isArray(assets) ? assets : [])
     .map(assetResolution)
     .filter((resolution) => resolution !== null);
   if (!resolutions.length) return fallback;
-  return defaultGridLevelForResolution(Math.min(...resolutions), gridType, fallback);
+  return defaultGridLevelForResolution(Math.min(...resolutions), gridType, partitionMethod, fallback);
 }
 
 const managedOpticalBatches = ref([]);
@@ -220,6 +246,7 @@ const partitionBatchDetailTab = ref('overview');
 const partitionBatchDetailSearch = ref('');
 const partitionBatchDetailAssetStatus = ref('all');
 const partitionBatchDetailSelectedAssetIds = ref([]);
+let partitionBatchDetailRequestToken = 0;
 const partitionTasks = ref([]);
 const partitionTasksLoading = ref(false);
 const partitionTaskPage = ref(1);
@@ -391,6 +418,36 @@ function partitionOperationText(operation) {
   return map[operation] || operation || '-';
 }
 
+function isExpandableErrorLabel(label) {
+  return typeof label === 'string' && /错误|失败/.test(label);
+}
+
+function attemptPayload(attempt) {
+  return attempt?.payload && typeof attempt.payload === 'object' ? attempt.payload : {};
+}
+
+function attemptPartitionMethod(attempt) {
+  const payload = attemptPayload(attempt);
+  if (payload.partition_method) return payload.partition_method;
+  if (payload.grid_type === 'isea4h') return 'entity';
+  if (payload.grid_type) return 'logical';
+  return '';
+}
+
+function attemptPartitionMethodLabel(attempt) {
+  const method = attemptPartitionMethod(attempt);
+  return method ? partitionMethodText(method) : '-';
+}
+
+function attemptGridLabel(attempt) {
+  const payload = attemptPayload(attempt);
+  if (!payload.grid_type) return '-';
+  const gridText = formatGridType(payload.grid_type);
+  return payload.grid_level === undefined || payload.grid_level === null
+    ? gridText
+    : `${gridText} / ${payload.grid_level} 级`;
+}
+
 function formatPartitionTimestamp(value) {
   return formatQualityTime(value);
 }
@@ -427,28 +484,30 @@ function partitionBatchExecutionOperation(batch) {
 }
 
 function partitionBatchConfigOverride(batch) {
+  const payload = batch?.normalized_payload || {};
   if (batch?.data_type === 'optical') {
     return {
-      grid_type: opticalGridType.value,
-      grid_level: Number(selectedMapGridLevel.value),
-      grid_level_mode: isGridLevelManual('optical') || opticalGridType.value === 'isea4h' ? 'manual' : 'auto',
+      partition_method: payload.partition_method || partitionMethodForModule('optical'),
+      grid_type: payload.grid_type || gridTypeForModule('optical'),
+      grid_level: Number(payload.grid_level || gridLevelForModule('optical')),
+      grid_level_mode: payload.grid_level_mode || gridLevelModeForModule('optical'),
     };
   }
   if (batch?.data_type === 'radar') {
-    const useEntityPartition = radarGridType.value === 'isea4h';
     return {
-      grid_type: radarGridType.value,
-      grid_level: Number(gridLevelForModule('radar')),
-      grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto',
+      partition_method: payload.partition_method || partitionMethodForModule('radar'),
+      grid_type: payload.grid_type || gridTypeForModule('radar'),
+      grid_level: Number(payload.grid_level || gridLevelForModule('radar')),
+      grid_level_mode: payload.grid_level_mode || gridLevelModeForModule('radar'),
     };
   }
   if (batch?.data_type === 'product') {
-    const useEntityPartition = productGridType.value === 'isea4h';
     return {
-      grid_type: productGridType.value,
-      grid_level: Number(gridLevelForModule('product')),
-      grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto',
-      target_crs: batch.normalized_payload?.target_crs || 'EPSG:4326',
+      partition_method: payload.partition_method || partitionMethodForModule('product'),
+      grid_type: payload.grid_type || gridTypeForModule('product'),
+      grid_level: Number(payload.grid_level || gridLevelForModule('product')),
+      grid_level_mode: payload.grid_level_mode || gridLevelModeForModule('product'),
+      target_crs: payload.target_crs || 'EPSG:4326',
     };
   }
   return {};
@@ -515,6 +574,65 @@ function partitionBatchSummary(batch) {
   return `${partitionStatusText(batch.status)}${ingestSummary} · 尝试 ${attemptCount} 次 · ${lastError}`;
 }
 
+function partitionSlots(batch) {
+  return Array.isArray(batch?.partition_slots) ? batch.partition_slots : [];
+}
+
+function partitionSlotStatusText(status) {
+  if (status === 'available') return '可剖分';
+  if (status === 'completed') return '已完成';
+  return partitionStatusText(status);
+}
+
+function partitionSlotStatusType(status) {
+  const map = {
+    available: 'primary',
+    queued: 'warning',
+    running: 'warning',
+    retrying: 'warning',
+    cancel_requested: 'warning',
+    failed: 'danger',
+    manual_required: 'danger',
+    cancelled: 'info',
+    completed: 'info',
+  };
+  return map[status] || 'info';
+}
+
+function partitionBatchAllSlotsCompleted(batch) {
+  const slots = partitionSlots(batch);
+  return slots.length === partitionGridTypes.length * partitionMethods.length
+    && slots.every((slot) => slot.status === 'completed');
+}
+
+function partitionSlotGroups(batch) {
+  if (!batch || batch.data_type === 'carbon') return [];
+  const slotsByKey = new Map(partitionSlots(batch).map((slot) => [`${slot.grid_type}:${slot.partition_method}`, slot]));
+  return partitionGridTypes.map((gridType) => ({
+    grid_type: gridType,
+    grid_label: formatGridType(gridType),
+    slots: partitionMethods.map((partitionMethod) => (
+      slotsByKey.get(`${gridType}:${partitionMethod}`) || {
+        grid_type: gridType,
+        grid_label: formatGridType(gridType),
+        partition_method: partitionMethod,
+        method_label: partitionMethodText(partitionMethod),
+        status: 'available',
+        disabled: false,
+        latest_task_id: null,
+        finished_at: null,
+      }
+    )),
+  }));
+}
+
+function partitionSlotSummary(slot) {
+  const parts = [partitionSlotStatusText(slot.status)];
+  if (slot.latest_task_id) parts.push(slot.latest_task_id);
+  if (slot.finished_at) parts.push(formatPartitionTimestamp(slot.finished_at));
+  return parts.join(' · ');
+}
+
 function partitionBatchDetailPayloadRows(batch) {
   if (!batch) return [];
   const payload = batch.normalized_payload || {};
@@ -536,6 +654,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'optical') {
     rows.splice(2, 0,
+      { label: '剖分方式', value: partitionMethodText(payload.partition_method) },
       { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '选择资产', value: Array.isArray(payload.selected_assets) ? payload.selected_assets.length : 0 },
@@ -549,6 +668,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'product') {
     rows.splice(2, 0,
+      { label: '剖分方式', value: partitionMethodText(payload.partition_method) },
       { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '目标参考系统', value: payload.target_crs || '-' },
@@ -557,6 +677,7 @@ function partitionBatchDetailPayloadRows(batch) {
   }
   if (batch.data_type === 'radar') {
     rows.splice(2, 0,
+      { label: '剖分方式', value: partitionMethodText(payload.partition_method) },
       { label: '格网类型', value: formatGridType(payload.grid_type) },
       { label: '格网层级', value: payload.grid_level ?? '-' },
       { label: '目标参考系统', value: payload.target_crs || '-' },
@@ -648,6 +769,23 @@ function partitionBatchAssetSelectionChange(rows) {
 
 function selectManagedBatchByDetail(batch) {
   setBatchSelection(batch.batch_id || batch.id, batch.data_type);
+  syncModuleControlsFromBatch(batch);
+}
+
+function syncModuleControlsFromBatch(batch) {
+  const dataType = batch?.data_type;
+  const payload = batch?.normalized_payload || {};
+  if (!['optical', 'radar', 'product'].includes(dataType)) return;
+  const gridType = payload.grid_type;
+  const partitionMethod = payload.partition_method;
+  const gridLevel = Number(payload.grid_level);
+  const gridLevelMode = payload.grid_level_mode;
+  if (gridType) setGridTypeForModule(dataType, gridType);
+  if (partitionMethod) setPartitionMethodForModule(dataType, partitionMethod);
+  if (Number.isFinite(gridLevel) && gridLevel > 0) setGridLevelForModule(dataType, gridLevel);
+  if (gridLevelMode === 'manual' || gridLevelMode === 'auto') {
+    setGridLevelManual(dataType, gridLevelMode === 'manual');
+  }
 }
 
 function partitionTaskDisplayStatus(task) {
@@ -717,7 +855,8 @@ async function requeuePartitionTaskBatch(task) {
   partitionBatchDetailAction.value = actionKey;
   try {
     const { partitionPrefix } = apiPrefixes();
-    await requestJson(`${partitionPrefix}/batches/${batchId}/requeue`, {});
+    const requeuedBatch = await requestJson(`${partitionPrefix}/batches/${batchId}/requeue`, {});
+    applyRequeuedPartitionBatch(batchId, requeuedBatch);
     ElMessage.success('已打回已载入数据队列');
     await Promise.all([
       loadPartitionBatches(),
@@ -732,6 +871,31 @@ async function requeuePartitionTaskBatch(task) {
     if (partitionBatchDetailAction.value === actionKey) {
       partitionBatchDetailAction.value = '';
     }
+  }
+}
+
+function applyRequeuedPartitionBatch(batchId, requeuedBatch = null) {
+  const patch = {
+    ...(requeuedBatch || {}),
+    id: batchId,
+    batch_id: batchId,
+    status: 'pending',
+    last_error: null,
+    manual_required_at: null,
+  };
+  const patchTaskRows = (items) => items.map((item) => (
+    item.batch_id === batchId
+      ? { ...item, batch_status: 'pending' }
+      : item
+  ));
+  partitionTasks.value = patchTaskRows(partitionTasks.value);
+  activePartitionTasks.value = patchTaskRows(activePartitionTasks.value);
+  if (partitionBatchDetail.value?.batch_id === batchId || partitionBatchDetail.value?.id === batchId) {
+    partitionBatchDetail.value = { ...partitionBatchDetail.value, ...patch };
+  }
+  if (lastPartitionResult.value?.batch_id === batchId) {
+    lastPartitionResult.value = { ...lastPartitionResult.value, batch_status: 'pending' };
+    resultRows.value = formatRows(lastPartitionResult.value);
   }
 }
 
@@ -758,7 +922,7 @@ function applyArchivedPartitionBatch(batchId, archivedBatch = null) {
 
 const partitionResultArchiveBatch = computed(() => {
   const result = lastPartitionResult.value;
-  if (!result || resultLoading.value || result.status !== 'failed') return null;
+  if (!result || resultLoading.value || !['failed', 'manual_required'].includes(result.status)) return null;
   if (result.batch_status === 'archived' || partitionActiveStatuses.includes(result.batch_status)) return null;
   const request = lastPartitionRequest.value || {};
   const payload = request.payload || {};
@@ -1047,6 +1211,7 @@ async function openPartitionBatchDetail(batch) {
     : batch;
   const batchId = resolved?.id || resolved?.batch_id || batch;
   if (!batchId) return;
+  dataDrawerVisible.value = false;
   partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };
   partitionBatchDetailVisible.value = true;
   partitionBatchDetailLoading.value = true;
@@ -1055,17 +1220,22 @@ async function openPartitionBatchDetail(batch) {
   partitionBatchDetailAssetStatus.value = 'all';
   clearPartitionBatchDetailSelection();
   partitionBatchDetailTab.value = 'overview';
+  const requestToken = ++partitionBatchDetailRequestToken;
   try {
     const detail = await loadPartitionBatchDetail(batchId);
+    if (requestToken !== partitionBatchDetailRequestToken) return null;
     partitionBatchDetail.value = detail;
     selectManagedBatchByDetail(detail);
     return detail;
   } catch (error) {
+    if (requestToken !== partitionBatchDetailRequestToken) return null;
     partitionBatchDetail.value = null;
     ElMessage.error(error.message);
     return null;
   } finally {
-    partitionBatchDetailLoading.value = false;
+    if (requestToken === partitionBatchDetailRequestToken) {
+      partitionBatchDetailLoading.value = false;
+    }
   }
 }
 
@@ -1073,13 +1243,18 @@ async function refreshPartitionBatchDetail() {
   const batchId = partitionBatchDetail.value?.id || partitionBatchDetail.value?.batch_id;
   if (!batchId) return;
   partitionBatchDetailLoading.value = true;
+  const requestToken = ++partitionBatchDetailRequestToken;
   try {
     const detail = await loadPartitionBatchDetail(batchId);
+    if (requestToken !== partitionBatchDetailRequestToken) return;
     partitionBatchDetail.value = detail;
   } catch (error) {
+    if (requestToken !== partitionBatchDetailRequestToken) return;
     ElMessage.error(error.message);
   } finally {
-    partitionBatchDetailLoading.value = false;
+    if (requestToken === partitionBatchDetailRequestToken) {
+      partitionBatchDetailLoading.value = false;
+    }
   }
 }
 
@@ -1672,24 +1847,57 @@ const selectedMapGridType = computed(() => (
 ));
 
 function gridLevelManualKeyFor(moduleName = activeModule.value) {
-  if (moduleName === 'optical' && opticalGridType.value === 'isea4h') return 'opticalEntity';
-  if (moduleName === 'radar' && radarGridType.value === 'isea4h') return 'radarEntity';
-  if (moduleName === 'product' && productGridType.value === 'isea4h') return 'productEntity';
+  if (moduleName === 'optical' && partitionMethodForModule('optical') === 'entity') return 'opticalEntity';
+  if (moduleName === 'radar' && partitionMethodForModule('radar') === 'entity') return 'radarEntity';
+  if (moduleName === 'product' && partitionMethodForModule('product') === 'entity') return 'productEntity';
   return moduleName;
 }
 
 function gridLevelForModule(moduleName = activeModule.value) {
-  if (moduleName === 'product') return productGridType.value === 'isea4h' ? productEntityGridLevel.value : productGridLevel.value;
-  if (moduleName === 'radar') return radarGridType.value === 'isea4h' ? radarEntityGridLevel.value : radarGridLevel.value;
-  return opticalGridType.value === 'isea4h' ? entityGridLevel.value : opticalGridLevel.value;
+  if (moduleName === 'product') return partitionMethodForModule('product') === 'entity' ? productEntityGridLevel.value : productGridLevel.value;
+  if (moduleName === 'radar') return partitionMethodForModule('radar') === 'entity' ? radarEntityGridLevel.value : radarGridLevel.value;
+  return partitionMethodForModule('optical') === 'entity' ? entityGridLevel.value : opticalGridLevel.value;
 }
 
-const selectedMapGridLevel = computed(() => gridLevelForModule(activeModule.value));
+const selectedMapGridLevel = computed({
+  get: () => gridLevelForModule(activeModule.value),
+  set: (level) => {
+    if (!['optical', 'radar', 'product'].includes(activeModule.value)) return;
+    setGridLevelForModule(activeModule.value, level);
+  },
+});
 
 function gridTypeForModule(moduleName = activeModule.value) {
   if (moduleName === 'product') return productGridType.value;
   if (moduleName === 'radar') return radarGridType.value;
   return opticalGridType.value;
+}
+
+function setGridTypeForModule(moduleName, gridType) {
+  if (moduleName === 'product') {
+    productGridType.value = gridType;
+  } else if (moduleName === 'radar') {
+    radarGridType.value = gridType;
+  } else if (moduleName === 'optical') {
+    opticalGridType.value = gridType;
+  }
+}
+
+function partitionMethodForModule(moduleName = activeModule.value) {
+  if (moduleName === 'product') return productPartitionMethod.value;
+  if (moduleName === 'radar') return radarPartitionMethod.value;
+  if (moduleName === 'optical') return opticalPartitionMethod.value;
+  return 'logical';
+}
+
+function setPartitionMethodForModule(moduleName, partitionMethod) {
+  if (moduleName === 'product') {
+    productPartitionMethod.value = partitionMethod;
+  } else if (moduleName === 'radar') {
+    radarPartitionMethod.value = partitionMethod;
+  } else if (moduleName === 'optical') {
+    opticalPartitionMethod.value = partitionMethod;
+  }
 }
 
 function selectedAssetsForModule(moduleName = activeModule.value) {
@@ -1709,16 +1917,20 @@ function setGridLevelManual(moduleName, value) {
   gridLevelManualOverrides.value = { ...gridLevelManualOverrides.value, [key]: value };
 }
 
+function gridLevelModeForModule(moduleName = activeModule.value) {
+  return isGridLevelManual(moduleName) ? 'manual' : 'auto';
+}
+
 function setGridLevelForModule(moduleName, level) {
-  if (moduleName === 'product' && productGridType.value === 'isea4h') {
+  if (moduleName === 'product' && partitionMethodForModule('product') === 'entity') {
     productEntityGridLevel.value = level;
   } else if (moduleName === 'product') {
     productGridLevel.value = level;
-  } else if (moduleName === 'radar' && radarGridType.value === 'isea4h') {
+  } else if (moduleName === 'radar' && partitionMethodForModule('radar') === 'entity') {
     radarEntityGridLevel.value = level;
   } else if (moduleName === 'radar') {
     radarGridLevel.value = level;
-  } else if (opticalGridType.value === 'isea4h') {
+  } else if (partitionMethodForModule('optical') === 'entity') {
     entityGridLevel.value = level;
   } else {
     opticalGridLevel.value = level;
@@ -1727,7 +1939,13 @@ function setGridLevelForModule(moduleName, level) {
 
 function defaultGridLevelForModule(moduleName = activeModule.value) {
   const gridType = gridTypeForModule(moduleName);
-  return defaultGridLevelFromAssets(selectedAssetsForModule(moduleName), gridType, defaultGridLevelForGridType(gridType));
+  const partitionMethod = partitionMethodForModule(moduleName);
+  return defaultGridLevelFromAssets(
+    selectedAssetsForModule(moduleName),
+    gridType,
+    partitionMethod,
+    defaultGridLevelForGridTypeAndMethod(gridType, partitionMethod),
+  );
 }
 
 function applyDefaultGridLevel(moduleName = activeModule.value) {
@@ -1792,6 +2010,15 @@ const partitionMetricRows = computed(() => {
   if (result.batch_status) {
     rows.splice(1, 0, { label: '批次状态', value: partitionStatusText(result.batch_status) });
   }
+  if (result.partition_method || result.partition_type) {
+    rows.splice(3, 0, { label: '剖分方式', value: partitionMethodText(result.partition_method || result.partition_type) });
+  }
+  if (result.grid_type) {
+    rows.splice(4, 0, { label: '格网类型', value: formatGridType(result.grid_type) });
+  }
+  if (result.grid_level !== undefined && result.grid_level !== null) {
+    rows.splice(5, 0, { label: '格网层级', value: result.grid_level });
+  }
   return rows;
 });
 
@@ -1854,11 +2081,15 @@ const partitionContextRows = computed(() => {
   ];
   if (partitionModules.has(activeModule.value)) {
     const gridType = activeModule.value === 'carbon' ? 'isea4h' : payload.grid_type || opticalGridType.value;
-    const gridLevel = activeModule.value === 'carbon' ? 5 : payload.grid_level || opticalGridLevel.value;
+    const gridLevel = activeModule.value === 'carbon' ? 5 : payload.grid_level || gridLevelForModule(activeModule.value);
+    const partitionMethod = activeModule.value === 'carbon'
+      ? 'logical'
+      : payload.partition_method || result.partition_method || result.partition_type || partitionMethodForModule(activeModule.value);
     const gridText = `${formatGridType(gridType)} / ${gridLevel} 级`;
     rows.splice(
       5,
       0,
+      { label: '剖分方式', value: partitionMethodText(partitionMethod) },
       { label: '剖分格网', value: gridText },
       ...(activeModule.value === 'optical'
         ? [
@@ -1892,6 +2123,9 @@ const partitionResultDetailRows = computed(() => {
   const result = lastPartitionResult.value;
   if (!result) return [];
   return [
+    { label: '剖分方式', value: partitionMethodText(result.partition_method || result.partition_type) },
+    { label: '格网类型', value: formatGridType(result.grid_type) },
+    { label: '格网层级', value: result.grid_level ?? '-' },
     { label: '执行引擎', value: result.execution_engine || result.partition_backend || '-' },
     { label: '后台任务 ID', value: result.partition_task_id || '-' },
     { label: '执行 ID', value: result.execution_id || result.run_task_id || result.demo_task_id || '-' },
@@ -1912,12 +2146,17 @@ const partitionWarnNeedsRetry = computed(() => {
 });
 
 const partitionFailureMessage = computed(() => (
-  lastPartitionResult.value?.status === 'failed' ? lastPartitionResult.value.error || '剖分失败' : ''
+  ['failed', 'manual_required'].includes(lastPartitionResult.value?.status)
+    ? lastPartitionResult.value.error || (lastPartitionResult.value?.status === 'manual_required' ? '需要人工确认后继续处理' : '剖分失败')
+    : ''
 ));
 
-function openDataDrawer() {
+async function openDataDrawer() {
   dataSearch.value = '';
   dataDrawerVisible.value = true;
+  if (partitionModules.has(activeModule.value)) {
+    await loadPartitionBatches();
+  }
 }
 
 function openQualityHistoryDrawer() {
@@ -2027,6 +2266,21 @@ function toggleProductBatchExpand(batchId) {
   expandedProductBatchId.value = expandedProductBatchId.value === batchId ? '' : batchId;
 }
 
+function isSelectedPartitionSlot(batch, slot) {
+  return activeModule.value === batch?.data_type
+    && gridTypeForModule(batch.data_type) === slot.grid_type
+    && partitionMethodForModule(batch.data_type) === slot.partition_method;
+}
+
+function selectPartitionSlot(batch, slot) {
+  if (!batch || !slot || slot.disabled) return;
+  const batchId = batch.id || batch.batch_id;
+  if (batchId) setBatchSelection(batchId, batch.data_type);
+  setGridTypeForModule(batch.data_type, slot.grid_type);
+  setPartitionMethodForModule(batch.data_type, slot.partition_method);
+  applyDefaultGridLevel(batch.data_type);
+}
+
 function toggleOpticalAssetSelect(batchId, asset) {
   const key = assetKey(asset);
   const current = deselectedOpticalAssetKeys.value[batchId] || [];
@@ -2094,6 +2348,10 @@ function schemaCollapseTitle(batch) {
   return `Schema 字段（${schemaForBatch(batch).length}）`;
 }
 
+function partitionSlotCollapseTitle(batch) {
+  return `剖分槽位（${partitionSlots(batch).length || partitionGridTypes.length * partitionMethods.length}）`;
+}
+
 function schemaFromManagedBatch(batch) {
   if (Array.isArray(batch?.source_schema?.schema) && batch.source_schema.schema.length) return batch.source_schema.schema;
   if (Array.isArray(batch?.schema) && batch.schema.length) return batch.schema;
@@ -2151,7 +2409,9 @@ function partitionBatchNeedsIngestAttention(batch) {
 }
 
 function shouldDisplayManagedBatch(batch) {
-  return batch?.status !== 'archived' && batch?.status !== 'succeeded';
+  if (batch?.status === 'archived') return false;
+  if (batch?.status !== 'succeeded') return true;
+  return !partitionBatchAllSlotsCompleted(batch);
 }
 
 async function loadPartitionBatches() {
@@ -2185,12 +2445,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'optical') {
     const selectedBatch = visibleOpticalBatches.value.find((batch) => selectedOpticalBatchIds.value.includes(batch.id));
     const selectedAssets = selectedOpticalAssets.value;
-    const useEntityPartition = opticalGridType.value === 'isea4h';
     return {
       payload: {
-        grid_type: opticalGridType.value,
-        grid_level: Number(selectedMapGridLevel.value),
-        grid_level_mode: isGridLevelManual('optical') || useEntityPartition ? 'manual' : 'auto',
+        partition_method: partitionMethodForModule('optical'),
+        grid_type: gridTypeForModule('optical'),
+        grid_level: Number(gridLevelForModule('optical')),
+        grid_level_mode: gridLevelModeForModule('optical'),
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
         selected_assets: selectedAssets,
@@ -2216,12 +2476,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'radar') {
     const selectedBatch = visibleRadarBatches.value.find((batch) => selectedRadarBatchIds.value.includes(batch.id));
     const selectedAssets = selectedRadarAssets.value;
-    const useEntityPartition = radarGridType.value === 'isea4h';
     return {
       payload: {
-        grid_type: radarGridType.value,
+        partition_method: partitionMethodForModule('radar'),
+        grid_type: gridTypeForModule('radar'),
         grid_level: Number(gridLevelForModule('radar')),
-        grid_level_mode: isGridLevelManual('radar') || useEntityPartition ? 'manual' : 'auto',
+        grid_level_mode: gridLevelModeForModule('radar'),
         target_crs: selectedBatch?.target_crs || 'EPSG:4326',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
@@ -2233,12 +2493,12 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'product') {
     const selectedBatch = visibleProductBatches.value.find((batch) => selectedProductBatchIds.value.includes(batch.id));
     const selectedAssets = selectedProductAssets.value;
-    const useEntityPartition = productGridType.value === 'isea4h';
     return {
       payload: {
-        grid_type: productGridType.value,
+        partition_method: partitionMethodForModule('product'),
+        grid_type: gridTypeForModule('product'),
         grid_level: Number(gridLevelForModule('product')),
-        grid_level_mode: isGridLevelManual('product') || useEntityPartition ? 'manual' : 'auto',
+        grid_level_mode: gridLevelModeForModule('product'),
         target_crs: selectedBatch?.target_crs || 'EPSG:4326',
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
@@ -2318,11 +2578,14 @@ function buildPartitionFailureResult(error, request = {}) {
   const operation = request.operation || 'run';
   const apiPath = request.apiPath || `/v1/partition/${endpoint}/${operation}`;
   const dataType = payload.data_type || activeModule.value;
+  const message = errorText(error);
+  const manualRequired = /需要人工处理|人工确认|manual_required/i.test(message);
   return {
-    status: 'failed',
+    status: manualRequired ? 'manual_required' : 'failed',
     mode: operation === 'test' ? 'partition_test_no_ingest' : operation === 'retry' ? 'partition_retry' : 'partition_run',
     data_type: dataType,
     endpoint: apiPath,
+    partition_method: payload.partition_method || partitionMethodForModule(dataType),
     grid_type: payload.grid_type || selectedMapGridType.value || '-',
     grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
     batch_id: request.batchId || payload.batch_id || '',
@@ -2332,10 +2595,10 @@ function buildPartitionFailureResult(error, request = {}) {
         ? selectedOpticalAssets.value.length
         : activeModule.value === 'carbon'
           ? selectedCarbonObservations.value.length
-          : activeModule.value === 'product'
+        : activeModule.value === 'product'
             ? selectedProductAssets.value.length
             : 0,
-    error: errorText(error),
+    error: message,
     started_at: partitionStartedAt.value || '',
     elapsed_sec: Number(partitionElapsedSec.value.toFixed(1)),
     ingest_status: initialPartitionIngestStatus(dataType),
@@ -2389,6 +2652,14 @@ async function waitForPartitionTask(partitionPrefix, taskId) {
     }
     if (task.status === 'failed') {
       throw new Error(task.error || `剖分任务 ${taskId} 执行失败`);
+    }
+    if (task.status === 'manual_required') {
+      return {
+        ...(task.result || {}),
+        status: 'manual_required',
+        partition_task_id: task.task_id || taskId,
+        error: task.error || task.result?.quality_failure_reason || `剖分任务 ${taskId} 需要人工处理`,
+      };
     }
     if (task.status === 'cancel_requested') {
       await sleep(partitionTaskPollIntervalMs);
@@ -2444,6 +2715,7 @@ function buildPartitionSubmittedResult(submitted, request, selectedCount) {
     operation: submitted.operation || request.operation || 'run',
     endpoint: request.apiPath,
     partition_task_id: submitted.task_id,
+    partition_method: payload.partition_method || partitionMethodForModule(dataType),
     grid_type: payload.grid_type || selectedMapGridType.value || '-',
     grid_level: payload.grid_level || selectedMapGridLevel.value || '-',
     batch_id: payload.batch_id || '',
@@ -3039,8 +3311,11 @@ async function retryLastPartitionTask() {
 }
 
 watch(activeModule, (moduleName) => {
-  if (moduleName === 'quality' && !qualityReport.value && !qualityLoading.value) {
+  if (moduleName === 'quality' && !qualityLoading.value) {
     refreshQualityWorkspace();
+  }
+  if (dataDrawerVisible.value && partitionModules.has(moduleName)) {
+    loadPartitionBatches();
   }
   if (partitionTaskDrawerVisible.value && partitionModules.has(moduleName)) {
     loadActivePartitionTasks(1);
@@ -3065,15 +3340,20 @@ watch(opticalGridType, () => {
   mapGridGeometries.value = [];
 });
 
-watch([selectedOpticalAssets, opticalGridType], () => {
+watch(opticalPartitionMethod, () => {
+  applyDefaultGridLevel('optical');
+  mapGridGeometries.value = [];
+});
+
+watch([selectedOpticalAssets, opticalGridType, opticalPartitionMethod], () => {
   applyDefaultGridLevel('optical');
 }, { deep: true });
 
-watch([selectedRadarAssets, radarGridType], () => {
+watch([selectedRadarAssets, radarGridType, radarPartitionMethod], () => {
   applyDefaultGridLevel('radar');
 }, { deep: true });
 
-watch([selectedProductAssets, productGridType], () => {
+watch([selectedProductAssets, productGridType, productPartitionMethod], () => {
   applyDefaultGridLevel('product');
 }, { deep: true });
 
@@ -3083,16 +3363,19 @@ watch([
   opticalGridType,
   opticalGridLevel,
   entityGridLevel,
+  opticalPartitionMethod,
   selectedRadarBatchIds,
   deselectedRadarAssetKeys,
   radarGridType,
   radarGridLevel,
   radarEntityGridLevel,
+  radarPartitionMethod,
   selectedProductBatchIds,
   deselectedProductAssetKeys,
   productGridType,
   productGridLevel,
   productEntityGridLevel,
+  productPartitionMethod,
 ], () => {
   mapGridGeometries.value = [];
 }, { deep: true });
@@ -3175,32 +3458,34 @@ onUnmounted(() => {
                 </el-table-column>
                 <el-table-column label="结果" min-width="180">
                   <template #default="{ row }">
-                    <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
+                    <ExpandableText :text="partitionTaskResultText(row)" :threshold="80" />
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="240" fixed="right">
+                <el-table-column label="操作" width="300" fixed="right">
                   <template #default="{ row }">
-                    <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
-                    <el-button
-                      v-if="partitionTaskCanRequeueBatch(row)"
-                      size="small"
-                      type="warning"
-                      :icon="Refresh"
-                      :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
-                      @click="requeuePartitionTaskBatch(row)"
-                    >
-                      打回队列
-                    </el-button>
-                    <el-button
-                      v-if="partitionTaskCanArchiveBatch(row)"
-                      size="small"
-                      type="info"
-                      :icon="FolderChecked"
-                      :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
-                      @click="archivePartitionTaskBatch(row)"
-                    >
-                      不再处理
-                    </el-button>
+                    <div class="partition-task-actions">
+                      <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+                      <el-button
+                        v-if="partitionTaskCanRequeueBatch(row)"
+                        size="small"
+                        type="warning"
+                        :icon="Refresh"
+                        :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
+                        @click="requeuePartitionTaskBatch(row)"
+                      >
+                        打回队列
+                      </el-button>
+                      <el-button
+                        v-if="partitionTaskCanArchiveBatch(row)"
+                        size="small"
+                        type="info"
+                        :icon="FolderChecked"
+                        :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
+                        @click="archivePartitionTaskBatch(row)"
+                      >
+                        不再处理
+                      </el-button>
+                    </div>
                   </template>
                 </el-table-column>
               </el-table>
@@ -3222,12 +3507,6 @@ onUnmounted(() => {
                 <h3>{{ activeModule === 'optical' ? '数据配置' : '参数配置' }}</h3>
 
                 <template v-if="activeModule === 'optical'">
-                  <div class="form-group">
-                    <label>数据源类型</label>
-                    <div class="task-note">
-                      <span>数据库载入批次</span>
-                    </div>
-                  </div>
                   <div class="form-group">
                     <label>待剖分数据队列</label>
                     <div class="task-note">
@@ -3251,6 +3530,13 @@ onUnmounted(() => {
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
+                  </div>
+                  <div class="form-group">
+                    <label>剖分方式</label>
+                    <el-radio-group v-model="opticalPartitionMethod" class="legacy-control partition-method-group">
+                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                    </el-radio-group>
                   </div>
                 </template>
 
@@ -3298,6 +3584,13 @@ onUnmounted(() => {
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
+                  <div class="form-group">
+                    <label>剖分方式</label>
+                    <el-radio-group v-model="radarPartitionMethod" class="legacy-control partition-method-group">
+                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                    </el-radio-group>
+                  </div>
                 </template>
 
                 <template v-else-if="activeModule === 'product'">
@@ -3324,6 +3617,13 @@ onUnmounted(() => {
                       <el-option label="平面格网" value="tile_matrix" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
+                  </div>
+                  <div class="form-group">
+                    <label>剖分方式</label>
+                    <el-radio-group v-model="productPartitionMethod" class="legacy-control partition-method-group">
+                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                    </el-radio-group>
                   </div>
                 </template>
 
@@ -3392,15 +3692,9 @@ onUnmounted(() => {
 
             <div class="workspace-main">
               <div v-if="activeModule !== 'quality'" class="map-panel">
-                <div class="panel-header">
-                  <h3>{{ activeModule === 'carbon' ? '观测足迹地图分布' : activeModule === 'product' ? '产品范围地图预览' : '地图预览' }}</h3>
-                  <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="map-actions">
-                    <el-input-number v-if="activeModule === 'product' && productGridType === 'isea4h'" v-model="productEntityGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
-                    <el-input-number v-else-if="activeModule === 'product'" v-model="productGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
-                    <el-input-number v-else-if="activeModule === 'radar' && radarGridType === 'isea4h'" v-model="radarEntityGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
-                    <el-input-number v-else-if="activeModule === 'radar'" v-model="radarGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
-                    <el-input-number v-else-if="opticalGridType === 'isea4h'" v-model="entityGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
-                    <el-input-number v-else v-model="opticalGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="panel-header">
+                  <div class="map-actions">
+                    <el-input-number v-model="selectedMapGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
                     <el-button size="small" :icon="activeGridLevelManual ? Refresh : EditPen" @click="activeGridLevelManual ? restoreDefaultGridLevel() : confirmGridLevelManualEdit()">
                       {{ activeGridLevelManual ? '恢复默认' : '修改层级' }}
                     </el-button>
@@ -3458,7 +3752,7 @@ onUnmounted(() => {
                   </div>
                   <div v-else-if="qualityError" class="quality-empty-state compact">
                     <div class="quality-empty-icon">ERR</div>
-                    <p>{{ qualityError }}</p>
+                    <ExpandableText :text="qualityError" :lines="3" :threshold="100" />
                   </div>
                   <div v-else class="quality-empty-state compact">
                     <div class="quality-empty-icon">QC</div>
@@ -3491,8 +3785,8 @@ onUnmounted(() => {
                             <span>尝试 {{ batch.attempt_count || 0 }} 次</span>
                             <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
                           </div>
-                          <div class="quality-manual-batch-error quality-text-clamp" :title="batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理'">
-                            {{ batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理' }}
+                          <div class="quality-manual-batch-error">
+                            <ExpandableText :text="batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理'" :threshold="80" />
                           </div>
                         </div>
                         <div class="quality-manual-batch-actions">
@@ -3603,9 +3897,11 @@ onUnmounted(() => {
                       v-if="partitionFailureMessage"
                       type="error"
                       :closable="false"
-                      :title="partitionFailureMessage"
+                      title="执行失败"
                       class="partition-failure-alert"
-                    />
+                    >
+                      <ExpandableText :text="partitionFailureMessage" :lines="3" :threshold="100" />
+                    </el-alert>
                     <el-alert
                       v-if="partitionWarnNeedsRetry"
                       type="warning"
@@ -3624,7 +3920,8 @@ onUnmounted(() => {
                       <div class="quality-section-title">执行明细</div>
                       <div v-for="item in partitionResultDetailRows" :key="item.label" class="quality-kv">
                         <span>{{ item.label }}</span>
-                        <strong>{{ item.value }}</strong>
+                        <strong v-if="!isExpandableErrorLabel(item.label)">{{ item.value }}</strong>
+                        <ExpandableText v-else :text="item.value" :threshold="80" />
                       </div>
                     </div>
                   </template>
@@ -3635,7 +3932,7 @@ onUnmounted(() => {
                           <strong>{{ checkNameText(check.name) }}</strong>
                           <el-tag :type="checkStatusType(check.status)" size="small">{{ statusText(check.status) }}</el-tag>
                         </div>
-                        <p class="quality-check-message" :title="checkMessageText(check)">{{ checkMessageText(check) }}</p>
+                        <ExpandableText class="quality-check-message" :text="checkMessageText(check)" :threshold="100" />
                         <div v-if="checkDetailRows(check).length" class="quality-check-details">
                           <div v-for="detail in checkDetailRows(check)" :key="detail.title" class="quality-check-detail">
                             <strong class="quality-check-detail-title" :title="detail.title">{{ detail.title }}</strong>
@@ -3706,6 +4003,28 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="batch-summary">{{ opticalBatchSummary(batch) }}</div>
+            <el-collapse v-if="partitionSlotGroups(batch).length" class="batch-schema-collapse">
+              <el-collapse-item :title="partitionSlotCollapseTitle(batch)" :name="`${batch.id}-slots`">
+                <div class="partition-slot-grid">
+                  <div v-for="group in partitionSlotGroups(batch)" :key="`${batch.id}-${group.grid_type}`" class="partition-slot-group">
+                    <span class="partition-slot-group-title">{{ group.grid_label }}</span>
+                    <button
+                      v-for="slot in group.slots"
+                      :key="`${batch.id}-${slot.grid_type}-${slot.partition_method}`"
+                      type="button"
+                      class="partition-slot-chip"
+                      :class="{ active: isSelectedPartitionSlot(batch, slot), disabled: slot.disabled }"
+                      :disabled="slot.disabled"
+                      :title="partitionSlotSummary(slot)"
+                      @click="selectPartitionSlot(batch, slot)"
+                    >
+                      <span>{{ partitionMethodText(slot.partition_method) }}</span>
+                      <el-tag size="small" :type="partitionSlotStatusType(slot.status)">{{ partitionSlotStatusText(slot.status) }}</el-tag>
+                    </button>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
             <el-collapse class="batch-schema-collapse">
               <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
                 <div class="schema-grid">
@@ -3834,8 +4153,30 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <div class="batch-summary">{{ radarBatchSummary(batch) }}</div>
-              <el-collapse class="batch-schema-collapse">
+            <div class="batch-summary">{{ radarBatchSummary(batch) }}</div>
+            <el-collapse class="batch-schema-collapse">
+              <el-collapse-item :title="partitionSlotCollapseTitle(batch)" :name="`${batch.id}-slots`">
+                <div class="partition-slot-grid">
+                  <div v-for="group in partitionSlotGroups(batch)" :key="`${batch.id}-${group.grid_type}`" class="partition-slot-group">
+                    <span class="partition-slot-group-title">{{ group.grid_label }}</span>
+                    <button
+                      v-for="slot in group.slots"
+                      :key="`${batch.id}-${slot.grid_type}-${slot.partition_method}`"
+                      type="button"
+                      class="partition-slot-chip"
+                      :class="{ active: isSelectedPartitionSlot(batch, slot), disabled: slot.disabled }"
+                      :disabled="slot.disabled"
+                      :title="partitionSlotSummary(slot)"
+                      @click="selectPartitionSlot(batch, slot)"
+                    >
+                      <span>{{ partitionMethodText(slot.partition_method) }}</span>
+                      <el-tag size="small" :type="partitionSlotStatusType(slot.status)">{{ partitionSlotStatusText(slot.status) }}</el-tag>
+                    </button>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+            <el-collapse class="batch-schema-collapse">
                 <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
                   <div class="schema-grid">
                     <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
@@ -3900,8 +4241,30 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
-              <el-collapse class="batch-schema-collapse">
+            <div class="batch-summary">{{ productBatchSummary(batch) }}</div>
+            <el-collapse class="batch-schema-collapse">
+              <el-collapse-item :title="partitionSlotCollapseTitle(batch)" :name="`${batch.id}-slots`">
+                <div class="partition-slot-grid">
+                  <div v-for="group in partitionSlotGroups(batch)" :key="`${batch.id}-${group.grid_type}`" class="partition-slot-group">
+                    <span class="partition-slot-group-title">{{ group.grid_label }}</span>
+                    <button
+                      v-for="slot in group.slots"
+                      :key="`${batch.id}-${slot.grid_type}-${slot.partition_method}`"
+                      type="button"
+                      class="partition-slot-chip"
+                      :class="{ active: isSelectedPartitionSlot(batch, slot), disabled: slot.disabled }"
+                      :disabled="slot.disabled"
+                      :title="partitionSlotSummary(slot)"
+                      @click="selectPartitionSlot(batch, slot)"
+                    >
+                      <span>{{ partitionMethodText(slot.partition_method) }}</span>
+                      <el-tag size="small" :type="partitionSlotStatusType(slot.status)">{{ partitionSlotStatusText(slot.status) }}</el-tag>
+                    </button>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+            <el-collapse class="batch-schema-collapse">
                 <el-collapse-item :title="schemaCollapseTitle(batch)" :name="`${batch.id}-schema`">
                   <div class="schema-grid">
                     <div v-for="field in schemaForBatch(batch)" :key="`${batch.id}-${field.field}`" class="schema-item">
@@ -3984,32 +4347,34 @@ onUnmounted(() => {
           </el-table-column>
           <el-table-column label="结果" min-width="170">
             <template #default="{ row }">
-              <div class="table-text-clamp" :title="partitionTaskResultText(row)">{{ partitionTaskResultText(row) }}</div>
+              <ExpandableText :text="partitionTaskResultText(row)" :threshold="80" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="240" fixed="right">
+          <el-table-column label="操作" width="300" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
-              <el-button
-                v-if="partitionTaskCanRequeueBatch(row)"
-                size="small"
-                type="warning"
-                :icon="Refresh"
-                :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
-                @click="requeuePartitionTaskBatch(row)"
-              >
-                打回队列
-              </el-button>
-              <el-button
-                v-if="partitionTaskCanArchiveBatch(row)"
-                size="small"
-                type="info"
-                :icon="FolderChecked"
-                :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
-                @click="archivePartitionTaskBatch(row)"
-              >
-                不再处理
-              </el-button>
+              <div class="partition-task-actions">
+                <el-button size="small" :icon="Document" :disabled="!canOpenPartitionTaskBatch(row)" @click="openPartitionTaskBatch(row)">详情</el-button>
+                <el-button
+                  v-if="partitionTaskCanRequeueBatch(row)"
+                  size="small"
+                  type="warning"
+                  :icon="Refresh"
+                  :loading="partitionBatchDetailAction === `requeue:${row.batch_id}`"
+                  @click="requeuePartitionTaskBatch(row)"
+                >
+                  打回队列
+                </el-button>
+                <el-button
+                  v-if="partitionTaskCanArchiveBatch(row)"
+                  size="small"
+                  type="info"
+                  :icon="FolderChecked"
+                  :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(partitionTaskBatchProxy(row))"
+                  @click="archivePartitionTaskBatch(row)"
+                >
+                  不再处理
+                </el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -4054,7 +4419,9 @@ onUnmounted(() => {
             {{ stageText(selectedPartitionStage.status) }}
           </el-tag>
         </div>
-        <div class="partition-stage-detail-message">{{ selectedPartitionStage.detail }}</div>
+        <div class="partition-stage-detail-message">
+          <ExpandableText :text="selectedPartitionStage.detail" :lines="4" :threshold="120" />
+        </div>
       </div>
     </el-dialog>
 
@@ -4064,7 +4431,9 @@ onUnmounted(() => {
           <span>字段</span>
           <strong>{{ selectedPartitionContext.label }}</strong>
         </div>
-        <div class="partition-stage-detail-message">{{ selectedPartitionContext.value }}</div>
+        <div class="partition-stage-detail-message">
+          <ExpandableText :text="selectedPartitionContext.value" :lines="4" :threshold="120" />
+        </div>
       </div>
     </el-dialog>
 
@@ -4079,7 +4448,9 @@ onUnmounted(() => {
         <div class="partition-batch-detail-head">
           <div>
             <div class="partition-batch-detail-subtitle">{{ partitionBatchDetailSubtitle(partitionBatchDetail) }}</div>
-            <div v-if="partitionBatchDetail" class="partition-batch-detail-summary">{{ partitionBatchSummary(partitionBatchDetail) }}</div>
+            <div v-if="partitionBatchDetail" class="partition-batch-detail-summary">
+              <ExpandableText :text="partitionBatchSummary(partitionBatchDetail)" :lines="3" :threshold="100" />
+            </div>
           </div>
           <div class="partition-batch-detail-actions">
             <el-button :icon="Document" @click="refreshPartitionBatchDetail">刷新</el-button>
@@ -4124,9 +4495,29 @@ onUnmounted(() => {
           <div class="partition-detail-grid">
             <div v-for="item in partitionBatchDetailPayloadRows(partitionBatchDetail)" :key="item.label" class="quality-kv">
               <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
+              <strong v-if="!isExpandableErrorLabel(item.label)">{{ item.value }}</strong>
+              <ExpandableText v-else :text="item.value" :threshold="80" />
             </div>
           </div>
+          <el-collapse v-if="partitionSlotGroups(partitionBatchDetail).length" class="batch-schema-collapse">
+            <el-collapse-item :title="partitionSlotCollapseTitle(partitionBatchDetail)" name="detail-slots">
+              <div class="partition-slot-grid detail">
+                <div v-for="group in partitionSlotGroups(partitionBatchDetail)" :key="`detail-${group.grid_type}`" class="partition-slot-group">
+                  <span class="partition-slot-group-title">{{ group.grid_label }}</span>
+                  <div
+                    v-for="slot in group.slots"
+                    :key="`detail-${slot.grid_type}-${slot.partition_method}`"
+                    class="partition-slot-chip static"
+                    :class="{ active: isSelectedPartitionSlot(partitionBatchDetail, slot), disabled: slot.disabled }"
+                  >
+                    <span>{{ partitionMethodText(slot.partition_method) }}</span>
+                    <el-tag size="small" :type="partitionSlotStatusType(slot.status)">{{ partitionSlotStatusText(slot.status) }}</el-tag>
+                    <small>{{ partitionSlotSummary(slot) }}</small>
+                  </div>
+                </div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </div>
 
         <div v-else-if="partitionBatchDetailTab === 'assets'" class="partition-detail-section">
@@ -4179,7 +4570,9 @@ onUnmounted(() => {
               </template>
             </el-table-column>
             <el-table-column label="错误" min-width="170">
-              <template #default="{ row }">{{ row.error || '-' }}</template>
+              <template #default="{ row }">
+                <ExpandableText :text="row.error || '-'" :threshold="60" />
+              </template>
             </el-table-column>
           </el-table>
         </div>
@@ -4195,13 +4588,17 @@ onUnmounted(() => {
                 </div>
                 <div class="partition-attempt-meta">
                   <span>{{ partitionOperationText(attempt.operation) }}</span>
+                  <el-tag size="small" effect="plain">{{ attemptPartitionMethodLabel(attempt) }}</el-tag>
+                  <el-tag size="small" effect="plain">{{ attemptGridLabel(attempt) }}</el-tag>
                   <span>第 {{ attempt.attempt_no }} 次</span>
                   <span>创建 {{ formatPartitionTimestamp(attempt.created_at) }}</span>
                   <span v-if="attempt.started_at">开始 {{ formatPartitionTimestamp(attempt.started_at) }}</span>
                   <span v-if="attempt.finished_at">结束 {{ formatPartitionTimestamp(attempt.finished_at) }}</span>
                   <span v-if="attempt.requested_by">提交者 {{ attempt.requested_by }}</span>
                 </div>
-                <div v-if="attempt.error_message" class="partition-attempt-error">{{ attempt.error_message }}</div>
+                <div v-if="attempt.error_message" class="partition-attempt-error">
+                  <ExpandableText :text="attempt.error_message" :lines="3" :threshold="100" />
+                </div>
               </div>
             </div>
             <div v-if="!partitionBatchDetailAttempts.length" class="empty-state compact">

@@ -242,10 +242,10 @@ class PostgresQualityReportStore(QualityReportStore):
 
     def _connect(self):
         try:
-            import psycopg
+            from cube_web.services.db_pool import _PostgresPool
         except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
             raise RuntimeError("PostgreSQL quality report storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn, client_encoding="UTF8")
+        return _PostgresPool.for_dsn(self.dsn).connection()
 
 
 _store: QualityReportStore | None = None

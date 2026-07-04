@@ -17,6 +17,7 @@ from cube_web.services.partition_job_store import (
     InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
     PartitionBatchArchivedError,
+    PartitionBatchNotRequeueableError,
     PartitionJobStore,
     get_partition_job_store,
 )
@@ -26,6 +27,7 @@ from cube_web.services.partition_defaults import normalize_partition_method
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
+TASK_SYNC_WAIT_SECONDS = 30.0
 RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
 PARTITION_SLOT_GRID_TYPES = ("tile_matrix", "s2", "isea4h")
 PARTITION_SLOT_METHODS = ("logical", "entity")
@@ -100,6 +102,8 @@ class PartitionWorkflowService:
         try:
             batch = self.store.requeue_batch(batch_id)
         except PartitionBatchAlreadyActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PartitionBatchNotRequeueableError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if batch is None:
             raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
@@ -235,6 +239,26 @@ class PartitionWorkflowService:
                 cancellation_check=cancellation_check,
             )
 
+    def run_payload_sync(
+        self,
+        data_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        requested_by: str = "operator",
+        timeout_seconds: float = TASK_SYNC_WAIT_SECONDS,
+    ) -> dict[str, Any]:
+        task = self.run_payload(data_type, payload, requested_by=requested_by)
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            current = self.get_task(task.task_id)
+            if current.status in {"completed", "failed", "cancelled"}:
+                if current.status == "completed" and isinstance(current.result, dict):
+                    return _json_safe(current.result)
+                return _json_safe(current.to_dict())
+            if time.monotonic() >= deadline:
+                return _json_safe(current.to_dict())
+            time.sleep(0.1)
+
     def run_batch(
         self,
         batch_id: str,
@@ -253,6 +277,9 @@ class PartitionWorkflowService:
             if active_task is not None:
                 return active_task
             payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
+            effective_asset_ids = self._selected_asset_ids_for_payload(batch_id, str(batch["data_type"]), payload)
+            if effective_asset_ids is None:
+                effective_asset_ids = asset_ids
             payload = {**payload, "_operation": operation}
             self._ensure_slot_not_completed(batch_id, payload, batch=batch)
             response_payload = dict(payload)
@@ -278,7 +305,7 @@ class PartitionWorkflowService:
                     batch_id=batch_id,
                     operation=operation,
                     payload=payload,
-                    asset_ids=asset_ids,
+                    asset_ids=effective_asset_ids,
                     requested_by=requested_by,
                     source_task_id=source_task_id,
                     retry_strategy=retry_strategy,
@@ -716,10 +743,10 @@ class PartitionWorkflowService:
 
 def classify_partition_error(error: str) -> str:
     normalized = error.lower()
-    if any(token in normalized for token in ("timed out", "timeout", "temporarily", "temporary", "connection reset", "connection refused", "network", "503", "502", "504")):
-        return "transient"
     if any(token in normalized for token in ("not found", "no such file", "no such key", "missing", "does not exist", "source missing")):
         return "source_missing"
+    if any(token in normalized for token in ("timed out", "timeout", "temporarily", "temporary", "connection reset", "connection refused", "network", "503", "502", "504")):
+        return "transient"
     if any(token in normalized for token in ("invalid", "validation", "bad request", "unsupported", "must be", "required")):
         return "validation"
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
@@ -741,6 +768,7 @@ def _ray_job_runtime_env() -> dict[str, Any]:
         "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
         "CUBE_WEB_MINIO_BUCKET": minio.bucket,
         "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1",
+        "RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S": "3600",
     }
     for name in (
         "CUBE_WEB_POSTGRES_DSN",
@@ -759,6 +787,7 @@ def _ray_job_runtime_env() -> dict[str, Any]:
         "CUBE_WEB_CARBON_PARTITION_BACKEND",
         "CUBE_WEB_ENV_FILE",
         "RAY_OVERRIDE_JOB_RUNTIME_ENV",
+        "RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S",
     ):
         value = os.environ.get(name)
         if not value:
@@ -1161,6 +1190,30 @@ def _task_response_operation(operation: str) -> str:
     return operation
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).startswith("_") or callable(item):
+                continue
+            cleaned = _json_safe(item)
+            if cleaned is not _JSON_SAFE_SKIP:
+                out[key] = cleaned
+        return out
+    if isinstance(value, list):
+        return [item for item in (_json_safe(item) for item in value) if item is not _JSON_SAFE_SKIP]
+    if callable(value):
+        return _JSON_SAFE_SKIP
+    return value
+
+
+class _JsonSafeSkip:
+    pass
+
+
+_JSON_SAFE_SKIP = _JsonSafeSkip()
+
+
 def _timestamp_or_now(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -1199,9 +1252,11 @@ def _find_asset_for_payload_item(assets: list[dict[str, Any]], item: dict[str, A
                 return asset
     source_uri = str(item.get("source_uri") or "").strip()
     scene_id = str(item.get("scene_id") or item.get("product_year") or item.get("observation_id") or item.get("source_index") or "").strip()
+    if source_uri:
+        for asset in assets:
+            if str(asset.get("source_uri") or "") == source_uri:
+                return asset
     for asset in assets:
-        if source_uri and str(asset.get("source_uri") or "") == source_uri:
-            return asset
         if scene_id and str(asset.get("scene_id") or "") == scene_id:
             return asset
     return None

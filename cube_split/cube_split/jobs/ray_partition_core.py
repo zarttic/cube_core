@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,6 +122,66 @@ def _cache_target_for_uri(uri: str, cache_root: Path) -> Path:
     return fallback
 
 
+def _object_identity(stat: Any) -> str:
+    etag = str(getattr(stat, "etag", "") or "").strip().strip('"')
+    if etag:
+        return f"etag:{etag}"
+    last_modified = getattr(stat, "last_modified", None)
+    if last_modified is not None:
+        return f"mtime:{last_modified}"
+    return f"size:{getattr(stat, 'size', '')}"
+
+
+def _identity_sidecar_path(target: Path) -> Path:
+    return target.with_name(f"{target.name}.identity")
+
+
+def _read_identity_sidecar(target: Path) -> dict[str, str]:
+    sidecar = _identity_sidecar_path(target)
+    if not sidecar.exists():
+        return {}
+    text = sidecar.read_text(encoding="utf-8").strip()
+    if not text:
+        return {}
+    if "=" not in text:
+        return {"remote": text}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            values[key] = value
+    return values
+
+
+def _write_identity_sidecar(target: Path, **identity: str) -> None:
+    lines = [f"{key}={value}" for key, value in sorted(identity.items()) if value]
+    _identity_sidecar_path(target).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _local_file_identity(path: Path) -> str:
+    stat = path.stat()
+    return f"size:{stat.st_size}|mtime_ns:{stat.st_mtime_ns}"
+
+
+def create_unique_run_dir(output_dir: Path, *, prefix: str = "run") -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base = time.strftime(f"{prefix}_%Y%m%d_%H%M%S")
+    for suffix in ("", *(f"_{idx:02d}" for idx in range(1, 100))):
+        run_dir = output_dir / f"{base}{suffix}"
+        try:
+            run_dir.mkdir(parents=False, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            continue
+    fallback = output_dir / f"{base}_{uuid4().hex[:8]}"
+    fallback.mkdir(parents=False, exist_ok=False)
+    return fallback
+
+
 def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | None = None) -> Path:
     from minio.error import S3Error
 
@@ -127,13 +189,16 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
     client = _minio_client(options)
     target = _cache_target_for_uri(uri, cache_root)
     stat = client.stat_object(bucket, key)
-    if not target.exists() or target.stat().st_size != stat.size:
+    identity = _object_identity(stat)
+    identity_state = _read_identity_sidecar(target)
+    if not target.exists() or target.stat().st_size != stat.size or identity_state.get("remote") != identity:
         handle = tempfile.NamedTemporaryFile(prefix=f".{target.name}.", suffix=".part", dir=target.parent, delete=False)
         tmp = Path(handle.name)
         handle.close()
         try:
             client.fget_object(bucket, key, str(tmp))
             tmp.replace(target)
+            _write_identity_sidecar(target, remote=identity)
         finally:
             if tmp.exists():
                 tmp.unlink()
@@ -151,7 +216,13 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
             if exc.code in {"NoSuchKey", "NoSuchObject"}:
                 continue
             raise
-        if not sidecar_target.exists() or sidecar_target.stat().st_size != sidecar_stat.size:
+        sidecar_identity = _object_identity(sidecar_stat)
+        sidecar_identity_state = _read_identity_sidecar(sidecar_target)
+        if (
+            not sidecar_target.exists()
+            or sidecar_target.stat().st_size != sidecar_stat.size
+            or sidecar_identity_state.get("remote") != sidecar_identity
+        ):
             handle = tempfile.NamedTemporaryFile(
                 prefix=f".{sidecar_target.name}.",
                 suffix=".part",
@@ -163,6 +234,7 @@ def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | No
             try:
                 client.fget_object(bucket, sidecar_key, str(tmp))
                 tmp.replace(sidecar_target)
+                _write_identity_sidecar(sidecar_target, remote=sidecar_identity)
             finally:
                 if tmp.exists():
                     tmp.unlink()
@@ -192,14 +264,23 @@ def _upload_file_to_minio(path: Path, key: str, options: dict[str, Any]) -> str:
     if not bucket:
         raise ValueError("MinIO bucket is required")
     client = _minio_client(options)
+    local_identity = _local_file_identity(path)
+    identity_state = _read_identity_sidecar(path)
     try:
         stat = client.stat_object(bucket, key)
-        if stat.size == path.stat().st_size:
+        remote_identity = _object_identity(stat)
+        if (
+            stat.size == path.stat().st_size
+            and identity_state.get("local") == local_identity
+            and identity_state.get("remote") == remote_identity
+        ):
             return f"s3://{bucket}/{key}"
     except S3Error as exc:
         if exc.code not in {"NoSuchKey", "NoSuchObject"}:
             raise
     client.fput_object(bucket, key, str(path))
+    stat = client.stat_object(bucket, key)
+    _write_identity_sidecar(path, local=local_identity, remote=_object_identity(stat))
     return f"s3://{bucket}/{key}"
 
 
@@ -215,6 +296,64 @@ def upload_cog_to_minio(asset: AssetRecord, cog_path: Path, options: dict[str, A
         f"scene_id={asset.scene_id}/version={version}/{cog_path.name}"
     )
     return _upload_file_to_minio(cog_path, key, opts)
+
+
+def upload_source_assets_to_minio(
+    assets: list[AssetRecord],
+    *,
+    prefix: str,
+    options: dict[str, Any] | None = None,
+) -> list[AssetRecord]:
+    from minio.error import S3Error
+
+    if not assets:
+        return []
+
+    opts = dict(options or {})
+    source_prefix = str(prefix or opts.get("prefix") or opts.get("minio_prefix") or "cube/source").strip("/")
+    dataset = str(opts.get("dataset") or "demo")
+    sensor = str(opts.get("sensor") or "unknown")
+    version = str(opts.get("asset_version") or opts.get("version") or "v1")
+    bucket = str(minio_settings(opts).bucket)
+    if not bucket:
+        raise ValueError("MinIO bucket is required")
+    client = _minio_client(opts)
+    if not client.bucket_exists(bucket):
+        client.make_bucket(bucket)
+
+    uploaded: list[AssetRecord] = []
+    for asset in assets:
+        if _is_s3_uri(asset.path):
+            uploaded.append(asset)
+            continue
+        source_path = Path(asset.path)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Asset file not found: {source_path}")
+        local_identity = _local_file_identity(source_path)
+        identity_state = _read_identity_sidecar(source_path)
+        date_path = datetime.fromisoformat(asset.acq_time.replace("Z", "+00:00")).strftime("%Y/%m/%d")
+        key = (
+            f"{source_prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
+            f"scene_id={asset.scene_id}/version={version}/{source_path.name}"
+        )
+        try:
+            stat = client.stat_object(bucket, key)
+            remote_identity = _object_identity(stat)
+            if (
+                stat.size == source_path.stat().st_size
+                and identity_state.get("local") == local_identity
+                and identity_state.get("remote") == remote_identity
+            ):
+                uploaded.append(replace(asset, path=f"s3://{bucket}/{key}"))
+                continue
+        except S3Error as exc:
+            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
+        client.fput_object(bucket, key, str(source_path))
+        stat = client.stat_object(bucket, key)
+        _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
+        uploaded.append(replace(asset, path=f"s3://{bucket}/{key}"))
+    return uploaded
 
 
 def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[AssetRecord]:
@@ -307,6 +446,7 @@ def build_manifest(
     product_family: str = "auto",
     data_type: str = "optical",
     manifest_path: Path | None = None,
+    source_uploader: Any | None = None,
 ) -> list[AssetRecord]:
     if manifest_path is not None:
         return _load_manifest_records(manifest_path, default_data_type=data_type)
@@ -330,6 +470,8 @@ def build_manifest(
                 sensor=metadata.sensor,
             )
         )
+    if source_uploader is not None:
+        records = list(source_uploader(records))
     return records
 
 

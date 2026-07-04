@@ -271,9 +271,9 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
   - 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
   - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
-  - 普通光学逻辑剖分（geohash/MGRS）和实体剖分（ISEA4H）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
+  - 普通光学逻辑剖分（`s2`/`tile_matrix`，`mgrs` 已废弃不再使用）和实体剖分（ISEA4H）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
   - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
   - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
   - 碳卫星 `run` 任务可以使用 `input_dir` 或 `source_uri`/`selected_observations[].source_uri`；`run` 模式会执行入库，`demo` 兼容入口不得声称或触发入库。
-  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `ISEA4H` 触发实体剖分，默认 `grid_level=6`。普通逻辑剖分（geohash/MGRS）默认层级仍为 5。
+  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `ISEA4H` 触发实体剖分，默认 `grid_level=6`。普通逻辑剖分只保留 `s2` 和 `tile_matrix`；`mgrs` 已废弃不再使用，默认层级仍为 5。
   - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。

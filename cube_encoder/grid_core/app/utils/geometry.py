@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from shapely import affinity
 from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
 
 from grid_core.app.core.exceptions import ValidationError
@@ -47,3 +48,38 @@ def bbox_to_polygon(bbox: list[float]) -> Polygon | MultiPolygon:
     left = box(min_lon, min_lat, 180.0, max_lat)
     right = box(-180.0, min_lat, max_lon, max_lat)
     return MultiPolygon([left, right])
+
+
+def normalize_ring_longitudes(points: list[tuple[float, float]] | tuple[tuple[float, float], ...]) -> list[list[float]]:
+    if not points:
+        return []
+    normalized = [[float(points[0][0]), float(points[0][1])]]
+    previous_lon = normalized[0][0]
+    for lon, lat in points[1:]:
+        current_lon = float(lon)
+        while current_lon - previous_lon > 180.0:
+            current_lon -= 360.0
+        while current_lon - previous_lon < -180.0:
+            current_lon += 360.0
+        normalized.append([current_lon, float(lat)])
+        previous_lon = current_lon
+
+    mean_lon = sum(lon for lon, _ in normalized) / len(normalized)
+    shift = 0.0
+    while mean_lon < -180.0:
+        shift += 360.0
+        mean_lon += 360.0
+    while mean_lon > 180.0:
+        shift -= 360.0
+        mean_lon -= 360.0
+    if shift:
+        normalized = [[lon + shift, lat] for lon, lat in normalized]
+    return normalized
+
+
+def wrapped_geometry_variants(geometry) -> tuple:
+    return (
+        geometry,
+        affinity.translate(geometry, xoff=360.0),
+        affinity.translate(geometry, xoff=-360.0),
+    )

@@ -295,7 +295,7 @@ def _carbon_observation(
 
 
 def _radar_asset(date: str, polarization: str, bbox: list[float], corners: list[list[float]]) -> dict[str, Any]:
-    source_uri = f"{RADAR_SOURCE_PREFIX}/yangzhou_sentinel1_2018_2020/{date}_{polarization.upper()}.dat"
+    source_uri = f"{RADAR_SOURCE_PREFIX}/yangzhou_s1_2018_2020/Data/{date}_{polarization.upper()}.dat"
     return {
         "source_uri": source_uri,
         "scene_id": f"S1_{date}",

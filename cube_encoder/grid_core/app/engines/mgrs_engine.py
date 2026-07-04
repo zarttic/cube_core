@@ -5,14 +5,13 @@ from functools import lru_cache
 
 import mgrs
 from pyproj import Transformer
-from shapely import affinity
 from shapely.geometry import Polygon
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
-from grid_core.app.utils.geometry import to_shapely
+from grid_core.app.utils.geometry import normalize_ring_longitudes, to_shapely, wrapped_geometry_variants
 
 
 class MGRSEngine:
@@ -59,12 +58,12 @@ class MGRSEngine:
             visited.add(code)
 
             cell_poly = self._geometry_shape(code)
-            intersects = any(cell_poly.intersects(target_geom) for target_geom in self._wrapped_geometry_variants(shp))
+            intersects = any(cell_poly.intersects(target_geom) for target_geom in wrapped_geometry_variants(shp))
             if not intersects:
                 continue
 
             if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} or any(
-                target_geom.covers(cell_poly) for target_geom in self._wrapped_geometry_variants(shp)
+                target_geom.covers(cell_poly) for target_geom in wrapped_geometry_variants(shp)
             ):
                 selected.add(code)
 
@@ -134,6 +133,7 @@ class MGRSEngine:
 
     def children(self, code: str, target_level: int):
         target_app_level = self._validate_level(target_level)
+        self._parse_utm(code)
         current_app_level = self._level_from_code(code)
         if target_app_level <= current_app_level:
             raise ValidationError("target_level must be greater than current MGRS level")
@@ -235,7 +235,7 @@ class MGRSEngine:
             transformer.transform(easting + cell_size_m, northing + cell_size_m),
             transformer.transform(easting, northing + cell_size_m),
         ]
-        normalized = self._normalize_longitudes(corners)
+        normalized = normalize_ring_longitudes(corners)
         return tuple((float(lon), float(lat)) for lon, lat in normalized)
 
     @staticmethod
@@ -247,32 +247,6 @@ class MGRSEngine:
         return min(lons), min(lats), max(lons), max(lats)
 
     @staticmethod
-    def _normalize_longitudes(corners: list[tuple[float, float]]) -> list[list[float]]:
-        if not corners:
-            return []
-        normalized = [[float(corners[0][0]), float(corners[0][1])]]
-        previous_lon = normalized[0][0]
-        for lon, lat in corners[1:]:
-            current_lon = float(lon)
-            while current_lon - previous_lon > 180.0:
-                current_lon -= 360.0
-            while current_lon - previous_lon < -180.0:
-                current_lon += 360.0
-            normalized.append([current_lon, float(lat)])
-            previous_lon = current_lon
-        mean_lon = sum(lon for lon, _ in normalized) / len(normalized)
-        shift = 0.0
-        while mean_lon < -180.0:
-            shift += 360.0
-            mean_lon += 360.0
-        while mean_lon > 180.0:
-            shift -= 360.0
-            mean_lon -= 360.0
-        if shift:
-            normalized = [[lon + shift, lat] for lon, lat in normalized]
-        return normalized
-
-    @staticmethod
     @lru_cache(maxsize=120)
     def _utm_to_lonlat(zone: int, hemisphere: str) -> Transformer:
         epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
@@ -281,14 +255,6 @@ class MGRSEngine:
     def _geometry_shape(self, code: str) -> Polygon:
         corners = self._code_to_corners(code)
         return Polygon(corners)
-
-    @staticmethod
-    def _wrapped_geometry_variants(geometry) -> tuple:
-        return (
-            geometry,
-            affinity.translate(geometry, xoff=360.0),
-            affinity.translate(geometry, xoff=-360.0),
-        )
 
     @staticmethod
     def _seed_points(shp) -> list[tuple[float, float]]:

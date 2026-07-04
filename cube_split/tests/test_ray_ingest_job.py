@@ -13,6 +13,7 @@ from cube_split.ingest.ray_ingest_job import (
     load_rows,
     materialize_cog_assets,
     run_ingest,
+    upload_assets_to_minio,
 )
 
 
@@ -79,7 +80,7 @@ def test_build_cube_fact_records_resolves_conflict_with_latest_scene():
         rows=rows,
         cube_version="v1",
         run_id="job-1",
-        quality_rule="best_quality_wins",
+        quality_rule="latest_wins",
         asset_uri_map={row["asset_path"]: row["asset_path"] for row in rows},
     )
     assert len(facts) == 1
@@ -88,6 +89,81 @@ def test_build_cube_fact_records_resolves_conflict_with_latest_scene():
     assert provenance["winner_scene_id"] == "S_NEW"
     assert sorted(provenance["candidate_scene_ids"]) == ["S_NEW", "S_OLD"]
     assert fact.source_scene_count == 2
+
+
+def test_build_cube_fact_records_respects_quality_rule():
+    rows = [
+        {**_sample_row("S_OLD", "2026-04-21T00:00:00Z", space_code="35f04"), "sample_mean_band1": 99.0},
+        {**_sample_row("S_NEW", "2026-04-21T06:00:00Z", space_code="35f04"), "sample_mean_band1": 1.0},
+    ]
+
+    best = build_cube_fact_records(
+        rows=rows,
+        cube_version="v1",
+        run_id="job-1",
+        quality_rule="best_quality_wins",
+        asset_uri_map={row["asset_path"]: row["asset_path"] for row in rows},
+    )[0]
+    latest = build_cube_fact_records(
+        rows=rows,
+        cube_version="v1",
+        run_id="job-1",
+        quality_rule="latest_wins",
+        asset_uri_map={row["asset_path"]: row["asset_path"] for row in rows},
+    )[0]
+
+    assert json.loads(best.provenance_json)["winner_scene_id"] == "S_OLD"
+    assert json.loads(latest.provenance_json)["winner_scene_id"] == "S_NEW"
+
+
+def test_upload_assets_to_minio_reuploads_when_identity_changes(monkeypatch, tmp_path: Path):
+    source = tmp_path / "S1_b04.TIF"
+    source.write_bytes(b"data")
+    source.with_name(f"{source.name}.identity").write_text("local=size:4|mtime_ns:1\nremote=etag:stale", encoding="utf-8")
+    uploaded: list[str] = []
+
+    class FakeStat:
+        size = 4
+        etag = "remote-new"
+        last_modified = None
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def make_bucket(self, _bucket):
+            raise AssertionError("bucket already exists")
+
+        def stat_object(self, _bucket, _key):
+            return FakeStat()
+
+        def fput_object(self, _bucket, key, _path):
+            uploaded.append(key)
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+
+    mapping = upload_assets_to_minio(
+        rows=[_sample_row("S1", "2026-04-21T00:00:00Z", asset_path=str(source))],
+        dataset="landsat8",
+        sensor="L8",
+        asset_version="v1",
+        endpoint="127.0.0.1:9000",
+        access_key="access",
+        secret_key="secret",
+        bucket="cube",
+        prefix="cube/raw",
+        secure=False,
+        workers=1,
+    )
+
+    assert uploaded
+    assert mapping[str(source)].startswith("s3://cube/cube/raw/")
+    identity_text = source.with_name(f"{source.name}.identity").read_text(encoding="utf-8")
+    assert "local=size:4|mtime_ns:" in identity_text
+    assert "remote=etag:remote-new" in identity_text
 
 
 def test_run_ingest_creates_and_upserts_tables(tmp_path: Path):

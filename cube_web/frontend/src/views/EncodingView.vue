@@ -1,9 +1,10 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, defineAsyncComponent, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 
-import GlobeMap from '@/components/GlobeMap.vue';
 import { apiPrefixes, requestJson } from '@/api/client';
+
+const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
 const activeModule = ref('division');
 const loading = ref(false);

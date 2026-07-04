@@ -19,6 +19,8 @@ from cube_split.jobs.ray_partition_core import (
     build_manifest,
     cog_creation_options,
     convert_assets_to_cog,
+    create_unique_run_dir,
+    upload_source_assets_to_minio,
 )
 
 
@@ -203,6 +205,14 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
         "working_dir": str(project_root),
         "excludes": [
             ".git/**",
+            ".agents/**",
+            ".cache/**",
+            ".codegraph/**",
+            ".codex/**",
+            ".mypy_cache/**",
+            ".ruff_cache/**",
+            ".tmp/**",
+            ".venv/**",
             "**/__pycache__/**",
             "**/.pytest_cache/**",
             "cube_split/*.gz",
@@ -213,6 +223,8 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "cube_split/results/**",
             "cube_web/frontend/node_modules/**",
             "cube_web/frontend/dist/**",
+            "cube_web/frontend/test-results/**",
+            "cube_web/frontend/playwright-report/**",
         ],
         "env_vars": env_vars,
     }
@@ -291,23 +303,41 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    backend_requested = args.partition_backend
+    if backend_requested == "auto":
+        backend = "ray" if args.ray_address else "thread"
+    else:
+        backend = backend_requested
+
+    source_uploader = None
+    if backend == "ray":
+        source_uploader = lambda assets: upload_source_assets_to_minio(
+            assets,
+            prefix="cube/source",
+            options={
+                "endpoint": str(getattr(args, "minio_endpoint", "")),
+                "access_key": str(getattr(args, "minio_access_key", "")),
+                "secret_key": str(getattr(args, "minio_secret_key", "")),
+                "secure": bool(getattr(args, "minio_secure", False)),
+                "bucket": str(getattr(args, "minio_bucket", "")),
+                "dataset": str(getattr(args, "dataset", "demo")),
+                "sensor": str(getattr(args, "sensor", "unknown")),
+                "asset_version": str(getattr(args, "asset_version", "v1")),
+            },
+        )
 
     source_assets = build_manifest(
         input_dir,
         product_family=args.product_family,
         data_type=str(getattr(args, "data_type", "optical") or "optical"),
         manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
+        **({"source_uploader": source_uploader} if source_uploader is not None else {}),
     )
     if not source_assets:
         data_type = str(getattr(args, "data_type", "optical") or "optical")
         suffix_hint = ".dat/.TIF" if data_type == "radar" else ".TIF"
         raise RuntimeError(f"No {suffix_hint} assets found under: {input_dir}")
     check_cancelled(args)
-    backend_requested = args.partition_backend
-    if backend_requested == "auto":
-        backend = "ray" if args.ray_address else "thread"
-    else:
-        backend = backend_requested
 
     cog_start = time.perf_counter()
     if backend == "ray":
@@ -336,20 +366,25 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         cover_mode=args.cover_mode,
         max_cells_per_asset=args.max_cells_per_asset,
     )
+    if not grid_tasks:
+        raise RuntimeError(
+            "No grid tasks produced for input assets; check grid_type/grid_level/cover_mode or source extent"
+        )
     task_rows = _prepare_task_rows_for_partitioning(
         grid_tasks,
         partition_prefix_len=args.partition_prefix_len,
         time_granularity=args.time_granularity,
     )
     grouped_tasks = _group_tasks_for_local_processing(task_rows, split_by_space_prefix=(backend == "ray"))
+    if not grouped_tasks:
+        raise RuntimeError("No partition task groups produced after task preparation")
     parallelism = _resolve_ray_parallelism(len(grouped_tasks), args.ray_parallelism)
     chunk_size = _resolve_ray_chunk_size(len(grouped_tasks), parallelism, args.chunk_size)
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
     skip_verify = args.skip_verify or args.timing_mode
     check_cancelled(args)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
+    run_dir = create_unique_run_dir(output_dir)
     rows_path = run_dir / "index_rows.jsonl"
     report_path = run_dir / "job_report.json"
 
@@ -357,206 +392,213 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     include_sample_mean = args.sample_mean and (not args.timing_mode)
     start = time.perf_counter()
     out_rows: list[dict] = []
-    if backend == "ray":
-        ray = _load_ray()
-        runtime_env = _ray_runtime_env_from_env()
-        ray_init_start = time.perf_counter()
-        ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
-        if args.ray_address:
-            try:
-                ray.init(
-                    address=args.ray_address,
-                    ignore_reinit_error=True,
-                    include_dashboard=False,
-                    logging_level="ERROR",
-                    runtime_env=runtime_env,
-                )
-            except Exception:
-                if args.ray_address != "auto":
-                    raise
-                ray.init(
-                    ignore_reinit_error=True,
-                    include_dashboard=False,
-                    logging_level="ERROR",
-                    runtime_env=runtime_env,
-                )
-        else:
-            ray.init(
-                ignore_reinit_error=True,
-                include_dashboard=False,
-                logging_level="ERROR",
-                runtime_env=runtime_env,
-            )
-        ray_init_elapsed = time.perf_counter() - ray_init_start
-
-        @ray.remote
-        class AssetTaskProcessor:
-            def __init__(self) -> None:
-                self._local_cog_by_source: dict[str, str] = {}
-                self._converted_asset_by_source: dict[str, dict[str, Any]] = {}
-                self._remote_cog_by_local_path: dict[str, str] = {}
-
-            def process_groups(
-                self,
-                task_groups: list[list[dict]],
-                time_granularity: str,
-                include_sample_mean: bool,
-                assets_by_path_value: dict[str, dict],
-                cog_input_dir_value: str,
-                cog_overwrite_value: bool,
-                cog_options_value: dict[str, str],
-                target_crs_value: str,
-                source_options_value: dict[str, Any],
-                cog_upload_options_value: dict[str, Any],
-            ) -> list[dict]:
-                import os
-                from pathlib import Path
-
-                _prepend_sys_paths(
-                    [
-                        os.path.abspath(os.path.join(project_root, rel_path))
-                        for project_root in _ray_project_roots()
-                        for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
-                    ]
-                )
-
-                from cube_split.jobs.ray_partition_core import (
-                    _process_local_task_group,
-                    asset_record_from_dict,
-                    asset_record_to_dict,
-                    convert_asset_to_cog,
-                    upload_cog_to_minio,
-                )
-
-                env_options = dict(cog_upload_options_value or source_options_value or {})
-                if env_options.get("endpoint"):
-                    os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
-                if env_options.get("access_key"):
-                    os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
-                if env_options.get("secret_key"):
-                    os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
-
-                prepared_groups: list[list[dict]] = []
-                used_local_cog_paths: set[str] = set()
-                worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
-                for group in task_groups:
-                    if not group:
-                        continue
-                    source_path = str(group[0]["asset_path"])
-                    local_cog_path = self._local_cog_by_source.get(source_path)
-                    if local_cog_path is None:
-                        asset = asset_record_from_dict(assets_by_path_value[source_path])
-                        converted = convert_asset_to_cog(
-                            asset,
-                            cog_input_dir=worker_cog_root,
-                            overwrite=cog_overwrite_value,
-                            creation_options=cog_options_value,
-                            target_crs=target_crs_value or None,
-                            source_options=source_options_value,
-                        )
-                        local_cog_path = str(converted.path)
-                        self._local_cog_by_source[source_path] = local_cog_path
-                        self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
-                    used_local_cog_paths.add(local_cog_path)
-                    prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
-
-                rows_out: list[dict] = []
-                for group in prepared_groups:
-                    rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
-                for source_path, local_cog_path in self._local_cog_by_source.items():
-                    if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
-                        continue
-                    converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
-                    self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
-                        converted,
-                        Path(local_cog_path),
-                        cog_upload_options_value,
+    ray = None
+    ray_already_initialized = False
+    try:
+        if backend == "ray":
+            ray = _load_ray()
+            runtime_env = _ray_runtime_env_from_env()
+            ray_init_start = time.perf_counter()
+            ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
+            if args.ray_address:
+                try:
+                    ray.init(
+                        address=args.ray_address,
+                        ignore_reinit_error=True,
+                        include_dashboard=False,
+                        logging_level="ERROR",
+                        runtime_env=runtime_env,
                     )
-                for row in rows_out:
-                    row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
+                except Exception:
+                    if args.ray_address != "auto":
+                        raise
+                    ray.init(
+                        ignore_reinit_error=True,
+                        include_dashboard=False,
+                        logging_level="ERROR",
+                        runtime_env=runtime_env,
+                    )
+            else:
+                ray.init(
+                    ignore_reinit_error=True,
+                    include_dashboard=False,
+                    logging_level="ERROR",
+                    runtime_env=runtime_env,
+                )
+            ray_init_elapsed = time.perf_counter() - ray_init_start
+
+            @ray.remote
+            class AssetTaskProcessor:
+                def __init__(self) -> None:
+                    self._local_cog_by_source: dict[str, str] = {}
+                    self._converted_asset_by_source: dict[str, dict[str, Any]] = {}
+                    self._remote_cog_by_local_path: dict[str, str] = {}
+
+                def process_groups(
+                    self,
+                    task_groups: list[list[dict]],
+                    time_granularity: str,
+                    include_sample_mean: bool,
+                    assets_by_path_value: dict[str, dict],
+                    cog_input_dir_value: str,
+                    cog_overwrite_value: bool,
+                    cog_options_value: dict[str, str],
+                    target_crs_value: str,
+                    source_options_value: dict[str, Any],
+                    cog_upload_options_value: dict[str, Any],
+                ) -> list[dict]:
+                    import os
+                    from pathlib import Path
+
+                    _prepend_sys_paths(
+                        [
+                            os.path.abspath(os.path.join(project_root, rel_path))
+                            for project_root in _ray_project_roots()
+                            for rel_path in ("", "cube_encoder", "cube_split", "cube_web")
+                        ]
+                    )
+
+                    from cube_split.jobs.ray_partition_core import (
+                        _process_local_task_group,
+                        asset_record_from_dict,
+                        asset_record_to_dict,
+                        convert_asset_to_cog,
+                        upload_cog_to_minio,
+                    )
+
+                    env_options = dict(cog_upload_options_value or source_options_value or {})
+                    if env_options.get("endpoint"):
+                        os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
+                    if env_options.get("access_key"):
+                        os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
+                    if env_options.get("secret_key"):
+                        os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
+
+                    prepared_groups: list[list[dict]] = []
+                    used_local_cog_paths: set[str] = set()
+                    worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
+                    for group in task_groups:
+                        if not group:
+                            continue
+                        source_path = str(group[0]["asset_path"])
+                        local_cog_path = self._local_cog_by_source.get(source_path)
+                        if local_cog_path is None:
+                            asset = asset_record_from_dict(assets_by_path_value[source_path])
+                            converted = convert_asset_to_cog(
+                                asset,
+                                cog_input_dir=worker_cog_root,
+                                overwrite=cog_overwrite_value,
+                                creation_options=cog_options_value,
+                                target_crs=target_crs_value or None,
+                                source_options=source_options_value,
+                            )
+                            local_cog_path = str(converted.path)
+                            self._local_cog_by_source[source_path] = local_cog_path
+                            self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
+                        used_local_cog_paths.add(local_cog_path)
+                        prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
+
+                    rows_out: list[dict] = []
+                    for group in prepared_groups:
+                        rows_out.extend(_process_local_task_group(group, time_granularity, include_sample_mean=include_sample_mean))
+                    for source_path, local_cog_path in self._local_cog_by_source.items():
+                        if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
+                            continue
+                        converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
+                        self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
+                            converted,
+                            Path(local_cog_path),
+                            cog_upload_options_value,
+                        )
+                    for row in rows_out:
+                        row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
+                    return rows_out
+
+            actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
+            actors = [actor_cls.remote() for _ in range(parallelism)]
+            assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
+            minio_options = {
+                "endpoint": str(getattr(args, "minio_endpoint", "")),
+                "access_key": str(getattr(args, "minio_access_key", "")),
+                "secret_key": str(getattr(args, "minio_secret_key", "")),
+                "secure": bool(getattr(args, "minio_secure", False)),
+            }
+
+            def submit_chunk(idx: int, actor_idx: int):
+                return actors[actor_idx].process_groups.remote(
+                    task_chunks[idx],
+                    args.time_granularity,
+                    include_sample_mean,
+                    assets_by_path,
+                    str(args.cog_input_dir),
+                    bool(args.cog_overwrite),
+                    cog_creation_options(
+                        compress=str(args.cog_compress or "LZW"),
+                        predictor=int(args.cog_predictor or 0),
+                        level=(int(args.cog_level or 0) or None),
+                        overviews="NONE",
+                        num_threads=str(args.cog_num_threads or ""),
+                    ),
+                    str(args.target_crs or ""),
+                    minio_options,
+                    {
+                        **minio_options,
+                        "bucket": str(getattr(args, "minio_bucket", "")),
+                        "prefix": str(getattr(args, "minio_prefix", "cube/raw")),
+                        "dataset": str(getattr(args, "dataset", "demo_optical")),
+                        "sensor": str(getattr(args, "sensor", "optical_mosaic")),
+                        "asset_version": str(getattr(args, "asset_version", "v1")),
+                    },
+                )
+
+            pending = []
+            pending_actor_by_ref: dict[Any, int] = {}
+            try:
+                next_idx = 0
+                while next_idx < len(task_chunks) and len(pending) < parallelism:
+                    check_cancelled(args)
+                    actor_idx = next_idx % parallelism
+                    ref = submit_chunk(next_idx, actor_idx)
+                    pending.append(ref)
+                    pending_actor_by_ref[ref] = actor_idx
+                    next_idx += 1
+                while pending:
+                    check_cancelled(args)
+                    ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+                    if not ready:
+                        continue
+                    for ready_ref in ready:
+                        actor_idx = pending_actor_by_ref.pop(ready_ref)
+                        out_rows.extend(ray.get(ready_ref))
+                        if next_idx < len(task_chunks):
+                            check_cancelled(args)
+                            ref = submit_chunk(next_idx, actor_idx)
+                            pending.append(ref)
+                            pending_actor_by_ref[ref] = actor_idx
+                            next_idx += 1
+            except PartitionCancelledError:
+                cancel_ray_refs(ray, pending)
+                raise
+            except Exception:
+                cancel_ray_refs(ray, pending)
+                raise
+        else:
+            from cube_split.jobs.ray_partition_core import _process_local_task_group
+
+            def process_chunk(chunk: list[list[dict]]) -> list[dict]:
+                rows_out: list[dict] = []
+                for group in chunk:
+                    rows_out.extend(_process_local_task_group(group, args.time_granularity, include_sample_mean=include_sample_mean))
                 return rows_out
 
-        actor_cls = AssetTaskProcessor.options(**_ray_actor_options_from_env())
-        actors = [actor_cls.remote() for _ in range(parallelism)]
-        assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
-        minio_options = {
-            "endpoint": str(getattr(args, "minio_endpoint", "")),
-            "access_key": str(getattr(args, "minio_access_key", "")),
-            "secret_key": str(getattr(args, "minio_secret_key", "")),
-            "secure": bool(getattr(args, "minio_secure", False)),
-        }
-
-        def submit_chunk(idx: int, actor_idx: int):
-            return actors[actor_idx].process_groups.remote(
-                task_chunks[idx],
-                args.time_granularity,
-                include_sample_mean,
-                assets_by_path,
-                str(args.cog_input_dir),
-                bool(args.cog_overwrite),
-                cog_creation_options(
-                    compress=str(args.cog_compress or "LZW"),
-                    predictor=int(args.cog_predictor or 0),
-                    level=(int(args.cog_level or 0) or None),
-                    overviews="NONE",
-                    num_threads=str(args.cog_num_threads or ""),
-                ),
-                str(args.target_crs or ""),
-                minio_options,
-                {
-                    **minio_options,
-                    "bucket": str(getattr(args, "minio_bucket", "")),
-                    "prefix": str(getattr(args, "minio_prefix", "cube/raw")),
-                    "dataset": str(getattr(args, "dataset", "demo_optical")),
-                    "sensor": str(getattr(args, "sensor", "optical_mosaic")),
-                    "asset_version": str(getattr(args, "asset_version", "v1")),
-                },
-            )
-
-        pending = []
-        pending_actor_by_ref: dict[Any, int] = {}
-        try:
-            next_idx = 0
-            while next_idx < len(task_chunks) and len(pending) < parallelism:
-                check_cancelled(args)
-                actor_idx = next_idx % parallelism
-                ref = submit_chunk(next_idx, actor_idx)
-                pending.append(ref)
-                pending_actor_by_ref[ref] = actor_idx
-                next_idx += 1
-            while pending:
-                check_cancelled(args)
-                ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
-                if not ready:
-                    continue
-                for ready_ref in ready:
-                    actor_idx = pending_actor_by_ref.pop(ready_ref)
-                    out_rows.extend(ray.get(ready_ref))
-                    if next_idx < len(task_chunks):
-                        check_cancelled(args)
-                        ref = submit_chunk(next_idx, actor_idx)
-                        pending.append(ref)
-                        pending_actor_by_ref[ref] = actor_idx
-                        next_idx += 1
-        except PartitionCancelledError:
-            cancel_ray_refs(ray, pending)
-            raise
-    else:
-        from cube_split.jobs.ray_partition_core import _process_local_task_group
-
-        def process_chunk(chunk: list[list[dict]]) -> list[dict]:
-            rows_out: list[dict] = []
-            for group in chunk:
-                rows_out.extend(_process_local_task_group(group, args.time_granularity, include_sample_mean=include_sample_mean))
-            return rows_out
-
-        with ThreadPoolExecutor(max_workers=parallelism) as pool:
-            for rows in pool.map(process_chunk, task_chunks):
-                check_cancelled(args)
-                out_rows.extend(rows)
+            with ThreadPoolExecutor(max_workers=parallelism) as pool:
+                for rows in pool.map(process_chunk, task_chunks):
+                    check_cancelled(args)
+                    out_rows.extend(rows)
+    finally:
+        if backend == "ray" and ray is not None:
+            shutdown_ray_if_needed(ray, ray_already_initialized)
     elapsed = time.perf_counter() - start
-    if backend == "ray":
-        shutdown_ray_if_needed(ray, ray_already_initialized)
 
     check_cancelled(args)
     run_dir.mkdir(parents=True, exist_ok=True)

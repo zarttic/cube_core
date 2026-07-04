@@ -84,7 +84,23 @@ def test_run_task_marks_cancelled_when_runner_raises_cancelled(monkeypatch) -> N
 
     exit_code = partition_remote_job.run_task(task_id)
 
-    assert exit_code == 1
+    assert exit_code == 0
+    assert store.cancelled == [task_id]
+    assert not store.failed
+
+
+def test_run_task_marks_cancelled_without_reporting_failure(monkeypatch) -> None:
+    task_id = "partition-remote-cancelled-2"
+    attempt = {"task_id": task_id, "batch_id": "BATCH_C", "payload": {"batch_id": "BATCH_C"}, "status": "queued", "operation": "auto_run", "asset_ids": []}
+    batch = {"batch_id": "BATCH_C", "data_type": "optical", "max_auto_retries": 0}
+    store = _Store(attempt, batch)
+
+    monkeypatch.setattr(partition_remote_job, "get_partition_job_store", lambda: store)
+    monkeypatch.setattr(partition_remote_job, "_runner_for_data_type", lambda _data_type: (lambda _payload: (_ for _ in ()).throw(Exception("Partition task cancelled"))))
+
+    exit_code = partition_remote_job.run_task(task_id)
+
+    assert exit_code == 0
     assert store.cancelled == [task_id]
     assert not store.failed
 

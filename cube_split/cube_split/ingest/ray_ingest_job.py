@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from cube_split import runtime_config
+from cube_split.jobs.ray_partition_core import _local_file_identity, _object_identity, _read_identity_sidecar, _write_identity_sidecar
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 
@@ -233,7 +234,7 @@ def _time_score(value: str) -> float:
 def _choice_score(row: dict, quality_rule: str) -> tuple[float, str]:
     if quality_rule == "latest_wins":
         return (_time_score(row["acq_time"]), row["scene_id"])
-    return (_time_score(row["acq_time"]), row["scene_id"])
+    return (float(row.get("sample_mean_band1") or float("-inf")), _time_score(row["acq_time"]), row["scene_id"])
 
 
 def _build_window_ref_uri(asset_uri: str, row: dict) -> str:
@@ -363,12 +364,23 @@ def upload_assets_to_minio(
         if not source_path.exists():
             raise FileNotFoundError(f"Asset file not found: {source_path}")
         key = _build_asset_key(dataset, sensor, asset_version, sample_row, source_path, prefix)
+        local_identity = _local_file_identity(source_path)
+        identity_state = _read_identity_sidecar(source_path)
         try:
-            client.stat_object(bucket, key)
+            stat = client.stat_object(bucket, key)
+            remote_identity = _object_identity(stat)
+            if (
+                stat.size == source_path.stat().st_size
+                and identity_state.get("local") == local_identity
+                and identity_state.get("remote") == remote_identity
+            ):
+                return source_uri, f"s3://{bucket}/{key}"
         except S3Error as exc:
             if exc.code != "NoSuchKey" and exc.code != "NoSuchObject":
                 raise
-            client.fput_object(bucket, key, str(source_path))
+        client.fput_object(bucket, key, str(source_path))
+        stat = client.stat_object(bucket, key)
+        _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
         return source_uri, f"s3://{bucket}/{key}"
 
     max_workers = max(1, workers)

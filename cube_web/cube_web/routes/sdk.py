@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from fastapi import HTTPException
 from grid_core.sdk import (
     BatchCodeToGeometryRequest,
     BatchGeometryResponse,
@@ -24,6 +25,8 @@ from grid_core.sdk import (
     STCodeParseRequest,
     STCodeParseResponse,
 )
+from cube_split.read.carbon_query import query_carbon_observations
+from cube_web.schemas import SpatiotemporalQueryRequest
 
 
 def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
@@ -108,5 +111,36 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
             time_granularity=req.time_granularity,
         )
         return STCodeBatchGenerateResponse(st_codes=st_codes, statistics={"count": len(st_codes)})
+
+    @router.post("/query/st")
+    def spatiotemporal_query(req: SpatiotemporalQueryRequest) -> dict:
+        bbox = req.bbox
+        if bbox is None:
+            if not req.point:
+                raise HTTPException(status_code=422, detail="point or bbox is required")
+            lon, lat = map(float, req.point[:2])
+            epsilon = 0.00001
+            bbox = [lon - epsilon, lat - epsilon, lon + epsilon, lat + epsilon]
+        rows = query_carbon_observations(
+            bbox=[float(value) for value in bbox],
+            time_start=req.time_start,
+            time_end=req.time_end,
+            quality_flags=req.quality_flags,
+            product_type=req.product_type,
+            grid_type=req.grid_type,
+            grid_level=req.grid_level,
+            cube_version=req.cube_version,
+            limit=req.limit,
+        )
+        return {
+            "data_type": req.data_type,
+            "query_mode": "point" if req.point is not None and req.bbox is None else "bbox",
+            "grid_type": req.grid_type,
+            "grid_level": req.grid_level,
+            "time_start": req.time_start,
+            "time_end": req.time_end,
+            "statistics": {"count": len(rows)},
+            "items": rows,
+        }
 
     return router

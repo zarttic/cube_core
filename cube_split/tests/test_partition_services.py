@@ -916,6 +916,63 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
     assert row["source_uri"] == "s3://cube/cube/source/carbon/oco2.nc4"
 
 
+def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+    loaded_sources: list[str] = []
+
+    monkeypatch.setattr("cube_split.partition.carbon._plan_oco2_lite_source_slices", lambda source_uris, config: None)
+    monkeypatch.setattr("cube_split.partition.carbon._resolve_oco2_lite_source_path", lambda source_uri: Path("/resolved") / Path(source_uri).name)
+
+    def fake_load_oco2_lite_observations(path: Path, max_observations=None):
+        loaded_sources.append(str(path))
+        return [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-a",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.391,
+                lat=39.907,
+                xco2=420.5,
+                source_uri="s3://cube/cube/source/carbon/oco2.nc4",
+                source_index=0,
+            )
+        ]
+
+    monkeypatch.setattr("cube_split.partition.carbon.load_oco2_lite_observations", fake_load_oco2_lite_observations)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._partition_chunks",
+        lambda chunks, config, worker_count: [
+            {
+                "data_type": "carbon",
+                "satellite": "OCO2",
+                "observation_id": chunks[0][0].observation_id,
+                "grid_type": config.grid_type,
+                "grid_level": config.grid_level,
+                "space_code": "cell-a",
+                "st_code": "hx:5:cell-a:20260424",
+                "source_uri": chunks[0][0].source_uri,
+            }
+        ],
+    )
+
+    result = CarbonSatellitePartitionService().run(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CarbonPartitionConfig(
+            grid_type="isea4h",
+            grid_level=5,
+            partition_backend="thread",
+            source_uris=("s3://cube/cube/source/carbon/oco2.nc4",),
+        ),
+        workers=1,
+    )
+
+    assert result.total_rows == 1
+    assert loaded_sources == ["/resolved/oco2.nc4"]
+
+
 def test_carbon_netcdf4_loader_only_falls_back_when_module_missing(monkeypatch, tmp_path: Path):
     original_import = builtins.__import__
 

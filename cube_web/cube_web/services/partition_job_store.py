@@ -26,6 +26,10 @@ class PartitionBatchArchivedError(RuntimeError):
     pass
 
 
+class PartitionBatchNotRequeueableError(RuntimeError):
+    pass
+
+
 class PartitionJobStore:
     def ensure_schema(self) -> None:
         raise NotImplementedError
@@ -295,7 +299,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         if str(batch.get("status") or "") in BATCH_RUN_ACTIVE_STATUSES:
             raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
         if str(batch.get("status") or "") not in BATCH_REQUEUEABLE_STATUSES:
-            return None
+            raise PartitionBatchNotRequeueableError(
+                f"Partition batch is not requeueable in status {str(batch.get('status') or '-')}: {batch_id}"
+            )
         now = _utc_now_iso()
         batch["status"] = "pending"
         batch["last_error"] = None
@@ -627,12 +633,28 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt["error_message"] = error
         attempt["finished_at"] = now
         attempt["updated_at"] = now
-        batch = self.batches[attempt["batch_id"]]
-        batch["status"] = "manual_required" if manual_required else "failed"
-        batch["last_error"] = error
-        batch["manual_required_at"] = now if manual_required else batch.get("manual_required_at")
-        batch["updated_at"] = now
-        self._set_assets_status(attempt, "manual_required" if manual_required else "failed", last_error=error)
+        failure_status = "manual_required" if manual_required else "failed"
+        scoped_asset_ids = self._failed_asset_ids_from_error(attempt["batch_id"], attempt.get("asset_ids") or [], error, error_type=error_type)
+        if scoped_asset_ids:
+            self._set_assets_status_by_ids(scoped_asset_ids, failure_status, now=now, last_error=error)
+            unaffected_asset_ids = [
+                asset_id
+                for asset_id in self._target_asset_ids(attempt["batch_id"], attempt.get("asset_ids") or None)
+                if asset_id not in set(scoped_asset_ids)
+            ]
+            self._set_assets_status_by_ids(unaffected_asset_ids, "pending", now=now)
+            self._refresh_batch_from_assets(attempt["batch_id"], now=now)
+            batch = self.batches[attempt["batch_id"]]
+            batch["last_error"] = error
+            batch["manual_required_at"] = now if batch.get("status") == "manual_required" else None
+            batch["updated_at"] = now
+        else:
+            batch = self.batches[attempt["batch_id"]]
+            batch["status"] = failure_status
+            batch["last_error"] = error
+            batch["manual_required_at"] = now if manual_required else batch.get("manual_required_at")
+            batch["updated_at"] = now
+            self._set_assets_status(attempt, failure_status, last_error=error)
 
     def mark_batch_queued(self, batch_id: str, task_id: str, *, operation: str) -> None:
         batch = self.batches[batch_id]
@@ -735,7 +757,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         asset_ids = attempt.get("asset_ids") or [
             asset_id for asset_id, asset in self.assets.items() if asset["batch_id"] == attempt["batch_id"]
         ]
-        now = _utc_now_iso()
+        self._set_assets_status_by_ids(asset_ids, status, now=_utc_now_iso(), **updates)
+
+    def _set_assets_status_by_ids(self, asset_ids: list[str], status: str, *, now: str, **updates: Any) -> None:
         for asset_id in asset_ids:
             asset = self.assets.get(asset_id)
             if asset is None:
@@ -794,6 +818,35 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             return list(asset_ids)
         return [asset_id for asset_id, asset in self.assets.items() if asset["batch_id"] == batch_id]
 
+    def _failed_asset_ids_from_error(
+        self,
+        batch_id: str,
+        asset_ids: list[str],
+        error: str,
+        *,
+        error_type: str | None = None,
+    ) -> list[str] | None:
+        target_ids = self._target_asset_ids(batch_id, asset_ids or None)
+        if not target_ids:
+            return None
+        normalized_error_type = str(error_type or "").strip().lower()
+        if normalized_error_type != "source_missing":
+            return None
+        text = str(error or "")
+        matched: list[str] = []
+        for asset_id in target_ids:
+            asset = self.assets.get(asset_id)
+            if asset is None:
+                continue
+            source_uri = str(asset.get("source_uri") or "").strip()
+            if source_uri and source_uri in text:
+                matched.append(asset_id)
+                continue
+            source_name = source_uri.rsplit("/", 1)[-1]
+            if source_name and source_name in text:
+                matched.append(asset_id)
+        return matched or None
+
     def _repair_missing_payload_assets(self, batch_id: str) -> None:
         batch = self.batches.get(batch_id)
         if batch is None:
@@ -818,6 +871,13 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch = self.batches[batch_id]
         assets = [asset for asset in self.assets.values() if asset["batch_id"] == batch_id]
         if not assets:
+            if batch.get("data_type") == "carbon":
+                batch["status"] = "succeeded"
+                batch["last_error"] = None
+                batch["partitioned_at"] = now
+                batch["manual_required_at"] = None
+                batch["updated_at"] = now
+                return
             batch["status"] = "failed"
             batch["last_error"] = "No partition assets found for batch"
             batch["manual_required_at"] = now
@@ -1205,9 +1265,12 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     status_row = cur.fetchone()
                     if status_row is None:
                         return None
-                    if str(status_row[0] or "") in BATCH_RUN_ACTIVE_STATUSES:
+                    current_status = str(status_row[0] or "")
+                    if current_status in BATCH_RUN_ACTIVE_STATUSES:
                         raise PartitionBatchAlreadyActiveError(f"Partition batch already has an active task: {batch_id}")
-                    return None
+                    raise PartitionBatchNotRequeueableError(
+                        f"Partition batch is not requeueable in status {current_status or '-'}: {batch_id}"
+                    )
                 batch = _row_to_dict(cur, row)
             conn.commit()
         return batch
@@ -1728,11 +1791,23 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if row is None:
                     return
                 batch_id, asset_ids = row
-                cur.execute(
-                    "UPDATE partition_batches SET status = %s, last_error = %s, manual_required_at = CASE WHEN %s THEN now() ELSE manual_required_at END, updated_at = now() WHERE batch_id = %s",
-                    (status, error, manual_required, batch_id),
-                )
-                self._update_assets(cur, batch_id, asset_ids, status, last_error=error)
+                scoped_asset_ids = self._failed_asset_ids_from_error(cur, batch_id, asset_ids or [], error, error_type=error_type)
+                if scoped_asset_ids:
+                    self._update_assets(cur, batch_id, scoped_asset_ids, status, last_error=error)
+                    unaffected_asset_ids = [asset_id for asset_id in list(asset_ids or []) if asset_id not in set(scoped_asset_ids)]
+                    if unaffected_asset_ids:
+                        self._update_assets(cur, batch_id, unaffected_asset_ids, "pending", last_error=None)
+                    self._refresh_batch_from_assets(cur, batch_id)
+                    cur.execute(
+                        "UPDATE partition_batches SET last_error = %s, manual_required_at = CASE WHEN status = 'manual_required' THEN COALESCE(manual_required_at, now()) ELSE NULL END, updated_at = now() WHERE batch_id = %s",
+                        (error, batch_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE partition_batches SET status = %s, last_error = %s, manual_required_at = CASE WHEN %s THEN now() ELSE manual_required_at END, updated_at = now() WHERE batch_id = %s",
+                        (status, error, manual_required, batch_id),
+                    )
+                    self._update_assets(cur, batch_id, asset_ids, status, last_error=error)
             conn.commit()
 
     def mark_batch_queued(self, batch_id: str, task_id: str, *, operation: str) -> None:
@@ -1771,6 +1846,8 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if row is None:
                     return None
                 status, batch_id, asset_ids = row
+                if status not in {"queued", "running", "retrying", "cancel_requested"}:
+                    return self.get_attempt(task_id)
                 next_status = "cancelled" if status == "queued" else "cancel_requested"
                 finished = ", finished_at = now()" if next_status == "cancelled" else ""
                 cur.execute(
@@ -1789,12 +1866,12 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'cancelled', finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
+                    "UPDATE partition_job_attempts SET status = 'cancelled', finished_at = now(), updated_at = now() WHERE task_id = %s AND status IN ('queued', 'running', 'retrying', 'cancel_requested') RETURNING batch_id, asset_ids",
                     (task_id,),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    return None
+                    return self.get_attempt(task_id)
                 batch_id, asset_ids = row
                 cur.execute("UPDATE partition_batches SET status = 'cancelled', updated_at = now() WHERE batch_id = %s", (batch_id,))
                 self._update_assets(cur, batch_id, asset_ids, "cancelled")
@@ -1950,6 +2027,40 @@ class PostgresPartitionJobStore(PartitionJobStore):
             params.append(batch_id)
             cur.execute(f"UPDATE partition_assets SET status = %s{partitioned_sql}{error_sql}, updated_at = now() WHERE batch_id = %s", params)
 
+    def _failed_asset_ids_from_error(
+        self,
+        cur,
+        batch_id: str,
+        asset_ids: list[str],
+        error: str,
+        *,
+        error_type: str | None = None,
+    ) -> list[str] | None:
+        normalized_error_type = str(error_type or "").strip().lower()
+        if normalized_error_type != "source_missing":
+            return None
+        target_ids = list(asset_ids or [])
+        if not target_ids:
+            cur.execute("SELECT asset_id FROM partition_assets WHERE batch_id = %s", (batch_id,))
+            target_ids = [str(row[0]) for row in cur.fetchall()]
+        if not target_ids:
+            return None
+        cur.execute(
+            "SELECT asset_id, source_uri FROM partition_assets WHERE batch_id = %s AND asset_id = ANY(%s)",
+            (batch_id, target_ids),
+        )
+        text = str(error or "")
+        matched: list[str] = []
+        for asset_id, source_uri in cur.fetchall():
+            source_uri = str(source_uri or "").strip()
+            if source_uri and source_uri in text:
+                matched.append(str(asset_id))
+                continue
+            source_name = source_uri.rsplit("/", 1)[-1]
+            if source_name and source_name in text:
+                matched.append(str(asset_id))
+        return matched or None
+
     def _increment_asset_attempts(self, cur, batch_id: str, asset_ids: list[str] | None) -> None:
         if asset_ids:
             cur.execute(
@@ -2037,9 +2148,18 @@ class PostgresPartitionJobStore(PartitionJobStore):
             )
 
     def _refresh_batch_from_assets(self, cur, batch_id: str) -> None:
+        cur.execute("SELECT data_type FROM partition_batches WHERE batch_id = %s", (batch_id,))
+        batch_row = cur.fetchone()
+        data_type = None if batch_row is None else batch_row[0]
         cur.execute("SELECT status, last_error FROM partition_assets WHERE batch_id = %s", (batch_id,))
         rows = cur.fetchall()
         if not rows:
+            if data_type == "carbon":
+                cur.execute(
+                    "UPDATE partition_batches SET status = 'succeeded', last_error = NULL, partitioned_at = now(), manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
+                    (batch_id,),
+                )
+                return
             cur.execute(
                 "UPDATE partition_batches SET status = 'failed', last_error = 'No partition assets found for batch', manual_required_at = now(), updated_at = now() WHERE batch_id = %s",
                 (batch_id,),
@@ -2603,7 +2723,7 @@ def _task_row_from_attempt(
         "task_id": attempt.get("task_id"),
         "status": attempt.get("status"),
         "data_type": batch.get("data_type") or result.get("data_type"),
-        "operation": attempt.get("operation"),
+        "operation": _public_task_operation(attempt.get("operation")),
         "batch_id": batch_id,
         "batch_name": batch.get("batch_name") or batch_id,
         "batch_status": batch.get("status"),
@@ -2639,7 +2759,7 @@ def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
         "task_id": row.get("task_id"),
         "status": row.get("status"),
         "data_type": row.get("data_type") or result.get("data_type"),
-        "operation": row.get("operation"),
+        "operation": _public_task_operation(row.get("operation")),
         "batch_id": row.get("batch_id"),
         "batch_name": row.get("batch_name") or row.get("batch_id"),
         "batch_status": row.get("batch_status"),
@@ -2665,6 +2785,16 @@ def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
         "error_message": row.get("error_message"),
         "result_summary": _task_result_summary(result),
     }
+
+
+def _public_task_operation(operation: Any) -> Any:
+    if not isinstance(operation, str):
+        return operation
+    if operation.endswith("_run"):
+        return "run"
+    if operation.endswith("_retry"):
+        return "retry"
+    return operation
 
 
 def _task_result_summary(result: dict[str, Any]) -> dict[str, Any]:

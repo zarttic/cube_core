@@ -4,6 +4,8 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_tasks_for_ray,
     _ray_runtime_env_from_env,
@@ -116,6 +118,9 @@ def test_ray_runtime_env_passes_source_cache_dir(monkeypatch):
 
     assert runtime_env is not None
     assert runtime_env["env_vars"]["CUBE_SOURCE_CACHE_DIR"] == "/data/cube_split_source_cache"
+    assert ".codegraph/**" in runtime_env["excludes"]
+    assert ".tmp/**" in runtime_env["excludes"]
+    assert "cube_web/frontend/test-results/**" in runtime_env["excludes"]
 
 
 def test_resolve_ray_chunk_size_auto_prefers_full_fanout_for_small_runs():
@@ -291,6 +296,66 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
     assert report["ingest_stats"]["input_rows"] == 1
     assert captured["job_id"] == Path(captured["run_dir"]).name
     assert captured["minio_bucket"] == "cube"
+
+
+def test_logical_partition_raises_clear_error_when_no_grid_tasks(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.build_manifest", lambda *args, **kwargs: [SimpleNamespace(path=str(input_dir / "source.tif"))])
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.convert_assets_to_cog", lambda *args, **kwargs: [SimpleNamespace(path=str(input_dir / "source_cog.tif"))])
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.build_grid_tasks_driver", lambda *args, **kwargs: [])
+
+    with pytest.raises(RuntimeError, match="No grid tasks produced"):
+        run_logical_partition(
+            Namespace(
+                input_dir=str(input_dir),
+                manifest_path="",
+                product_family="auto",
+                output_dir=str(tmp_path / "output"),
+                cog_input_dir=str(tmp_path / "cog"),
+                cog_overwrite=True,
+                cog_workers=1,
+                cog_compress="LZW",
+                cog_predictor=2,
+                cog_level=0,
+                cog_num_threads="ALL_CPUS",
+                target_crs="EPSG:4326",
+                grid_type="s2",
+                grid_level=1,
+                cover_mode="intersect",
+                time_granularity="day",
+                max_cells_per_asset=20000,
+                ray_parallelism=1,
+                ray_address="",
+                chunk_size=1,
+                partition_backend="thread",
+                partition_prefix_len=3,
+                timing_mode=False,
+                skip_verify=False,
+                sample_mean=False,
+                job_id="",
+                dataset="landsat8",
+                sensor="L8",
+                asset_version="v1",
+                cube_version="cube-v1",
+                quality_rule="best_quality_wins",
+                metadata_backend="none",
+                postgres_dsn="",
+                db_path="",
+                asset_storage_backend="local",
+                minio_endpoint="",
+                minio_access_key="",
+                minio_secret_key="",
+                minio_bucket="",
+                minio_prefix="cube/raw",
+                minio_secure=False,
+                minio_upload_workers=1,
+                cog_output_root=str(tmp_path / "local_cog"),
+                cog_materialize_mode="copy",
+                data_type="optical",
+            )
+        )
 
 
 def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, tmp_path: Path):
@@ -647,3 +712,107 @@ def test_logical_partition_does_not_shutdown_shared_ray(monkeypatch, tmp_path: P
     shutdown_ray_if_needed(fake_ray, already_initialized=True)
 
     assert fake_ray.shutdown_calls == 0
+
+
+def test_logical_partition_ray_shutdowns_after_worker_failure(monkeypatch, tmp_path: Path):
+    fake_ray = _FakeRay()
+    source_asset = SimpleNamespace(
+        path="/source/scene_a.tif",
+        scene_id="SCENE_A",
+        band="b04",
+        acq_time="2026-04-21T00:00:00Z",
+        product_family="other",
+        sensor="optical_mosaic",
+        bbox=None,
+        corners=[[116.1, 39.9], [116.2, 39.9], [116.2, 39.8], [116.1, 39.8]],
+        resolution=30,
+    )
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._load_ray", lambda: fake_ray)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_runtime_env_from_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.build_manifest", lambda *args, **kwargs: [source_asset])
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.build_grid_tasks_driver",
+        lambda **kwargs: [
+            {
+                "scene_id": "SCENE_A",
+                "band": "b04",
+                "asset_path": "/source/scene_a.tif",
+                "acq_time": "2026-04-21T00:00:00Z",
+                "grid_type": "s2",
+                "grid_level": 5,
+                "space_code": "35f4",
+                "cell_min_lon": 116.1,
+                "cell_min_lat": 39.8,
+                "cell_max_lon": 116.2,
+                "cell_max_lat": 39.9,
+                "cover_mode": "intersect",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job._prepare_task_rows_for_partitioning",
+        lambda tasks, partition_prefix_len, time_granularity: tasks,
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job._group_tasks_for_local_processing",
+        lambda task_rows, split_by_space_prefix: [[task_rows[0]]],
+    )
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.convert_assets_to_cog", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_partition_core.convert_asset_to_cog",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ray worker failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="ray worker failed"):
+        run_logical_partition(
+            Namespace(
+                input_dir=str(tmp_path),
+                manifest_path="",
+                product_family="auto",
+                output_dir=str(tmp_path / "output"),
+                cog_input_dir=str(tmp_path / "cog"),
+                cog_overwrite=True,
+                cog_workers=1,
+                cog_compress="LZW",
+                cog_predictor=2,
+                cog_level=0,
+                cog_num_threads="ALL_CPUS",
+                target_crs="EPSG:4326",
+                grid_type="s2",
+                grid_level=5,
+                cover_mode="intersect",
+                time_granularity="day",
+                max_cells_per_asset=20000,
+                ray_parallelism=1,
+                ray_address="10.3.100.182:6379",
+                chunk_size=1,
+                partition_backend="ray",
+                partition_prefix_len=3,
+                timing_mode=False,
+                skip_verify=False,
+                sample_mean=False,
+                job_id="",
+                data_type="optical",
+                dataset="demo_optical",
+                sensor="optical_mosaic",
+                asset_version="v1",
+                cube_version="v1",
+                quality_rule="best_quality_wins",
+                metadata_backend="none",
+                postgres_dsn="postgresql://postgres:postgres@127.0.0.1:5432/cube",
+                db_path="",
+                asset_storage_backend="local",
+                minio_endpoint="10.3.100.179:9000",
+                minio_access_key="access",
+                minio_secret_key="secret",
+                minio_bucket="cube",
+                minio_prefix="cube/raw",
+                minio_secure=False,
+                minio_upload_workers=2,
+                cog_output_root=str(tmp_path / "local_cog"),
+                cog_materialize_mode="copy",
+            )
+        )
+
+    assert fake_ray.shutdown_calls == 1

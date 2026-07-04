@@ -11,7 +11,7 @@ from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_cell import GridCell
-from grid_core.app.utils.geometry import to_shapely
+from grid_core.app.utils.geometry import normalize_ring_longitudes, to_shapely, wrapped_geometry_variants
 
 
 class S2Engine:
@@ -72,9 +72,12 @@ class S2Engine:
             boundary = self._boundary_lnglat(code)
             boundary_cache[code] = boundary
             cell_poly = Polygon(boundary)
-            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} and prepared_shp.intersects(cell_poly):
+            intersects = any(prepared_shp.intersects(candidate) for candidate in (cell_poly,))
+            if not intersects:
+                intersects = any(cell_poly.intersects(target_geom) for target_geom in wrapped_geometry_variants(shp))
+            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} and intersects:
                 selected.add(code)
-            elif cover_mode == CoverMode.CONTAIN.value and shp.covers(cell_poly):
+            elif cover_mode == CoverMode.CONTAIN.value and any(target_geom.covers(cell_poly) for target_geom in wrapped_geometry_variants(shp)):
                 selected.add(code)
 
         if cover_mode == CoverMode.MINIMAL.value:
@@ -177,7 +180,8 @@ class S2Engine:
             ll = LatLng.from_point(cell.get_vertex(i))
             ring.append((ll.lng().degrees, ll.lat().degrees))
         ring.append(ring[0])
-        return tuple(ring)
+        normalized = normalize_ring_longitudes(ring)
+        return tuple((lon, lat) for lon, lat in normalized)
 
     def _boundary_lnglat(self, code: str) -> list[list[float]]:
         return [[lon, lat] for lon, lat in self._boundary_cached(code)]

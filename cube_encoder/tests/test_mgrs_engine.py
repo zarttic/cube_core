@@ -162,6 +162,8 @@ def test_mgrs_children_validation():
     code = engine.locate_point(lon=116.391, lat=39.907, level=3).space_code
     with pytest.raises(ValidationError):
         engine.children(code, target_level=3)
+    with pytest.raises(ValidationError):
+        engine.children("00AAA", target_level=2)
 
 
 def test_mgrs_cover_geometry_compact_matches_full_cover():

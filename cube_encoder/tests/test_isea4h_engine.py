@@ -91,3 +91,29 @@ def test_isea4h_cover_geometry_compact_matches_full_cover():
     assert {cell.space_code: cell.bbox for cell in compact} == {
         cell.space_code: cell.bbox for cell in full
     }
+
+
+def test_isea4h_cover_intersect_handles_dateline_crossing_bbox():
+    engine = ISEA4HEngine()
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[179.7, 61.8], [-179.7, 61.8], [-179.7, 62.7], [179.7, 62.7], [179.7, 61.8]]],
+    }
+
+    code = engine.locate_space_code(179.9, 62.4, 3)
+    covered = {cell.space_code for cell in engine.cover_geometry(geometry, level=3, cover_mode="intersect")}
+
+    assert code in covered
+
+
+def test_isea4h_dateline_cell_geometry_and_bbox_stay_local():
+    engine = ISEA4HEngine()
+    code = engine.locate_space_code(179.9, 62.4, 3)
+
+    geometry = engine.code_to_geometry(code)
+    bbox = engine.code_to_bbox(code)
+    coords = geometry["coordinates"][0]
+
+    assert bbox[0] < bbox[2]
+    assert (bbox[2] - bbox[0]) < 180.0
+    assert max(abs(coords[index + 1][0] - coords[index][0]) for index in range(len(coords) - 1)) < 180.0

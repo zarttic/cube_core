@@ -36,7 +36,13 @@ from cube_split.jobs.ray_partition_core import (
     _dataset_bounds_wgs84,
     build_grid_tasks_driver,
     build_manifest,
+    create_unique_run_dir,
+    _local_file_identity,
+    _object_identity,
+    _read_identity_sidecar,
+    _write_identity_sidecar,
     resolve_asset_source_path,
+    upload_source_assets_to_minio,
 )
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
@@ -576,7 +582,7 @@ def _write_entity_tile_chunks_ray(
                 source_asset_path = str(task.get("source_asset_path") or task["asset_path"])
                 local_asset_path = self._source_path_by_uri.get(str(task["asset_path"]))
                 if local_asset_path is None:
-                    local_asset_path = prepare_source_tasks([task], source_options_value)[0]["asset_path"]
+                    local_asset_path = _prepare_entity_source_tasks([task], source_options_value)[0]["asset_path"]
                     self._source_path_by_uri[str(task["asset_path"])] = local_asset_path
                 prepared_tasks.append({**task, "asset_path": local_asset_path, "source_asset_path": source_asset_path})
             partition_start = time.perf_counter()
@@ -706,14 +712,23 @@ def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Nam
         if not source_path.exists():
             raise FileNotFoundError(f"Entity tile file not found: {source_path}")
         key = _entity_tile_object_key(row, source_path, args)
+        local_identity = _local_file_identity(source_path)
+        identity_state = _read_identity_sidecar(source_path)
         try:
             stat = client.stat_object(bucket, key)
-            if stat.size == source_path.stat().st_size:
+            remote_identity = _object_identity(stat)
+            if (
+                stat.size == source_path.stat().st_size
+                and identity_state.get("local") == local_identity
+                and identity_state.get("remote") == remote_identity
+            ):
                 return source_uri, f"s3://{bucket}/{key}"
         except S3Error as exc:
             if exc.code not in {"NoSuchKey", "NoSuchObject"}:
                 raise
         client.fput_object(bucket, key, str(source_path))
+        stat = client.stat_object(bucket, key)
+        _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
         return source_uri, f"s3://{bucket}/{key}"
 
     workers = max(1, int(getattr(args, "minio_upload_workers", 8) or 8))
@@ -1085,11 +1100,33 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     data_type = _normalize_data_type(getattr(args, "data_type", "optical"))
     grid_type = _normalize_grid_type(getattr(args, "grid_type", "isea4h"))
 
+    source_uploader = None
+    backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
+    ray_address = str(getattr(args, "ray_address", "") or "")
+    backend = _resolve_backend(backend_requested, ray_address)
+    if backend == "ray":
+        _validate_entity_tile_upload_options(_entity_tile_upload_options(args))
+        source_uploader = lambda assets: upload_source_assets_to_minio(
+            assets,
+            prefix="cube/source",
+            options={
+                "endpoint": str(getattr(args, "minio_endpoint", "")),
+                "access_key": str(getattr(args, "minio_access_key", "")),
+                "secret_key": str(getattr(args, "minio_secret_key", "")),
+                "secure": bool(getattr(args, "minio_secure", False)),
+                "bucket": str(getattr(args, "minio_bucket", "")),
+                "dataset": str(getattr(args, "dataset", "demo")),
+                "sensor": str(getattr(args, "sensor", "unknown")),
+                "asset_version": str(getattr(args, "asset_version", "v1")),
+            },
+        )
+
     source_assets = build_manifest(
         input_dir,
         product_family=args.product_family,
         data_type=data_type,
         manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
+        **({"source_uploader": source_uploader} if source_uploader is not None else {}),
     )
     if not source_assets:
         suffix_hint = ".dat/.TIF" if data_type == "radar" else ".TIF"
@@ -1113,15 +1150,14 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         max_cells_per_asset=0,
     )
     grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_type, grid_level, args.cover_mode)
+    if not grid_tasks:
+        raise RuntimeError(
+            "No grid tasks produced for input assets; check grid_type/grid_level/cover_mode or source extent"
+        )
     check_cancelled(args)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = output_dir / time.strftime("run_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = create_unique_run_dir(output_dir)
 
-    backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
-    ray_address = str(getattr(args, "ray_address", "") or "")
-    backend = _resolve_backend(backend_requested, ray_address)
     if backend not in {"ray", "thread"}:
         raise ValueError("partition_backend must be one of: auto, ray, thread, local, process")
 
@@ -1134,6 +1170,8 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         int(args.partition_prefix_len),
         max_tasks_per_group=max_tasks_per_group,
     )
+    if not grouped_tasks:
+        raise RuntimeError("No partition task groups produced after task preparation")
     parallelism = _resolve_ray_parallelism(len(grouped_tasks), requested_ray_parallelism)
     parallelism = max(1, min(len(grouped_tasks), parallelism))
     chunk_size = _resolve_ray_chunk_size(

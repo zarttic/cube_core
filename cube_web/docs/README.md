@@ -15,6 +15,8 @@
 
 - [PARTITION_INGEST_LOGIC.md](PARTITION_INGEST_LOGIC.md)：记录当前剖分提交后自动入库、
   optical 预入库/确认入库按钮与现行状态机不一致的事实，以及后续调整建议。
+- [PARTITION_GRID_METHOD_AND_HISTORY.md](PARTITION_GRID_METHOD_AND_HISTORY.md)：记录剖分格网
+  3x2 选择、同一载入批次多槽位剖分状态展示和重复提交限制的调研结论与推荐改造方案。
 
 ## 1. 定位
 

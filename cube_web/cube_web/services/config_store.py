@@ -140,10 +140,10 @@ class PostgresConfigStore(ConfigStore):
 
     def _connect(self):
         try:
-            import psycopg
-        except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in incomplete installs.
+            from cube_web.services.db_pool import _PostgresPool
+        except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError("PostgreSQL config storage requires `psycopg`") from exc
-        return psycopg.connect(self.dsn, client_encoding="UTF8")
+        return _PostgresPool.for_dsn(self.dsn).connection()
 
     def _jsonb(self, value: dict[str, Any]):
         from psycopg.types.json import Jsonb

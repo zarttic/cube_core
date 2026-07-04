@@ -186,6 +186,32 @@ def test_topology_code_to_geometry_function_mgrs_level1_antimeridian():
     assert max(abs(coords[index + 1][0] - coords[index][0]) for index in range(len(coords) - 1)) < 180.0
 
 
+def test_topology_code_to_geometry_function_isea4h_antimeridian():
+    locate_resp = locate(LocateRequest(grid_type="isea4h", level=3, point=[179.9, 62.4]))
+    geo_resp = code_to_geometry(
+        CodeToGeometryRequest(
+            grid_type="isea4h",
+            code=locate_resp.cell.space_code,
+            boundary_type="polygon",
+        )
+    )
+
+    coords = geo_resp.geometry["coordinates"][0]
+    lons = [coord[0] for coord in coords]
+
+    assert geo_resp.geometry["type"] == "Polygon"
+    assert max(lons) - min(lons) < 180.0
+
+
+def test_cover_with_bbox_input_isea4h_dateline_crossing_keeps_target_cell():
+    req = CoverRequest(grid_type="isea4h", level=3, cover_mode="intersect", bbox=[179.7, 61.8, -179.7, 62.7])
+    resp = cover(req)
+    target_code = locate(LocateRequest(grid_type="isea4h", level=3, point=[179.9, 62.4])).cell.space_code
+
+    assert resp.grid_type == "isea4h"
+    assert target_code in {cell.space_code for cell in resp.cells}
+
+
 def test_topology_mgrs_parent_children_neighbors_functions():
     locate_resp = locate(LocateRequest(grid_type="mgrs", level=3, point=[116.391, 39.907]))
     code = locate_resp.cell.space_code

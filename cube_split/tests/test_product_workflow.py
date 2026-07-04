@@ -12,7 +12,7 @@ from rasterio.transform import from_origin
 
 import cube_split.ingest.product_ingest_job as product_ingest_job
 from cube_split.ingest.product_ingest_job import run_product_ingest
-from cube_split.jobs.product_partition_job import _partition_groups_ray, _prepare_product_task_rows, run_product_partition
+from cube_split.jobs.product_partition_job import _partition_groups_ray, _prepare_product_task_rows, parse_args, run_product_partition
 from cube_split.partition.product_products import parse_product_asset
 from cube_split.quality.product_quality import run_quality_check
 
@@ -84,6 +84,19 @@ def _write_product_tif(path: Path, *, crs: str = "EPSG:4326") -> None:
         nodata=-9999.0,
     ) as ds:
         ds.write(data)
+
+
+def _stub_product_source_asset_upload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "cube_split.jobs.product_partition_job.upload_source_assets_to_minio",
+        lambda assets, *, prefix, options=None: list(assets),
+    )
+
+
+def test_product_parse_args_allows_isea4h_grid_type(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["product_partition_job.py", "--grid-type", "isea4h"])
+    args = parse_args()
+    assert args.grid_type == "isea4h"
 
 
 def _product_row(asset_path: Path, year: int = 1980) -> dict:
@@ -256,6 +269,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("cube_split.jobs.product_partition_job.convert_assets_to_cog", fake_convert_assets_to_cog)
     monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", fake_build_grid_tasks_driver)
     monkeypatch.setattr("cube_split.jobs.product_partition_job._partition_groups_ray", fake_partition_groups_ray)
+    _stub_product_source_asset_upload(monkeypatch)
 
     result = run_product_partition(
         Namespace(
@@ -295,6 +309,9 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert result["ray_parallelism"] == 1
     assert result["ray_address"] == "10.3.100.182:6379"
     assert result["ray_init_elapsed_sec"] == 0.25
+    assert result["asset_storage_backend"] == "minio"
+    assert result["minio_bucket"] == "cube"
+    assert result["minio_prefix"] == "cube/product"
     assert captured["parallelism"] == 1
     assert captured["include_sample_mean"] is True
     assert str(tif.resolve()) in captured["assets_by_path"]
@@ -556,6 +573,146 @@ def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
     assert captured["job_id"] == Path(captured["run_dir"]).name
     assert captured["asset_storage_backend"] == "minio"
     assert captured["minio_bucket"] == "cube"
+
+
+def test_product_partition_ray_forces_minio_ingest_contract(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    cog_dir = tmp_path / "cog"
+    input_dir.mkdir()
+    tif = input_dir / "1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif"
+    _write_product_tif(tif)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", lambda **kwargs: [_product_row(tif, 1980)])
+    monkeypatch.setattr(
+        "cube_split.jobs.product_partition_job._partition_groups_ray",
+        lambda **kwargs: ([
+            {**_product_row(tif, 1980), "asset_path": "s3://cube/cube/product/demo_scene.tif"}
+        ], 0.1),
+    )
+    _stub_product_source_asset_upload(monkeypatch)
+
+    def fake_run_product_ingest(args):
+        captured["asset_storage_backend"] = args.asset_storage_backend
+        captured["minio_bucket"] = args.minio_bucket
+        captured["run_dir"] = args.run_dir
+        return {"input_rows": 1, "product_asset_rows": 1, "product_fact_rows": 1}
+
+    monkeypatch.setattr("cube_split.ingest.product_ingest_job.run_product_ingest", fake_run_product_ingest)
+
+    result = run_product_partition(
+        Namespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            output_dir=str(output_dir),
+            cog_input_dir=str(cog_dir),
+            target_crs="EPSG:4326",
+            grid_type="s2",
+            grid_level=5,
+            cover_mode="intersect",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            cog_overwrite=True,
+            cog_workers=1,
+            partition_workers=1,
+            partition_backend="ray",
+            ray_address="10.3.100.182:6379",
+            ray_parallelism=1,
+            chunk_size=1,
+            sample_mean=False,
+            job_id="",
+            dataset="dianzhong_ecological_security",
+            product_name="滇中地区30米生态安全评价数据集",
+            asset_version="v1",
+            cube_version="product_v1",
+            metadata_backend="sqlite",
+            postgres_dsn="",
+            db_path=str(tmp_path / "product.db"),
+            asset_storage_backend="local",
+            minio_endpoint="10.3.100.179:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/product",
+            minio_secure=False,
+            minio_upload_workers=1,
+            cog_output_root=str(tmp_path / "product_cog_store"),
+            cog_materialize_mode="copy",
+        )
+    )
+
+    assert result["asset_storage_backend"] == "minio"
+    assert captured["asset_storage_backend"] == "minio"
+    assert captured["minio_bucket"] == "cube"
+
+
+def test_product_partition_fills_product_name_from_source_metadata(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    cog_dir = tmp_path / "cog"
+    input_dir.mkdir()
+    tif = input_dir / "1980-2020年滇中地区30米生态安全评价数据集（第一版）_1980年.tif"
+    _write_product_tif(tif)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cube_split.jobs.product_partition_job.build_grid_tasks_driver", lambda **kwargs: [_product_row(tif, 1980)])
+    monkeypatch.setattr(
+        "cube_split.jobs.product_partition_job._partition_groups_ray",
+        lambda **kwargs: ([
+            {**_product_row(tif, 1980), "asset_path": "s3://cube/cube/product/demo_scene.tif"}
+        ], 0.1),
+    )
+    _stub_product_source_asset_upload(monkeypatch)
+
+    def fake_run_product_ingest(args):
+        captured["product_name"] = args.product_name
+        return {"input_rows": 1, "product_asset_rows": 1, "product_fact_rows": 1}
+
+    monkeypatch.setattr("cube_split.ingest.product_ingest_job.run_product_ingest", fake_run_product_ingest)
+
+    run_product_partition(
+        Namespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            output_dir=str(output_dir),
+            cog_input_dir=str(cog_dir),
+            target_crs="EPSG:4326",
+            grid_type="s2",
+            grid_level=5,
+            cover_mode="intersect",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            cog_overwrite=True,
+            cog_workers=1,
+            partition_workers=1,
+            partition_backend="ray",
+            ray_address="10.3.100.182:6379",
+            ray_parallelism=1,
+            chunk_size=1,
+            sample_mean=False,
+            job_id="",
+            dataset="dianzhong_ecological_security",
+            product_name="",
+            asset_version="v1",
+            cube_version="product_v1",
+            metadata_backend="sqlite",
+            postgres_dsn="",
+            db_path=str(tmp_path / "product.db"),
+            asset_storage_backend="local",
+            minio_endpoint="10.3.100.179:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/product",
+            minio_secure=False,
+            minio_upload_workers=1,
+            cog_output_root=str(tmp_path / "product_cog_store"),
+            cog_materialize_mode="copy",
+        )
+    )
+
+    assert captured["product_name"] == "1980-2020年滇中地区30米生态安全评价数据集（第一版）"
 
 
 def test_product_quality_passes_complete_years(tmp_path: Path):

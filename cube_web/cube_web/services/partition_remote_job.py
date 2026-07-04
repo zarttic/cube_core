@@ -89,8 +89,8 @@ def run_task(task_id: str) -> int:
     except Exception as exc:
         error = _error_text(exc)
         if "cancel" in error.lower():
-            workflow.on_task_failed(task_id, error)
-            return 1
+            store.mark_cancelled(task_id)
+            return 0
         workflow.on_task_failed(task_id, error)
         raise
     result = dict(result or {})

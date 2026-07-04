@@ -208,30 +208,32 @@ def _report_carbon_fact_metrics(rows: list[CarbonObservationFact]) -> None:
 
 
 def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -> None:
-    sql = """
+    if not rows:
+        return
+    columns = """
+        satellite TEXT NOT NULL,
+        product_type TEXT NOT NULL,
+        observation_id TEXT NOT NULL,
+        acq_time TIMESTAMPTZ NOT NULL,
+        time_bucket TEXT NOT NULL,
+        grid_type TEXT NOT NULL,
+        grid_level INTEGER NOT NULL,
+        space_code TEXT NOT NULL,
+        st_code TEXT NOT NULL,
+        xco2 DOUBLE PRECISION NOT NULL,
+        quality_flag TEXT,
+        center_lon DOUBLE PRECISION NOT NULL,
+        center_lat DOUBLE PRECISION NOT NULL,
+        footprint_geojson JSONB NOT NULL,
+        source_uri TEXT NOT NULL,
+        source_index INTEGER,
+        metadata_json JSONB NOT NULL,
+        cube_version TEXT NOT NULL,
+        run_id TEXT NOT NULL
+    """
+    merge_sql = """
         MERGE INTO rs_carbon_observation_fact target
-        USING (
-          SELECT
-            %s::text AS satellite,
-            %s::text AS product_type,
-            %s::text AS observation_id,
-            %s::timestamptz AS acq_time,
-            %s::text AS time_bucket,
-            %s::text AS grid_type,
-            %s::int AS grid_level,
-            %s::text AS space_code,
-            %s::text AS st_code,
-            %s::double precision AS xco2,
-            %s::text AS quality_flag,
-            %s::double precision AS center_lon,
-            %s::double precision AS center_lat,
-            %s::jsonb AS footprint_geojson,
-            %s::text AS source_uri,
-            %s::int AS source_index,
-            %s::jsonb AS metadata_json,
-            %s::text AS cube_version,
-            %s::text AS run_id
-        ) source
+        USING tmp_carbon_observation_fact source
         ON (
           target.satellite = source.satellite
           AND target.observation_id = source.observation_id
@@ -267,32 +269,46 @@ def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -
           source.metadata_json, source.cube_version, source.run_id
         )
     """
-    values = [
-        (
-            row.satellite,
-            row.product_type,
-            row.observation_id,
-            _parse_timestamp(row.acq_time),
-            row.time_bucket,
-            row.grid_type,
-            row.grid_level,
-            row.space_code,
-            row.st_code,
-            row.xco2,
-            row.quality_flag,
-            row.center_lon,
-            row.center_lat,
-            row.footprint_geojson,
-            row.source_uri,
-            row.source_index,
-            row.metadata_json,
-            row.cube_version,
-            row.run_id,
-        )
-        for row in rows
-    ]
     with conn.cursor() as cur:
-        cur.executemany(sql, values)
+        cur.execute("DROP TABLE IF EXISTS tmp_carbon_observation_fact")
+        cur.execute(f"CREATE TEMP TABLE tmp_carbon_observation_fact ({columns})")
+        with cur.copy(
+            """
+            COPY tmp_carbon_observation_fact (
+              satellite, product_type, observation_id, acq_time, time_bucket,
+              grid_type, grid_level, space_code, st_code, xco2, quality_flag,
+              center_lon, center_lat, footprint_geojson, source_uri, source_index,
+              metadata_json, cube_version, run_id
+            ) FROM STDIN
+            """
+        ) as copy:
+            for row in rows:
+                copy.write_row(_carbon_fact_values(row))
+        cur.execute(merge_sql)
+
+
+def _carbon_fact_values(row: CarbonObservationFact) -> tuple[Any, ...]:
+    return (
+        row.satellite,
+        row.product_type,
+        row.observation_id,
+        _parse_timestamp(row.acq_time),
+        row.time_bucket,
+        row.grid_type,
+        row.grid_level,
+        row.space_code,
+        row.st_code,
+        row.xco2,
+        row.quality_flag,
+        row.center_lon,
+        row.center_lat,
+        row.footprint_geojson,
+        row.source_uri,
+        row.source_index,
+        row.metadata_json,
+        row.cube_version,
+        row.run_id,
+    )
 
 def _upsert_job_status_postgres(
     conn: Any,

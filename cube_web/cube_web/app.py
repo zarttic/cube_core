@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import logging
 from typing import Any
 
@@ -31,7 +32,15 @@ partition_workflow_service = partition_route.partition_workflow_service
 
 
 def create_app() -> FastAPI:
-    web_app = FastAPI(title="cube-web")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            partition_workflow_service.reconcile_orphaned_tasks()
+        except Exception as exc:
+            logger.warning("Skipping partition task reconcile during startup: %s", exc)
+        yield
+
+    web_app = FastAPI(title="cube-web", lifespan=lifespan)
     sdk = CubeEncoderSDK()
     api_router = APIRouter(prefix="/v1", tags=["sdk-web"])
 
@@ -48,13 +57,6 @@ def create_app() -> FastAPI:
         check: list[str] | None = Query(default=None),
     ) -> dict[str, Any]:
         return health_service.health_report([*(checks or []), *(check or [])])
-
-    @web_app.on_event("startup")
-    async def reconcile_partition_tasks() -> None:
-        try:
-            partition_workflow_service.reconcile_orphaned_tasks()
-        except Exception as exc:
-            logger.warning("Skipping partition task reconcile during startup: %s", exc)
 
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())

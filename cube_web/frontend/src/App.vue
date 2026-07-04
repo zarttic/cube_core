@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue';
 import { navItems, normalizePath, portalHomeUrl } from '@/data/navigation';
-import PartitionView from '@/views/PartitionView.vue';
-import EncodingView from '@/views/EncodingView.vue';
 import { authRequired, loadAuthRuntimeConfig } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
+
+const PartitionView = defineAsyncComponent(() => import('@/views/PartitionView.vue'));
+const EncodingView = defineAsyncComponent(() => import('@/views/EncodingView.vue'));
 
 const currentPath = ref(normalizePath(window.location.pathname));
 const authReady = ref(false);

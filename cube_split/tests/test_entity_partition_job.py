@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,8 +86,16 @@ def _write_tif(path: Path) -> None:
         dtype=data.dtype,
         crs="EPSG:4326",
         transform=transform,
-    ) as ds:
+        ) as ds:
         ds.write(data)
+
+
+def _stub_source_asset_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_upload_source_assets_to_minio(assets, *, prefix, options=None):
+        _ = prefix, options
+        return [replace(asset, path=asset.path) for asset in assets]
+
+    monkeypatch.setattr(entity_partition_job, "upload_source_assets_to_minio", fake_upload_source_assets_to_minio)
 
 
 def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
@@ -199,6 +208,68 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     assert rows[0]["asset_path"] != rows[0]["source_asset_path"]
 
 
+def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    source = tmp_path / "source.tif"
+    _write_tif(source)
+    sdk = entity_partition_job.CubeEncoderSDK()
+    with rasterio.open(source) as ds:
+        min_lon, min_lat, max_lon, max_lat = entity_partition_job._dataset_bounds_wgs84(ds)
+    center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
+    cell = sdk.locate(grid_type="s2", level=6, point=center)
+    tasks = [
+        {
+            "scene_id": "scene-s2",
+            "band": "b04",
+            "asset_path": str(source),
+            "source_asset_path": str(source),
+            "acq_time": "2026-04-21T00:00:00Z",
+            "grid_type": "s2",
+            "grid_level": 6,
+            "space_code": cell.space_code,
+            "cover_mode": "intersect",
+            "cell_min_lon": float(cell.bbox[0]),
+            "cell_min_lat": float(cell.bbox[1]),
+            "cell_max_lon": float(cell.bbox[2]),
+            "cell_max_lat": float(cell.bbox[3]),
+        }
+    ]
+
+    rows = entity_partition_job._write_entity_tiles(
+        tasks,
+        run_dir=run_dir,
+        time_granularity="day",
+        partition_prefix_len=3,
+        data_type="optical",
+    )
+
+    assert rows
+    assert rows[0]["grid_type"] == "s2"
+    assert rows[0]["partition_method"] == "entity"
+    assert "/s2/" in rows[0]["asset_path"]
+
+
+def test_entity_tile_object_key_uses_row_grid_type():
+    row = {
+        "scene_id": "scene-s2",
+        "band": "b04",
+        "acq_time": "2026-04-21T00:00:00Z",
+        "grid_type": "s2",
+        "grid_level": 6,
+        "space_code": "abc123",
+    }
+    args = SimpleNamespace(
+        minio_prefix="cube/entity",
+        dataset="demo_optical",
+        sensor="optical_mosaic",
+        asset_version="v1",
+    )
+
+    key = entity_partition_job._entity_tile_object_key(row, Path("tile.tif"), args)
+
+    assert "grid=s2/" in key
+
+
 def test_entity_task_grouping_batches_by_asset_and_space_prefix():
     tasks = [
         {"asset_path": "/source/a.tif", "space_code": "811aaa"},
@@ -299,6 +370,7 @@ def test_entity_auto_parallelism_uses_split_groups_after_prefix_batching(monkeyp
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.os.cpu_count", lambda: 8)
     monkeypatch.setattr(entity_partition_job, "build_grid_tasks_driver", fake_build_grid_tasks_driver)
     monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_ray", fake_ray_writer)
+    _stub_source_asset_upload(monkeypatch)
 
     report = run_entity_partition(
         SimpleNamespace(
@@ -426,6 +498,8 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
 
     class FakeStat:
         size = 4
+        etag = "remote-1"
+        last_modified = None
 
     class FakeMinio:
         def __init__(self, *args, **kwargs):
@@ -448,6 +522,10 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
     second.parent.mkdir()
     first.write_bytes(b"data")
     second.write_bytes(b"data")
+    first_identity = entity_partition_job._local_file_identity(first)
+    second_identity = entity_partition_job._local_file_identity(second)
+    first.with_name(f"{first.name}.identity").write_text(f"local={first_identity}\nremote=etag:remote-1", encoding="utf-8")
+    second.with_name(f"{second.name}.identity").write_text(f"local={second_identity}\nremote=etag:remote-1", encoding="utf-8")
     rows = [
         {
             "asset_path": str(first),
@@ -488,6 +566,44 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
     assert "space_code=86283082fffffff" in uploaded[str(first)]
     assert "space_code=862830837ffffff" in uploaded[str(second)]
     assert len(set(captured_keys)) == 2
+
+
+def test_entity_partition_raises_clear_error_when_no_task_groups(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    _write_tif(input_dir / "demo_scene_empty.tif")
+
+    monkeypatch.setattr(entity_partition_job, "_group_tasks_for_parallel_processing", lambda *args, **kwargs: [])
+
+    with pytest.raises(RuntimeError, match="No partition task groups produced after task preparation"):
+        run_entity_partition(
+            SimpleNamespace(
+                input_dir=str(input_dir),
+                manifest_path="",
+                product_family="auto",
+                output_dir=str(tmp_path / "output"),
+                cog_input_dir=str(tmp_path / "cog"),
+                cog_overwrite=True,
+                cog_workers=1,
+                cog_compress="LZW",
+                cog_predictor=2,
+                cog_level=0,
+                cog_num_threads="ALL_CPUS",
+                target_crs="EPSG:4326",
+                grid_level=1,
+                target_pixels_per_hex_edge=768,
+                cover_mode="intersect",
+                time_granularity="day",
+                max_cells_per_asset=20000,
+                partition_prefix_len=3,
+                partition_backend="thread",
+                ray_address="",
+                ray_parallelism=0,
+                chunk_size=0,
+                asset_storage_backend="local",
+                metadata_backend="none",
+            )
+        )
 
 
 def test_entity_partition_ingest_disabled_skips_minio_and_postgres(monkeypatch, tmp_path: Path):
@@ -606,6 +722,7 @@ def test_entity_partition_ray_ingest_disabled_still_uses_minio_tiles(monkeypatch
     monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_ray", fake_ray_writer)
     monkeypatch.setattr(entity_partition_job, "_upload_entity_tiles_to_minio", fail_upload)
     monkeypatch.setattr(entity_partition_job, "_write_entity_metadata_postgres", fail_metadata)
+    _stub_source_asset_upload(monkeypatch)
 
     report = run_entity_partition(
         SimpleNamespace(
@@ -666,6 +783,7 @@ def test_entity_partition_ray_requires_minio_tile_output(monkeypatch, tmp_path: 
         raise AssertionError("Ray writer should not run without MinIO tile output settings")
 
     monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_ray", fail_ray_writer)
+    _stub_source_asset_upload(monkeypatch)
 
     with pytest.raises(ValueError, match="Ray entity partition requires minio"):
         run_entity_partition(
@@ -1093,6 +1211,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
         )
 
     monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_ray", fake_ray_writer)
+    _stub_source_asset_upload(monkeypatch)
 
     report = run_entity_partition(
         SimpleNamespace(
@@ -1314,6 +1433,77 @@ def test_entity_ray_prepare_sources_only_actor_assigned_assets(monkeypatch, tmp_
     assert sorted(prepared) == [["s3://cube/source/a.tif"], ["s3://cube/source/b.tif"]]
     assert fake_ray.kill_calls == 2
     assert fake_ray.shutdown_calls == 1
+
+
+def test_entity_ray_process_groups_falls_back_to_shared_source_prepare_helper(monkeypatch, tmp_path: Path):
+    class MissingPrepareSourcesActorHandle(_FakeActorHandle):
+        def __getattr__(self, name):
+            if name == "prepare_sources":
+                return _FakeRemoteMethod(lambda *args, **kwargs: {"source_prepare_elapsed_sec": 0.0})
+            return super().__getattr__(name)
+
+    class MissingPrepareSourcesActorClass(_FakeActorClass):
+        def remote(self):
+            return MissingPrepareSourcesActorHandle(self._actor_cls)
+
+    class MissingPrepareSourcesRay(_FakeRay):
+        def remote(self, actor_cls):
+            return MissingPrepareSourcesActorClass(actor_cls)
+
+    fake_ray = MissingPrepareSourcesRay()
+    resolved_calls: list[str] = []
+    writer_assets: list[str] = []
+
+    monkeypatch.setattr(entity_partition_job, "_load_ray", lambda: fake_ray)
+    monkeypatch.setattr(entity_partition_job, "_ray_runtime_env_from_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr(entity_partition_job, "_prepend_sys_paths", lambda paths: None)
+    monkeypatch.setattr(entity_partition_job, "_ray_project_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(entity_partition_job, "_ray_actor_options_from_env", lambda: {})
+
+    def fake_resolve(source_uri, options=None):
+        _ = options
+        resolved_calls.append(source_uri)
+        return f"/cache/{Path(source_uri).name}"
+
+    def fake_writer(tasks, run_dir, time_granularity, partition_prefix_len, data_type="optical", source_options=None):
+        _ = run_dir, time_granularity, partition_prefix_len, data_type, source_options
+        writer_assets.extend(task["asset_path"] for task in tasks)
+        return []
+
+    monkeypatch.setattr(entity_partition_job, "resolve_asset_source_path", fake_resolve)
+    monkeypatch.setattr(entity_partition_job, "_write_entity_tiles", fake_writer)
+
+    entity_partition_job._write_entity_tile_chunks_ray(
+        task_chunks=[
+            [[
+                {
+                    "scene_id": "scene-a",
+                    "band": "b1",
+                    "asset_path": "s3://cube/source/a.tif",
+                    "acq_time": "2026-04-21T00:00:00Z",
+                    "grid_type": "isea4h",
+                    "grid_level": 1,
+                    "space_code": "811ffffffffffff",
+                    "cover_mode": "intersect",
+                    "cell_min_lon": 0.0,
+                    "cell_min_lat": 0.0,
+                    "cell_max_lon": 1.0,
+                    "cell_max_lat": 1.0,
+                }
+            ]]
+        ],
+        run_dir=tmp_path / "run",
+        time_granularity="day",
+        partition_prefix_len=3,
+        parallelism=1,
+        ray_address="10.3.100.182:6379",
+        data_type="optical",
+        source_options={"endpoint": "10.3.100.179:9000"},
+        tile_upload_options=None,
+    )
+
+    assert resolved_calls == ["s3://cube/source/a.tif"]
+    assert writer_assets == ["/cache/a.tif"]
 
 
 def test_entity_actor_assignment_keeps_asset_affinity_when_parallelism_allows():
