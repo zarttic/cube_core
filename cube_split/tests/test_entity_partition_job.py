@@ -163,6 +163,10 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
         assert ds.nodata == 0
         assert ds.width > 0
         assert ds.height > 0
+        assert ds.profile["compress"].lower() == "zstd"
+        assert ds.profile["tiled"] is True
+        assert ds.profile["blockxsize"] == 512
+        assert ds.profile["blockysize"] == 512
 
 
 def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
@@ -558,6 +562,7 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
             minio_prefix="cube/entity",
             minio_secure=False,
             minio_upload_workers=1,
+            minio_fast_upload=False,
         ),
     )
 
@@ -566,6 +571,56 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
     assert "space_code=86283082fffffff" in uploaded[str(first)]
     assert "space_code=862830837ffffff" in uploaded[str(second)]
     assert len(set(captured_keys)) == 2
+
+
+def test_entity_tile_minio_fast_upload_skips_stat(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+
+    class FakeMinio:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def stat_object(self, *_args):
+            raise AssertionError("fast upload should not stat objects")
+
+        def fput_object(self, _bucket, key, _path):
+            calls.append(key)
+
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+    tile = tmp_path / "tile.tif"
+    tile.write_bytes(b"data")
+
+    uploaded = entity_partition_job._upload_entity_tiles_to_minio(
+        [
+            {
+                "asset_path": str(tile),
+                "scene_id": "scene-a",
+                "band": "b1",
+                "acq_time": "2020-08-01T00:00:00Z",
+                "grid_type": "isea4h",
+                "grid_level": 6,
+                "space_code": "86283082fffffff",
+            }
+        ],
+        SimpleNamespace(
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            minio_endpoint="127.0.0.1:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="entity-bucket",
+            minio_prefix="cube/entity",
+            minio_secure=False,
+            minio_upload_workers=1,
+        ),
+    )
+
+    assert len(calls) == 1
+    assert uploaded[str(tile)].startswith("s3://entity-bucket/")
 
 
 def test_entity_partition_raises_clear_error_when_no_task_groups(monkeypatch, tmp_path: Path):
@@ -974,7 +1029,8 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
             },
         ]
 
-    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
+    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical", clip_mode="exact"):
+        _ = clip_mode
         _ = time_granularity, partition_prefix_len, workers
         rows = []
         for chunk in task_chunks:
@@ -1078,7 +1134,8 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
             }
         ]
 
-    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical"):
+    def fake_writer(task_chunks, run_dir, time_granularity, partition_prefix_len, workers, data_type="optical", clip_mode="exact"):
+        _ = clip_mode
         _ = time_granularity, partition_prefix_len, workers
         captured["writer_data_type"] = data_type
         task = task_chunks[0][0][0]
@@ -1285,11 +1342,21 @@ def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tm
         calls.append(("tile_upload_bucket", args.minio_bucket))
         return {row["asset_path"]: f"s3://{args.minio_bucket}/entity/{Path(row['asset_path']).name}" for row in rows}
 
-    def fake_writer(tasks, run_dir, time_granularity, partition_prefix_len, data_type="optical", source_options=None):
-        _ = time_granularity, partition_prefix_len
+    def fake_writer(
+        tasks,
+        run_dir,
+        time_granularity,
+        partition_prefix_len,
+        data_type="optical",
+        source_options=None,
+        timing=None,
+        clip_mode="exact",
+        tile_upload_options=None,
+    ):
+        _ = time_granularity, partition_prefix_len, timing, clip_mode
         calls.append(("writer_assets", [task["asset_path"] for task in tasks]))
         calls.append(("source_options", source_options))
-        return [
+        rows = [
             {
                 "partition_type": "entity",
                 "data_type": data_type,
@@ -1319,6 +1386,16 @@ def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tm
             }
             for task in tasks
         ]
+        if tile_upload_options:
+            calls.append(("tile_upload_bucket", tile_upload_options["minio_bucket"]))
+            for row in rows:
+                row["source_asset_path"] = row["source_asset_path"]
+                row["asset_path"] = f"s3://{tile_upload_options['minio_bucket']}/entity/{Path(row['asset_path']).name}"
+                row["output_path"] = row["asset_path"]
+            if timing is not None:
+                timing["entity_tile_upload_count"] = float(len(rows))
+                timing["entity_tile_upload_elapsed_sec"] = 0.0
+        return rows
 
     monkeypatch.setattr("cube_split.jobs.ray_partition_core.convert_asset_to_cog", fake_convert_asset_to_cog)
     monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
@@ -1343,7 +1420,15 @@ def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tm
     }
     task_b = {**task_a, "space_code": "812ffffffffffff"}
 
-    rows, ray_init_elapsed, source_prepare_elapsed, partition_elapsed, source_prepare_worker_elapsed, worker_partition_elapsed = entity_partition_job._write_entity_tile_chunks_ray(
+    (
+        rows,
+        ray_init_elapsed,
+        source_prepare_elapsed,
+        partition_elapsed,
+        source_prepare_worker_elapsed,
+        worker_partition_elapsed,
+        worker_stats,
+    ) = entity_partition_job._write_entity_tile_chunks_ray(
         task_chunks=[[[task_a]], [[task_b]]],
         run_dir=tmp_path / "run",
         time_granularity="day",
@@ -1365,6 +1450,9 @@ def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tm
     assert partition_elapsed >= 0
     assert source_prepare_worker_elapsed >= 0
     assert worker_partition_elapsed >= 0
+    assert worker_stats["entity_tile_upload_count"] == 2
+    assert worker_stats["entity_tile_upload_elapsed_sec"] >= 0
+    assert worker_stats["entity_writer_wall_elapsed_sec"] >= 0
     assert calls == [
         ("writer_assets", [source_path, source_path]),
         ("source_options", None),
@@ -1392,8 +1480,18 @@ def test_entity_ray_prepare_sources_only_actor_assigned_assets(monkeypatch, tmp_
         prepared.append([source_uri])
         return f"/cache/{Path(source_uri).name}"
 
-    def fake_writer(tasks, run_dir, time_granularity, partition_prefix_len, data_type="optical", source_options=None):
-        _ = run_dir, time_granularity, partition_prefix_len, data_type, source_options
+    def fake_writer(
+        tasks,
+        run_dir,
+        time_granularity,
+        partition_prefix_len,
+        data_type="optical",
+        source_options=None,
+        timing=None,
+        clip_mode="exact",
+        tile_upload_options=None,
+    ):
+        _ = run_dir, time_granularity, partition_prefix_len, data_type, source_options, timing, clip_mode, tile_upload_options
         return []
 
     monkeypatch.setattr("cube_split.jobs.ray_partition_core.resolve_asset_source_path", fake_resolve)
@@ -1465,8 +1563,18 @@ def test_entity_ray_process_groups_falls_back_to_shared_source_prepare_helper(mo
         resolved_calls.append(source_uri)
         return f"/cache/{Path(source_uri).name}"
 
-    def fake_writer(tasks, run_dir, time_granularity, partition_prefix_len, data_type="optical", source_options=None):
-        _ = run_dir, time_granularity, partition_prefix_len, data_type, source_options
+    def fake_writer(
+        tasks,
+        run_dir,
+        time_granularity,
+        partition_prefix_len,
+        data_type="optical",
+        source_options=None,
+        timing=None,
+        clip_mode="exact",
+        tile_upload_options=None,
+    ):
+        _ = run_dir, time_granularity, partition_prefix_len, data_type, source_options, timing, clip_mode, tile_upload_options
         writer_assets.extend(task["asset_path"] for task in tasks)
         return []
 

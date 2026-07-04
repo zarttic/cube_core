@@ -220,7 +220,7 @@ onMounted(loadConfig);
                   </el-select>
                 </el-form-item>
                 <el-form-item label="COG Predictor">
-                  <el-input-number v-model="optical.cog_predictor" :min="1" :max="3" />
+                  <el-input-number v-model="optical.cog_predictor" :min="0" :max="3" />
                 </el-form-item>
                 <el-form-item label="COG Level">
                   <el-input-number v-model="optical.cog_level" :min="0" :max="22" />

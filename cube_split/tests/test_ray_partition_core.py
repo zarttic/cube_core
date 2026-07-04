@@ -13,7 +13,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 import cube_split.jobs.ray_partition_core as ray_partition_core
-from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, convert_assets_to_cog, create_unique_run_dir, upload_source_assets_to_minio
+from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, cog_creation_options, convert_assets_to_cog, create_unique_run_dir, upload_source_assets_to_minio
 from cube_split.partition.optical_products import get_optical_product_adapter, supported_optical_product_families
 
 
@@ -503,6 +503,22 @@ def test_convert_assets_to_cog_creates_cog_files(tmp_path: Path):
     with rasterio.open(out_path) as ds:
         assert str(ds.profile.get("compress", "")).lower() == "lzw"
         assert ds.overviews(1) == []
+
+
+def test_cog_creation_options_skip_predictor_and_level_without_compression():
+    options = cog_creation_options(compress="NONE", predictor=2, level=9)
+
+    assert options["COMPRESS"] == "NONE"
+    assert "PREDICTOR" not in options
+    assert "LEVEL" not in options
+
+
+def test_cog_creation_options_keep_predictor_for_compressed_output():
+    options = cog_creation_options(compress="LZW", predictor=2, level=9)
+
+    assert options["COMPRESS"] == "LZW"
+    assert options["PREDICTOR"] == "2"
+    assert options["LEVEL"] == "9"
 
 
 def test_convert_assets_to_cog_can_standardize_target_crs(tmp_path: Path):

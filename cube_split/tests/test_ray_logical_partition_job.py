@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from cube_split.jobs.ray_logical_partition_job import (
+    _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
     _ray_runtime_env_from_env,
+    _resolve_ray_actor_parallelism,
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
     _should_run_ingest,
@@ -84,16 +86,56 @@ def test_chunk_tasks_for_ray_preserves_order_and_chunk_size():
     assert [[row["id"] for row in chunk] for chunk in chunks] == [[0, 1, 2], [3, 4, 5], [6]]
 
 
+def test_chunk_task_groups_by_actor_keeps_asset_groups_together():
+    groups = [
+        [{"asset_path": "/source/a.tif", "space_code": "35f4"}],
+        [{"asset_path": "/source/a.tif", "space_code": "35f5"}],
+        [{"asset_path": "/source/b.tif", "space_code": "36a1"}],
+        [{"asset_path": "/source/a.tif", "space_code": "35f6"}],
+        [{"asset_path": "/source/b.tif", "space_code": "36a2"}],
+    ]
+
+    chunks_by_actor = _chunk_task_groups_by_actor(groups, parallelism=2, chunk_size=1)
+
+    actor_by_asset: dict[str, int] = {}
+    for actor_idx, actor_chunks in enumerate(chunks_by_actor):
+        for chunk in actor_chunks:
+            for group in chunk:
+                asset_path = group[0]["asset_path"]
+                actor_by_asset.setdefault(asset_path, actor_idx)
+                assert actor_by_asset[asset_path] == actor_idx
+    assert actor_by_asset == {"/source/a.tif": 0, "/source/b.tif": 1}
+
+
 def test_resolve_ray_parallelism_caps_by_task_count():
     assert _resolve_ray_parallelism(task_group_count=1, requested_parallelism=8) == 1
     assert _resolve_ray_parallelism(task_group_count=4, requested_parallelism=8) == 4
     assert _resolve_ray_parallelism(task_group_count=4, requested_parallelism=2) == 2
 
 
+def test_resolve_ray_actor_parallelism_caps_by_asset_count():
+    groups = [
+        [{"asset_path": "/source/a.tif"}],
+        [{"asset_path": "/source/a.tif"}],
+        [{"asset_path": "/source/b.tif"}],
+    ]
+
+    assert _resolve_ray_actor_parallelism(groups, requested_parallelism=8) == 2
+
+
 def test_parse_args_allows_isea4h_grid_type(monkeypatch):
     monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "isea4h"])
     args = parse_args()
     assert args.grid_type == "isea4h"
+
+
+def test_parse_args_defaults_to_fastest_measured_cog_compression(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py"])
+
+    args = parse_args()
+
+    assert args.cog_compress == "LZW"
+    assert args.cog_predictor == 2
 
 
 def test_resolve_ray_parallelism_auto_uses_task_count_ceiling(monkeypatch):
@@ -461,15 +503,18 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
         )
 
     def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
-        calls.append(("process", str(group[0]["asset_path"])))
-        row = dict(group[0])
-        row["st_code"] = f"{row['space_code']}:{row['time_bucket']}"
-        row["sample_mean_band1"] = None
-        row["intersect_min_lon"] = row["cell_min_lon"]
-        row["intersect_min_lat"] = row["cell_min_lat"]
-        row["intersect_max_lon"] = row["cell_max_lon"]
-        row["intersect_max_lat"] = row["cell_max_lat"]
-        return [row]
+        calls.append(("process", [str(row["asset_path"]) for row in group]))
+        rows = []
+        for item in group:
+            row = dict(item)
+            row["st_code"] = f"{row['space_code']}:{row['time_bucket']}"
+            row["sample_mean_band1"] = None
+            row["intersect_min_lon"] = row["cell_min_lon"]
+            row["intersect_min_lat"] = row["cell_min_lat"]
+            row["intersect_max_lon"] = row["cell_max_lon"]
+            row["intersect_max_lat"] = row["cell_max_lat"]
+            rows.append(row)
+        return rows
 
     def fake_upload_cog_to_minio(asset, local_path, options):
         calls.append(("upload", str(local_path)))
@@ -529,10 +574,9 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
         )
     )
 
-    assert [name for name, _ in calls] == ["convert", "process", "process", "upload"]
-    assert calls[1][1] == str(worker_cog_path)
+    assert [name for name, _ in calls] == ["convert", "process", "upload"]
+    assert calls[1][1] == [str(worker_cog_path), str(worker_cog_path)]
     assert calls[2][1] == str(worker_cog_path)
-    assert calls[3][1] == str(worker_cog_path)
     assert report["execution_engine"] == "ray"
     assert report["partition_backend_used"] == "ray"
     assert report["total_index_rows"] == 2
