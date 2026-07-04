@@ -274,6 +274,24 @@ def test_entity_tile_object_key_uses_row_grid_type():
     assert "grid=s2/" in key
 
 
+def test_entity_tile_upload_options_default_workers():
+    options = entity_partition_job._entity_tile_upload_options(
+        SimpleNamespace(
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            minio_endpoint="127.0.0.1:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="entity-bucket",
+            minio_prefix="cube/entity",
+            minio_secure=False,
+        )
+    )
+
+    assert options["minio_upload_workers"] == entity_partition_job.DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS
+
+
 def test_entity_task_grouping_batches_by_asset_and_space_prefix():
     tasks = [
         {"asset_path": "/source/a.tif", "space_code": "811aaa"},
@@ -621,6 +639,68 @@ def test_entity_tile_minio_fast_upload_skips_stat(monkeypatch, tmp_path: Path):
 
     assert len(calls) == 1
     assert uploaded[str(tile)].startswith("s3://entity-bucket/")
+
+
+def test_entity_tile_minio_upload_workers_scale_http_pool(monkeypatch, tmp_path: Path):
+    pool_sizes: list[int] = []
+    uploaded_keys: list[str] = []
+
+    class FakeHTTPClient:
+        pass
+
+    def fake_pool_manager(**kwargs):
+        pool_sizes.append(int(kwargs["maxsize"]))
+        return FakeHTTPClient()
+
+    class FakeMinio:
+        def __init__(self, *args, http_client=None, **kwargs):
+            assert http_client is not None
+
+        def bucket_exists(self, _bucket):
+            return True
+
+        def fput_object(self, _bucket, key, _path):
+            uploaded_keys.append(key)
+
+    monkeypatch.setattr("urllib3.PoolManager", fake_pool_manager)
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+
+    rows = []
+    for idx in range(3):
+        tile = tmp_path / f"tile-{idx}.tif"
+        tile.write_bytes(b"data")
+        rows.append(
+            {
+                "asset_path": str(tile),
+                "scene_id": "scene-a",
+                "band": "b1",
+                "acq_time": "2020-08-01T00:00:00Z",
+                "grid_type": "isea4h",
+                "grid_level": 6,
+                "space_code": f"86283082fffff{idx:02d}",
+            }
+        )
+
+    uploaded = entity_partition_job._upload_entity_tiles_to_minio(
+        rows,
+        SimpleNamespace(
+            dataset="demo_optical",
+            sensor="optical_mosaic",
+            asset_version="v1",
+            minio_endpoint="127.0.0.1:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="entity-bucket",
+            minio_prefix="cube/entity",
+            minio_secure=False,
+            minio_upload_workers=16,
+            minio_fast_upload=True,
+        ),
+    )
+
+    assert pool_sizes == [16]
+    assert len(uploaded_keys) == len(rows)
+    assert len(uploaded) == len(rows)
 
 
 def test_entity_partition_raises_clear_error_when_no_task_groups(monkeypatch, tmp_path: Path):
