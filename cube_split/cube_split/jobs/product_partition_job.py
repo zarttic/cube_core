@@ -23,6 +23,7 @@ from cube_split.jobs.ray_logical_partition_job import (
     _resolve_ray_chunk_size,
 )
 from cube_split.jobs.ray_partition_core import (
+    PLANE_GRID_TYPE,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
     _process_local_task_group,
@@ -55,12 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default="data/product", help="Input directory containing product TIF files")
     parser.add_argument("--manifest-path", default="", help="Optional selected product asset manifest")
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
-    parser.add_argument("--cog-input-dir", default="data/cog/product_epsg4326", help="Directory for standardized product COGs")
-    parser.add_argument("--target-crs", default="EPSG:4326", help="Target CRS for standardized COG assets")
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "tile_matrix", "isea4h"], help="Grid type")
+    parser.add_argument("--cog-input-dir", default="data/cog/product", help="Directory for standardized product COGs")
+    parser.add_argument("--target-crs", default="", help="Optional target CRS for standardized COG assets. Empty keeps source CRS.")
+    parser.add_argument("--grid-type", default="s2", choices=["s2", "tile_matrix", "isea4h", "plane_grid"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
-    parser.add_argument("--max-cells-per-asset", type=int, default=20000, help="Safety limit for cover cells per asset")
+    parser.add_argument("--max-cells-per-asset", type=int, default=0, help="Safety limit for cover cells per asset (0 disables)")
     parser.add_argument("--partition-prefix-len", type=int, default=3, help="Prefix length used in row grouping")
     parser.add_argument("--cog-overwrite", action="store_true", help="Force reconvert source TIF files to COG")
     parser.add_argument("--cog-workers", type=int, default=0, help="Parallel workers for COG conversion")
@@ -344,6 +345,8 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     backend = _resolve_backend(backend_requested, ray_address)
     if backend not in {"ray", "thread"}:
         raise ValueError("partition_backend must be one of: auto, ray, thread")
+    if str(args.grid_type or "").lower() == PLANE_GRID_TYPE and str(args.target_crs or "").strip():
+        raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
 
     manifest_path_raw = str(getattr(args, "manifest_path", "") or "").strip()
     manifest_path = Path(manifest_path_raw).expanduser() if manifest_path_raw else None

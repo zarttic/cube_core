@@ -20,7 +20,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "target_crs": "EPSG:4326",
             "cover_mode": "intersect",
             "time_granularity": "day",
-            "max_cells_per_asset": 20000,
+            "max_cells_per_asset": 0,
             "cog_workers": 2,
             "cog_compress": "LZW",
             "cog_predictor": 2,
@@ -185,7 +185,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("config must be an object")
     merged = _deep_merge(default_config(), config or {})
     optical = merged["partition"]["optical"]
-    optical["grid_type"] = _choice(optical.get("grid_type"), {"s2", "tile_matrix", "isea4h"}, "grid_type")
+    optical["grid_type"] = _choice(optical.get("grid_type"), {"s2", "tile_matrix", "isea4h", "plane_grid"}, "grid_type")
     optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=1)
     optical["grid_level_mode"] = _choice(optical.get("grid_level_mode"), {"auto", "manual"}, "grid_level_mode")
     optical["target_pixels_per_hex_edge"] = _int_value(
@@ -196,7 +196,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     optical["target_crs"] = _text_value(optical.get("target_crs"), "target_crs")
     optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
     optical["time_granularity"] = _choice(optical.get("time_granularity"), {"hour", "day", "month", "year"}, "time_granularity")
-    optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=1)
+    optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=0)
     optical["cog_workers"] = _int_value(optical.get("cog_workers"), "cog_workers", minimum=0)
     optical["cog_compress"] = _choice(optical.get("cog_compress"), {"LZW", "DEFLATE", "ZSTD", "NONE"}, "cog_compress")
     optical["cog_predictor"] = _int_value(optical.get("cog_predictor"), "cog_predictor", minimum=0)

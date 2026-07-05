@@ -36,14 +36,15 @@ const defaultLogicalGridLevel = 5;
 const defaultEntityGridLevel = 6;
 const gridTypeLabels = {
   s2: '四边形格网',
-  tile_matrix: '平面格网',
+  tile_matrix: '经纬度格网',
+  plane_grid: '平面格网',
   isea4h: '六边形格网',
 };
 const partitionMethodLabels = {
   logical: '逻辑剖分',
   entity: '实体剖分',
 };
-const partitionGridTypes = ['tile_matrix', 's2', 'isea4h'];
+const partitionGridTypes = ['tile_matrix', 'plane_grid', 's2', 'isea4h'];
 const partitionMethods = ['logical', 'entity'];
 const partitionArchiveableStatuses = ['failed', 'manual_required', 'cancelled'];
 const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];
@@ -153,6 +154,10 @@ const qualityHistoryTotal = ref(0);
 const selectedQualityReportId = ref('');
 const qualityDataType = ref('optical');
 const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);
+
+function targetCrsForGrid(gridType, fallback) {
+  return gridType === 'plane_grid' ? '' : (fallback || 'EPSG:4326');
+}
 
 function parseResolution(value) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
@@ -502,12 +507,13 @@ function partitionBatchConfigOverride(batch) {
     };
   }
   if (batch?.data_type === 'product') {
+    const gridType = payload.grid_type || gridTypeForModule('product');
     return {
       partition_method: payload.partition_method || partitionMethodForModule('product'),
-      grid_type: payload.grid_type || gridTypeForModule('product'),
+      grid_type: gridType,
       grid_level: Number(payload.grid_level || gridLevelForModule('product')),
       grid_level_mode: payload.grid_level_mode || gridLevelModeForModule('product'),
-      target_crs: payload.target_crs || 'EPSG:4326',
+      target_crs: targetCrsForGrid(gridType, payload.target_crs),
     };
   }
   return {};
@@ -2385,7 +2391,7 @@ function normalizeManagedBatch(batch) {
       ...base,
       product_family: payload.product_family || 'product',
       sensor: payload.sensor || 'data_product',
-      target_crs: payload.target_crs || 'EPSG:4326',
+      target_crs: targetCrsForGrid(payload.grid_type, payload.target_crs),
       assets: payload.selected_assets || [],
     };
   }
@@ -2394,7 +2400,7 @@ function normalizeManagedBatch(batch) {
       ...base,
       product_family: payload.product_family || 'sentinel1',
       sensor: payload.sensor || 'sentinel1_sar',
-      target_crs: payload.target_crs || 'EPSG:4326',
+      target_crs: targetCrsForGrid(payload.grid_type, payload.target_crs),
       assets: payload.selected_assets || [],
     };
   }
@@ -2476,13 +2482,14 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'radar') {
     const selectedBatch = visibleRadarBatches.value.find((batch) => selectedRadarBatchIds.value.includes(batch.id));
     const selectedAssets = selectedRadarAssets.value;
+    const gridType = gridTypeForModule('radar');
     return {
       payload: {
         partition_method: partitionMethodForModule('radar'),
-        grid_type: gridTypeForModule('radar'),
+        grid_type: gridType,
         grid_level: Number(gridLevelForModule('radar')),
         grid_level_mode: gridLevelModeForModule('radar'),
-        target_crs: selectedBatch?.target_crs || 'EPSG:4326',
+        target_crs: targetCrsForGrid(gridType, selectedBatch?.target_crs),
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
         selected_assets: selectedAssets,
@@ -2493,13 +2500,14 @@ function partitionPayloadForActiveModule() {
   if (activeModule.value === 'product') {
     const selectedBatch = visibleProductBatches.value.find((batch) => selectedProductBatchIds.value.includes(batch.id));
     const selectedAssets = selectedProductAssets.value;
+    const gridType = gridTypeForModule('product');
     return {
       payload: {
         partition_method: partitionMethodForModule('product'),
-        grid_type: gridTypeForModule('product'),
+        grid_type: gridType,
         grid_level: Number(gridLevelForModule('product')),
         grid_level_mode: gridLevelModeForModule('product'),
-        target_crs: selectedBatch?.target_crs || 'EPSG:4326',
+        target_crs: targetCrsForGrid(gridType, selectedBatch?.target_crs),
         batch_id: selectedBatch?.id || '',
         batch_name: selectedBatch?.name || '',
         selected_assets: selectedAssets,
@@ -3527,7 +3535,8 @@ onUnmounted(() => {
                     <label>剖分格网</label>
                     <el-select v-model="opticalGridType" class="legacy-control">
                       <el-option label="四边形格网" value="s2" />
-                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="经纬度格网" value="tile_matrix" />
+                      <el-option label="平面格网" value="plane_grid" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
@@ -3580,7 +3589,8 @@ onUnmounted(() => {
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
                       <el-option label="四边形格网" value="s2" />
-                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="经纬度格网" value="tile_matrix" />
+                      <el-option label="平面格网" value="plane_grid" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
@@ -3614,7 +3624,8 @@ onUnmounted(() => {
                     <label>剖分格网</label>
                     <el-select v-model="productGridType" class="legacy-control">
                       <el-option label="四边形格网" value="s2" />
-                      <el-option label="平面格网" value="tile_matrix" />
+                      <el-option label="经纬度格网" value="tile_matrix" />
+                      <el-option label="平面格网" value="plane_grid" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>

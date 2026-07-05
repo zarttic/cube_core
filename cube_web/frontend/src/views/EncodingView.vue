@@ -73,7 +73,7 @@ const emptyText = computed(() => {
 const gridTypeLabels = {
   s2: '四边形格网',
   mgrs: '平面格网',
-  tile_matrix: '平面格网',
+  tile_matrix: '经纬度格网',
   isea4h: '六边形格网',
 };
 
@@ -98,8 +98,8 @@ const contextualMapHint = computed(() => {
     }
     if (division.value.gridType === 'tile_matrix') {
       return division.value.inputType === 'draw'
-        ? '平面格网会按规则行列单元展示；拖拽圈画后会自动聚焦。'
-        : '点击地图后会定位到当前平面格网单元。';
+        ? '经纬度格网会按规则行列单元展示；拖拽圈画后会自动聚焦。'
+        : '点击地图后会定位到当前经纬度格网单元。';
     }
     return division.value.inputType === 'draw'
       ? '选择“圈画”后按住拖拽绘制范围'
@@ -107,7 +107,7 @@ const contextualMapHint = computed(() => {
   }
   if (activeModule.value === 'operations') {
     if (topology.value.gridType === 'tile_matrix') {
-      return '点击地图选择平面格网基准点；结果会按格网单元展示。';
+      return '点击地图选择经纬度格网基准点；结果会按格网单元展示。';
     }
     return topology.value.gridType === 'mgrs'
       ? '点击地图选择平面格网基准点；结果会按格网单元展示。'
@@ -119,7 +119,7 @@ const contextualMapHint = computed(() => {
   return encoding.value.gridType === 'mgrs'
     ? '点击地图选择平面格网编码点；结果会展示空间编码。'
     : encoding.value.gridType === 'tile_matrix'
-      ? '点击地图选择平面格网编码点；结果会展示层级与空间编码。'
+      ? '点击地图选择经纬度格网编码点；结果会展示层级与空间编码。'
     : '点击地图选择编码点';
 });
 
@@ -128,7 +128,7 @@ const legendItems = computed(() => {
   const primaryLabel = activeGridType.value === 'mgrs'
     ? '平面格网单元'
     : activeGridType.value === 'tile_matrix'
-      ? '平面格网单元'
+      ? '经纬度格网单元'
     : activeModule.value === 'operations'
       ? '中心单元'
       : `${formatGridType(activeGridType.value)}单元`;
@@ -637,7 +637,7 @@ async function runDemo() {
                     <label>格网类型</label>
                     <div class="radio-group">
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>经纬度格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
                   </div>
@@ -663,7 +663,7 @@ async function runDemo() {
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
                       <option value="s2">四边形格网</option>
-                      <option value="tile_matrix">平面格网</option>
+                      <option value="tile_matrix">经纬度格网</option>
                       <option value="isea4h">六边形格网</option>
                     </select>
                   </div>
@@ -703,7 +703,7 @@ async function runDemo() {
                       <label>格网类型</label>
                       <div class="radio-group">
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>平面格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>经纬度格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>
                     </div>

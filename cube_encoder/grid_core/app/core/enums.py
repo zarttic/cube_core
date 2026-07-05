@@ -6,6 +6,7 @@ class GridType(str, Enum):
     MGRS = "mgrs"
     ISEA4H = "isea4h"
     TILE_MATRIX = "tile_matrix"
+    PLANE_GRID = "plane_grid"
 
 
 class CoverMode(str, Enum):

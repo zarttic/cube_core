@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import mgrs
@@ -16,9 +17,11 @@ PREFIX_MAP = {
     GridType.MGRS: "mgrs",
     GridType.ISEA4H: "hx",
     GridType.TILE_MATRIX: "tm",
+    GridType.PLANE_GRID: "pg",
 }
 PREFIX_MAP_REVERSE = {v: k for k, v in PREFIX_MAP.items()}
 MGRS_CONVERTER = mgrs.MGRS()
+PLANE_GRID_CRS_TOKEN_RE = re.compile(r"^[a-z0-9_]+$")
 TIME_CODE_FORMATS_BY_LENGTH = {
     6: "%Y%m",
     8: "%Y%m%d",
@@ -167,6 +170,22 @@ class CodeService:
             matrix_height = 2**level
             if x < 0 or x >= matrix_width or y < 0 or y >= matrix_height:
                 raise ValidationError("tile_matrix space_code row or column out of range")
+            return
+
+        if grid_type == GridType.PLANE_GRID:
+            try:
+                crs_token, actual_level_text, col_text, row_text = space_code.split("/")
+                actual_level = int(actual_level_text)
+                col = int(col_text)
+                row = int(row_text)
+            except Exception as exc:
+                raise ValidationError("Invalid plane_grid space_code") from exc
+            if actual_level != level:
+                raise ValidationError("plane_grid space_code level does not match level")
+            if not PLANE_GRID_CRS_TOKEN_RE.match(crs_token):
+                raise ValidationError("Invalid plane_grid CRS token")
+            if col < 0 or row < 0:
+                raise ValidationError("plane_grid space_code row or column out of range")
             return
 
         raise ValidationError(f"Unsupported grid_type: {grid_type}")

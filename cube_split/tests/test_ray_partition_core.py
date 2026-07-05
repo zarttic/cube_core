@@ -13,7 +13,17 @@ import rasterio
 from rasterio.transform import from_origin
 
 import cube_split.jobs.ray_partition_core as ray_partition_core
-from cube_split.jobs.ray_partition_core import AssetRecord, build_grid_tasks_driver, build_manifest, cog_creation_options, convert_assets_to_cog, create_unique_run_dir, upload_source_assets_to_minio
+from cube_split.jobs.ray_partition_core import (
+    AssetRecord,
+    _prepare_task_rows_for_partitioning,
+    _process_local_task_group,
+    build_grid_tasks_driver,
+    build_manifest,
+    cog_creation_options,
+    convert_assets_to_cog,
+    create_unique_run_dir,
+    upload_source_assets_to_minio,
+)
 from cube_split.partition.optical_products import get_optical_product_adapter, supported_optical_product_families
 
 
@@ -29,6 +39,23 @@ def _write_tif(path: Path) -> None:
         count=1,
         dtype=data.dtype,
         crs="EPSG:4326",
+        transform=transform,
+    ) as ds:
+        ds.write(data)
+
+
+def _write_projected_tif(path: Path) -> None:
+    transform = from_origin(500000.0, 4100000.0, 10.0, 10.0)
+    data = np.arange(64, dtype=np.uint8).reshape((1, 8, 8))
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype=data.dtype,
+        crs="EPSG:32650",
         transform=transform,
     ) as ds:
         ds.write(data)
@@ -68,6 +95,56 @@ def test_build_grid_tasks_driver_supports_tile_matrix_with_asset_bbox():
     assert len(tasks) > 0
     assert {task["grid_type"] for task in tasks} == {"tile_matrix"}
     assert all(task["space_code"].count("/") == 2 for task in tasks)
+
+
+def test_plane_grid_uses_source_crs_windows_for_projected_raster(tmp_path: Path):
+    source = tmp_path / "projected.tif"
+    _write_projected_tif(source)
+
+    tasks = build_grid_tasks_driver(
+        assets=[
+            AssetRecord(
+                scene_id="projected",
+                band="b1",
+                path=str(source),
+                acq_time="2026-03-09T00:00:00Z",
+            )
+        ],
+        grid_type="plane_grid",
+        grid_level=11,
+        cover_mode="intersect",
+        max_cells_per_asset=0,
+    )
+
+    assert len(tasks) == 4
+    first = tasks[0]
+    assert first["space_code"] == "epsg32650/11/0/0"
+    assert first["window_col_off"] == 0
+    assert first["window_row_off"] == 0
+    assert first["window_width"] == 4
+    assert first["window_height"] == 4
+    assert first["cell_crs"] == "EPSG:32650"
+    assert first["cell_min_x"] == 500000.0
+    assert first["cell_max_x"] == 500040.0
+    assert first["cell_min_y"] == 4099960.0
+    assert first["cell_max_y"] == 4100000.0
+
+    task_rows = _prepare_task_rows_for_partitioning(tasks[:1], partition_prefix_len=8, time_granularity="day")
+    rows = _process_local_task_group(task_rows, "day", include_sample_mean=True)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["grid_type"] == "plane_grid"
+    assert row["st_code"] == "pg:11:epsg32650/11/0/0:20260309"
+    assert row["window_col_off"] == 0
+    assert row["window_row_off"] == 0
+    assert row["window_width"] == 4
+    assert row["window_height"] == 4
+    assert row["intersect_min_x"] == 500000.0
+    assert row["intersect_max_x"] == 500040.0
+    assert row["intersect_min_y"] == 4099960.0
+    assert row["intersect_max_y"] == 4100000.0
+    assert row["sample_mean_band1"] == float(np.arange(64, dtype=np.uint8).reshape((8, 8))[:4, :4].mean())
 
 
 def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):

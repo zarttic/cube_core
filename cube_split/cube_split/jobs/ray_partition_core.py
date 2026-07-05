@@ -33,6 +33,9 @@ from cube_split.runtime_config import (
     minio_settings,
 )
 
+PLANE_GRID_TYPE = "plane_grid"
+PLANE_GRID_BASE_CHUNK_LEVEL = 13
+
 
 @dataclass
 class AssetRecord:
@@ -790,6 +793,122 @@ def _prepare_task_rows_for_partitioning(
     return task_rows
 
 
+def _is_plane_grid(grid_type: str) -> bool:
+    return str(grid_type or "").strip().lower() == PLANE_GRID_TYPE
+
+
+def _plane_grid_chunk_pixels(grid_level: int) -> int:
+    level = int(grid_level)
+    if level < 1:
+        raise ValueError("plane_grid level must be >= 1")
+    return 2 ** max(0, PLANE_GRID_BASE_CHUNK_LEVEL - level)
+
+
+def _plane_grid_crs_token(ds: rasterio.DatasetReader) -> str:
+    if ds.crs is None:
+        raise ValueError("plane_grid requires source assets with a CRS")
+    authority = ds.crs.to_authority()
+    if authority and authority[0] and authority[1]:
+        return f"{authority[0].lower()}{authority[1]}"
+    crs_text = ds.crs.to_string()
+    digest = hashlib.sha1(crs_text.encode("utf-8")).hexdigest()[:12]
+    return f"crs{digest}"
+
+
+def _safe_window_from_offsets(
+    ds: rasterio.DatasetReader,
+    col_off: int,
+    row_off: int,
+    width: int,
+    height: int,
+) -> Optional[Window]:
+    col_off = max(0, int(col_off))
+    row_off = max(0, int(row_off))
+    width = int(min(ds.width - col_off, max(0, int(width))))
+    height = int(min(ds.height - row_off, max(0, int(height))))
+    if width <= 0 or height <= 0:
+        return None
+    return Window(col_off=col_off, row_off=row_off, width=width, height=height)
+
+
+def _plane_grid_cells(ds: rasterio.DatasetReader, grid_level: int) -> list[dict[str, Any]]:
+    chunk_pixels = _plane_grid_chunk_pixels(grid_level)
+    crs_token = _plane_grid_crs_token(ds)
+    crs_text = ds.crs.to_string() if ds.crs is not None else ""
+    cells: list[dict[str, Any]] = []
+
+    for row_index, row_off in enumerate(range(0, ds.height, chunk_pixels)):
+        height = min(chunk_pixels, ds.height - row_off)
+        for col_index, col_off in enumerate(range(0, ds.width, chunk_pixels)):
+            width = min(chunk_pixels, ds.width - col_off)
+            win = Window(col_off=col_off, row_off=row_off, width=width, height=height)
+            left, bottom, right, top = rasterio.windows.bounds(win, ds.transform)
+            min_x, max_x = sorted((float(left), float(right)))
+            min_y, max_y = sorted((float(bottom), float(top)))
+            space_code = f"{crs_token}/{int(grid_level)}/{col_index}/{row_index}"
+            cells.append(
+                {
+                    "grid_level": int(grid_level),
+                    "space_code": space_code,
+                    "cell_crs": crs_text,
+                    "cell_crs_token": crs_token,
+                    "plane_grid_chunk_pixels": int(chunk_pixels),
+                    "plane_grid_col": int(col_index),
+                    "plane_grid_row": int(row_index),
+                    "cell_min_x": min_x,
+                    "cell_min_y": min_y,
+                    "cell_max_x": max_x,
+                    "cell_max_y": max_y,
+                    "cell_min_lon": min_x,
+                    "cell_min_lat": min_y,
+                    "cell_max_lon": max_x,
+                    "cell_max_lat": max_y,
+                    "window_col_off": int(col_off),
+                    "window_row_off": int(row_off),
+                    "window_width": int(width),
+                    "window_height": int(height),
+                }
+            )
+    return cells
+
+
+def _build_plane_grid_tasks_for_asset(asset: AssetRecord, grid_level: int, cover_mode: str) -> list[dict]:
+    with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
+        cells = _plane_grid_cells(ds, grid_level)
+
+    return [
+        {
+            "scene_id": asset.scene_id,
+            "band": asset.band,
+            "asset_path": asset.path,
+            "acq_time": asset.acq_time,
+            "grid_type": PLANE_GRID_TYPE,
+            "grid_level": int(cell["grid_level"]),
+            "space_code": cell["space_code"],
+            "cell_min_lon": cell["cell_min_lon"],
+            "cell_min_lat": cell["cell_min_lat"],
+            "cell_max_lon": cell["cell_max_lon"],
+            "cell_max_lat": cell["cell_max_lat"],
+            "cell_min_x": cell["cell_min_x"],
+            "cell_min_y": cell["cell_min_y"],
+            "cell_max_x": cell["cell_max_x"],
+            "cell_max_y": cell["cell_max_y"],
+            "cell_crs": cell["cell_crs"],
+            "cell_crs_token": cell["cell_crs_token"],
+            "plane_grid_chunk_pixels": cell["plane_grid_chunk_pixels"],
+            "plane_grid_col": cell["plane_grid_col"],
+            "plane_grid_row": cell["plane_grid_row"],
+            "window_col_off": cell["window_col_off"],
+            "window_row_off": cell["window_row_off"],
+            "window_width": cell["window_width"],
+            "window_height": cell["window_height"],
+            "cover_mode": cover_mode,
+            "resolution": asset.resolution,
+        }
+        for cell in cells
+    ]
+
+
 def _cover_codes(
     sdk: CubeEncoderSDK,
     grid_type: str,
@@ -847,6 +966,19 @@ def build_grid_tasks_driver(
     cover_mode: str,
     max_cells_per_asset: int,
 ) -> list[dict]:
+    grid_type = str(grid_type or "").strip().lower()
+    if _is_plane_grid(grid_type):
+        tasks: list[dict] = []
+        for asset in assets:
+            asset_tasks = _build_plane_grid_tasks_for_asset(asset, grid_level, cover_mode)
+            if max_cells_per_asset > 0 and len(asset_tasks) > max_cells_per_asset:
+                raise RuntimeError(
+                    "Cover cells exceed max limit for asset %s: %d > %d"
+                    % (asset.path, len(asset_tasks), max_cells_per_asset)
+                )
+            tasks.extend(asset_tasks)
+        return tasks
+
     sdk = CubeEncoderSDK()
     bbox_cache: dict[str, list[float]] = {}
     scene_cover_cache: dict[tuple[str, float, float, float, float], list[tuple[str, int, list[float]]]] = {}
@@ -944,6 +1076,28 @@ def _safe_window_from_bounds(ds: rasterio.DatasetReader, left: float, bottom: fl
     return Window(col_off=col_off, row_off=row_off, width=width, height=height)
 
 
+def _window_bounds_xy(ds: rasterio.DatasetReader, win: Window) -> tuple[float, float, float, float]:
+    left, bottom, right, top = rasterio.windows.bounds(win, ds.transform)
+    min_x, max_x = sorted((float(left), float(right)))
+    min_y, max_y = sorted((float(bottom), float(top)))
+    return min_x, min_y, max_x, max_y
+
+
+def _plane_grid_window_from_row(ds: rasterio.DatasetReader, row: Any) -> Optional[Window]:
+    col_off = getattr(row, "window_col_off", None)
+    row_off = getattr(row, "window_row_off", None)
+    width = getattr(row, "window_width", None)
+    height = getattr(row, "window_height", None)
+    if None not in (col_off, row_off, width, height):
+        return _safe_window_from_offsets(ds, int(col_off), int(row_off), int(width), int(height))
+
+    min_x = float(getattr(row, "cell_min_x", getattr(row, "cell_min_lon")))
+    min_y = float(getattr(row, "cell_min_y", getattr(row, "cell_min_lat")))
+    max_x = float(getattr(row, "cell_max_x", getattr(row, "cell_max_lon")))
+    max_y = float(getattr(row, "cell_max_y", getattr(row, "cell_max_lat")))
+    return _safe_window_from_bounds(ds, min_x, min_y, max_x, max_y)
+
+
 def process_partition(rows: Iterator[Any], time_granularity: str, include_sample_mean: bool = True) -> Iterator[dict]:
     sdk = CubeEncoderSDK()
     st_cache: dict[str, str] = {}
@@ -961,14 +1115,10 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 local_asset_path = resolve_asset_source_path(row.asset_path)
                 open_ds = rasterio.open(local_asset_path)
                 open_path = row.asset_path
-                ds_bounds_wgs84 = _dataset_bounds_wgs84(open_ds)
-                ds_wgs84_to_native = (
-                    Transformer.from_crs("EPSG:4326", open_ds.crs, always_xy=True)
-                    if open_ds.crs and str(open_ds.crs).upper() != "EPSG:4326"
-                    else None
-                )
+                ds_bounds_wgs84 = None
+                ds_wgs84_to_native = None
 
-            assert open_ds is not None and ds_bounds_wgs84 is not None
+            assert open_ds is not None
 
             acq_dt = datetime.fromisoformat(row.acq_time.replace("Z", "+00:00"))
             st_key = "%s|%d|%s|%s|%s" % (
@@ -989,6 +1139,68 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                     time_granularity=time_granularity,
                 ).st_code
                 st_cache[st_key] = st_code
+
+            if _is_plane_grid(row.grid_type):
+                win = _plane_grid_window_from_row(open_ds, row)
+                if win is None:
+                    continue
+                min_x, min_y, max_x, max_y = _window_bounds_xy(open_ds, win)
+
+                sample_mean = None
+                if include_sample_mean:
+                    band1 = open_ds.read(1, window=win, masked=True)
+                    if band1.size > 0 and band1.count() > 0:
+                        sample_mean = float(band1.mean())
+
+                cell_crs = str(getattr(row, "cell_crs", "") or (open_ds.crs.to_string() if open_ds.crs else ""))
+                yield {
+                    "scene_id": row.scene_id,
+                    "band": row.band,
+                    "asset_path": row.asset_path,
+                    "acq_time": row.acq_time,
+                    "grid_type": row.grid_type,
+                    "grid_level": int(row.grid_level),
+                    "space_code": row.space_code,
+                    "space_code_prefix": getattr(row, "space_code_prefix", str(row.space_code)[:3]),
+                    "st_code": st_code,
+                    "time_bucket": row.time_bucket,
+                    "cover_mode": row.cover_mode,
+                    "cell_min_lon": float(getattr(row, "cell_min_lon", min_x)),
+                    "cell_min_lat": float(getattr(row, "cell_min_lat", min_y)),
+                    "cell_max_lon": float(getattr(row, "cell_max_lon", max_x)),
+                    "cell_max_lat": float(getattr(row, "cell_max_lat", max_y)),
+                    "cell_min_x": float(getattr(row, "cell_min_x", min_x)),
+                    "cell_min_y": float(getattr(row, "cell_min_y", min_y)),
+                    "cell_max_x": float(getattr(row, "cell_max_x", max_x)),
+                    "cell_max_y": float(getattr(row, "cell_max_y", max_y)),
+                    "cell_crs": cell_crs,
+                    "cell_crs_token": str(getattr(row, "cell_crs_token", "") or ""),
+                    "plane_grid_chunk_pixels": int(getattr(row, "plane_grid_chunk_pixels", 0) or 0),
+                    "plane_grid_col": int(getattr(row, "plane_grid_col", 0) or 0),
+                    "plane_grid_row": int(getattr(row, "plane_grid_row", 0) or 0),
+                    "window_col_off": int(win.col_off),
+                    "window_row_off": int(win.row_off),
+                    "window_width": int(win.width),
+                    "window_height": int(win.height),
+                    "intersect_min_lon": float(min_x),
+                    "intersect_min_lat": float(min_y),
+                    "intersect_max_lon": float(max_x),
+                    "intersect_max_lat": float(max_y),
+                    "intersect_min_x": float(min_x),
+                    "intersect_min_y": float(min_y),
+                    "intersect_max_x": float(max_x),
+                    "intersect_max_y": float(max_y),
+                    "sample_mean_band1": sample_mean,
+                }
+                continue
+
+            if ds_bounds_wgs84 is None:
+                ds_bounds_wgs84 = _dataset_bounds_wgs84(open_ds)
+                ds_wgs84_to_native = (
+                    Transformer.from_crs("EPSG:4326", open_ds.crs, always_xy=True)
+                    if open_ds.crs and str(open_ds.crs).upper() != "EPSG:4326"
+                    else None
+                )
 
             inter = _bbox_intersection(
                 ds_bounds_wgs84,
