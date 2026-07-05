@@ -90,6 +90,29 @@ def _write_tif(path: Path) -> None:
         ds.write(data)
 
 
+def _write_two_band_tif(path: Path) -> None:
+    transform = from_origin(116.0, 40.0, 0.001, 0.001)
+    data = np.stack(
+        [
+            np.full((32, 32), 10, dtype=np.uint8),
+            np.full((32, 32), 20, dtype=np.uint8),
+        ]
+    )
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=32,
+        height=32,
+        count=2,
+        dtype=data.dtype,
+        crs="EPSG:4326",
+        transform=transform,
+        nodata=0,
+    ) as ds:
+        ds.write(data)
+
+
 def _stub_source_asset_upload(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_upload_source_assets_to_minio(assets, *, prefix, options=None):
         _ = prefix, options
@@ -251,6 +274,64 @@ def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: P
     assert rows[0]["grid_type"] == "s2"
     assert rows[0]["partition_method"] == "entity"
     assert "/s2/" in rows[0]["asset_path"]
+
+
+def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_path: Path):
+    run_dir = tmp_path / "run"
+    source = tmp_path / "source_multiband.tif"
+    _write_two_band_tif(source)
+    sdk = entity_partition_job.CubeEncoderSDK()
+    cell = sdk.locate(grid_type="isea4h", level=1, point=[116.016, 39.984])
+    calls = 0
+    original_geometry_mask = entity_partition_job.rasterio.mask.raster_geometry_mask
+
+    def counting_geometry_mask(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_geometry_mask(*args, **kwargs)
+
+    monkeypatch.setattr(entity_partition_job.rasterio.mask, "raster_geometry_mask", counting_geometry_mask)
+
+    rows = entity_partition_job._write_entity_tiles(
+        [
+            {
+                "scene_id": "scene-multiband",
+                "band": "sr",
+                "asset_path": str(source),
+                "source_asset_path": str(source),
+                "acq_time": "2026-04-21T00:00:00Z",
+                "grid_type": "isea4h",
+                "grid_level": 1,
+                "space_code": cell.space_code,
+                "cover_mode": "intersect",
+                "cell_min_lon": float(cell.bbox[0]),
+                "cell_min_lat": float(cell.bbox[1]),
+                "cell_max_lon": float(cell.bbox[2]),
+                "cell_max_lat": float(cell.bbox[3]),
+            }
+        ],
+        run_dir=run_dir,
+        time_granularity="day",
+        partition_prefix_len=3,
+        data_type="optical",
+    )
+
+    assert calls == 1
+    assert [row["band"] for row in rows] == ["sr_band1", "sr_band2"]
+    transforms = []
+    valid_counts = []
+    for row, expected_value in zip(rows, [10, 20]):
+        with rasterio.open(row["asset_path"]) as ds:
+            data = ds.read(1, masked=True)
+            transforms.append(ds.transform)
+            valid = data.compressed()
+            valid_counts.append(valid.size)
+            assert ds.width == row["window_width"]
+            assert ds.height == row["window_height"]
+            assert valid.size > 0
+            assert set(valid.tolist()) == {expected_value}
+    assert transforms[0] == transforms[1]
+    assert valid_counts[0] == valid_counts[1]
 
 
 def test_entity_tile_object_key_uses_row_grid_type():
