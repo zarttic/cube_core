@@ -16,6 +16,8 @@ from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import _local_file_identity, _object_identity, _read_identity_sidecar, _write_identity_sidecar
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
+DEFAULT_POSTGRES_BATCH_SIZE = 1000
+
 
 @dataclass(frozen=True)
 class RawAssetRecord:
@@ -87,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-prefix", default="cube/raw", help="Object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO connection")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers for MinIO")
+    parser.add_argument("--postgres-batch-size", type=int, default=DEFAULT_POSTGRES_BATCH_SIZE, help="Rows per PostgreSQL/OpenGauss MERGE batch")
 
     parser.add_argument(
         "--cog-output-root",
@@ -580,20 +583,21 @@ def upsert_cube_facts(conn: sqlite3.Connection, rows: list[CubeFactRecord]) -> N
     )
 
 
-def upsert_raw_assets_postgres(conn: Any, rows: list[RawAssetRecord]) -> None:
-    sql = """
+def upsert_raw_assets_postgres(conn: Any, rows: list[RawAssetRecord], batch_size: int = DEFAULT_POSTGRES_BATCH_SIZE) -> None:
+    columns = (
+        "dataset",
+        "sensor",
+        "scene_id",
+        "band",
+        "acq_time",
+        "raw_cog_uri",
+        "version",
+        "run_id",
+    )
+    casts = ("text", "text", "text", "text", "timestamptz", "text", "text", "text")
+    sql_template = """
         MERGE INTO rs_raw_scene_asset target
-        USING (
-          SELECT
-            %s::text AS dataset,
-            %s::text AS sensor,
-            %s::text AS scene_id,
-            %s::text AS band,
-            %s::timestamptz AS acq_time,
-            %s::text AS raw_cog_uri,
-            %s::text AS version,
-            %s::text AS run_id
-        ) source
+        USING ({source_sql}) source
         ON (
           target.scene_id = source.scene_id
           AND target.band = source.band
@@ -626,30 +630,50 @@ def upsert_raw_assets_postgres(conn: Any, rows: list[RawAssetRecord]) -> None:
         for row in rows
     ]
     with conn.cursor() as cur:
-        cur.executemany(sql, values)
+        for batch in _batches(values, batch_size):
+            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
 
-def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord]) -> None:
-    sql = """
+
+def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size: int = DEFAULT_POSTGRES_BATCH_SIZE) -> None:
+    columns = (
+        "grid_type",
+        "grid_level",
+        "space_code",
+        "time_bucket",
+        "band",
+        "st_code",
+        "cell_min_lon",
+        "cell_min_lat",
+        "cell_max_lon",
+        "cell_max_lat",
+        "value_ref_uri",
+        "source_scene_count",
+        "provenance_json",
+        "quality_rule",
+        "cube_version",
+        "run_id",
+    )
+    casts = (
+        "text",
+        "int",
+        "text",
+        "text",
+        "text",
+        "text",
+        "double precision",
+        "double precision",
+        "double precision",
+        "double precision",
+        "text",
+        "int",
+        "jsonb",
+        "text",
+        "text",
+        "text",
+    )
+    sql_template = """
         MERGE INTO rs_cube_cell_fact target
-        USING (
-          SELECT
-            %s::text AS grid_type,
-            %s::int AS grid_level,
-            %s::text AS space_code,
-            %s::text AS time_bucket,
-            %s::text AS band,
-            %s::text AS st_code,
-            %s::double precision AS cell_min_lon,
-            %s::double precision AS cell_min_lat,
-            %s::double precision AS cell_max_lon,
-            %s::double precision AS cell_max_lat,
-            %s::text AS value_ref_uri,
-            %s::int AS source_scene_count,
-            %s::jsonb AS provenance_json,
-            %s::text AS quality_rule,
-            %s::text AS cube_version,
-            %s::text AS run_id
-        ) source
+        USING ({source_sql}) source
         ON (
           target.grid_type = source.grid_type
           AND target.grid_level = source.grid_level
@@ -702,7 +726,31 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord]) -> None:
         for row in rows
     ]
     with conn.cursor() as cur:
-        cur.executemany(sql, values)
+        for batch in _batches(values, batch_size):
+            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
+
+
+def _postgres_values_source(columns: tuple[str, ...], casts: tuple[str, ...], row_count: int) -> str:
+    if row_count <= 0:
+        raise ValueError("row_count must be greater than 0")
+    row_sql = "(" + ", ".join(f"%s::{cast}" for cast in casts) + ")"
+    values_sql = ", ".join(row_sql for _ in range(row_count))
+    return f"SELECT * FROM (VALUES {values_sql}) AS source ({', '.join(columns)})"
+
+
+def _batches(values: list[tuple[Any, ...]], batch_size: int) -> Iterable[list[tuple[Any, ...]]]:
+    size = max(1, int(batch_size))
+    for idx in range(0, len(values), size):
+        yield values[idx : idx + size]
+
+
+def _flatten(values: list[tuple[Any, ...]]) -> tuple[Any, ...]:
+    return tuple(item for row in values for item in row)
+
+
+def _postgres_batch_size(args: argparse.Namespace) -> int:
+    return max(1, int(getattr(args, "postgres_batch_size", DEFAULT_POSTGRES_BATCH_SIZE) or DEFAULT_POSTGRES_BATCH_SIZE))
+
 
 def _upsert_job_status(
     conn: sqlite3.Connection,
@@ -814,6 +862,7 @@ def _upsert_job_status_postgres(
             ),
         )
 
+
 def _resolve_backends(args: argparse.Namespace) -> tuple[str, str]:
     metadata_backend = getattr(args, "metadata_backend", "postgres")
     asset_storage_backend = getattr(args, "asset_storage_backend", None)
@@ -831,6 +880,7 @@ def run_ingest(args: argparse.Namespace) -> dict:
         raise FileNotFoundError(f"index_rows.jsonl not found under run dir: {run_dir}")
 
     metadata_backend, asset_storage_backend = _resolve_backends(args)
+    postgres_batch_size = _postgres_batch_size(args)
 
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     params = {
@@ -842,6 +892,7 @@ def run_ingest(args: argparse.Namespace) -> dict:
         "quality_rule": args.quality_rule,
         "metadata_backend": metadata_backend,
         "asset_storage_backend": asset_storage_backend,
+        "postgres_batch_size": postgres_batch_size,
     }
 
     rows = load_rows(rows_path)
@@ -893,6 +944,7 @@ def run_ingest(args: argparse.Namespace) -> dict:
         "cube_fact_rows": len(cube_records),
         "metadata_backend": metadata_backend,
         "asset_storage_backend": asset_storage_backend,
+        "postgres_batch_size": postgres_batch_size,
     }
 
     if metadata_backend == "sqlite":
@@ -969,8 +1021,8 @@ def run_ingest(args: argparse.Namespace) -> dict:
                 params_json=params,
                 started_at=started_at,
             )
-            upsert_raw_assets_postgres(conn, raw_records)
-            upsert_cube_facts_postgres(conn, cube_records)
+            upsert_raw_assets_postgres(conn, raw_records, batch_size=postgres_batch_size)
+            upsert_cube_facts_postgres(conn, cube_records, batch_size=postgres_batch_size)
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             _upsert_job_status_postgres(
                 conn,

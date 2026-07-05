@@ -1077,6 +1077,7 @@ def test_config_get_returns_defaults():
     assert body["config"]["partition"]["optical"]["grid_level"] == 5
     assert body["config"]["ingest"]["optical"]["metadata_backend"] == "postgres"
     assert body["config"]["ingest"]["optical"]["asset_storage_backend"] == "minio"
+    assert body["config"]["ingest"]["optical"]["postgres_batch_size"] == 1000
     assert body["config"]["ingest"]["optical"]["minio_endpoint"] == "10.3.100.179:9000"
     assert body["config"]["ingest"]["optical"]["minio_bucket"] == "cube"
     assert body["runtime"]["postgres_dsn"] == "postgresql://***:***@10.3.100.180:15400/postgres"
@@ -1654,8 +1655,55 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
     assert captured["cube_version"] == "cube-smoke"
     assert captured["quality_rule"] == "best_quality_wins"
     assert captured["db_path"] == ""
+    assert captured["postgres_batch_size"] == 1000
     assert captured["cog_materialize_mode"] == "copy"
     assert captured["cog_output_root"].endswith("optical_cog_store")
+
+
+def test_optical_partition_runner_preserves_e2e_performance_params(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": args.partition_backend,
+            "total_index_rows": 0,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "s2",
+            "grid_level": 5,
+            "partition_backend": "thread",
+            "ray_parallelism": 6,
+            "chunk_size": 3,
+            "max_cells_per_asset": 50,
+            "partition_prefix_len": 4,
+            "minio_upload_workers": 11,
+            "postgres_batch_size": 250,
+        },
+        mode="partition_run",
+    )
+
+    assert captured["partition_backend"] == "thread"
+    assert captured["ray_parallelism"] == 6
+    assert captured["chunk_size"] == 3
+    assert captured["max_cells_per_asset"] == 50
+    assert captured["partition_prefix_len"] == 4
+    assert captured["minio_upload_workers"] == 11
+    assert captured["postgres_batch_size"] == 250
 
 
 def test_optical_partition_runner_infers_grid_level_from_selected_asset_resolution(monkeypatch, tmp_path):
@@ -2188,6 +2236,9 @@ def test_partition_run_submits_remote_ray_job_for_ray_backend(monkeypatch):
                 "grid_level": 5,
                 "partition_backend": "ray",
                 "ray_address": "10.3.100.182:6379",
+                "ray_parallelism": 4,
+                "chunk_size": 2,
+                "postgres_batch_size": 250,
                 "selected_assets": [ard_raster_asset("s3://cube/cube/source/product/remote-run.tif", "remote-run-scene", data_type="product")],
             },
         )
@@ -2201,6 +2252,9 @@ def test_partition_run_submits_remote_ray_job_for_ray_backend(monkeypatch):
         task = web_app.partition_workflow_service.store.get_attempt(body["task_id"])
         assert task is not None
         assert task["status"] == "queued"
+        assert task["payload"]["ray_parallelism"] == 4
+        assert task["payload"]["chunk_size"] == 2
+        assert task["payload"]["postgres_batch_size"] == 250
     finally:
         if hasattr(store, "supports_remote_jobs"):
             delattr(store, "supports_remote_jobs")
@@ -6082,7 +6136,10 @@ def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch
 
     monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fake_run_ingest)
 
-    resp = client.post("/v1/ingest/optical/confirm", json={"report_id": "optical-ingest-confirm"})
+    resp = client.post(
+        "/v1/ingest/optical/confirm",
+        json={"report_id": "optical-ingest-confirm", "minio_upload_workers": 9, "postgres_batch_size": 512},
+    )
 
     assert resp.status_code == 200
     body = resp.json()
@@ -6093,6 +6150,8 @@ def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch
     assert captured["asset_storage_backend"] == "minio"
     assert captured["minio_endpoint"] == "10.3.100.179:9000"
     assert captured["minio_bucket"] == "cube"
+    assert captured["minio_upload_workers"] == 9
+    assert captured["postgres_batch_size"] == 512
     assert captured["cog_materialize_mode"] == "symlink"
     assert captured["asset_version"].startswith("demo-")
 

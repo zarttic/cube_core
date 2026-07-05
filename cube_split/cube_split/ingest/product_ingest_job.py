@@ -11,8 +11,13 @@ from typing import Any, Iterable
 
 from cube_split import runtime_config
 from cube_split.ingest.ray_ingest_job import (
+    DEFAULT_POSTGRES_BATCH_SIZE,
+    _batches,
     _build_window_ref_uri,
+    _flatten,
     _parse_timestamp,
+    _postgres_batch_size,
+    _postgres_values_source,
     _resolve_backends,
     _upsert_job_status,
     _upsert_job_status_postgres,
@@ -76,6 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-prefix", default="cube/product", help="Object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO connection")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers")
+    parser.add_argument("--postgres-batch-size", type=int, default=DEFAULT_POSTGRES_BATCH_SIZE, help="Rows per PostgreSQL/OpenGauss MERGE batch")
     parser.add_argument("--cog-output-root", default="data/cog/product_raw", help="Local COG materialization root")
     parser.add_argument("--cog-materialize-mode", default="copy", choices=["copy", "hardlink", "symlink"], help="Local materialization mode")
     return parser.parse_args()
@@ -374,20 +380,21 @@ def upsert_product_facts(conn: sqlite3.Connection, rows: list[ProductFactRecord]
     )
 
 
-def upsert_product_assets_postgres(conn: Any, rows: list[ProductAssetRecord]) -> None:
-    sql = """
+def upsert_product_assets_postgres(conn: Any, rows: list[ProductAssetRecord], batch_size: int = DEFAULT_POSTGRES_BATCH_SIZE) -> None:
+    columns = (
+        "dataset",
+        "product_name",
+        "scene_id",
+        "product_year",
+        "acq_time",
+        "cog_uri",
+        "version",
+        "run_id",
+    )
+    casts = ("text", "text", "text", "int", "timestamptz", "text", "text", "text")
+    sql_template = """
         MERGE INTO rs_product_asset target
-        USING (
-          SELECT
-            %s::text AS dataset,
-            %s::text AS product_name,
-            %s::text AS scene_id,
-            %s::int AS product_year,
-            %s::timestamptz AS acq_time,
-            %s::text AS cog_uri,
-            %s::text AS version,
-            %s::text AS run_id
-        ) source
+        USING ({source_sql}) source
         ON (
           target.dataset = source.dataset
           AND target.scene_id = source.scene_id
@@ -411,31 +418,52 @@ def upsert_product_assets_postgres(conn: Any, rows: list[ProductAssetRecord]) ->
         for row in rows
     ]
     with conn.cursor() as cur:
-        cur.executemany(sql, values)
+        for batch in _batches(values, batch_size):
+            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
 
-def upsert_product_facts_postgres(conn: Any, rows: list[ProductFactRecord]) -> None:
-    sql = """
+
+def upsert_product_facts_postgres(conn: Any, rows: list[ProductFactRecord], batch_size: int = DEFAULT_POSTGRES_BATCH_SIZE) -> None:
+    columns = (
+        "dataset",
+        "product_name",
+        "product_year",
+        "product_band",
+        "grid_type",
+        "grid_level",
+        "space_code",
+        "time_bucket",
+        "st_code",
+        "cell_min_lon",
+        "cell_min_lat",
+        "cell_max_lon",
+        "cell_max_lat",
+        "value_ref_uri",
+        "sample_mean",
+        "cube_version",
+        "run_id",
+    )
+    casts = (
+        "text",
+        "text",
+        "int",
+        "text",
+        "text",
+        "int",
+        "text",
+        "text",
+        "text",
+        "double precision",
+        "double precision",
+        "double precision",
+        "double precision",
+        "text",
+        "double precision",
+        "text",
+        "text",
+    )
+    sql_template = """
         MERGE INTO rs_product_cell_fact target
-        USING (
-          SELECT
-            %s::text AS dataset,
-            %s::text AS product_name,
-            %s::int AS product_year,
-            %s::text AS product_band,
-            %s::text AS grid_type,
-            %s::int AS grid_level,
-            %s::text AS space_code,
-            %s::text AS time_bucket,
-            %s::text AS st_code,
-            %s::double precision AS cell_min_lon,
-            %s::double precision AS cell_min_lat,
-            %s::double precision AS cell_max_lon,
-            %s::double precision AS cell_max_lat,
-            %s::text AS value_ref_uri,
-            %s::double precision AS sample_mean,
-            %s::text AS cube_version,
-            %s::text AS run_id
-        ) source
+        USING ({source_sql}) source
         ON (
           target.dataset = source.dataset
           AND target.grid_type = source.grid_type
@@ -490,7 +518,9 @@ def upsert_product_facts_postgres(conn: Any, rows: list[ProductFactRecord]) -> N
         for row in rows
     ]
     with conn.cursor() as cur:
-        cur.executemany(sql, values)
+        for batch in _batches(values, batch_size):
+            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
+
 
 def run_product_ingest(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir)
@@ -499,6 +529,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
         raise FileNotFoundError(f"index_rows.jsonl not found under run dir: {run_dir}")
 
     metadata_backend, asset_storage_backend = _resolve_backends(args)
+    postgres_batch_size = _postgres_batch_size(args)
     rows = load_rows(rows_path)
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     params = {
@@ -509,6 +540,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
         "cube_version": args.cube_version,
         "metadata_backend": metadata_backend,
         "asset_storage_backend": asset_storage_backend,
+        "postgres_batch_size": postgres_batch_size,
     }
 
     if asset_storage_backend == "minio":
@@ -545,6 +577,7 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
         "product_fact_rows": len(fact_records),
         "metadata_backend": metadata_backend,
         "asset_storage_backend": asset_storage_backend,
+        "postgres_batch_size": postgres_batch_size,
     }
 
     if metadata_backend == "sqlite":
@@ -595,8 +628,8 @@ def run_product_ingest(args: argparse.Namespace) -> dict:
         try:
             ensure_product_tables_postgres(conn)
             _upsert_job_status_postgres(conn, args.job_id, "running", params, started_at=started_at)
-            upsert_product_assets_postgres(conn, asset_records)
-            upsert_product_facts_postgres(conn, fact_records)
+            upsert_product_assets_postgres(conn, asset_records, batch_size=postgres_batch_size)
+            upsert_product_facts_postgres(conn, fact_records, batch_size=postgres_batch_size)
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             _upsert_job_status_postgres(
                 conn,

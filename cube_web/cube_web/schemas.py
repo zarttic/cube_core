@@ -10,6 +10,7 @@ class CubeWebModel(BaseModel):
 
 
 GridType = Literal["s2", "mgrs", "tile_matrix", "isea4h"]
+PartitionBackend = Literal["auto", "ray", "thread", "process", "local"]
 
 
 class OpticalAssetSelection(CubeWebModel):
@@ -41,8 +42,16 @@ class PartitionDemoRequest(CubeWebModel):
     max_cells_per_asset: int | None = Field(default=None, ge=1)
     cog_workers: int | None = Field(default=None, ge=0)
     partition_workers: int | None = Field(default=None, ge=0)
+    partition_backend: PartitionBackend | None = None
+    ray_address: str | None = None
     ray_parallelism: int | None = Field(default=None, ge=0)
+    chunk_size: int | None = Field(default=None, ge=0)
     partition_prefix_len: int | None = Field(default=None, ge=1)
+    metadata_backend: Literal["none", "local", "sqlite", "postgres"] | None = None
+    asset_storage_backend: Literal["local", "minio"] | None = None
+    quality_rule: Literal["best_quality_wins", "latest_wins"] | None = None
+    minio_upload_workers: int | None = Field(default=None, ge=1)
+    postgres_batch_size: int | None = Field(default=None, ge=1)
 
 
 class PartitionRequestRecord(CubeWebModel):
@@ -160,6 +169,8 @@ class OpticalIngestRequest(CubeWebModel):
     cube_version: str | None = None
     quality_rule: Literal["best_quality_wins", "latest_wins"] = "best_quality_wins"
     allow_failed_quality: bool = False
+    minio_upload_workers: int | None = Field(default=None, ge=1)
+    postgres_batch_size: int | None = Field(default=None, ge=1)
 
 
 class ConfigGetRequest(CubeWebModel):
