@@ -51,6 +51,7 @@ from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 DEFAULT_ENTITY_TASKS_PER_GROUP = 64
+DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS = 16
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
 _ENTITY_MODULE_SEARCH_ROOTS = (
     os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
@@ -234,6 +235,38 @@ def _add_timing(timing: dict[str, float] | None, key: str, value: float) -> None
         timing[key] = timing.get(key, 0.0) + float(value)
 
 
+def _minio_upload_workers(args: argparse.Namespace) -> int:
+    value = getattr(args, "minio_upload_workers", DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS)
+    return max(1, int(value or DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS))
+
+
+def _make_minio_client(args: argparse.Namespace, *, http_pool_size: int) -> Any:
+    try:
+        from minio import Minio
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("MinIO backend requires `minio` package") from exc
+
+    import certifi
+    import urllib3
+    from urllib3.util import Timeout
+    from urllib3.util.retry import Retry
+
+    timeout = 300
+    return Minio(
+        str(getattr(args, "minio_endpoint", "")),
+        access_key=str(getattr(args, "minio_access_key", "")),
+        secret_key=str(getattr(args, "minio_secret_key", "")),
+        secure=bool(getattr(args, "minio_secure", False)),
+        http_client=urllib3.PoolManager(
+            timeout=Timeout(connect=timeout, read=timeout),
+            maxsize=max(10, int(http_pool_size)),
+            cert_reqs="CERT_REQUIRED",
+            ca_certs=os.environ.get("SSL_CERT_FILE") or certifi.where(),
+            retries=Retry(total=5, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504]),
+        ),
+    )
+
+
 def _write_entity_tiles(
     tasks: list[dict[str, Any]],
     run_dir: Path,
@@ -259,19 +292,13 @@ def _write_entity_tiles(
     upload_bucket = ""
     upload_fast = True
     if upload_args is not None:
-        from minio import Minio
-
         upload_bucket = str(getattr(upload_args, "minio_bucket", ""))
-        upload_client = Minio(
-            str(getattr(upload_args, "minio_endpoint", "")),
-            access_key=str(getattr(upload_args, "minio_access_key", "")),
-            secret_key=str(getattr(upload_args, "minio_secret_key", "")),
-            secure=bool(getattr(upload_args, "minio_secure", False)),
-        )
+        upload_workers = _minio_upload_workers(upload_args)
+        upload_client = _make_minio_client(upload_args, http_pool_size=upload_workers)
         if not upload_client.bucket_exists(upload_bucket):
             upload_client.make_bucket(upload_bucket)
         upload_fast = bool(getattr(upload_args, "minio_fast_upload", True))
-        upload_pool = ThreadPoolExecutor(max_workers=max(1, int(getattr(upload_args, "minio_upload_workers", 8) or 8)))
+        upload_pool = ThreadPoolExecutor(max_workers=upload_workers)
     task_groups: dict[str, list[dict[str, Any]]] = {}
     try:
         for task in tasks:
@@ -824,11 +851,6 @@ def _write_entity_tile_chunks_ray(
 
 
 def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, str]:
-    try:
-        from minio import Minio
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("MinIO backend requires `minio` package") from exc
-
     endpoint = str(getattr(args, "minio_endpoint", ""))
     access_key = str(getattr(args, "minio_access_key", ""))
     secret_key = str(getattr(args, "minio_secret_key", ""))
@@ -836,7 +858,8 @@ def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Nam
     if not endpoint or not access_key or not secret_key or not bucket:
         raise ValueError("minio endpoint/access-key/secret-key/bucket are required for entity tile upload")
 
-    client = Minio(endpoint, access_key=access_key, secret_key=secret_key, secure=bool(getattr(args, "minio_secure", False)))
+    workers = _minio_upload_workers(args)
+    client = _make_minio_client(args, http_pool_size=workers)
     if not client.bucket_exists(bucket):
         client.make_bucket(bucket)
 
@@ -850,7 +873,6 @@ def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Nam
         source_uri, row = item
         return _upload_entity_tile_file(client, bucket, source_uri, row, args, fast_upload)
 
-    workers = max(1, int(getattr(args, "minio_upload_workers", 8) or 8))
     if workers == 1:
         return dict(upload_one(item) for item in unique_tiles.items())
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -907,7 +929,7 @@ def _entity_tile_upload_options(args: argparse.Namespace) -> dict[str, Any]:
         "minio_bucket": str(getattr(args, "minio_bucket", "")),
         "minio_prefix": str(getattr(args, "minio_prefix", "cube/entity")),
         "minio_secure": bool(getattr(args, "minio_secure", False)),
-        "minio_upload_workers": int(getattr(args, "minio_upload_workers", 8) or 8),
+        "minio_upload_workers": _minio_upload_workers(args),
         "minio_fast_upload": bool(getattr(args, "minio_fast_upload", True)),
     }
 
@@ -1564,7 +1586,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-bucket", default=minio.bucket)
     parser.add_argument("--minio-prefix", default="cube/entity")
     parser.add_argument("--minio-secure", action="store_true")
-    parser.add_argument("--minio-upload-workers", type=int, default=8)
+    parser.add_argument("--minio-upload-workers", type=int, default=DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS)
     parser.set_defaults(minio_fast_upload=True)
     parser.add_argument(
         "--minio-safe-upload",
