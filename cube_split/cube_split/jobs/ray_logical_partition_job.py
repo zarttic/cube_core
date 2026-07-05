@@ -493,10 +493,8 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
                     from cube_split.jobs.ray_partition_core import (
                         _process_local_task_group,
-                        asset_record_from_dict,
-                        asset_record_to_dict,
-                        convert_asset_to_cog,
-                        upload_cog_to_minio,
+                        _prepare_actor_cog_groups,
+                        _upload_actor_cogs,
                     )
 
                     env_options = dict(cog_upload_options_value or source_options_value or {})
@@ -507,8 +505,6 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     if env_options.get("secret_key"):
                         os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
-                    prepared_groups: list[list[dict]] = []
-                    used_local_cog_paths: set[str] = set()
                     stats: dict[str, float] = {
                         "source_resolve_elapsed_sec": 0.0,
                         "cog_write_elapsed_sec": 0.0,
@@ -519,30 +515,18 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                         "cog_upload_count": 0.0,
                     }
                     worker_cog_root = Path(cog_input_dir_value or "/tmp/cube_logical_cog") / f"ray_worker_{os.getpid()}"
-                    for group in task_groups:
-                        if not group:
-                            continue
-                        source_path = str(group[0]["asset_path"])
-                        local_cog_path = self._local_cog_by_source.get(source_path)
-                        if local_cog_path is None:
-                            asset = asset_record_from_dict(assets_by_path_value[source_path])
-                            convert_timing: dict[str, float] = {}
-                            converted = convert_asset_to_cog(
-                                asset,
-                                cog_input_dir=worker_cog_root,
-                                overwrite=cog_overwrite_value,
-                                creation_options=cog_options_value,
-                                target_crs=target_crs_value or None,
-                                source_options=source_options_value,
-                                timing=convert_timing,
-                            )
-                            for key, value in convert_timing.items():
-                                stats[key] = stats.get(key, 0.0) + float(value)
-                            local_cog_path = str(converted.path)
-                            self._local_cog_by_source[source_path] = local_cog_path
-                            self._converted_asset_by_source[source_path] = asset_record_to_dict(converted)
-                        used_local_cog_paths.add(local_cog_path)
-                        prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
+                    prepared_groups, used_local_cog_paths = _prepare_actor_cog_groups(
+                        task_groups,
+                        assets_by_path=assets_by_path_value,
+                        local_cog_by_source=self._local_cog_by_source,
+                        converted_asset_by_source=self._converted_asset_by_source,
+                        cog_input_dir=worker_cog_root,
+                        cog_overwrite=cog_overwrite_value,
+                        cog_options=cog_options_value,
+                        target_crs=target_crs_value,
+                        source_options=source_options_value,
+                        timing=stats,
+                    )
 
                     prepared_rows = [row for group in prepared_groups for row in group]
                     partition_rows_start = time.perf_counter()
@@ -552,18 +536,14 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                         include_sample_mean=include_sample_mean,
                     )
                     stats["partition_rows_elapsed_sec"] += time.perf_counter() - partition_rows_start
-                    for source_path, local_cog_path in self._local_cog_by_source.items():
-                        if local_cog_path not in used_local_cog_paths or local_cog_path in self._remote_cog_by_local_path:
-                            continue
-                        converted = asset_record_from_dict(self._converted_asset_by_source[source_path])
-                        upload_start = time.perf_counter()
-                        self._remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
-                            converted,
-                            Path(local_cog_path),
-                            cog_upload_options_value,
-                        )
-                        stats["cog_upload_elapsed_sec"] += time.perf_counter() - upload_start
-                        stats["cog_upload_count"] += 1.0
+                    _upload_actor_cogs(
+                        local_cog_by_source=self._local_cog_by_source,
+                        converted_asset_by_source=self._converted_asset_by_source,
+                        remote_cog_by_local_path=self._remote_cog_by_local_path,
+                        used_local_cog_paths=used_local_cog_paths,
+                        cog_upload_options=cog_upload_options_value,
+                        timing=stats,
+                    )
                     for row in rows_out:
                         row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
                     return {"rows": rows_out, "stats": stats}

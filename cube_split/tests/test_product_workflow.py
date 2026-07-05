@@ -375,6 +375,11 @@ def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
     def fake_convert_asset_to_cog(asset, **kwargs):
         local_cog_path.parent.mkdir(parents=True, exist_ok=True)
         local_cog_path.write_bytes(b"cog")
+        timing = kwargs.get("timing")
+        if timing is not None:
+            timing["source_resolve_elapsed_sec"] = timing.get("source_resolve_elapsed_sec", 0.0) + 1.25
+            timing["cog_write_elapsed_sec"] = timing.get("cog_write_elapsed_sec", 0.0) + 2.5
+            timing["cog_write_count"] = timing.get("cog_write_count", 0.0) + 1.0
         calls.append(("convert", asset.path))
         return SimpleNamespace(
             scene_id=asset.scene_id,
@@ -400,7 +405,7 @@ def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
     monkeypatch.setattr("cube_split.jobs.product_partition_job._process_group_chunk", fake_process_group_chunk)
     monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
 
-    rows, ray_init_elapsed = _partition_groups_ray(
+    rows, ray_init_elapsed, stats = _partition_groups_ray(
         task_chunks=[
             [
                 [{"scene_id": "product-2020", "asset_path": "/source/product_2020.tif"}],
@@ -439,6 +444,12 @@ def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
         "s3://cube/cube/product/product_cog.tif",
         "s3://cube/cube/product/product_cog.tif",
     ]
+    assert stats["source_resolve_elapsed_sec"] == 1.25
+    assert stats["cog_write_elapsed_sec"] == 2.5
+    assert stats["cog_write_count"] == 1.0
+    assert stats["cog_cache_hit_count"] == 1.0
+    assert stats["cog_upload_count"] == 1.0
+    assert stats["partition_rows_elapsed_sec"] >= 0
     assert fake_ray.shutdown_calls == 1
 
 
@@ -482,7 +493,7 @@ def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
     monkeypatch.setattr("cube_split.jobs.product_partition_job._process_group_chunk", fake_process_group_chunk)
     monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
 
-    rows, _ = _partition_groups_ray(
+    rows, _, stats = _partition_groups_ray(
         task_chunks=[
             [[{"scene_id": "product-2020", "asset_path": "/source/product_2020.tif"}]],
             [[{"scene_id": "product-2020-b", "asset_path": "/source/product_2020.tif"}]],
@@ -514,6 +525,8 @@ def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
     assert [name for name, _ in calls] == ["convert", "process", "upload", "process"]
     assert calls.count(("convert", "/source/product_2020.tif")) == 1
     assert calls.count(("upload", str(local_cog_path))) == 1
+    assert stats["cog_cache_hit_count"] == 1.0
+    assert stats["cog_upload_count"] == 1.0
     assert [row["asset_path"] for row in rows] == [
         "s3://cube/cube/product/product_cog.tif",
         "s3://cube/cube/product/product_cog.tif",

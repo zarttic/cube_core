@@ -749,6 +749,172 @@ def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
     assert report["total_index_rows"] == 2
 
 
+def test_logical_partition_radar_uses_worker_cog_timing(monkeypatch, tmp_path: Path):
+    fake_ray = _FakeRay()
+    source_asset = SimpleNamespace(
+        path="/source/20180615_VV.dat",
+        scene_id="S1_20180615",
+        band="vv",
+        acq_time="2018-06-15T00:00:00Z",
+        product_family="sentinel1",
+        sensor="sentinel1_sar",
+        bbox=None,
+        corners=[[100.0, 25.0], [100.1, 25.0], [100.1, 24.9], [100.0, 24.9]],
+        resolution=10,
+    )
+    worker_cog_path = tmp_path / "worker" / "20180615_VV_cog.tif"
+    calls: list[tuple[str, object]] = []
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._load_ray", lambda: fake_ray)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_runtime_env_from_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._prepend_sys_paths", lambda paths: None)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_project_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job._ray_actor_options_from_env", lambda: {})
+
+    def fake_build_manifest(*args, **kwargs):
+        captured["data_type"] = kwargs["data_type"]
+        return [source_asset]
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.build_manifest", fake_build_manifest)
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.build_grid_tasks_driver",
+        lambda **kwargs: [
+            {
+                "scene_id": "S1_20180615",
+                "band": "vv",
+                "asset_path": source_asset.path,
+                "acq_time": "2018-06-15T00:00:00Z",
+                "grid_type": "s2",
+                "grid_level": 5,
+                "space_code": "35f4",
+                "cell_min_lon": 100.0,
+                "cell_min_lat": 24.9,
+                "cell_max_lon": 100.1,
+                "cell_max_lat": 25.0,
+                "cover_mode": "intersect",
+            },
+            {
+                "scene_id": "S1_20180615",
+                "band": "vv",
+                "asset_path": source_asset.path,
+                "acq_time": "2018-06-15T00:00:00Z",
+                "grid_type": "s2",
+                "grid_level": 5,
+                "space_code": "35f5",
+                "cell_min_lon": 100.1,
+                "cell_min_lat": 24.9,
+                "cell_max_lon": 100.2,
+                "cell_max_lat": 25.0,
+                "cover_mode": "intersect",
+            },
+        ],
+    )
+
+    def fake_convert_asset_to_cog(asset, **kwargs):
+        worker_cog_path.parent.mkdir(parents=True, exist_ok=True)
+        worker_cog_path.write_bytes(b"cog")
+        timing = kwargs.get("timing")
+        if timing is not None:
+            timing["source_resolve_elapsed_sec"] = timing.get("source_resolve_elapsed_sec", 0.0) + 0.5
+            timing["cog_write_elapsed_sec"] = timing.get("cog_write_elapsed_sec", 0.0) + 1.0
+            timing["cog_write_count"] = timing.get("cog_write_count", 0.0) + 1.0
+        calls.append(("convert", asset.path))
+        return SimpleNamespace(
+            scene_id=asset.scene_id,
+            band=asset.band,
+            path=worker_cog_path,
+            acq_time=asset.acq_time,
+            product_family=asset.product_family,
+            sensor=asset.sensor,
+            bbox=asset.bbox,
+            corners=asset.corners,
+            resolution=asset.resolution,
+        )
+
+    def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
+        calls.append(("process", [str(row["asset_path"]) for row in group]))
+        rows = []
+        for item in group:
+            row = dict(item)
+            row["st_code"] = f"{row['space_code']}:{row['time_bucket']}"
+            row["sample_mean_band1"] = None
+            row["intersect_min_lon"] = row["cell_min_lon"]
+            row["intersect_min_lat"] = row["cell_min_lat"]
+            row["intersect_max_lon"] = row["cell_max_lon"]
+            row["intersect_max_lat"] = row["cell_max_lat"]
+            rows.append(row)
+        return rows
+
+    def fake_upload_cog_to_minio(asset, local_path, options):
+        calls.append(("upload", str(local_path)))
+        return f"s3://cube/cube/radar/{Path(local_path).name}"
+
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.convert_asset_to_cog", fake_convert_asset_to_cog)
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core._process_local_task_group", fake_process_local_task_group)
+    monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
+
+    report = run_logical_partition(
+        Namespace(
+            input_dir=str(tmp_path),
+            manifest_path="",
+            product_family="auto",
+            output_dir=str(tmp_path / "output"),
+            cog_input_dir=str(tmp_path / "cog"),
+            cog_overwrite=True,
+            cog_workers=1,
+            cog_compress="LZW",
+            cog_predictor=2,
+            cog_level=0,
+            cog_num_threads="ALL_CPUS",
+            target_crs="EPSG:4326",
+            grid_type="s2",
+            grid_level=5,
+            cover_mode="intersect",
+            time_granularity="day",
+            max_cells_per_asset=20000,
+            ray_parallelism=1,
+            ray_address="10.3.100.182:6379",
+            chunk_size=2,
+            partition_backend="ray",
+            partition_prefix_len=3,
+            timing_mode=False,
+            skip_verify=False,
+            sample_mean=False,
+            job_id="",
+            data_type="radar",
+            dataset="demo_radar",
+            sensor="sentinel1_sar",
+            asset_version="v1",
+            cube_version="v1",
+            quality_rule="best_quality_wins",
+            metadata_backend="none",
+            postgres_dsn="",
+            db_path="",
+            asset_storage_backend="local",
+            minio_endpoint="10.3.100.179:9000",
+            minio_access_key="access",
+            minio_secret_key="secret",
+            minio_bucket="cube",
+            minio_prefix="cube/radar",
+            minio_secure=False,
+            minio_upload_workers=2,
+            cog_output_root=str(tmp_path / "local_cog"),
+            cog_materialize_mode="copy",
+        )
+    )
+
+    assert captured["data_type"] == "radar"
+    assert [name for name, _ in calls] == ["convert", "process", "upload"]
+    assert calls[1][1] == [str(worker_cog_path), str(worker_cog_path)]
+    assert report["data_type"] == "radar"
+    assert report["worker_source_resolve_elapsed_sec"] == 0.5
+    assert report["worker_cog_write_elapsed_sec"] == 1.0
+    assert report["worker_cog_write_count"] == 1
+    assert report["worker_cog_upload_count"] == 1
+    assert report["total_index_rows"] == 2
+
+
 def test_logical_partition_does_not_shutdown_shared_ray(monkeypatch, tmp_path: Path):
     fake_ray = _FakeRay()
     fake_ray._initialized = True
