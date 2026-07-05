@@ -82,6 +82,24 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest
 - 同一个源资产没有跨 actor 重复转 COG；每个 case 都是 2 个源资产、2 次 COG write、2 次 COG upload。
 - `s2` case 内部出现 12 次 worker COG cache hit，说明 actor 内资产复用生效。
 - 当前小规模逻辑剖分瓶颈仍是 COG 写入/上传，不是行生成。
+- 本 benchmark 默认 `target_crs=EPSG:4326`，因此包含源 TIF 到 EPSG:4326 COG 的重投影成本；该成本不等同于坐标系 Transformer 缓存优化的行生成成本。
+
+补充 A/B 校验：
+
+为确认集成分支没有相对 `master` 开倒车，使用同一 Shandong manifest、同一 Ray/MinIO、同一 `s2 L5` 和同一并行参数补跑 A/B。
+
+| 分支 | target_crs | total elapsed | partition elapsed | worker COG write | worker COG upload | worker rows |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `master` (`cb618e9`) | keep source CRS | 6.465s | 6.461s | 4.706s | 2.819s | 2.059s |
+| `perf/partition-optimization-integration` (`1201a67`) | keep source CRS | 6.361s | 6.356s | 4.667s | 2.849s | 2.044s |
+| `master` (`cb618e9`) | `EPSG:4326` | 10.018s | 10.013s | 13.959s | 2.472s | 0.015s |
+| `perf/partition-optimization-integration` (`1201a67`) | `EPSG:4326` | 9.924s | 9.920s | 13.623s | 2.650s | 0.014s |
+
+判断：
+
+- 同参对比下集成分支未慢于 `master`。
+- 坐标系 Transformer 缓存直接影响的 `worker rows` 阶段没有回退。
+- 10s 级结果来自 `EPSG:4326` COG 重投影写入，`worker COG write` 约 13.6-14.0s；保持源 CRS 时 COG 写入约 4.7s。
 
 输出前缀：
 
