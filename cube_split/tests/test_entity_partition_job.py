@@ -1145,7 +1145,7 @@ def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_p
     assert captured[0].attributes["cube.target_table"] == "rs_entity_tile_asset"
 
 
-def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path):
+def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     source = input_dir / "demo_scene_unlimited.tif"
@@ -1248,7 +1248,7 @@ def test_entity_partition_does_not_limit_cover_cells(monkeypatch, tmp_path: Path
         )
     )
 
-    assert captured["max_cells_per_asset"] == 0
+    assert captured["max_cells_per_asset"] == 1
     assert report["grid_task_count"] == 2
     assert report["entity_tile_count"] == 2
 
