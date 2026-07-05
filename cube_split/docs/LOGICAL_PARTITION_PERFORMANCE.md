@@ -1,6 +1,6 @@
 # 逻辑剖分性能优化记录
 
-更新时间：2026-07-04
+更新时间：2026-07-05
 
 ## 1. 范围
 
@@ -44,6 +44,64 @@
 - COG 写入约 4.7s，不是 33s 总耗时的主因。
 - 不压缩 COG 反而更慢：`NONE` 输出约 1247MB，`LZW` 输出约 465MB，上传时间显著变长。
 - 当前默认继续使用 `LZW + predictor=2`，`NONE` 只保留为测试选项。
+
+### 3.1 可复现小规模 benchmark
+
+新增脚本：
+
+```bash
+PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 \
+  cube_split/scripts/run_logical_partition_benchmark.py \
+  --work-dir /tmp/cube_logical_partition_benchmark_worker1 \
+  --ray-address 10.3.100.182:6379 \
+  --minio-endpoint 10.3.100.179:9000 \
+  --grid-types s2,tile_matrix \
+  --s2-level 5 \
+  --tile-matrix-level 5 \
+  --ray-parallelism-values 2 \
+  --chunk-sizes 1 \
+  --max-cells-per-asset 500
+```
+
+默认 manifest 使用山东 2020Q3 的 `sr_band2`/`sr_band3` 两个 MinIO 源资产，运行时生成在
+`<work-dir>/<run-id>/manifest/shandong_2020q3_2band.jsonl`。脚本只调用现有
+`run_logical_partition`，不复制剖分逻辑；默认 `metadata_backend=none`，只做剖分和 COG
+写入 MinIO。
+
+可调参数：
+
+- `--grid-types s2,tile_matrix`：普通逻辑剖分格网，默认覆盖两者。
+- `--ray-parallelism-values 1,2,4`：同一输入下横向比较 actor 数。
+- `--chunk-sizes 1,4,8`：比较 task group chunk 粒度。
+- `--repeat N`：重复每个 case，便于区分冷/热缓存波动。
+- `--cog-compress LZW|DEFLATE|ZSTD|NONE`：压缩策略对 CPU 和上传的影响。
+- `--manifest-path ...`：替换为其他真实源资产 manifest。
+
+### 3.2 worker1 验证结果
+
+执行时间：2026-07-05。源对象可访问性：
+
+- `Shandong_mosaic_2020Q3_sr_band2_cut.tif`：268105481 bytes。
+- `Shandong_mosaic_2020Q3_sr_band3_cut.tif`：277461750 bytes。
+
+Ray 集群：`10.3.100.182:6379`，MinIO endpoint：`10.3.100.179:9000`，bucket：`cube`。
+本次 run id：`logical_bench_20260705_013405`。
+
+| case | grid | level | assets | grid tasks | rows | parallelism/chunk | partition | total | worker source | worker COG write | worker COG upload | worker rows | COG writes/uploads | MinIO prefix |
+| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `s2_l5_p2_c1_r1` | s2 | 5 | 2 | 24 | 24 | 2/1 | 10.181s | 10.186s | 0.186s | 13.834s | 2.600s | 0.014s | 2/2 | `cube/benchmark/logical/logical_bench_20260705_013405/s2_l5_p2_c1_r1` |
+| `tile_matrix_l5_p2_c1_r1` | tile_matrix | 5 | 2 | 4 | 4 | 2/1 | 9.572s | 9.574s | 0.198s | 13.615s | 2.566s | 0.003s | 2/2 | `cube/benchmark/logical/logical_bench_20260705_013405/tile_matrix_l5_p2_c1_r1` |
+
+MinIO 输出确认：
+
+- `s2_l5_p2_c1_r1`：2 个 COG 对象，合计 442691078 bytes。
+- `tile_matrix_l5_p2_c1_r1`：2 个 COG 对象，合计 442691078 bytes。
+
+解读：
+
+- 两个格网的总耗时接近，因为本规模下固定成本主要是两源资产的 COG 写入和上传。
+- `tile_matrix` level 5 只产生 4 行，行剖分耗时约 0.003s；`s2` level 5 产生 24 行，行剖分耗时约 0.014s。
+- worker 阶段耗时为 actor 聚合值，可能大于 wall time；本次 COG 写入聚合约 13.6-13.8s，但 wall time 约 9.6-10.2s。
 
 ## 4. 根因
 
