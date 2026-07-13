@@ -39,7 +39,7 @@ class PartitionDemoRequest(CubeWebModel):
     target_crs: str | None = None
     cover_mode: Literal["intersect", "contain", "minimal"] | None = None
     time_granularity: Literal["year", "month", "day", "hour", "minute"] | None = None
-    max_cells_per_asset: int | None = Field(default=None, ge=1)
+    max_cells_per_asset: int | None = Field(default=None, ge=0)
     cog_workers: int | None = Field(default=None, ge=0)
     partition_workers: int | None = Field(default=None, ge=0)
     partition_backend: PartitionBackend | None = None

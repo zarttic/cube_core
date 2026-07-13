@@ -1,6 +1,6 @@
 # cube_split 当前工作流
 
-更新时间：2026-06-04
+更新时间：2026-07-13
 
 ## 1. 定位
 
@@ -14,7 +14,7 @@
   -> 栅格资产标准化为 COG
   -> 调用 CubeEncoderSDK 生成 space_code / st_code
   -> 输出 index_rows.jsonl 或 carbon_observation_rows.jsonl
-  -> 写入 PostgreSQL + MinIO，或 SQLite + local
+  -> 写入 OpenGauss + MinIO，或 SQLite + local
   -> 运行质量检查
   -> AOI / 时间 / 波段回读
 ```
@@ -25,6 +25,15 @@
 - `product`：栅格产品 TIF，默认输出到 `data/ray_output/product`，时间桶按年份组织。
 - `carbon` / `carbon_satellite`：碳卫星点/足迹观测，输出 `carbon_observation_rows.jsonl`，不强制重采样为 GeoTIFF。
 - `radar`：雷达栅格资产，使用与光学一致的逻辑剖分链路；`ISEA4H` 格网走实体瓦片剖分。Web schema 驱动运行不依赖 Sentinel 命名，只依赖 ARD 字段。
+
+剖分方式与格网组合：
+
+| 方式 | 支持的格网 | 输出 |
+| --- | --- | --- |
+| `logical` | `s2`、`tile_matrix`、`isea4h`、`plane_grid` | `index_rows.jsonl` 窗口/索引行 |
+| `entity` | `s2`、`tile_matrix`、`isea4h` | 实体瓦片和实体瓦片元数据 |
+
+`mgrs` 仅保留为 encoder/旧客户端兼容能力，不作为 Web 生产剖分选择。`plane_grid` 使用源影像 CRS 和像素窗口，不做默认 EPSG:4326 重投影；其编码是资产局部布局标识，跨场景唯一性、WGS84 bbox 质检和地图预览仍是后续重构项。
 
 ## 3. ARD Schema 与 Manifest 交付要求
 
@@ -117,10 +126,12 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition
 - `--manifest-path`：可选，`.jsonl` 或 `.json` 清单；设置后按清单读取资产。
 - `--product-family`：`auto`、`landsat`、`sentinel2`。
 - `--target-crs`：可选 COG 目标 CRS；为空则保留源 CRS。
+- `--grid-type plane_grid`：必须保持 `--target-crs ""`，只允许 `logical` 方式。
+- `--max-cells-per-asset`：`0` 表示不设上限；生产可不传，smoke/调试应显式给正数。
 - `--partition-backend`：`ray`、`auto`、`thread`；需要分布式执行时显式提供 Ray 地址。
 - `--ray-address`：优先来自 `CUBE_WEB_RAY_ADDRESS` 或 `RAY_ADDRESS`，也可通过命令行参数传入；本机调试可用空值或 `auto`。
 - `--timing-mode`、`--skip-verify`：用于性能计时，减少汇总校验开销。
-- PostgreSQL、MinIO、Ray 统一从运行时配置读取：PostgreSQL 使用
+- OpenGauss、MinIO、Ray 统一从运行时配置读取：OpenGauss 使用 PostgreSQL 兼容变量
   `CUBE_WEB_POSTGRES_DSN`、`POSTGRES_DSN` 或 `DATABASE_URL`；Ray 使用
   `CUBE_WEB_RAY_ADDRESS` 或 `RAY_ADDRESS`；MinIO 使用
   `CUBE_WEB_MINIO_*`、`MINIO_*` 或节点 `/etc/default/minio`。业务模块不再内置集群 IP 或默认密钥。
@@ -151,7 +162,7 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job 
 
 底层通过 `CarbonSatellitePartitionService` 使用 `CarbonPartitionConfig`。`--partition-backend ray` 按观测 chunk 分发到 Ray actor；`auto` 在设置 `--ray-address` 时使用 Ray，否则回退到本地 `process`。测试 monkeypatch 或不适合 fork 的环境可改为 `thread`。
 
-端到端试运行脚本覆盖 `optical`、`radar`、`product` 三类资产，以及 `s2`、`tile_matrix`、`isea4h` 三种格网。脚本会生成小 TIF，上传到 MinIO，以 `selected_assets` 写入完整 ARD 字段，并通过 Ray 执行剖分：
+端到端试运行脚本覆盖 `optical`、`radar`、`product` 三类资产，以及 `s2`、`tile_matrix`、`isea4h` 三种主流程格网。脚本会生成小 TIF，上传到 MinIO，以 `selected_assets` 写入完整 ARD 字段，并通过 Ray 执行剖分；`plane_grid` 需使用带 CRS 的投影小影像单独验证：
 
 ```bash
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_split/scripts/run_all_partition_flows_smoke.py \
@@ -176,7 +187,7 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_split/scripts/run_al
 
 Ray Client 需要 driver Python 与集群 Python 主版本一致；当前 Ray 集群为 Python 3.11.6，因此 smoke 建议使用 `python3.11`。如需指定其他兼容解释器，pytest 包装器支持 `CUBE_PARTITION_E2E_PYTHON=/path/to/python`。
 
-也可以通过 pytest marker 运行同一个 smoke。默认会 skip，不影响本地单元测试；显式设置环境变量后才会连接 Ray、MinIO 和 PostgreSQL。pytest 包装器会启用 `--keep-quality`，并校验 optical/product 结果带有 `quality_status` 和 `quality_report_id`：
+也可以通过 pytest marker 运行同一个 smoke。默认会 skip，不影响本地单元测试；显式设置环境变量后才会连接 Ray、MinIO 和 OpenGauss。pytest 包装器会启用 `--keep-quality`，并校验 optical/product 结果带有 `quality_status` 和 `quality_report_id`：
 
 ```bash
 CUBE_RUN_PARTITION_E2E_SMOKE=1 \
@@ -287,7 +298,7 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.quality.product_quality \
 ```
 
 质检输出默认写入 `run_dir/quality_report.json`。通过 Web API 触发质检时，报告会同步写入
-PostgreSQL `quality_reports`；Web 的 latest/history/report/pdf/txt 均从该表读取。直接运行
+  OpenGauss `quality_reports`；Web 的 latest/history/report/pdf/txt 均从该表读取。直接运行
 `cube_split.quality` 命令只生成本地报告文件，不会自动写入 Web 报告库。
 
 Web 批处理会把剖分结果中的 `quality_status`、`quality_report_id`、`quality_failure_reason` 持久化到 `partition_batches`：

@@ -17,7 +17,8 @@ const pageMap = {
 };
 
 const currentView = computed(() => pageMap[currentPath.value] || PartitionView);
-const currentNavItems = computed(() => navItems());
+const isAdmin = computed(() => userStore.role.value === '管理员');
+const currentNavItems = computed(() => navItems(isAdmin.value));
 
 function syncPathFromLocation() {
   const normalized = normalizePath(window.location.pathname);
@@ -68,6 +69,12 @@ function redirectToPortalHomeIfNeeded() {
   return true;
 }
 
+function redirectNonAdminFromPartition() {
+  if (currentPath.value !== '/partition' || isAdmin.value) return false;
+  window.location.replace(portalHomeUrl);
+  return true;
+}
+
 async function initializeAuth() {
   authReady.value = false;
   await loadAuthRuntimeConfig();
@@ -80,6 +87,7 @@ async function initializeAuth() {
     window.history.replaceState({}, '', target);
     syncPathFromLocation();
     if (redirectToPortalHomeIfNeeded()) return;
+    if (redirectNonAdminFromPartition()) return;
     authReady.value = true;
     return;
   }
@@ -89,6 +97,7 @@ async function initializeAuth() {
     try {
       await userStore.fetchUserInfo();
       if (redirectToPortalHomeIfNeeded()) return;
+      if (redirectNonAdminFromPartition()) return;
       authReady.value = true;
       return;
     } catch {
@@ -100,6 +109,7 @@ async function initializeAuth() {
     userStore.redirectToAuth(window.location.pathname + window.location.search);
     return;
   }
+  if (redirectNonAdminFromPartition()) return;
   authReady.value = true;
 }
 

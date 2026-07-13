@@ -1,6 +1,6 @@
 # cube_encoder 文档索引
 
-更新时间：2026-06-04
+更新时间：2026-07-13
 
 本文档目录只维护 `cube_encoder` 的 SDK、API、格网引擎和发布规则。剖分入库执行链路见
 [cube_split/docs/README.md](../../cube_split/docs/README.md)，Web 管理入口、托管剖分 API
@@ -10,6 +10,12 @@
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)：当前格网编码引擎的职责、分层、API 和 SDK 边界。
 - [SDK_RELEASE.md](SDK_RELEASE.md)：SDK 版本、发布检查和兼容性规则。
+
+## 格网边界
+
+- `s2`、`mgrs`、`tile_matrix`、`isea4h`：编码器提供 locate、cover、topology 和 ST code 能力。
+- `plane_grid`：编码器只提供 ST code 的 prefix、格式校验和解析；源 CRS、像素窗口和布局由 `cube_split` 的逻辑剖分实现。
+- `mgrs` 仍是 SDK/API 兼容能力，但不再是 Web 生产剖分页面的可选项。
 
 ## 运行版本
 

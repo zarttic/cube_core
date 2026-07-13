@@ -1,5 +1,7 @@
 # cube_encoder
 
+更新时间：2026-07-13
+
 `cube_encoder` 是 cube 项目的底层格网编码 SDK 与 API 提供方，负责离散格网编码、
 时空编码、拓扑元操作和统一能力输出。其他包应通过 `grid_core.sdk.CubeEncoderSDK`
 或 HTTP API 使用这些能力，不应复制格网实现逻辑。
@@ -7,6 +9,7 @@
 ## 核心能力
 
 - 支持 S2 CellId token-backed `s2`、`mgrs`、`tile_matrix` 和 H3-backed `isea4h` 的点定位与几何覆盖。
+- 支持 `plane_grid` 的 ST code 生成/解析契约；`plane_grid` 不提供通用点定位、覆盖或拓扑引擎，源平面窗口剖分由 `cube_split` 负责。
 - 支持时空编码生成、批量生成与解析。
 - 支持邻接、父级、子级、编码转几何、批量编码转几何。
 - Python SDK 入口：`grid_core.sdk.CubeEncoderSDK`。

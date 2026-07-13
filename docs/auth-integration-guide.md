@@ -1,5 +1,7 @@
 # 认证集成方案
 
+更新时间：2026-07-13
+
 ## 概述
 
 通过 OAuth2 授权码流程，复用统一认证系统的用户认证能力。`cube_web` 作为 OAuth2 客户端，
@@ -67,6 +69,8 @@ curl -X POST http://localhost:50039/v1/config/get \
   -H "Content-Type: application/json" -d '{}' \
   -H "Authorization: Bearer <your-token>"
 ```
+
+载入系统交付批次时，`POST /v1/partition/schemas/import` 是认证开启状态下的公开导入入口；它只登记 schema/资产，不启动剖分。除该入口外，`/v1/*` 默认需要 Bearer Token。前端非管理员只显示公共编码入口，页面隐藏不替代后端鉴权。
 
 ## 注意事项
 

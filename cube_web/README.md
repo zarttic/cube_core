@@ -1,5 +1,7 @@
 # cube_web
 
+更新时间：2026-07-13
+
 `cube_web` 承载 FastAPI 后端、独立 Vue/Vite 前端，以及面向前端的
 encoder SDK facade、托管剖分任务和质检报告 API。
 
@@ -19,13 +21,14 @@ encoder SDK facade、托管剖分任务和质检报告 API。
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:app --host 0.0.0.0 --port 50039
 ```
 
-质检报告和托管剖分任务使用 PostgreSQL 持久化。使用这些链路前需要设置
+质检报告和托管剖分任务使用 OpenGauss 持久化，并通过 PostgreSQL 兼容 DSN/`psycopg` 连接。使用这些链路前需要设置
 `CUBE_WEB_POSTGRES_DSN`、`POSTGRES_DSN` 或 `DATABASE_URL`。
 
 认证开关由运行时环境变量 `CUBE_WEB_AUTH_REQUIRED` 控制。本地自测可设置
 `CUBE_WEB_AUTH_REQUIRED=false`，跳过前端登录跳转和后端 `/v1/*` Bearer Token 校验。
+启用认证时，载入系统调用的 `POST /v1/partition/schemas/import` 保持公开；其他 `/v1/*` 默认需要 Bearer Token。非管理员前端只展示公共编码入口，并在直接进入剖分页面时返回门户首页。
 
-剖分运行从运行时配置读取 Ray、MinIO 和 PostgreSQL 设置。使用分布式后端时设置
+剖分运行从运行时配置读取 Ray、MinIO 和 OpenGauss 设置。使用分布式后端时设置
 `CUBE_WEB_RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`、`CUBE_WEB_MINIO_ACCESS_KEY`、
 `CUBE_WEB_MINIO_SECRET_KEY` 和 `CUBE_WEB_MINIO_BUCKET`。MinIO 凭据也可以来自节点本地
 MinIO 服务环境。
@@ -57,6 +60,8 @@ npm run dev
 - `/v1/partition/batches/*`：托管批次、资产、attempt、重试和取消接口。
 - `/v1/quality/{optical|product|carbon}/run`、`/latest`、`/report`、`/report/pdf`、
   `/report/txt`、`/history`：质检报告链路。
+
+Web 生产剖分格网为 `s2`、`tile_matrix`、`isea4h` 和实验性的 `plane_grid`。逻辑与实体方式独立选择，但 `plane_grid` 当前只允许逻辑方式；`mgrs` 不再显示在生产剖分页面。`plane_grid` 的跨场景编码、质检和地图预览仍待后续重构。
 
 ## 测试
 

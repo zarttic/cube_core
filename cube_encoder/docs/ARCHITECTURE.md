@@ -1,6 +1,6 @@
 # cube_encoder 架构说明
 
-更新时间：2026-06-04
+更新时间：2026-07-13
 适用范围：`cube_encoder`
 
 ## 1. 定位
@@ -27,6 +27,7 @@
 - `mgrs`：定位、覆盖、拓扑和几何反算。
 - `tile_matrix`：Web Mercator 平面瓦片格网定位、覆盖和几何反算。
 - `isea4h`：基于 Uber H3 的第一阶段可运行能力。
+- `plane_grid`：只注册为 ST code 类型，用于承载 `cube_split` 源平面窗口产生的编码；当前没有 encoder engine，因此不能调用 locate、cover 或 topology。
 
 ## 3. 分层结构
 
@@ -35,7 +36,7 @@
   -> SDK / HTTP API
   -> 统一请求与响应模型
   -> grid service / code service / topology service
-  -> s2 / mgrs / isea4h engine
+  -> s2 / mgrs / tile_matrix / isea4h engine
   -> geometry / projection / timecode utilities
 ```
 
@@ -45,6 +46,7 @@
 - 引擎实现可替换，但输出模型保持稳定。
 - CRS 默认按 `EPSG:4326` 对外表达，特殊投影细节封装在引擎内部。
 - `cover_mode=minimal` 允许返回低于请求层级的格网单元，用于减少复杂边界的冗余覆盖。
+- `plane_grid` 不走上述全球拓扑链路；调用 `/v1/grid/cover` 或 `CubeEncoderSDK.cover(grid_type="plane_grid")` 当前会失败，这是有意保留的后续重构边界。
 
 ## 4. 调用边界
 

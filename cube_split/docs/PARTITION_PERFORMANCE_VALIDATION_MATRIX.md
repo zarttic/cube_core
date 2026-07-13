@@ -4,6 +4,8 @@ Baseline: `cb618e9`
 Branch: `perf/entity-coverage`
 Scope: converge entity-partition coverage outside the already-optimized optical single-grid path.
 
+Document status: historical validation matrix. It is not the current production contract; use `docs/PRODUCTION_TEST_ACCEPTANCE.md` and `cube_split/docs/WORKFLOW.md` for current behavior.
+
 ## Coverage Matrix
 
 | Entry | Payload / config | Expected path | Validation | Status |

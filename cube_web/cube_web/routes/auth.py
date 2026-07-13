@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from cube_web.services import auth_service, runtime_config
 
+PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
+
 
 def create_auth_router() -> APIRouter:
     router = APIRouter(prefix="/api", tags=["auth"])
@@ -89,7 +91,7 @@ def _safe_target_path(target: str) -> str:
 
 async def require_auth_for_api(request: Request, call_next):
     settings = auth_service.auth_settings()
-    if settings.required and request.url.path.startswith("/v1/"):
+    if settings.required and request.url.path.startswith("/v1/") and request.url.path not in PUBLIC_V1_PATHS:
         try:
             token = auth_service.bearer_token(request.headers.get("Authorization"))
             auth_service.verify_access_token(token, settings)

@@ -1,5 +1,7 @@
 # cube_split
 
+更新时间：2026-07-13
+
 `cube_split` 负责剖分、入库、质检和 AOI 回读。它不实现格网算法，而是通过
 `grid_core.sdk.CubeEncoderSDK` 使用 `cube_encoder` 能力。
 
@@ -13,7 +15,7 @@
 
 ## 常用命令
 
-运行光学逻辑剖分：
+运行光学逻辑剖分（默认 `s2`）：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
@@ -21,6 +23,19 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition
   --manifest-path data/optocal/manifest.jsonl \
   --output-dir data/ray_output/logical_partition
 ```
+
+源 CRS 保留型平面窗口剖分：
+
+```bash
+PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
+  --input-dir data/optocal \
+  --manifest-path data/optocal/manifest.jsonl \
+  --grid-type plane_grid \
+  --target-crs "" \
+  --max-cells-per-asset 50
+```
+
+`plane_grid` 只适合逻辑窗口输出，不支持实体瓦片，也不能当作 encoder 的全球拓扑格网。
 
 运行产品剖分：
 
@@ -48,8 +63,8 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job 
 scripts/run_ray_ingest_e2e.sh
 ```
 
-脚本从 `POSTGRES_DSN`、`RAY_ADDRESS`、`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
-`MINIO_SECRET_KEY` 和 `MINIO_BUCKET` 读取 PostgreSQL、Ray 和 MinIO 配置。
+脚本从 `CUBE_WEB_POSTGRES_DSN`/`POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`/`RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
+`MINIO_SECRET_KEY` 和 `MINIO_BUCKET` 读取 OpenGauss、Ray 和 MinIO 配置。
 分布式后端缺少必需配置时会显式失败。
 
 运行光学 Ray 剖分并在同一作业内入库：

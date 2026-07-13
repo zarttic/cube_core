@@ -12,6 +12,8 @@
 `cube_encoder` 是 SDK 提供方。其他包必须通过 `grid_core.sdk.CubeEncoderSDK`
 或 Web SDK backend 使用 encoder 能力，不允许复制格网逻辑。
 
+当前格网契约：`cube_encoder` 完整支持 `s2`、`mgrs`、`tile_matrix`、`isea4h` 的定位、覆盖、拓扑和编码；`plane_grid` 当前只提供 source-plane ST code 校验与 `cube_split` 的逻辑窗口剖分，不是 encoder 的通用 locate/cover/topology 引擎。Web 生产页面不再暴露 `mgrs`，普通逻辑格网使用 `s2`、`tile_matrix`，源 CRS 保留型逻辑剖分使用 `plane_grid`，实体剖分使用 `s2`、`tile_matrix` 或 `isea4h`。
+
 ## 构建、测试与开发命令
 
 ```bash
@@ -70,6 +72,7 @@ cd cube_web/frontend && npm run build
 - 修改前端详情抽屉、弹窗或跨页面复用组件时，必须先重置当前记录 id 或状态，避免复用上一次打开的详情数据。
 - 新增依赖前，先确认现有依赖无法满足需求。
 - 不随意移动目录或重命名公共模块。
+- 文档中的运行端点、格网矩阵、认证规则和数据表语义必须以代码与测试为准；历史性能报告保留原始结果，但必须标注测量时间，不得冒充当前契约。
 
 ## 生产与演示分离
 
@@ -146,6 +149,8 @@ CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 
 配置页面必须展示 OpenGauss/PostgreSQL 兼容 DSN、Ray 和 MinIO 的运行时启动信息，但不得把这些值写回
 `cube_web_configs`。
+
+当 `CUBE_WEB_AUTH_REQUIRED=1` 时，`/v1/partition/schemas/import` 是载入系统使用的公开导入入口；其余 `/v1/*` 默认要求 Bearer Token。前端非管理员只保留公共编码入口，直接访问剖分页面会回到门户首页；这不是后端业务授权的替代品。
 
 OpenGauss 连接变量名仍使用历史兼容名 `CUBE_WEB_POSTGRES_DSN`，代码通过 PostgreSQL
 兼容协议和 `psycopg` 连接 OpenGauss。文档和交接说明中应称 OpenGauss，不要把运行库误写成
@@ -271,9 +276,10 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
   - 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
   - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
-  - 普通光学逻辑剖分（`s2`/`tile_matrix`，`mgrs` 已废弃不再使用）和实体剖分（ISEA4H）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
+  - 普通光学逻辑剖分（`s2`/`tile_matrix`）、源 CRS 保留型逻辑剖分（`plane_grid`，当前仅逻辑方式）和实体剖分（`s2`/`tile_matrix`/`isea4h`）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
   - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
   - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
   - 碳卫星 `run` 任务可以使用 `input_dir` 或 `source_uri`/`selected_observations[].source_uri`；`run` 模式会执行入库，`demo` 兼容入口不得声称或触发入库。
-  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `ISEA4H` 触发实体剖分，默认 `grid_level=6`。普通逻辑剖分只保留 `s2` 和 `tile_matrix`；`mgrs` 已废弃不再使用，默认层级仍为 5。
+  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `s2`、`tile_matrix` 或 `isea4h`，实体默认 `grid_level=6`。普通逻辑剖分默认层级仍为 5；`plane_grid` 逻辑剖分默认保留源 CRS。`max_cells_per_asset=0` 表示不设上限，smoke/调试任务应显式设置小的正数。
+  - `plane_grid` 当前按每个源资产的像素窗口生成 `<crs>/<level>/<col>/<row>` 形式的源平面编码；跨场景唯一性、WGS84 bbox 质检和地图预览仍属于后续重构范围，不得把该模式当作全局拓扑格网使用。
   - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。

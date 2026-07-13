@@ -335,6 +335,12 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert "'/':" not in app_source
     assert ':href="item.path"' in app_source
     assert "currentNavItems" in app_source
+    assert "const isAdmin = computed(() => userStore.role.value === '管理员');" in app_source
+    assert "const currentNavItems = computed(() => navItems(isAdmin.value));" in app_source
+    assert "function redirectNonAdminFromPartition()" in app_source
+    assert "window.location.replace(portalHomeUrl);" in app_source
+    assert "const publicNavLabels = new Set(['全球离散格网模型与编码']);" in nav_source
+    assert ".filter((item) => isAdmin || publicNavLabels.has(item.label))" in nav_source
     assert "targetFromAuthState(state)" in app_source
     assert "normalizePath(window.location.pathname)" in app_source
 
@@ -923,6 +929,27 @@ def test_auth_required_rejects_v1_without_bearer(monkeypatch):
     assert resp.json()["detail"] == "Missing Authorization header"
 
 
+def test_auth_required_allows_partition_schema_import_without_bearer(monkeypatch):
+    monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "1")
+
+    resp = client.post(
+        "/v1/partition/schemas/import",
+        json={
+            "batch_id": "AUTH_PUBLIC_IMPORT",
+            "data_type": "optical",
+            "assets": [
+                ard_raster_asset(
+                    "s3://cube/cube/source/optocal/auth-public-import.tif",
+                    "auth-public-import",
+                )
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["batch_id"] == "AUTH_PUBLIC_IMPORT"
+
+
 def test_auth_required_allows_v1_with_valid_bearer(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "1")
     token = make_jwt({"sub": "u-1", "username": "alice", "exp": time.time() + 3600})
@@ -1146,6 +1173,16 @@ def test_config_update_accepts_plane_grid_type_with_unlimited_cell_default():
 
     assert resp.status_code == 200
     assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "plane_grid"
+    assert resp.json()["config"]["partition"]["optical"]["max_cells_per_asset"] == 0
+
+
+def test_config_update_accepts_unlimited_max_cells_per_asset():
+    resp = client.post(
+        "/v1/config/update",
+        json={"config": {"partition": {"optical": {"max_cells_per_asset": 0}}}},
+    )
+
+    assert resp.status_code == 200
     assert resp.json()["config"]["partition"]["optical"]["max_cells_per_asset"] == 0
 
 

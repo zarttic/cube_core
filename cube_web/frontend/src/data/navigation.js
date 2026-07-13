@@ -27,6 +27,8 @@ const headerLabelOrder = [
   '全球离散格网模型与编码',
 ];
 
+const publicNavLabels = new Set(['全球离散格网模型与编码']);
+
 function normalizeNavItem(item) {
   if (!item?.label) return null;
   if (item.label === '首页') return { label: '首页', kind: 'external', url: portalHomeUrl };
@@ -37,7 +39,7 @@ function normalizeNavItem(item) {
   return null;
 }
 
-export function navItems() {
+export function navItems(isAdmin = true) {
   const itemsByLabel = new Map();
   defaultNavItems.forEach((item) => {
     const normalized = normalizeNavItem(item);
@@ -47,7 +49,7 @@ export function navItems() {
     const normalized = normalizeNavItem(item);
     if (normalized) itemsByLabel.set(normalized.label, normalized);
   });
-  const items = [...itemsByLabel.values()];
+  const items = [...itemsByLabel.values()].filter((item) => isAdmin || publicNavLabels.has(item.label));
   return [
     ...headerLabelOrder.flatMap((label) => items.filter((item) => item.label === label)),
     ...items.filter((item) => !headerLabelOrder.includes(item.label)),
