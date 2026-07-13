@@ -105,6 +105,14 @@ def test_product_parse_args_allows_isea4h_grid_type(monkeypatch):
     assert args.grid_type == "isea4h"
 
 
+def test_product_parse_args_allows_plane_grid_and_keeps_source_crs_by_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["product_partition_job.py", "--grid-type", "plane_grid"])
+    args = parse_args()
+    assert args.grid_type == "plane_grid"
+    assert args.target_crs == ""
+    assert args.max_cells_per_asset == 0
+
+
 def _product_row(asset_path: Path, year: int = 1980) -> dict:
     return {
         "scene_id": f"dianzhong_ecological_security_{year}",

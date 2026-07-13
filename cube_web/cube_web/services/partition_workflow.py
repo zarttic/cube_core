@@ -29,7 +29,7 @@ ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 TASK_SYNC_WAIT_SECONDS = 30.0
 RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
-PARTITION_SLOT_GRID_TYPES = ("tile_matrix", "s2", "isea4h")
+PARTITION_SLOT_GRID_TYPES = ("tile_matrix", "plane_grid", "s2", "isea4h")
 PARTITION_SLOT_METHODS = ("logical", "entity")
 
 
@@ -890,7 +890,8 @@ def _partition_slot_status(attempt_status: str) -> str:
 
 def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, str]:
     grid_labels = {
-        "tile_matrix": "平面格网",
+        "tile_matrix": "经纬度格网",
+        "plane_grid": "平面格网",
         "s2": "四边形格网",
         "isea4h": "六边形格网",
     }

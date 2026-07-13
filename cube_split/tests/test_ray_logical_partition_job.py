@@ -129,6 +129,13 @@ def test_parse_args_allows_isea4h_grid_type(monkeypatch):
     assert args.grid_type == "isea4h"
 
 
+def test_parse_args_allows_plane_grid_and_defaults_cell_limit_to_unlimited(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "plane_grid"])
+    args = parse_args()
+    assert args.grid_type == "plane_grid"
+    assert args.max_cells_per_asset == 0
+
+
 def test_parse_args_defaults_to_fastest_measured_cog_compression(monkeypatch):
     monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py"])
 

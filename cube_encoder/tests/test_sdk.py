@@ -86,6 +86,25 @@ def test_sdk_st_code_generate_parse_batch():
     assert batch[0] == f"s2:7:{g1}:202603091530"
 
 
+def test_sdk_plane_grid_st_code_generate_parse_roundtrip():
+    sdk = CubeEncoderSDK()
+    timestamp = datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)
+
+    st_code = sdk.generate_st_code(
+        grid_type="plane_grid",
+        level=11,
+        space_code="epsg32650/11/3/4",
+        timestamp=timestamp,
+        time_granularity="day",
+    )
+    parsed = sdk.parse_st_code(st_code.st_code)
+
+    assert st_code.st_code == "pg:11:epsg32650/11/3/4:20260309"
+    assert parsed.grid_type == "plane_grid"
+    assert parsed.level == 11
+    assert parsed.space_code == "epsg32650/11/3/4"
+
+
 def test_sdk_s2_locate_generate_parse_roundtrip():
     sdk = CubeEncoderSDK()
     timestamp = datetime(2026, 3, 9, 15, 30, 0, tzinfo=timezone.utc)

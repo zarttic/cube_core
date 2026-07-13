@@ -12,6 +12,7 @@ from typing import Any
 from cube_split import runtime_config
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled, shutdown_ray_if_needed
 from cube_split.jobs.ray_partition_core import (
+    PLANE_GRID_TYPE,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
     asset_record_to_dict,
@@ -58,11 +59,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional target CRS for standardized COG assets, e.g. EPSG:4326. Empty keeps source CRS.",
     )
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "mgrs", "tile_matrix", "isea4h"], help="Grid type")
+    parser.add_argument("--grid-type", default="s2", choices=["s2", "mgrs", "tile_matrix", "isea4h", "plane_grid"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"], help="ST time code granularity")
-    parser.add_argument("--max-cells-per-asset", type=int, default=20000, help="Safety limit for cover cells per asset")
+    parser.add_argument("--max-cells-per-asset", type=int, default=0, help="Safety limit for cover cells per asset (0 disables)")
     parser.add_argument(
         "--ray-parallelism",
         type=int,
@@ -335,6 +336,8 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         backend = "ray" if args.ray_address else "thread"
     else:
         backend = backend_requested
+    if str(args.grid_type or "").lower() == PLANE_GRID_TYPE and str(args.target_crs or "").strip():
+        raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
 
     source_uploader = None
     if backend == "ray":

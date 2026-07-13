@@ -393,7 +393,8 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "activeModule.value === 'entity'" not in source
     assert ">实体剖分</button>" not in source
     assert '<el-option label="四边形格网" value="s2" />' in source
-    assert '<el-option label="平面格网" value="tile_matrix" />' in source
+    assert '<el-option label="经纬度格网" value="tile_matrix" />' in source
+    assert '<el-option label="平面格网" value="plane_grid" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS (逻辑剖分)" value="mgrs" />' not in source
     assert 'v-model="radarGridType"' in source
@@ -678,7 +679,8 @@ def test_config_view_does_not_expose_mgrs_partition_grid_type():
     )
 
     assert '<el-option label="四边形格网" value="s2" />' in source
-    assert '<el-option label="平面格网" value="tile_matrix" />' in source
+    assert '<el-option label="经纬度格网" value="tile_matrix" />' in source
+    assert '<el-option label="平面格网" value="plane_grid" />' in source
     assert '<el-option label="六边形格网" value="isea4h" />' in source
     assert '<el-option label="MGRS" value="mgrs" />' not in source
 
@@ -688,9 +690,9 @@ def test_encoding_view_displays_generic_grid_type_names():
         encoding="utf-8"
     )
 
-    assert "tile_matrix: '平面格网'" in source
+    assert "tile_matrix: '经纬度格网'" in source
     assert '<input v-model="division.gridType" type="radio" value="tile_matrix">' in source
-    assert '<option value="tile_matrix">平面格网</option>' in source
+    assert '<option value="tile_matrix">经纬度格网</option>' in source
     assert '<input v-model="topology.gridType" type="radio" value="tile_matrix">' in source
     assert "s2: '四边形格网'" in source
     assert '<input v-model="division.gridType" type="radio" value="s2">' in source
@@ -1134,6 +1136,17 @@ def test_config_update_accepts_tile_matrix_grid_type():
 
     assert resp.status_code == 200
     assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "tile_matrix"
+
+
+def test_config_update_accepts_plane_grid_type_with_unlimited_cell_default():
+    resp = client.post(
+        "/v1/config/update",
+        json={"config": {"partition": {"optical": {"grid_type": "plane_grid", "grid_level": 5}}}},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["config"]["partition"]["optical"]["grid_type"] == "plane_grid"
+    assert resp.json()["config"]["partition"]["optical"]["max_cells_per_asset"] == 0
 
 
 def test_config_update_rejects_mgrs_partition_grid_type():
@@ -1981,6 +1994,50 @@ def test_optical_partition_runner_dispatches_tile_matrix_to_logical_partition(mo
     assert captured["grid_type"] == "tile_matrix"
     assert captured["grid_level"] == 5
     assert result["output_path"].endswith("index_rows.jsonl")
+
+
+def test_optical_partition_runner_dispatches_plane_grid_to_logical_without_reproject_or_cell_limit(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "plane-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "execution_engine": "thread",
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "total_index_rows": 0,
+            "ray_parallelism": 0,
+        }
+
+    def fail_entity_partition(_args):
+        raise AssertionError("plane_grid optical partition should use logical partition")
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
+
+    result = partition_runners._run_optical_partition_from_payload(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "plane_grid",
+            "grid_level": 11,
+            "partition_backend": "thread",
+        },
+        mode="partition_test_no_ingest",
+    )
+
+    assert result["status"] == "completed"
+    assert captured["grid_type"] == "plane_grid"
+    assert captured["grid_level"] == 11
+    assert captured["target_crs"] == ""
+    assert captured["max_cells_per_asset"] == 0
+    assert result["partition_type"] == "logical"
 
 
 def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_path):
@@ -4258,11 +4315,13 @@ def test_partition_batch_detail_includes_partition_slots_and_rejects_duplicate_c
     slots = detail_resp.json()["partition_slots"]
     logical_slot = next(slot for slot in slots if slot["grid_type"] == "s2" and slot["partition_method"] == "logical")
     entity_slot = next(slot for slot in slots if slot["grid_type"] == "s2" and slot["partition_method"] == "entity")
-    assert len(slots) == 6
+    plane_slot = next(slot for slot in slots if slot["grid_type"] == "plane_grid" and slot["partition_method"] == "logical")
+    assert len(slots) == 8
     assert logical_slot["status"] == "completed"
     assert logical_slot["disabled"] is True
     assert entity_slot["status"] == "available"
     assert entity_slot["disabled"] is False
+    assert plane_slot["grid_label"] == "平面格网"
     assert rerun_logical_resp.status_code == 409
     assert entity_resp.status_code == 202
 
@@ -6914,6 +6973,53 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"
     assert captured["ingest_enabled"] is False
+
+
+def test_radar_partition_runner_dispatches_plane_grid_without_default_target_crs(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_logical_partition(args):
+        captured.update(vars(args))
+        run_dir = tmp_path / "plane-radar-run"
+        run_dir.mkdir()
+        rows_path = run_dir / "index_rows.jsonl"
+        rows_path.write_text("", encoding="utf-8")
+        return {
+            "status": "completed",
+            "data_type": "radar",
+            "run_dir": str(run_dir),
+            "rows_path": str(rows_path),
+            "total_index_rows": 0,
+            "grid_type": args.grid_type,
+            "grid_level": args.grid_level,
+            "partition_backend_used": args.partition_backend,
+            "execution_engine": args.partition_backend,
+            "ray_parallelism": args.ray_parallelism,
+            "ingest_enabled": False,
+        }
+
+    def fail_entity_partition(_args):
+        raise AssertionError("plane_grid radar partition should use logical partition")
+
+    monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
+    monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
+    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", None)
+
+    result = partition_runners._run_radar_partition_test(
+        {
+            "input_dir": str(tmp_path),
+            "grid_type": "plane_grid",
+            "grid_level": 11,
+            "partition_backend": "thread",
+        }
+    )
+
+    assert result["mode"] == "partition_test_no_ingest"
+    assert result["partition_type"] == "logical"
+    assert captured["grid_type"] == "plane_grid"
+    assert captured["grid_level"] == 11
+    assert captured["target_crs"] == ""
+    assert captured["max_cells_per_asset"] == 0
 
 
 def test_radar_partition_retry_endpoint(monkeypatch):

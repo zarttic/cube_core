@@ -17,7 +17,8 @@ const ingest = computed(() => config.value.ingest.optical);
 const quality = computed(() => config.value.quality.optical);
 const gridTypeLabels = {
   s2: '四边形格网',
-  tile_matrix: '平面格网',
+  tile_matrix: '经纬度格网',
+  plane_grid: '平面格网',
   isea4h: '六边形格网',
 };
 
@@ -34,7 +35,7 @@ function emptyConfig() {
         target_crs: 'EPSG:4326',
         cover_mode: 'intersect',
         time_granularity: 'day',
-        max_cells_per_asset: 20000,
+        max_cells_per_asset: 0,
         cog_workers: 2,
         cog_compress: 'LZW',
         cog_predictor: 2,
@@ -174,7 +175,8 @@ onMounted(loadConfig);
                 <el-form-item label="格网类型">
                   <el-select v-model="optical.grid_type">
                     <el-option label="四边形格网" value="s2" />
-                    <el-option label="平面格网" value="tile_matrix" />
+                    <el-option label="经纬度格网" value="tile_matrix" />
+                    <el-option label="平面格网" value="plane_grid" />
                     <el-option label="六边形格网" value="isea4h" />
                   </el-select>
                 </el-form-item>
@@ -202,7 +204,7 @@ onMounted(loadConfig);
                   </el-select>
                 </el-form-item>
                 <el-form-item label="单资产最大格网数">
-                  <el-input-number v-model="optical.max_cells_per_asset" :min="1" :step="1000" />
+                  <el-input-number v-model="optical.max_cells_per_asset" :min="0" :step="1000" />
                 </el-form-item>
               </div>
 

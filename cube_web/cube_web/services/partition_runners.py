@@ -25,7 +25,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
-PARTITION_GRID_TYPES = {"s2", "mgrs", "tile_matrix", "isea4h"}
+PARTITION_GRID_TYPES = {"s2", "mgrs", "tile_matrix", "isea4h", "plane_grid"}
 PARTITION_METHODS = {"logical", "entity"}
 
 
@@ -486,14 +486,29 @@ def _int_payload_value(payload: dict, key: str, default: int) -> int:
 def _partition_grid_type(payload: dict) -> str:
     grid_type = str(payload.get("grid_type") or "s2").lower()
     if grid_type not in PARTITION_GRID_TYPES:
-        raise ValueError("grid_type must be one of: s2, mgrs, tile_matrix, isea4h")
+        raise ValueError("grid_type must be one of: s2, mgrs, tile_matrix, isea4h, plane_grid")
     return grid_type
+
+
+def _target_crs_for_grid(payload: dict, grid_type: str, *, explicit_payload: dict | None = None) -> str:
+    explicit = explicit_payload if explicit_payload is not None else payload
+    if grid_type == "plane_grid":
+        if str(explicit.get("target_crs") or "").strip():
+            raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
+        return ""
+    return str(payload.get("target_crs") or "EPSG:4326")
+
+
+def _max_cells_per_asset(payload: dict) -> int:
+    return _int_payload_value(payload, "max_cells_per_asset", 0)
 
 
 def _partition_method(payload: dict | None, *, grid_type: str | None = None) -> str:
     method = normalize_partition_method((payload or {}).get("partition_method"), grid_type=grid_type)
     if method not in PARTITION_METHODS:
         raise ValueError("partition_method must be one of: logical, entity")
+    if str(grid_type or "").lower() == "plane_grid" and method == "entity":
+        raise ValueError("plane_grid is supported for logical partition only")
     return method
 
 
@@ -550,7 +565,8 @@ def _result_observations(payload: dict, source_label: str, selected_source_index
 
 
 def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
-    payload = payload or {}
+    raw_payload = payload or {}
+    payload = raw_payload
     return payload.get("_cancellation_check") or payload.get("cancellation_check")
 
 
@@ -681,6 +697,8 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     partition_method = normalize_partition_method(raw_payload.get("partition_method"), grid_type=grid_type)
     if not str(raw_payload.get("partition_method") or "").strip():
         partition_method = "entity"
+    if grid_type == "plane_grid" and partition_method == "entity":
+        raise ValueError("plane_grid is supported for logical partition only")
     default_grid_level = DEFAULT_ENTITY_TEST_GRID_LEVEL if mode == "partition_test_no_ingest" else DEFAULT_ENTITY_GRID_LEVEL
     default_grid_level = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
@@ -708,14 +726,14 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
         cog_level=_int_payload_value(payload, "cog_level", 0),
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
         grid_level=entity_grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
-        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        max_cells_per_asset=_max_cells_per_asset(payload),
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
         ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
@@ -962,7 +980,8 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
     from cube_split.jobs.product_partition_job import run_product_partition
 
-    payload = payload or {}
+    raw_payload = payload or {}
+    payload = raw_payload
     if mode == "partition_run":
         _require_run_source(payload, data_type="product")
     minio = runtime_config.minio_settings(payload)
@@ -1023,14 +1042,14 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
         cog_level=_int_payload_value(payload, "cog_level", 0),
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
         grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "year"),
-        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        max_cells_per_asset=_max_cells_per_asset(payload),
         partition_prefix_len=_int_payload_value(payload, "partition_prefix_len", 3),
         partition_workers=_int_payload_value(payload, "partition_workers", 0),
         partition_backend=str(payload.get("partition_backend") or "ray"),
@@ -1185,14 +1204,14 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
         cog_level=_int_payload_value(payload, "cog_level", 0),
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
         grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
-        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        max_cells_per_asset=_max_cells_per_asset(payload),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
         ray_address=ray_address,
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
@@ -1351,14 +1370,14 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
         cog_level=_int_payload_value(payload, "cog_level", 0),
         cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=str(payload.get("target_crs") or "EPSG:4326"),
+        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
         grid_level=entity_grid_level if partition_method == "entity" else grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
         target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
-        max_cells_per_asset=_int_payload_value(payload, "max_cells_per_asset", 20000),
+        max_cells_per_asset=_max_cells_per_asset(payload),
         ray_parallelism=_int_payload_value(payload, "ray_parallelism", 0),
         ray_address=str(payload.get("ray_address") or runtime_config.require_ray_address()),
         chunk_size=_int_payload_value(payload, "chunk_size", 0),
