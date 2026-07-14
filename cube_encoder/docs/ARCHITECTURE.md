@@ -1,6 +1,6 @@
 # cube_encoder 架构说明
 
-更新时间：2026-07-13
+更新时间：2026-07-14
 适用范围：`cube_encoder`
 
 ## 1. 定位
@@ -21,13 +21,11 @@
 - 拓扑操作：`/v1/topology/neighbors`、`/v1/topology/parent`、`/v1/topology/children`、`/v1/topology/geometry`、`/v1/topology/geometries`。
 - SDK 封装：`grid_core.sdk.CubeEncoderSDK`。
 
-支持的格网体系：
+支持的格网体系（生产格网严格限定为三类）：
 
-- `s2`：定位、覆盖、拓扑和几何反算。
-- `mgrs`：定位、覆盖、拓扑和几何反算。
-- `tile_matrix`：Web Mercator 平面瓦片格网定位、覆盖和几何反算。
-- `isea4h`：基于 Uber H3 的第一阶段可运行能力。
-- `plane_grid`：只注册为 ST code 类型，用于承载 `cube_split` 源平面窗口产生的编码；当前没有 encoder engine，因此不能调用 locate、cover 或 topology。
+- `geohash`（经纬度格网，logical）：定位、覆盖、拓扑和几何反算；`space_code` 为 base32 geohash，层级 `1..12`。
+- `mgrs`（平面格网，logical）：标准 UTM/UPS MGRS 定位、覆盖、拓扑和几何反算；结果同时携带标准 `space_code` 与 `topology_code`（`mgrs-topo-v1:<domain>:<level>:<space_code>`），精度 `0..5`。
+- `isea4h`（六边形格网，entity）：纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；`space_code` 为 DGGRID `SEQNUM`，分辨率 `0..15`；运行时不依赖 H3 或 DGGRID，固定权威向量由 DGGRID 生成并提交为测试基线。
 
 ## 3. 分层结构
 
@@ -36,7 +34,7 @@
   -> SDK / HTTP API
   -> 统一请求与响应模型
   -> grid service / code service / topology service
-  -> s2 / mgrs / tile_matrix / isea4h engine
+  -> geohash / mgrs / isea4h engine
   -> geometry / projection / timecode utilities
 ```
 
@@ -46,7 +44,7 @@
 - 引擎实现可替换，但输出模型保持稳定。
 - CRS 默认按 `EPSG:4326` 对外表达，特殊投影细节封装在引擎内部。
 - `cover_mode=minimal` 允许返回低于请求层级的格网单元，用于减少复杂边界的冗余覆盖。
-- `plane_grid` 不走上述全球拓扑链路；调用 `/v1/grid/cover` 或 `CubeEncoderSDK.cover(grid_type="plane_grid")` 当前会失败，这是有意保留的后续重构边界。
+- 请求层级字段统一为 `requested_grid_level`；返回单元保留实际 `grid_level`。拓扑与几何操作以 `GridAddress` 为入参，因为 ISEA4H 的 seqnum 只有连同分辨率才有意义，MGRS 拓扑结果需同时保留标准码与 `topology_code` 两个身份。
 
 ## 4. 调用边界
 
@@ -57,13 +55,14 @@ from grid_core.sdk import CubeEncoderSDK
 
 sdk = CubeEncoderSDK()
 cells = sdk.cover(
-    grid_type="s2",
-    level=7,
+    grid_type="geohash",
+    requested_grid_level=6,
+    cover_mode="intersect",
+    boundary_type="polygon",
     geometry={
         "type": "Polygon",
         "coordinates": [[[116.3, 39.8], [116.5, 39.8], [116.5, 40.0], [116.3, 40.0], [116.3, 39.8]]],
     },
-    cover_mode="intersect",
 )
 ```
 

@@ -1,6 +1,6 @@
 # cube_encoder
 
-更新时间：2026-07-13
+更新时间：2026-07-14
 
 `cube_encoder` 是 cube 项目的底层格网编码 SDK 与 API 提供方，负责离散格网编码、
 时空编码、拓扑元操作和统一能力输出。其他包应通过 `grid_core.sdk.CubeEncoderSDK`
@@ -8,10 +8,13 @@
 
 ## 核心能力
 
-- 支持 S2 CellId token-backed `s2`、`mgrs`、`tile_matrix` 和 H3-backed `isea4h` 的点定位与几何覆盖。
-- 支持 `plane_grid` 的 ST code 生成/解析契约；`plane_grid` 不提供通用点定位、覆盖或拓扑引擎，源平面窗口剖分由 `cube_split` 负责。
-- 支持时空编码生成、批量生成与解析。
-- 支持邻接、父级、子级、编码转几何、批量编码转几何。
+- 生产格网严格限定为三类：`geohash`（经纬度格网，logical）、`mgrs`（平面格网，logical）、`isea4h`（六边形格网，entity）。
+- 支持三类格网的点定位、几何覆盖、拓扑元操作和 ST code 生成/解析。
+- `isea4h` 为纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；运行时不依赖 H3 或 DGGRID，`space_code` 为 DGGRID `SEQNUM`（1 基十进制字符串）。
+- `mgrs` 结果同时携带标准 `space_code`（标准 UTM/UPS MGRS）与 `topology_code`（`mgrs-topo-v1:<domain>:<level>:<space_code>`）；`geohash`/`isea4h` 的 `topology_code` 为空。
+- 请求层级字段统一为 `requested_grid_level`；返回单元保留其实际 `grid_level`（含 `minimal` 覆盖的混合层级）。
+- 原生层级范围：Geohash `1..12`、MGRS 精度 `0..5`、ISEA4H 分辨率 `0..15`。
+- 支持时空编码生成、批量生成与解析；邻接、父级、子级、编码转几何、批量编码转几何。
 - Python SDK 入口：`grid_core.sdk.CubeEncoderSDK`。
 - FastAPI 服务入口：`/v1`。
 
@@ -36,12 +39,10 @@ from datetime import datetime, timezone
 from grid_core.sdk import CubeEncoderSDK
 
 sdk = CubeEncoderSDK()
-cell = sdk.locate(grid_type="s2", level=7, point=[116.391, 39.907])
-neighbors = sdk.neighbors(grid_type="s2", code=cell.space_code, k=1)
+cell = sdk.locate(grid_type="geohash", requested_grid_level=6, point=[116.391, 39.907])
+neighbors = sdk.neighbors(address=cell, k=1)
 st_code = sdk.generate_st_code(
-    grid_type="s2",
-    level=7,
-    space_code=cell.space_code,
+    address=cell,
     timestamp=datetime(2026, 3, 9, 15, 30, tzinfo=timezone.utc),
     time_granularity="minute",
 ).st_code
@@ -59,11 +60,11 @@ python3.11 -m pip install dist/cube_encoder-*.whl
 ```bash
 curl -X POST http://127.0.0.1:50012/v1/grid/locate \
   -H 'Content-Type: application/json' \
-  -d '{"grid_type":"s2","level":7,"point":[116.391,39.907]}'
+  -d '{"grid_type":"geohash","requested_grid_level":6,"point":[116.391,39.907]}'
 
 curl -X POST http://127.0.0.1:50012/v1/code/st \
   -H 'Content-Type: application/json' \
-  -d '{"grid_type":"s2","level":7,"space_code":"35f04","timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute"}'
+  -d '{"address":{"grid_type":"geohash","grid_level":6,"space_code":"wx4g0b"},"timestamp":"2026-03-09T15:30:00Z","time_granularity":"minute"}'
 ```
 
 ## 测试

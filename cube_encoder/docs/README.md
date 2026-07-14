@@ -1,6 +1,6 @@
 # cube_encoder 文档索引
 
-更新时间：2026-07-13
+更新时间：2026-07-14
 
 本文档目录只维护 `cube_encoder` 的 SDK、API、格网引擎和发布规则。剖分入库执行链路见
 [cube_split/docs/README.md](../../cube_split/docs/README.md)，Web 管理入口、托管剖分 API
@@ -13,9 +13,10 @@
 
 ## 格网边界
 
-- `s2`、`mgrs`、`tile_matrix`、`isea4h`：编码器提供 locate、cover、topology 和 ST code 能力。
-- `plane_grid`：编码器只提供 ST code 的 prefix、格式校验和解析；源 CRS、像素窗口和布局由 `cube_split` 的逻辑剖分实现。
-- `mgrs` 仍是 SDK/API 兼容能力，但不再是 Web 生产剖分页面的可选项。
+- 生产格网严格限定为三类：`geohash`、`mgrs`、`isea4h`；编码器为三者提供 locate、cover、topology 和 ST code 能力。
+- 派生剖分方式固定：`geohash`→logical、`mgrs`→logical、`isea4h`→entity；不由调用方选择。
+- `isea4h` 为纯 Python 实现，对齐 DGGRID v8.44；运行时不依赖 H3 或 DGGRID。
+- S2、Tile Matrix、Plane Grid、H3 已从编码器移除，不再是可用格网。
 
 ## 运行版本
 
