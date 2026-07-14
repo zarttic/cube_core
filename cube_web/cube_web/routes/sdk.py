@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
-from fastapi import HTTPException
+from cube_split.read.carbon_query import query_carbon_observations
+from fastapi import APIRouter, HTTPException
 from grid_core.sdk import (
     BatchAddressRequest,
     BatchGeometryResponse,
@@ -25,7 +25,7 @@ from grid_core.sdk import (
     STCodeParseRequest,
     STCodeParseResponse,
 )
-from cube_split.read.carbon_query import query_carbon_observations
+
 from cube_web.schemas import SpatiotemporalQueryRequest
 
 
