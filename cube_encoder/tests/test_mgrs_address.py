@@ -19,9 +19,8 @@ from grid_core.app.engines.mgrs.address import (
     parse_topology_code,
     precision_from_code,
 )
-from grid_core.app.engines.mgrs.domain import GridDomain, domain_for_point
+from grid_core.app.engines.mgrs.domain import domain_for_point
 from grid_core.app.engines.mgrs_engine import MGRSEngine
-
 
 # ---------------------------------------------------------------------------
 # Precision / level basics
@@ -35,7 +34,6 @@ def test_mgrs_precision_equals_grid_level() -> None:
     assert address.grid_level == 5
     assert address.space_code == canonicalize_mgrs(address.space_code)
     # Precision 5 = 10 digit suffix
-    digits = len([c for c in address.space_code if c.isdigit()])
     # Only trailing digits count toward precision
     from grid_core.app.engines.mgrs.address import suffix_digit_count
     assert suffix_digit_count(address.space_code) == 10

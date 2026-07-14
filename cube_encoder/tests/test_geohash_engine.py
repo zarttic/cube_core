@@ -1,14 +1,10 @@
 """Tests for GeohashEngine — TDD step 1 (these fail before the engine exists)."""
 from __future__ import annotations
 
-import math
-import time
-
 import pytest
 
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.models.grid_address import GridAddress
-
 
 # ---------------------------------------------------------------------------
 # Known-vector tests from the plan

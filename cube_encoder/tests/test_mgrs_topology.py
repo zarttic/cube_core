@@ -6,7 +6,6 @@ from shapely.geometry import shape
 
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
-
 # ---------------------------------------------------------------------------
 # Clipped geometry
 # ---------------------------------------------------------------------------

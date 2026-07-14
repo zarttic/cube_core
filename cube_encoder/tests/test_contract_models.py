@@ -12,7 +12,6 @@ from grid_core.app.core.enums import GridType
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.models.request import (
-    CoverRequest,
     LocateRequest,
     NeighborsRequest,
     validate_requested_grid_level,

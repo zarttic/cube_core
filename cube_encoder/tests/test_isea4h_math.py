@@ -22,7 +22,6 @@ from grid_core.app.engines.isea4h.constants import (
 )
 from grid_core.app.engines.isea4h.projection import locate_cell
 
-
 # ---------------------------------------------------------------------------
 # constants
 # ---------------------------------------------------------------------------

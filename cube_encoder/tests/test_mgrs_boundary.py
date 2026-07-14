@@ -1,12 +1,10 @@
 """Tests for MGRS boundary conditions: antimeridian, UTM/UPS transitions, polar zones."""
 from __future__ import annotations
 
-import pytest
 from shapely.geometry import shape
 
 from grid_core.app.engines.mgrs.domain import domain_for_point
 from grid_core.app.engines.mgrs_engine import MGRSEngine
-
 
 # ---------------------------------------------------------------------------
 # Antimeridian
