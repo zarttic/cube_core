@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import mgrs as mgrs_lib
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.validation import make_valid
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs.address import (
@@ -13,10 +11,7 @@ from grid_core.app.engines.mgrs.address import (
 )
 from grid_core.app.engines.mgrs.domain import GridDomain, domain_for_point
 from grid_core.app.engines.mgrs.geometry import (
-    cell_bbox,
-    cell_center,
     cell_geometry_clipped,
-    cell_geometry_to_geojson,
 )
 from grid_core.app.engines.mgrs.projection import cell_size_metres, projected_to_wgs84
 from grid_core.app.models.grid_address import GridAddress

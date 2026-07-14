@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Generator
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
@@ -291,29 +290,21 @@ def _neighbor_in_direction(code: str, direction: str) -> str:
 
 def _neighbors_k1(code: str) -> list[str]:
     """Return the (up to) 8 geohash neighbors at k=1."""
-    directions = ["right", "left", "top", "bottom"]
-    diagonals = [
-        ("top", "right"),
-        ("top", "left"),
-        ("bottom", "right"),
-        ("bottom", "left"),
-    ]
-
     # Cardinal neighbors
     r = _neighbor_in_direction(code, "right")
-    l = _neighbor_in_direction(code, "left")
+    left = _neighbor_in_direction(code, "left")
     t = _neighbor_in_direction(code, "top")
     b = _neighbor_in_direction(code, "bottom")
 
     # Diagonal neighbors
     tr = _neighbor_in_direction(r, "top")
-    tl = _neighbor_in_direction(l, "top")
+    tl = _neighbor_in_direction(left, "top")
     br = _neighbor_in_direction(r, "bottom")
-    bl = _neighbor_in_direction(l, "bottom")
+    bl = _neighbor_in_direction(left, "bottom")
 
     seen: set[str] = set()
     result: list[str] = []
-    for n in (r, l, t, b, tr, tl, br, bl):
+    for n in (r, left, t, b, tr, tl, br, bl):
         if n != code and n not in seen:
             seen.add(n)
             result.append(n)
@@ -338,8 +329,8 @@ def _geom_to_shapely(geometry: dict):
     """Convert a GeoJSON geometry dict to a Shapely geometry, normalising the
     antimeridian by splitting geometries that cross lon=180 / lon=-180."""
     try:
-        from shapely.geometry import shape, box as shapely_box
-        from shapely.ops import split as shapely_split
+        from shapely.geometry import box as shapely_box
+        from shapely.geometry import shape
     except ImportError:  # pragma: no cover
         raise RuntimeError("shapely is required for cover operations")
 
@@ -356,14 +347,8 @@ def _cells_for_bbox(
     lon_min: float, lat_min: float, lon_max: float, lat_max: float, precision: int
 ) -> list[str]:
     """Enumerate all geohash codes at ``precision`` that intersect the given bbox."""
-    # Find the geohash at each corner and fill in by expanding
-    corners = [
-        (lon_min, lat_min),
-        (lon_max, lat_min),
-        (lon_min, lat_max),
-        (lon_max, lat_max),
-    ]
-    # Start from code at lower-left corner
+    # Start from code at lower-left corner and fill in by expanding
+
     seed = _encode(
         max(-180.0, min(lon_min, 179.9999999)),
         max(-90.0, lat_min),
@@ -543,12 +528,6 @@ class GeohashEngine(BaseGridEngine):
         where a parent replaces all 32 children if the parent itself satisfies
         the criterion.
         """
-        try:
-            from shapely.geometry import shape, box as shapely_box
-            from shapely.ops import unary_union
-        except ImportError:  # pragma: no cover
-            raise RuntimeError("shapely is required for cover operations")
-
         aoi = _geom_to_shapely(geometry)
         if aoi.is_empty:
             return []
@@ -606,11 +585,6 @@ class GeohashEngine(BaseGridEngine):
     ) -> list[str]:
         """Replace groups of 32 siblings with their parent if the parent is
         fully covered by the AOI.  Works bottom-up from the deepest level."""
-        try:
-            from shapely.geometry import shape
-        except ImportError:  # pragma: no cover
-            raise RuntimeError("shapely is required for compact cover")
-
         code_set: set[str] = set(codes)
 
         # Work from longest codes upward

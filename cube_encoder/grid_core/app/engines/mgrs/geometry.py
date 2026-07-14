@@ -1,11 +1,9 @@
 """Clipped MGRS cell geometry: project square → densify → inverse-project → clip to domain."""
 from __future__ import annotations
 
-from functools import lru_cache
-
 import mgrs as mgrs_lib
 from pyproj import Transformer
-from shapely.geometry import MultiPolygon, Polygon, mapping, shape
+from shapely.geometry import MultiPolygon, Polygon, mapping
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 

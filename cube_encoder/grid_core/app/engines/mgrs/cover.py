@@ -4,32 +4,24 @@ from __future__ import annotations
 from collections import deque
 
 import mgrs as mgrs_lib
-from shapely.geometry import MultiPolygon, Polygon, shape
-from shapely.ops import unary_union
+from shapely.geometry import MultiPolygon, Polygon
 from shapely.validation import make_valid
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs.address import (
     build_topology_code,
-    canonicalize_mgrs,
-    precision_from_code,
 )
 from grid_core.app.engines.mgrs.domain import (
     GridDomain,
-    domain_for_point,
-    domain_polygon,
 )
 from grid_core.app.engines.mgrs.geometry import (
     cell_bbox,
-    cell_center,
     cell_geometry_clipped,
-    cell_geometry_to_geojson,
 )
-from grid_core.app.engines.mgrs.topology import address_for_code, _domain_for_address
+from grid_core.app.engines.mgrs.topology import _domain_for_address
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_address import GridAddress
-from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.utils.geometry import to_shapely, wrapped_geometry_variants
 
 _converter = mgrs_lib.MGRS()

@@ -1,12 +1,13 @@
 """MGRS UTM/UPS grid engine: implements BaseGridEngine with GridAddress protocol."""
 from __future__ import annotations
 
+import mgrs as mgrs_lib
+
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
 from grid_core.app.engines.mgrs.address import (
     build_topology_code,
     canonicalize_mgrs,
-    precision_from_code,
 )
 from grid_core.app.engines.mgrs.cover import cover_geometry as _cover_geometry
 from grid_core.app.engines.mgrs.domain import domain_for_point
@@ -18,7 +19,6 @@ from grid_core.app.engines.mgrs.geometry import (
 )
 from grid_core.app.engines.mgrs.topology import (
     _domain_for_address,
-    address_for_code,
     children_addresses,
     neighbors_for_address,
     parent_address,
@@ -26,8 +26,6 @@ from grid_core.app.engines.mgrs.topology import (
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
-
-import mgrs as mgrs_lib
 
 _converter = mgrs_lib.MGRS()
 
@@ -125,9 +123,9 @@ class MGRSEngine(BaseGridEngine):
 
     def domain_geometry(self, address: GridAddress) -> dict:
         """Return the WGS84 valid-domain polygon for the given address's domain."""
-        from grid_core.app.engines.mgrs.domain import domain_polygon
-        from grid_core.app.engines.mgrs.geometry import cell_geometry_to_geojson
         from shapely.geometry import mapping
+
+        from grid_core.app.engines.mgrs.domain import domain_polygon
         domain = _domain_for_address(address.space_code)
         return dict(mapping(domain_polygon(domain)))
 

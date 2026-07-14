@@ -6,7 +6,6 @@ from functools import lru_cache
 from typing import Literal
 
 from shapely.geometry import MultiPolygon, Polygon, box
-from shapely.ops import unary_union
 
 # -------------------------------------------------------------------------
 # Latitude thresholds (half-open boundary policy)
