@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from grid_core.app.models.grid_address import GridAddress
 
 
-class GridCell(BaseModel):
-    grid_type: str
-    level: int
-    cell_id: str
-    space_code: str
+class GridCell(GridAddress):
+    """A fully resolved grid cell with geometry and metadata.
+
+    Inherits grid_type, grid_level, space_code, topology_code from GridAddress.
+    Adds spatial geometry fields and arbitrary metadata.
+    """
+
     center: List[float]
     bbox: List[float]
     geometry: Optional[Dict[str, Any]] = None

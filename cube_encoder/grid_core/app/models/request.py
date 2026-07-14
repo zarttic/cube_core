@@ -3,18 +3,51 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from grid_core.app.core.enums import BoundaryType, CoverMode, GridType, TimeGranularity
+from grid_core.app.models.grid_address import GridAddress
+
+# ---------------------------------------------------------------------------
+# Canonical level ranges (inclusive on both ends).
+# M2 imports validate_requested_grid_level from this module; do not duplicate.
+# ---------------------------------------------------------------------------
+
+LEVEL_RANGES: dict[GridType, tuple[int, int]] = {
+    GridType.GEOHASH: (1, 12),
+    GridType.MGRS: (0, 5),
+    GridType.ISEA4H: (0, 15),
+}
+
+
+def validate_requested_grid_level(grid_type: GridType, requested_grid_level: int) -> int:
+    """Validate that requested_grid_level is within the accepted inclusive range for grid_type.
+
+    Raises ValueError with 'requested_grid_level' in the message on out-of-range input.
+    M2 imports this function directly rather than duplicating the range logic.
+    """
+    minimum, maximum = LEVEL_RANGES[grid_type]
+    if not minimum <= requested_grid_level <= maximum:
+        raise ValueError(f"{grid_type.value} requested_grid_level must be in [{minimum}, {maximum}]")
+    return requested_grid_level
+
+
+# ---------------------------------------------------------------------------
+# Grid request models — all use requested_grid_level, never legacy "level".
+# extra="forbid" ensures legacy callers get a clear validation error.
+# ---------------------------------------------------------------------------
 
 
 class LocateRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    level: int = Field(ge=1, le=12)
+    model_config = ConfigDict(extra="forbid")
+
+    grid_type: GridType
+    requested_grid_level: int
     point: List[float] = Field(min_length=2, max_length=2)
 
     @model_validator(mode="after")
-    def validate_point_range(self):
+    def _validate_level_and_point(self) -> "LocateRequest":
+        validate_requested_grid_level(self.grid_type, self.requested_grid_level)
         lon, lat = self.point
         if lon < -180.0 or lon > 180.0:
             raise ValueError("Point longitude must be in [-180, 180]")
@@ -24,8 +57,10 @@ class LocateRequest(BaseModel):
 
 
 class CoverRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    level: int = Field(ge=1, le=12)
+    model_config = ConfigDict(extra="forbid")
+
+    grid_type: GridType
+    requested_grid_level: int
     cover_mode: CoverMode = CoverMode.INTERSECT
     boundary_type: BoundaryType = BoundaryType.BBOX
     geometry: Optional[Dict[str, Any]] = None
@@ -33,21 +68,65 @@ class CoverRequest(BaseModel):
     crs: str = "EPSG:4326"
 
     @model_validator(mode="after")
-    def validate_geometry_or_bbox(self):
+    def _validate_level_and_geometry(self) -> "CoverRequest":
+        validate_requested_grid_level(self.grid_type, self.requested_grid_level)
         if self.geometry is None and self.bbox is None:
             raise ValueError("Either geometry or bbox must be provided")
         return self
 
 
+# ---------------------------------------------------------------------------
+# Address-based topology request models (M1 frozen contract).
+# Topology and geometry operations consume a GridAddress because an ISEA4H
+# sequence number is only meaningful with its resolution, and MGRS topology
+# results must retain both space_code and topology_code identities.
+# ---------------------------------------------------------------------------
+
+
+class AddressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    address: GridAddress
+
+
+class NeighborsRequest(AddressRequest):
+    k: int = Field(default=1, ge=1, le=5)
+
+
+class ChildrenRequest(AddressRequest):
+    target_grid_level: int
+
+
+class BatchAddressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    addresses: List[GridAddress] = Field(min_length=1, max_length=500)
+    boundary_type: BoundaryType = BoundaryType.POLYGON
+
+
+# ---------------------------------------------------------------------------
+# ST-code request models — use requested_grid_level.
+# ---------------------------------------------------------------------------
+
+
 class STCodeGenerateRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    level: int = Field(ge=1, le=12)
+    model_config = ConfigDict(extra="forbid")
+
+    grid_type: GridType
+    requested_grid_level: int
     space_code: str
     timestamp: datetime
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
 
+    @model_validator(mode="after")
+    def _validate_level(self) -> "STCodeGenerateRequest":
+        validate_requested_grid_level(self.grid_type, self.requested_grid_level)
+        return self
+
 
 class STCodeParseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     st_code: str
 
 
@@ -57,36 +136,42 @@ class STCodeBatchItem(BaseModel):
 
 
 class STCodeBatchGenerateRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    level: int = Field(ge=1, le=12)
+    model_config = ConfigDict(extra="forbid")
+
+    grid_type: GridType
+    requested_grid_level: int
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
     items: List[STCodeBatchItem] = Field(min_length=1, max_length=1000)
 
+    @model_validator(mode="after")
+    def _validate_level(self) -> "STCodeBatchGenerateRequest":
+        validate_requested_grid_level(self.grid_type, self.requested_grid_level)
+        return self
 
-class NeighborsRequest(BaseModel):
-    grid_type: GridType = GridType.S2
+
+# ---------------------------------------------------------------------------
+# Legacy stub classes retained for import compatibility until Task 8 rewrites
+# the topology API routes.  These classes use bare string codes and are
+# deprecated; Task 8 replaces every usage with AddressRequest-based models.
+# ---------------------------------------------------------------------------
+
+
+class _LegacyCodeRequest(BaseModel):
+    """Base class for legacy string-code topology requests (Task 8 will remove)."""
+
+    grid_type: GridType
     code: str
-    k: int = Field(default=1, ge=1, le=5)
 
 
-class CodeToGeometryRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    code: str
+class ParentRequest(_LegacyCodeRequest):
+    pass
+
+
+class CodeToGeometryRequest(_LegacyCodeRequest):
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 
 class BatchCodeToGeometryRequest(BaseModel):
-    grid_type: GridType = GridType.S2
+    grid_type: GridType
     codes: List[str] = Field(min_length=1, max_length=500)
     boundary_type: BoundaryType = BoundaryType.POLYGON
-
-
-class ParentRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    code: str
-
-
-class ChildrenRequest(BaseModel):
-    grid_type: GridType = GridType.S2
-    code: str
-    target_level: int = Field(ge=1, le=12)

@@ -2,25 +2,21 @@ from __future__ import annotations
 
 from grid_core.app.core.enums import GridType
 from grid_core.app.core.exceptions import ValidationError
-from grid_core.app.engines.mgrs_engine import MGRSEngine
-from grid_core.app.engines.s2_engine import S2Engine
-from grid_core.app.engines.tile_matrix_engine import TileMatrixEngine
 
 
 class GridEngineRegistry:
+    """Engine registry stub for M1 contract freeze.
+
+    Real engine registrations are wired in Task 8 after replacement engines
+    (Tasks 2–7) pass their replacement gates.  Until then every engine lookup
+    raises ValidationError so callers get a clear message instead of a crash.
+    """
+
     def __init__(self) -> None:
-        self._engines = {
-            GridType.S2: S2Engine(),
-            GridType.MGRS: MGRSEngine(),
-            GridType.TILE_MATRIX: TileMatrixEngine(),
-        }
+        self._engines: dict[GridType, object] = {}
 
-    def get_engine(self, grid_type: GridType):
-        if grid_type == GridType.ISEA4H and grid_type not in self._engines:
-            from grid_core.app.engines.isea4h_engine import ISEA4HEngine
-
-            self._engines[grid_type] = ISEA4HEngine()
+    def get_engine(self, grid_type: GridType) -> object:
         engine = self._engines.get(grid_type)
         if engine is None:
-            raise ValidationError(f"Unsupported grid_type: {grid_type}")
+            raise ValidationError(f"Engine not yet implemented for grid_type: {grid_type}")
         return engine

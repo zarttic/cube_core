@@ -1,198 +1,92 @@
+"""Frozen M1 SDK contract stubs for CubeEncoderSDK.
+
+Method signatures are final and consumed by cube_split and cube_web.
+Implementations raise NotImplementedError until each engine replacement
+task (Tasks 2–7) is complete and the facade is wired (Task 8).
+"""
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
-from typing import Any
 
 from grid_core.app.core.enums import BoundaryType, CoverMode, GridType, TimeGranularity
 from grid_core.app.models.compact_grid_cell import CompactGridCell
+from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
 from grid_core.app.models.st_code import STCode
-from grid_core.app.services.code_service import CodeService
-from grid_core.app.services.grid_service import GridService
-from grid_core.app.services.topology_service import TopologyService
-from grid_core.app.utils.timecode import to_time_code
-
-
-def _parse_enum(value: str | Enum, enum_cls: type[Enum]) -> Enum:
-    if isinstance(value, enum_cls):
-        return value
-    return enum_cls(value)
 
 
 class CubeEncoderSDK:
-    """Local Python SDK facade over grid/topology/ST-code capabilities."""
+    """Typed SDK facade over grid/topology/ST-code capabilities.
 
-    def __init__(self) -> None:
-        self._grid = GridService()
-        self._topology = TopologyService()
-        self._code = CodeService()
+    All signatures are frozen by M1 contract.  Callers (cube_split, cube_web)
+    depend on these exact parameter names; do not rename them.
 
-    def locate(self, grid_type: str | GridType, level: int, point: list[float]) -> GridCell:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        return self._grid.locate(grid_type=parsed_grid_type, level=level, point=point)
+    ``codes_to_geometries`` keys its result by
+    ``topology_code or f"{grid_type}:{grid_level}:{space_code}"``
+    so distinct cross-domain MGRS cells cannot collide.
+    """
+
+    def locate(
+        self,
+        grid_type: str | GridType,
+        requested_grid_level: int,
+        point: list[float],
+    ) -> GridCell:
+        raise NotImplementedError
 
     def cover(
         self,
         grid_type: str | GridType,
-        level: int,
+        requested_grid_level: int,
         cover_mode: str | CoverMode,
         boundary_type: str | BoundaryType,
-        geometry: dict[str, Any] | None = None,
+        geometry: dict[str, object] | None = None,
         bbox: list[float] | None = None,
         crs: str = "EPSG:4326",
     ) -> list[GridCell]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_cover_mode = _parse_enum(cover_mode, CoverMode)
-        parsed_boundary_type = _parse_enum(boundary_type, BoundaryType)
-        return self._grid.cover(
-            grid_type=parsed_grid_type,
-            level=level,
-            geometry=geometry,
-            bbox=bbox,
-            cover_mode=parsed_cover_mode.value,
-            boundary_type=parsed_boundary_type,
-            crs=crs,
-        )
+        raise NotImplementedError
 
     def cover_compact(
         self,
         grid_type: str | GridType,
-        level: int,
+        requested_grid_level: int,
         cover_mode: str | CoverMode,
-        geometry: dict[str, Any] | None = None,
+        geometry: dict[str, object] | None = None,
         bbox: list[float] | None = None,
         crs: str = "EPSG:4326",
     ) -> list[CompactGridCell]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_cover_mode = _parse_enum(cover_mode, CoverMode)
-        return self._grid.cover_compact(
-            grid_type=parsed_grid_type,
-            level=level,
-            geometry=geometry,
-            bbox=bbox,
-            cover_mode=parsed_cover_mode.value,
-            crs=crs,
-        )
+        raise NotImplementedError
 
-    def neighbors(self, grid_type: str | GridType, code: str, k: int = 1) -> list[str]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        return self._topology.neighbors(grid_type=parsed_grid_type, code=code, k=k)
+    def neighbors(self, address: GridAddress, k: int = 1) -> list[GridAddress]:
+        raise NotImplementedError
 
-    def parent(self, grid_type: str | GridType, code: str) -> str:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        return self._topology.parent(grid_type=parsed_grid_type, code=code)
+    def parent(self, address: GridAddress) -> GridAddress:
+        raise NotImplementedError
 
-    def children(self, grid_type: str | GridType, code: str, target_level: int) -> list[str]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        return self._topology.children(grid_type=parsed_grid_type, code=code, target_level=target_level)
+    def children(self, address: GridAddress, target_grid_level: int) -> list[GridAddress]:
+        raise NotImplementedError
 
     def code_to_geometry(
         self,
-        grid_type: str | GridType,
-        code: str,
+        address: GridAddress,
         boundary_type: str | BoundaryType = BoundaryType.POLYGON,
-    ) -> dict[str, Any]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_boundary_type = _parse_enum(boundary_type, BoundaryType)
-        return self._topology.code_to_geometry(
-            grid_type=parsed_grid_type,
-            code=code,
-            boundary_type=parsed_boundary_type,
-        )
+    ) -> dict[str, object]:
+        raise NotImplementedError
 
-    def code_to_bbox(self, grid_type: str | GridType, code: str) -> list[float]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        return self._topology.code_to_bbox(
-            grid_type=parsed_grid_type,
-            code=code,
-        )
+    def code_to_bbox(self, address: GridAddress) -> list[float]:
+        raise NotImplementedError
 
     def codes_to_geometries(
         self,
-        grid_type: str | GridType,
-        codes: list[str],
+        addresses: list[GridAddress],
         boundary_type: str | BoundaryType = BoundaryType.POLYGON,
-    ) -> dict[str, dict[str, Any]]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_boundary_type = _parse_enum(boundary_type, BoundaryType)
-        return self._topology.codes_to_geometries(
-            grid_type=parsed_grid_type,
-            codes=codes,
-            boundary_type=parsed_boundary_type,
-        )
+    ) -> dict[str, dict[str, object]]:
+        raise NotImplementedError
 
     def generate_st_code(
         self,
-        grid_type: str | GridType,
-        level: int,
-        space_code: str,
+        address: GridAddress,
         timestamp: datetime,
         time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
     ) -> STCode:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
-        return self._code.generate_st_code(
-            grid_type=parsed_grid_type,
-            level=level,
-            space_code=space_code,
-            timestamp=timestamp,
-            time_granularity=parsed_time_granularity,
-        )
-
-    def batch_generate_st_codes(
-        self,
-        grid_type: str | GridType,
-        level: int,
-        items: list[dict[str, Any]],
-        time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
-    ) -> list[str]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
-        return self._code.batch_generate_st_codes(
-            grid_type=parsed_grid_type,
-            level=level,
-            items=items,
-            time_granularity=parsed_time_granularity,
-        )
-
-    def batch_locate_st_codes(
-        self,
-        grid_type: str | GridType,
-        level: int,
-        items: list[dict[str, Any]],
-        time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
-    ) -> list[dict[str, Any]]:
-        parsed_grid_type = _parse_enum(grid_type, GridType)
-        parsed_time_granularity = _parse_enum(time_granularity, TimeGranularity)
-        results: list[dict[str, Any]] = []
-        for item in items:
-            space_code = self._grid.locate_space_code(
-                grid_type=parsed_grid_type,
-                level=level,
-                point=item["point"],
-            )
-            time_code = self._code_time_code(item["timestamp"], parsed_time_granularity)
-            st_code = self._code.build_st_code(
-                grid_type=parsed_grid_type,
-                level=level,
-                space_code=space_code,
-                time_code=time_code,
-            )
-            results.append(
-                {
-                    "grid_type": parsed_grid_type.value,
-                    "grid_level": level,
-                    "space_code": space_code,
-                    "time_code": time_code,
-                    "st_code": st_code.st_code,
-                }
-            )
-        return results
-
-    @staticmethod
-    def _code_time_code(timestamp: datetime, granularity: TimeGranularity) -> str:
-        return to_time_code(timestamp, granularity)
-
-    def parse_st_code(self, st_code: str) -> STCode:
-        return self._code.parse_st_code(st_code=st_code)
+        raise NotImplementedError
