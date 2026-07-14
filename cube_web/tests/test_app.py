@@ -14,7 +14,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from s2sphere import CellId
 
 import cube_web.app as web_app
 import cube_web.routes.partition_adapters as partition_adapters
@@ -25,8 +24,8 @@ from cube_web.services import config_store as config_store_module
 from cube_web.services import health_service, partition_runners
 from cube_web.services import partition_job_store as partition_job_store_module
 from cube_web.services import quality_report_store as quality_report_store_module
-from cube_web.services.db_pool import _PoolContext
 from cube_web.services.config_store import set_config_store
+from cube_web.services.db_pool import _PoolContext
 from cube_web.services.partition_defaults import default_grid_level_for_resolution
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
@@ -965,20 +964,26 @@ def test_cube_web_imports_encoder_package():
 
 
 def test_grid_locate_sdk_endpoint():
-    resp = client.post("/v1/grid/locate", json={"grid_type": "s2", "level": 7, "point": [116.391, 39.907]})
+    resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "requested_grid_level": 7, "point": [116.391, 39.907]})
     assert resp.status_code == 200
     body = resp.json()
-    assert CellId.from_token(body["cell"]["space_code"]).level() == 7
+    assert body["cell"]["grid_type"] == "geohash"
+    assert body["cell"]["grid_level"] == 7
 
 
 def test_code_parse_sdk_endpoint():
-    locate_resp = client.post("/v1/grid/locate", json={"grid_type": "s2", "level": 7, "point": [116.391, 39.907]})
-    space_code = locate_resp.json()["cell"]["space_code"]
-    resp = client.post("/v1/code/parse", json={"st_code": f"s2:7:{space_code}:202603091530"})
+    locate_resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "requested_grid_level": 7, "point": [116.391, 39.907]})
+    cell = locate_resp.json()["cell"]
+    address = {"grid_type": cell["grid_type"], "grid_level": cell["grid_level"], "space_code": cell["space_code"], "topology_code": cell["topology_code"]}
+    gen_resp = client.post("/v1/code/st", json={"address": address, "timestamp": "2026-03-09T15:30:00Z", "time_granularity": "minute"})
+    assert gen_resp.status_code == 200
+    st_code = gen_resp.json()["st_code"]
+
+    resp = client.post("/v1/code/parse", json={"st_code": st_code})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["grid_type"] == "s2"
-    assert body["level"] == 7
+    assert body["grid_type"] == "geohash"
+    assert body["grid_level"] == 7
 
 
 def test_spatiotemporal_query_sdk_endpoint_with_bbox(monkeypatch):

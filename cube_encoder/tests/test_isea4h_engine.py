@@ -1,119 +1,133 @@
+"""Tests for the pure-Python ISEA4H engine."""
 from __future__ import annotations
 
-import h3
+import json
+import os
+
 import pytest
 
-from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.engines.isea4h.addressing import cell_count
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
+from grid_core.app.models.grid_address import GridAddress
+
+FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "isea4h")
+ENGINE = ISEA4HEngine()
 
 
-def test_isea4h_locate_point_returns_cell():
-    engine = ISEA4HEngine()
-    cell = engine.locate_point(lon=116.391, lat=39.907, level=6)
+def _load_vectors(res: int) -> list[dict]:
+    path = os.path.join(FIXTURE_DIR, f"vectors_res{res}.jsonl")
+    with open(path) as fh:
+        return [json.loads(line) for line in fh]
+
+
+def test_locate_north_pole() -> None:
+    # Verified against the DGGRID v8.44 binary (TRANSFORM_POINTS, res 0):
+    # the geographic north pole (0, 90) is NOT a res-0 cell centre; it falls
+    # inside the pentagon with seqnum 2.
+    cell = ENGINE.locate_point(0.0, 90.0, 0)
+    assert cell.space_code == "2"
+
+
+def test_locate_south_pole() -> None:
+    # Verified against the DGGRID binary: (0, -90) at res 0 -> seqnum 12.
+    expected = str(cell_count(0))
+    cell = ENGINE.locate_point(0.0, -90.0, 0)
+    assert cell.space_code == expected
+
+
+def test_locate_returns_correct_grid_type_and_level() -> None:
+    cell = ENGINE.locate_point(10.0, 20.0, 3)
     assert cell.grid_type == "isea4h"
-    assert h3.is_valid_cell(cell.space_code)
-    assert h3.get_resolution(cell.space_code) == 6
-    assert len(cell.bbox) == 4
-    assert len(cell.center) == 2
+    assert cell.grid_level == 3
 
 
-def test_isea4h_code_to_bbox_and_geometry():
-    engine = ISEA4HEngine()
-    code = engine.locate_point(lon=116.391, lat=39.907, level=5).space_code
-    bbox = engine.code_to_bbox(code)
-    geometry = engine.code_to_geometry(code)
-    assert bbox[0] < bbox[2]
-    assert bbox[1] < bbox[3]
-    assert geometry["type"] == "Polygon"
+@pytest.mark.parametrize("res", [0, 1, 2])
+def test_fixture_center_roundtrip(res: int) -> None:
+    vectors = _load_vectors(res)
+    failures = []
+    for v in vectors:
+        expected = v["seqnum"]
+        cell = ENGINE.locate_point(v["center_lon"], v["center_lat"], res)
+        if cell.space_code != expected:
+            failures.append(
+                f"seqnum {expected}: got {cell.space_code} "
+                f"at ({v['center_lon']:.4f}, {v['center_lat']:.4f})"
+            )
+    assert not failures, f"{len(failures)} roundtrip failures at res {res}: {failures[:3]}"
 
 
-def test_isea4h_neighbors_parent_children():
-    engine = ISEA4HEngine()
-    code = engine.locate_point(lon=116.391, lat=39.907, level=4).space_code
-    neighbors = engine.neighbors(code, k=1)
-    parent = engine.parent(code)
-    children = engine.children(parent, target_level=4)
-    assert len(neighbors) > 0
-    assert code not in neighbors
-    assert code in children
-
-
-def test_isea4h_cover_modes():
-    engine = ISEA4HEngine()
-    geometry = {
+def test_cover_bbox_small_returns_cells() -> None:
+    bbox_geom = {
         "type": "Polygon",
-        "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
+        "coordinates": [[[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0]]],
     }
-    center_candidates = set(
-        h3.h3shape_to_cells_experimental(h3.geo_to_h3shape(geometry), 6, contain="center")
+    cells = ENGINE.cover_geometry(bbox_geom, 3, "intersect")
+    assert len(cells) > 0
+    for cell in cells:
+        assert cell.grid_type == "isea4h"
+        assert cell.grid_level == 3
+
+
+def test_geometry_is_closed_polygon() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=1, space_code="1")
+    geom = ENGINE.code_to_geometry(addr)
+    assert geom["type"] == "Polygon"
+    coords = geom["coordinates"][0]
+    assert len(coords) >= 4
+    assert coords[0] == coords[-1]
+
+
+def test_center_returns_two_floats() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=0, space_code="1")
+    center = ENGINE.code_to_center(addr)
+    assert len(center) == 2
+
+
+def test_bbox_valid_range() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=1, space_code="2")
+    bbox = ENGINE.code_to_bbox(addr)
+    assert len(bbox) == 4
+    assert bbox[0] <= bbox[2]
+    assert bbox[1] <= bbox[3]
+
+
+def test_neighbors_returns_grid_addresses() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=2, space_code="5")
+    nbs = ENGINE.neighbors(addr)
+    assert len(nbs) >= 1
+    for nb in nbs:
+        assert nb.grid_type == "isea4h"
+        assert nb.grid_level == 2
+
+
+def test_parent_returns_lower_resolution() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=2, space_code="5")
+    parent = ENGINE.parent(addr)
+    assert parent.grid_type == "isea4h"
+    assert parent.grid_level == 1
+    seqnum = int(parent.space_code)
+    assert 1 <= seqnum <= cell_count(1)
+
+
+def test_children_returns_higher_resolution() -> None:
+    addr = GridAddress(grid_type="isea4h", grid_level=0, space_code="1")
+    children = ENGINE.children(addr, 1)
+    assert len(children) >= 1
+    for ch in children:
+        assert ch.grid_type == "isea4h"
+        assert ch.grid_level == 1
+
+
+def test_no_h3_import() -> None:
+    import ast
+    engine_path = os.path.join(
+        os.path.dirname(__file__), "..", "grid_core", "app", "engines", "isea4h_engine.py"
     )
-    intersect = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="intersect")}
-    contain = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="contain")}
-    minimal = {c.space_code for c in engine.cover_geometry(geometry, level=6, cover_mode="minimal")}
-    expanded_minimal: set[str] = set()
-    for code in minimal:
-        code_level = h3.get_resolution(code)
-        if code_level == 6:
-            expanded_minimal.add(code)
-        else:
-            expanded_minimal.update(h3.cell_to_children(code, 6))
-    assert center_candidates.issubset(intersect)
-    assert len(intersect) > len(center_candidates)
-    assert contain.issubset(intersect)
-    assert expanded_minimal.issubset(intersect)
-    assert len(minimal) <= len(expanded_minimal)
-
-
-def test_isea4h_validation():
-    engine = ISEA4HEngine()
-    with pytest.raises(ValidationError):
-        engine.locate_point(lon=116.391, lat=39.907, level=13)
-    with pytest.raises(ValidationError):
-        engine.neighbors("invalid-cell", k=1)
-    with pytest.raises(ValidationError):
-        engine.neighbors(engine.locate_point(lon=116.391, lat=39.907, level=6).space_code, k=0)
-    with pytest.raises(ValidationError):
-        root_code = engine.locate_point(lon=116.391, lat=39.907, level=1).space_code
-        engine.parent(root_code)
-
-
-def test_isea4h_cover_geometry_compact_matches_full_cover():
-    engine = ISEA4HEngine()
-    geometry = {
-        "type": "Polygon",
-        "coordinates": [[[116.37, 39.89], [116.43, 39.89], [116.43, 39.93], [116.37, 39.93], [116.37, 39.89]]],
-    }
-
-    full = engine.cover_geometry(geometry, level=6, cover_mode="intersect")
-    compact = engine.cover_geometry_compact(geometry, level=6, cover_mode="intersect")
-
-    assert {cell.space_code for cell in compact} == {cell.space_code for cell in full}
-    assert {cell.space_code: cell.bbox for cell in compact} == {
-        cell.space_code: cell.bbox for cell in full
-    }
-
-
-def test_isea4h_cover_intersect_handles_dateline_crossing_bbox():
-    engine = ISEA4HEngine()
-    geometry = {
-        "type": "Polygon",
-        "coordinates": [[[179.7, 61.8], [-179.7, 61.8], [-179.7, 62.7], [179.7, 62.7], [179.7, 61.8]]],
-    }
-
-    code = engine.locate_space_code(179.9, 62.4, 3)
-    covered = {cell.space_code for cell in engine.cover_geometry(geometry, level=3, cover_mode="intersect")}
-
-    assert code in covered
-
-
-def test_isea4h_dateline_cell_geometry_and_bbox_stay_local():
-    engine = ISEA4HEngine()
-    code = engine.locate_space_code(179.9, 62.4, 3)
-
-    geometry = engine.code_to_geometry(code)
-    bbox = engine.code_to_bbox(code)
-    coords = geometry["coordinates"][0]
-
-    assert bbox[0] < bbox[2]
-    assert (bbox[2] - bbox[0]) < 180.0
-    assert max(abs(coords[index + 1][0] - coords[index][0]) for index in range(len(coords) - 1)) < 180.0
+    with open(engine_path) as fh:
+        source = fh.read()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""])
+            for name in names:
+                assert "h3" not in (name or "").lower(), f"Forbidden import: {name}"

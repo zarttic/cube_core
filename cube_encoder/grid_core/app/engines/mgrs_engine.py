@@ -1,309 +1,173 @@
+"""MGRS UTM/UPS grid engine: implements BaseGridEngine with GridAddress protocol."""
 from __future__ import annotations
 
-from collections import deque
-from functools import lru_cache
+import mgrs as mgrs_lib
 
-import mgrs
-from pyproj import Transformer
-from shapely.geometry import Polygon
-
-from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.engines.base import BaseGridEngine
+from grid_core.app.engines.mgrs.address import (
+    build_topology_code,
+    canonicalize_mgrs,
+)
+from grid_core.app.engines.mgrs.cover import cover_geometry as _cover_geometry
+from grid_core.app.engines.mgrs.domain import domain_for_point
+from grid_core.app.engines.mgrs.geometry import (
+    cell_bbox,
+    cell_center,
+    cell_geometry_clipped,
+    cell_geometry_to_geojson,
+)
+from grid_core.app.engines.mgrs.topology import (
+    _domain_for_address,
+    children_addresses,
+    neighbors_for_address,
+    parent_address,
+)
 from grid_core.app.models.compact_grid_cell import CompactGridCell
+from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
-from grid_core.app.utils.geometry import normalize_ring_longitudes, to_shapely, wrapped_geometry_variants
+
+_converter = mgrs_lib.MGRS()
+
+_PRECISION_MIN = 0
+_PRECISION_MAX = 5
 
 
-class MGRSEngine:
+class MGRSEngine(BaseGridEngine):
+    """MGRS grid engine with full UTM/UPS support and topology codes.
+
+    Grid level == MGRS numeric precision (0-5):
+      0 = 100 km cell
+      1 = 10 km cell
+      2 = 1 km cell
+      3 = 100 m cell
+      4 = 10 m cell
+      5 = 1 m cell
+    """
+
     grid_type = "mgrs"
 
-    def __init__(self) -> None:
-        self._converter = mgrs.MGRS()
+    # ------------------------------------------------------------------
+    # Public API — location
+    # ------------------------------------------------------------------
 
-    def locate_point(self, lon: float, lat: float, level: int) -> GridCell:
-        app_level = self._validate_level(level)
-        code = self.locate_space_code(lon=lon, lat=lat, level=app_level)
-        return self._build_cell(code=code, level=app_level)
+    def locate_point(self, lon: float, lat: float, requested_grid_level: int) -> GridCell:
+        precision = self._validate_precision(requested_grid_level)
+        address = self.locate_space_code(lon, lat, precision)
+        return self._address_to_cell(address)
 
-    def locate_space_code(self, lon: float, lat: float, level: int) -> str:
-        app_level = self._validate_level(level)
-        precision = self._to_precision(app_level)
-        return self._converter.toMGRS(lat, lon, MGRSPrecision=precision)
-
-    def cover_geometry(self, geometry: dict, level: int, cover_mode: str):
-        compact_cells = self.cover_geometry_compact(geometry=geometry, level=level, cover_mode=cover_mode)
-        return [self._build_cell(code=cell.space_code, level=cell.level) for cell in compact_cells]
-
-    def cover_geometry_compact(self, geometry: dict, level: int, cover_mode: str) -> list[CompactGridCell]:
-        app_level = self._validate_level(level)
-        if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
-            raise ValidationError("MGRS cover supports only intersect/contain/minimal mode in MVP")
-
-        shp = to_shapely(geometry)
-        seeds = self._seed_points(shp)
-        seed_codes = {
-            self.locate_point(lon=lon, lat=lat, level=app_level).space_code for lon, lat in seeds if -90.0 <= lat <= 90.0
-        }
-        if not seed_codes:
-            return []
-
-        selected: set[str] = set()
-        visited: set[str] = set()
-        queue = deque(sorted(seed_codes))
-
-        while queue:
-            code = queue.popleft()
-            if code in visited:
-                continue
-            visited.add(code)
-
-            cell_poly = self._geometry_shape(code)
-            intersects = any(cell_poly.intersects(target_geom) for target_geom in wrapped_geometry_variants(shp))
-            if not intersects:
-                continue
-
-            if cover_mode in {CoverMode.INTERSECT.value, CoverMode.MINIMAL.value} or any(
-                target_geom.covers(cell_poly) for target_geom in wrapped_geometry_variants(shp)
-            ):
-                selected.add(code)
-
-            if len(selected) > 20000:
-                raise ValidationError("MGRS cover result too large for MVP")
-
-            for neighbor in self.neighbors(code, k=1):
-                if neighbor not in visited:
-                    queue.append(neighbor)
-
-        if cover_mode == CoverMode.MINIMAL.value:
-            selected = self._coarsen_minimal(selected)
-
-        return [
-            CompactGridCell(space_code=code, level=self._level_from_code(code), bbox=self.code_to_bbox(code))
-            for code in sorted(selected)
-        ]
-
-    def code_to_geometry(self, code: str):
-        return self._geometry_from_corners(self._code_to_corners(code))
-
-    def code_to_center(self, code: str):
-        return self._center_from_bbox(self.code_to_bbox(code))
-
-    def code_to_bbox(self, code: str):
-        return list(self._code_to_bbox_cached(code))
-
-    @lru_cache(maxsize=50000)
-    def _code_to_bbox_cached(self, code: str) -> tuple[float, float, float, float]:
-        return self._bbox_from_coords(self._code_to_corners(code))
-
-    def neighbors(self, code: str, k: int = 1):
-        return list(self._neighbors_cached(code, k))
-
-    @lru_cache(maxsize=50000)
-    def _neighbors_cached(self, code: str, k: int) -> tuple[str, ...]:
-        if k < 1:
-            raise ValidationError("k must be >= 1")
-        precision = self._precision_from_code(code)
-        zone, hemisphere, easting, northing = self._parse_utm(code)
-        cell_size_m = 10 ** (5 - precision)
-
-        neighbors: set[str] = set()
-        for dx in range(-k, k + 1):
-            for dy in range(-k, k + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                try:
-                    neighbor = self._converter.UTMToMGRS(
-                        zone,
-                        hemisphere,
-                        easting + dx * cell_size_m,
-                        northing + dy * cell_size_m,
-                        MGRSPrecision=precision,
-                    )
-                except Exception:
-                    continue
-                if self._precision_from_code(neighbor) == precision:
-                    neighbors.add(neighbor)
-        return tuple(sorted(neighbors))
-
-    def parent(self, code: str):
-        level = self._level_from_code(code)
-        if level <= self._level_min():
-            raise ValidationError("Root MGRS level has no parent")
-        return code[:-2]
-
-    def children(self, code: str, target_level: int):
-        target_app_level = self._validate_level(target_level)
-        self._parse_utm(code)
-        current_app_level = self._level_from_code(code)
-        if target_app_level <= current_app_level:
-            raise ValidationError("target_level must be greater than current MGRS level")
-
-        out = [code]
-        for _ in range(target_app_level - current_app_level):
-            out = [f"{prefix}{easting}{northing}" for prefix in out for easting in range(10) for northing in range(10)]
-        return out
-
-    def _build_cell(self, code: str, level: int) -> GridCell:
-        bbox = self.code_to_bbox(code)
-        geometry = self.code_to_geometry(code)
-        return GridCell(
+    def locate_space_code(self, lon: float, lat: float, requested_grid_level: int) -> GridAddress:
+        precision = self._validate_precision(requested_grid_level)
+        try:
+            code = _converter.toMGRS(lat, lon, MGRSPrecision=precision)
+        except Exception as exc:
+            raise ValidationError(f"Cannot encode ({lon}, {lat}) at precision {precision}") from exc
+        canonical = canonicalize_mgrs(code)
+        domain = domain_for_point(lon, lat)
+        topo = build_topology_code(domain.token, precision, canonical)
+        return GridAddress(
             grid_type=self.grid_type,
-            level=level,
-            cell_id=code,
-            space_code=code,
-            center=self._center_from_bbox(bbox),
-            bbox=bbox,
-            geometry=geometry,
-            metadata={"precision": self._precision_from_code(code), "zone": code[:3], "facet": None},
+            grid_level=precision,
+            space_code=canonical,
+            topology_code=topo,
         )
 
-    @staticmethod
-    def _level_min() -> int:
-        return 1
+    # ------------------------------------------------------------------
+    # Public API — cover
+    # ------------------------------------------------------------------
+
+    def cover_geometry(
+        self, geometry: dict, requested_grid_level: int, cover_mode: str
+    ) -> list[GridCell]:
+        compact = self.cover_geometry_compact(geometry, requested_grid_level, cover_mode)
+        return [self._compact_to_cell(c) for c in compact]
+
+    def cover_geometry_compact(
+        self, geometry: dict, requested_grid_level: int, cover_mode: str
+    ) -> list[CompactGridCell]:
+        precision = self._validate_precision(requested_grid_level)
+        return _cover_geometry(geometry, precision, cover_mode)
+
+    # ------------------------------------------------------------------
+    # Public API — geometry
+    # ------------------------------------------------------------------
+
+    def code_to_geometry(self, address: GridAddress) -> dict:
+        geom = self._clipped_geom(address)
+        return cell_geometry_to_geojson(geom)
+
+    def code_to_center(self, address: GridAddress) -> list[float]:
+        geom = self._clipped_geom(address)
+        return cell_center(geom)
+
+    def code_to_bbox(self, address: GridAddress) -> list[float]:
+        geom = self._clipped_geom(address)
+        return cell_bbox(geom)
+
+    # ------------------------------------------------------------------
+    # Public API — topology
+    # ------------------------------------------------------------------
+
+    def neighbors(self, address: GridAddress, k: int = 1) -> list[GridAddress]:
+        return neighbors_for_address(address, k)
+
+    def parent(self, address: GridAddress) -> GridAddress:
+        return parent_address(address)
+
+    def children(self, address: GridAddress, target_grid_level: int) -> list[GridAddress]:
+        return children_addresses(address, target_grid_level)
+
+    # ------------------------------------------------------------------
+    # Domain helpers (exposed for tests)
+    # ------------------------------------------------------------------
+
+    def domain_geometry(self, address: GridAddress) -> dict:
+        """Return the WGS84 valid-domain polygon for the given address's domain."""
+        from shapely.geometry import mapping
+
+        from grid_core.app.engines.mgrs.domain import domain_polygon
+        domain = _domain_for_address(address.space_code)
+        return dict(mapping(domain_polygon(domain)))
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _level_max() -> int:
-        # MGRSPrecision supports 0..5, we expose it as app level 1..6.
-        return 6
-
-    @classmethod
-    def _validate_level(cls, level: int) -> int:
-        if level < cls._level_min() or level > cls._level_max():
-            raise ValidationError(f"MGRS level must be in [{cls._level_min()}, {cls._level_max()}] for MVP")
+    def _validate_precision(level: int) -> int:
+        if level < _PRECISION_MIN or level > _PRECISION_MAX:
+            raise ValidationError(
+                f"MGRS requested_grid_level must be in [{_PRECISION_MIN}, {_PRECISION_MAX}]"
+            )
         return level
 
-    @classmethod
-    def _to_precision(cls, level: int) -> int:
-        # app level 1..6 -> MGRSPrecision 0..5
-        return cls._validate_level(level) - 1
+    def _clipped_geom(self, address: GridAddress):
+        precision = address.grid_level
+        code = address.space_code
+        domain = _domain_for_address(code)
+        return cell_geometry_clipped(code, precision, domain)
 
-    @classmethod
-    def _to_level(cls, precision: int) -> int:
-        if precision < 0 or precision > 5:
-            raise ValidationError("Invalid MGRS precision")
-        return precision + 1
+    def _address_to_cell(self, address: GridAddress) -> GridCell:
+        geom = self._clipped_geom(address)
+        return GridCell(
+            grid_type=self.grid_type,
+            grid_level=address.grid_level,
+            space_code=address.space_code,
+            topology_code=address.topology_code,
+            center=cell_center(geom),
+            bbox=cell_bbox(geom),
+            geometry=cell_geometry_to_geojson(geom),
+            metadata={
+                "precision": address.grid_level,
+                "domain": _domain_for_address(address.space_code).token,
+            },
+        )
 
-    @staticmethod
-    def _precision_from_code(code: str) -> int:
-        if len(code) < 5:
-            raise ValidationError("Invalid MGRS code")
-        suffix_len = len(code) - 5
-        if suffix_len % 2 != 0:
-            raise ValidationError("Invalid MGRS precision digits")
-        precision = suffix_len // 2
-        if precision < 0 or precision > 5:
-            raise ValidationError("Invalid MGRS precision")
-        return precision
-
-    @classmethod
-    def _level_from_code(cls, code: str) -> int:
-        return cls._to_level(cls._precision_from_code(code))
-
-    def _parse_utm(self, code: str) -> tuple[int, str, float, float]:
-        try:
-            return self._converter.MGRSToUTM(code)
-        except Exception as exc:
-            raise ValidationError("Invalid MGRS code") from exc
-
-    @staticmethod
-    def _center_from_bbox(bbox: list[float] | tuple[float, float, float, float]) -> list[float]:
-        min_lon, min_lat, max_lon, max_lat = bbox
-        return [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
-
-    @staticmethod
-    def _geometry_from_corners(
-        corners: list[list[float]] | tuple[tuple[float, float], ...],
-    ) -> dict:
-        return {
-            "type": "Polygon",
-            "coordinates": [
-                [
-                    [float(lon), float(lat)] for lon, lat in [*corners, corners[0]]
-                ]
-            ],
-        }
-
-    @lru_cache(maxsize=50000)
-    def _code_to_corners(self, code: str) -> tuple[tuple[float, float], ...]:
-        precision = self._precision_from_code(code)
-        zone, hemisphere, easting, northing = self._converter.MGRSToUTM(code)
-        cell_size_m = 10 ** (5 - precision)
-        transformer = self._utm_to_lonlat(zone, hemisphere)
-        corners = [
-            transformer.transform(easting, northing),
-            transformer.transform(easting + cell_size_m, northing),
-            transformer.transform(easting + cell_size_m, northing + cell_size_m),
-            transformer.transform(easting, northing + cell_size_m),
-        ]
-        normalized = normalize_ring_longitudes(corners)
-        return tuple((float(lon), float(lat)) for lon, lat in normalized)
-
-    @staticmethod
-    def _bbox_from_coords(
-        corners: list[list[float]] | tuple[tuple[float, float], ...],
-    ) -> tuple[float, float, float, float]:
-        lons = [float(lon) for lon, _ in corners]
-        lats = [float(lat) for _, lat in corners]
-        return min(lons), min(lats), max(lons), max(lats)
-
-    @staticmethod
-    @lru_cache(maxsize=120)
-    def _utm_to_lonlat(zone: int, hemisphere: str) -> Transformer:
-        epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
-        return Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
-
-    def _geometry_shape(self, code: str) -> Polygon:
-        corners = self._code_to_corners(code)
-        return Polygon(corners)
-
-    @staticmethod
-    def _seed_points(shp) -> list[tuple[float, float]]:
-        points: set[tuple[float, float]] = set()
-        geoms = list(shp.geoms) if hasattr(shp, "geoms") else [shp]
-
-        for geom in geoms:
-            rp = geom.representative_point()
-            points.add((float(rp.x), float(rp.y)))
-
-            min_lon, min_lat, max_lon, max_lat = geom.bounds
-            mid_lon = (min_lon + max_lon) / 2.0
-            mid_lat = (min_lat + max_lat) / 2.0
-            points.update(
-                {
-                    (min_lon, min_lat),
-                    (min_lon, max_lat),
-                    (max_lon, min_lat),
-                    (max_lon, max_lat),
-                    (mid_lon, min_lat),
-                    (mid_lon, max_lat),
-                    (min_lon, mid_lat),
-                    (max_lon, mid_lat),
-                    (mid_lon, mid_lat),
-                }
-            )
-
-        return sorted(points)
-
-    def _coarsen_minimal(self, codes: set[str]) -> set[str]:
-        out = set(codes)
-        changed = True
-        while changed:
-            changed = False
-            grouped: dict[str, set[str]] = {}
-            for code in out:
-                precision = self._precision_from_code(code)
-                if precision <= 0:
-                    continue
-                parent_code = code[:-2]
-                grouped.setdefault(parent_code, set()).add(code)
-
-            for parent_code, child_codes in grouped.items():
-                if len(child_codes) != 100:
-                    continue
-                child_level = self._level_from_code(parent_code) + 1
-                expected_children = set(self.children(parent_code, child_level))
-                if expected_children == child_codes:
-                    out.difference_update(child_codes)
-                    out.add(parent_code)
-                    changed = True
-        return out
+    def _compact_to_cell(self, compact: CompactGridCell) -> GridCell:
+        addr = GridAddress(
+            grid_type=compact.grid_type,
+            grid_level=compact.grid_level,
+            space_code=compact.space_code,
+            topology_code=compact.topology_code,
+        )
+        return self._address_to_cell(addr)

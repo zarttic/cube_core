@@ -11,9 +11,7 @@ service = CodeService()
 @router.post("/st", response_model=STCodeGenerateResponse)
 def generate_st(req: STCodeGenerateRequest) -> STCodeGenerateResponse:
     result = service.generate_st_code(
-        grid_type=req.grid_type,
-        level=req.level,
-        space_code=req.space_code,
+        address=req.address,
         timestamp=req.timestamp,
         time_granularity=req.time_granularity,
     )
@@ -25,7 +23,7 @@ def parse_st(req: STCodeParseRequest) -> STCodeParseResponse:
     result = service.parse_st_code(req.st_code)
     return STCodeParseResponse(
         grid_type=result.grid_type,
-        level=result.level,
+        grid_level=result.grid_level,
         space_code=result.space_code,
         time_code=result.time_code,
     )
@@ -35,7 +33,7 @@ def parse_st(req: STCodeParseRequest) -> STCodeParseResponse:
 def batch_generate_st(req: STCodeBatchGenerateRequest) -> STCodeBatchGenerateResponse:
     st_codes = service.batch_generate_st_codes(
         grid_type=req.grid_type,
-        level=req.level,
+        grid_level=req.requested_grid_level,
         items=[{"space_code": item.space_code, "timestamp": item.timestamp} for item in req.items],
         time_granularity=req.time_granularity,
     )

@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
+from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
 
 
@@ -23,7 +24,7 @@ class LocateResponse(BaseResponse):
 
 class CoverResponse(BaseResponse):
     grid_type: str
-    level: int
+    requested_grid_level: int
     cover_mode: str
     cells: List[GridCell]
 
@@ -38,13 +39,13 @@ class STCodeBatchGenerateResponse(BaseResponse):
 
 class STCodeParseResponse(BaseResponse):
     grid_type: str
-    level: int
+    grid_level: int
     space_code: str
     time_code: str
 
 
 class NeighborsResponse(BaseResponse):
-    result_codes: List[str]
+    addresses: List[GridAddress]
 
 
 class GeometryResponse(BaseResponse):
@@ -56,8 +57,8 @@ class BatchGeometryResponse(BaseResponse):
 
 
 class ParentResponse(BaseResponse):
-    parent_code: str
+    address: GridAddress
 
 
 class ChildrenResponse(BaseResponse):
-    child_codes: List[str]
+    addresses: List[GridAddress]

@@ -10,7 +10,7 @@ service = GridService()
 
 @router.post("/locate", response_model=LocateResponse)
 def locate(req: LocateRequest) -> LocateResponse:
-    cell = service.locate(grid_type=req.grid_type, level=req.level, point=req.point)
+    cell = service.locate(grid_type=req.grid_type, requested_grid_level=req.requested_grid_level, point=req.point)
     return LocateResponse(cell=cell)
 
 
@@ -18,7 +18,7 @@ def locate(req: LocateRequest) -> LocateResponse:
 def cover(req: CoverRequest) -> CoverResponse:
     cells = service.cover(
         grid_type=req.grid_type,
-        level=req.level,
+        requested_grid_level=req.requested_grid_level,
         geometry=req.geometry,
         bbox=req.bbox,
         cover_mode=req.cover_mode.value,
@@ -27,7 +27,7 @@ def cover(req: CoverRequest) -> CoverResponse:
     )
     return CoverResponse(
         grid_type=req.grid_type.value,
-        level=req.level,
+        requested_grid_level=req.requested_grid_level,
         cover_mode=req.cover_mode.value,
         cells=cells,
         statistics={"cell_count": len(cells)},

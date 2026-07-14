@@ -22,3 +22,4 @@ cube_split/*.hdf
 cube_split/CarbonCube.gz
 cube_split/data/
 .worktrees/
+.dggrid_src/

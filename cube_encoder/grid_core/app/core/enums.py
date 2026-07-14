@@ -2,11 +2,9 @@ from enum import Enum
 
 
 class GridType(str, Enum):
-    S2 = "s2"
+    GEOHASH = "geohash"
     MGRS = "mgrs"
     ISEA4H = "isea4h"
-    TILE_MATRIX = "tile_matrix"
-    PLANE_GRID = "plane_grid"
 
 
 class CoverMode(str, Enum):

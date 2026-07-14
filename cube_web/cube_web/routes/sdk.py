@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
-from fastapi import HTTPException
+from cube_split.read.carbon_query import query_carbon_observations
+from fastapi import APIRouter, HTTPException
 from grid_core.sdk import (
-    BatchCodeToGeometryRequest,
+    BatchAddressRequest,
     BatchGeometryResponse,
     ChildrenRequest,
     ChildrenResponse,
@@ -25,7 +25,7 @@ from grid_core.sdk import (
     STCodeParseRequest,
     STCodeParseResponse,
 )
-from cube_split.read.carbon_query import query_carbon_observations
+
 from cube_web.schemas import SpatiotemporalQueryRequest
 
 
@@ -34,14 +34,14 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
 
     @router.post("/grid/locate", response_model=LocateResponse)
     def locate(req: LocateRequest) -> LocateResponse:
-        cell = sdk.locate(grid_type=req.grid_type, level=req.level, point=req.point)
+        cell = sdk.locate(grid_type=req.grid_type, requested_grid_level=req.requested_grid_level, point=req.point)
         return LocateResponse(cell=cell)
 
     @router.post("/grid/cover", response_model=CoverResponse)
     def cover(req: CoverRequest) -> CoverResponse:
         cells = sdk.cover(
             grid_type=req.grid_type,
-            level=req.level,
+            requested_grid_level=req.requested_grid_level,
             cover_mode=req.cover_mode,
             boundary_type=req.boundary_type,
             geometry=req.geometry,
@@ -50,7 +50,7 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
         )
         return CoverResponse(
             grid_type=req.grid_type.value,
-            level=req.level,
+            requested_grid_level=req.requested_grid_level,
             cover_mode=req.cover_mode.value,
             cells=cells,
             statistics={"cell_count": len(cells)},
@@ -58,35 +58,33 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
 
     @router.post("/topology/neighbors", response_model=NeighborsResponse)
     def neighbors(req: NeighborsRequest) -> NeighborsResponse:
-        result_codes = sdk.neighbors(grid_type=req.grid_type, code=req.code, k=req.k)
-        return NeighborsResponse(result_codes=result_codes, statistics={"count": len(result_codes)})
+        addresses = sdk.neighbors(req.address, k=req.k)
+        return NeighborsResponse(addresses=addresses, statistics={"count": len(addresses)})
 
     @router.post("/topology/geometry", response_model=GeometryResponse)
     def code_to_geometry(req: CodeToGeometryRequest) -> GeometryResponse:
-        geometry = sdk.code_to_geometry(grid_type=req.grid_type, code=req.code, boundary_type=req.boundary_type)
+        geometry = sdk.code_to_geometry(req.address, boundary_type=req.boundary_type)
         return GeometryResponse(geometry=geometry)
 
     @router.post("/topology/geometries", response_model=BatchGeometryResponse)
-    def codes_to_geometries(req: BatchCodeToGeometryRequest) -> BatchGeometryResponse:
-        geometries = sdk.codes_to_geometries(grid_type=req.grid_type, codes=req.codes, boundary_type=req.boundary_type)
+    def codes_to_geometries(req: BatchAddressRequest) -> BatchGeometryResponse:
+        geometries = sdk.codes_to_geometries(req.addresses, boundary_type=req.boundary_type)
         return BatchGeometryResponse(geometries=geometries, statistics={"count": len(geometries)})
 
     @router.post("/topology/parent", response_model=ParentResponse)
     def parent(req: ParentRequest) -> ParentResponse:
-        parent_code = sdk.parent(grid_type=req.grid_type, code=req.code)
-        return ParentResponse(parent_code=parent_code)
+        address = sdk.parent(req.address)
+        return ParentResponse(address=address)
 
     @router.post("/topology/children", response_model=ChildrenResponse)
     def children(req: ChildrenRequest) -> ChildrenResponse:
-        child_codes = sdk.children(grid_type=req.grid_type, code=req.code, target_level=req.target_level)
-        return ChildrenResponse(child_codes=child_codes, statistics={"count": len(child_codes)})
+        addresses = sdk.children(req.address, req.target_grid_level)
+        return ChildrenResponse(addresses=addresses, statistics={"count": len(addresses)})
 
     @router.post("/code/st", response_model=STCodeGenerateResponse)
     def generate_st(req: STCodeGenerateRequest) -> STCodeGenerateResponse:
         result = sdk.generate_st_code(
-            grid_type=req.grid_type,
-            level=req.level,
-            space_code=req.space_code,
+            address=req.address,
             timestamp=req.timestamp,
             time_granularity=req.time_granularity,
         )
@@ -97,7 +95,7 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
         result = sdk.parse_st_code(req.st_code)
         return STCodeParseResponse(
             grid_type=result.grid_type,
-            level=result.level,
+            grid_level=result.grid_level,
             space_code=result.space_code,
             time_code=result.time_code,
         )
@@ -106,7 +104,7 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
     def batch_generate_st(req: STCodeBatchGenerateRequest) -> STCodeBatchGenerateResponse:
         st_codes = sdk.batch_generate_st_codes(
             grid_type=req.grid_type,
-            level=req.level,
+            grid_level=req.requested_grid_level,
             items=[{"space_code": item.space_code, "timestamp": item.timestamp} for item in req.items],
             time_granularity=req.time_granularity,
         )
