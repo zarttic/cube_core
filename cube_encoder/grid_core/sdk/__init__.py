@@ -1,9 +1,9 @@
 from grid_core.app.core.exceptions import GridCoreError, NotImplementedCapabilityError, ValidationError
+from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
-from grid_core.app.models.compact_grid_cell import CompactGridCell
-from grid_core.app.models.st_code import STCode
 from grid_core.app.models.request import (
+    LEVEL_RANGES,
     AddressRequest,
     BatchAddressRequest,
     ChildrenRequest,
@@ -11,10 +11,10 @@ from grid_core.app.models.request import (
     CoverRequest,
     LocateRequest,
     NeighborsRequest,
+    ParentRequest,
     STCodeBatchGenerateRequest,
     STCodeGenerateRequest,
     STCodeParseRequest,
-    LEVEL_RANGES,
     validate_requested_grid_level,
 )
 from grid_core.app.models.response import (
@@ -29,6 +29,7 @@ from grid_core.app.models.response import (
     STCodeGenerateResponse,
     STCodeParseResponse,
 )
+from grid_core.app.models.st_code import STCode
 
 from .client import CubeEncoderSDK
 
@@ -55,6 +56,7 @@ __all__ = [
     "CoverRequest",
     "LocateRequest",
     "NeighborsRequest",
+    "ParentRequest",
     "STCodeBatchGenerateRequest",
     "STCodeGenerateRequest",
     "STCodeParseRequest",
