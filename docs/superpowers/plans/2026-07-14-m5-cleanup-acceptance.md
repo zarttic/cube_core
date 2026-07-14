@@ -21,6 +21,7 @@
 - Conversion fields are absent, not defaulted: `convert_asset_to_cog`, `cog_workers`, `cog_overwrite`, conversion timing, source upload, and reprojection controls must not appear with `0`, `null`, `false`, empty string, or any other value.
 - Exactly six real scenarios must run and pass. Missing infrastructure, missing/invalid manifests, deselection, any skip, count mismatch, or scenario failure exits nonzero; real tests never call `pytest.skip`.
 - The six scenarios are exactly: Geohash logical single dataset; MGRS cross-zone/boundary logical; low-resolution ISEA4H entity; one batch/two datasets with sibling partial failure; quality failure with complete errors and full/filtered CSV/JSON export equality; Pass/Warn policy followed by publish/withdraw reconciliation.
+- Publication-record lifecycle values are exactly `publishing|active|withdrawing|failed|withdrawn`; dataset-derived publication status values are exactly `unpublished|publishing|active|withdrawing|failed|withdrawn`. The value `published` is forbidden in production, current documentation, acceptance results, scanner allowlists, and evidence.
 - The frozen M3 real test is `cube_web/tests/real/test_m3_quality_publication_real.py`, marker `m3_real`, registration `m3_real: actual OpenGauss, MinIO, Ray dataset quality and publication acceptance`, and sole standard gate `cube_web/scripts/run_m3_quality_publication_gate.py`.
 - The canonical M3 command is `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_web/scripts/run_m3_quality_publication_gate.py`; it invokes exactly `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_web/tests/real/test_m3_quality_publication_real.py -v -m m3_real -rs` and fails on skip, deselection, missing infrastructure, invalid manifests, export mismatch, or publication-gateway failure.
 - Required M3 manifest variables are `CUBE_M3_REAL_INPUT_MANIFEST` and `CUBE_M3_REAL_DEFECT_MANIFEST`.
@@ -166,10 +167,10 @@ Use `git ls-files -co --exclude-standard -z`, normalize with `PurePosixPath`, an
 ```python
 EXCLUDED_PREFIXES = ("docs/superpowers/", ".git/", ".claude/", "node_modules/")
 TOOL_TEST_EXCLUSIONS = frozenset({"scripts/m5_cleanup_acceptance_scan.py", "tests/test_m5_cleanup_acceptance_scan.py"})
-RULE_NAMES = frozenset({"legacy_grid", "cog_conversion", "legacy_request_level", "isea_h3_runtime_dependency"})
+RULE_NAMES = frozenset({"legacy_grid", "cog_conversion", "legacy_request_level", "isea_h3_runtime_dependency", "forbidden_published_status"})
 ```
 
-Rules reject: (1) production/current use of removed `s2`, `tile_matrix`, `plane_grid`; (2) removed COG generation/reprojection/upload fields or responsibilities; (3) request declarations/payloads with `grid_level` or `grid_level_mode`, without rejecting result-cell `grid_level`; (4) H3 imports/calls in ISEA runtime/tests, H3 declarations in dependency/lock/package metadata, or current docs claiming H3-backed ISEA4H. Historical paths are checked for their exact label but their dated bodies are exempt from token rules. No production/current-doc path is exempt.
+Rules reject: (1) production/current use of removed `s2`, `tile_matrix`, `plane_grid`; (2) removed COG generation/reprojection/upload fields or responsibilities; (3) request declarations/payloads with `grid_level` or `grid_level_mode`, without rejecting result-cell `grid_level`; (4) H3 imports/calls in ISEA runtime/tests, H3 declarations in dependency/lock/package metadata, or current docs claiming H3-backed ISEA4H; (5) the exact forbidden publication status token `published` in production/current docs, while accepting only publication-record lifecycle `publishing|active|withdrawing|failed|withdrawn` and dataset-derived publication status `unpublished|publishing|active|withdrawing|failed|withdrawn`. `forbidden_published_status` has no allowlist: rejection tests use explicit scanner/tool-test exclusion rather than permitting the forbidden token. Historical paths are checked for their exact label but their dated bodies are exempt from token rules. No production/current-doc path is exempt.
 
 - [ ] **Step 5: Run scanner tests and scan**
 
@@ -179,7 +180,7 @@ PYTHONPATH=. python3.11 -m pytest tests/test_m5_cleanup_acceptance_scan.py -v 2>
 PYTHONPATH=. python3.11 scripts/m5_cleanup_acceptance_scan.py --root . --json-out artifacts/m5/l2-scanner.json 2>&1 | tee artifacts/m5/l2-scanner-stdout.txt
 ```
 
-Expected: exit `0`, positive count, production/current docs scanned, only declared exclusions, inventory-backed allowlists, and four passing named rules. Commit this work together with Task 6.
+Expected: exit `0`, positive count, production/current docs scanned, only declared exclusions, inventory-backed allowlists, and five passing named rules. Commit this work together with Task 6.
 
 ### Task 3: Define and unit-test the exact six-scenario package runner
 
@@ -257,7 +258,7 @@ Use the carbon strict COG from the defect manifest and require quality `fail`. E
 
 - [ ] **Step 6: Pass/Warn policy, publish, and withdraw reconciliation**
 
-Use two completed strict COG outputs producing Pass and Warn. Assert Pass publishes through the actual gateway. Assert Warn blocks before run-specific approval, then approves and publishes. Reconcile immutable publication ID, exact dataset/output/quality snapshot, gateway state, and OpenGauss active state. Withdraw both; assert gateway withdrawal, cleared active state, retained immutable history, and idempotent reconciliation.
+Use two completed strict COG outputs producing Pass and Warn. Assert Pass publishes through the actual gateway. Assert Warn blocks before run-specific approval, then approves and publishes. Reconcile immutable publication ID, exact dataset/output/quality snapshot, gateway state, and OpenGauss active state. For every observed transition, assert publication-record lifecycle belongs to the exact set `publishing|active|withdrawing|failed|withdrawn` and dataset-derived publication status belongs to the exact set `unpublished|publishing|active|withdrawing|failed|withdrawn`; assert `published` never appears. Withdraw both; assert gateway withdrawal, cleared active state, retained immutable history, terminal publication record `withdrawn`, dataset-derived status `withdrawn`, and idempotent reconciliation.
 
 - [ ] **Step 7: Run module gate and checkpoint**
 
@@ -290,7 +291,7 @@ Expected: tests and real run exit `0`; counts are `6/6/0/0/0` for scenario/pass/
 
 - [ ] **Step 1: Import and assert the literal M4 handoff**
 
-Import `installApiRoutes` and every named fixture above from `./fixtures.js`. Use dataset identities `dataset-a`/`Dataset A` and `dataset-b`/`Dataset B`; quality identities `quality-run-a` and `quality-run-b`; exact dataset routes `**/v1/partition/datasets/dataset-a` and `**/v1/partition/datasets/dataset-b`; exact quality routes `**/v1/quality/records/quality-run-a` and `**/v1/quality/records/quality-run-b`; and export base `/v1/quality/records/quality-run-a/errors/export`. The frozen export filenames are `dataset-a_quality-run-a_errors.csv` and the equivalent `.json`, with `text/csv` and `application/json` content types. If the integrated M4 commit differs, record `residuals.M4` and stop; do not adapt.
+Import `installApiRoutes` and every named fixture above from `./fixtures.js`. Use dataset identities `dataset-a`/`Dataset A` and `dataset-b`/`Dataset B`; quality identities `quality-run-a` and `quality-run-b`; exact dataset routes `**/v1/partition/datasets/dataset-a` and `**/v1/partition/datasets/dataset-b`; exact quality routes `**/v1/quality/records/quality-run-a` and `**/v1/quality/records/quality-run-b`; export API base exactly `/v1/quality/records/quality-run-a/errors/export`; and Playwright export interception glob exactly `**/v1/quality/records/quality-run-a/errors/export*`. The frozen export filenames are exactly `dataset-a_quality-run-a_errors.csv` and `dataset-a_quality-run-a_errors.json`; MIME types are exactly `text/csv` and `application/json`, respectively. If the integrated M4 commit differs, record `residuals.M4` and stop; do not adapt.
 
 Use only these exact test IDs: `partition-grid-type`, `dataset-row-dataset-a`, `dataset-row-dataset-b`, `dataset-detail-drawer`, `dataset-detail-close`, `dataset-detail-tab-assets`, `dataset-detail-tab-grid`, `quality-row-quality-run-a`, `quality-row-quality-run-b`, `quality-detail-drawer`, `quality-detail-close`, `quality-detail-tab-results`, `quality-detail-tab-errors`, `quality-export-all`, and `quality-export-filtered`. Do not use conditional lookup, `.or()`, fallback CSS/text, index-based row guesses, adaptive route globs, or substitute IDs.
 
@@ -355,7 +356,7 @@ Use exactly:
 Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
 ```
 
-State requests use `requested_grid_level`, cells retain actual `grid_level`, minimal cover may differ, strict loader COG assets/dataset-level bands are consumed unchanged, and partition never creates/reprojects source COGs. State ISEA4H uses unpadded decimal DGGRID SEQNUM with `cell_count(r) = 10 * 4**r + 2` and no H3/DGGRID runtime dependency.
+State requests use `requested_grid_level`, cells retain actual `grid_level`, minimal cover may differ, strict loader COG assets/dataset-level bands are consumed unchanged, and partition never creates/reprojects source COGs. State ISEA4H uses unpadded decimal DGGRID SEQNUM with `cell_count(r) = 10 * 4**r + 2` and no H3/DGGRID runtime dependency. State publication-record lifecycle values are exactly `publishing|active|withdrawing|failed|withdrawn`, dataset-derived publication status values are exactly `unpublished|publishing|active|withdrawing|failed|withdrawn`, and `published` is forbidden.
 
 - [ ] **Step 2: Label only and preserve historical bodies**
 
@@ -383,7 +384,7 @@ git commit -m "docs: clean current partition guidance"
 git log -1 --format=%H
 ```
 
-Expected: scanner exits `0`, current docs pass four rules, historical body digests match, and no product behavior file is staged. An independent reviewer checks inventory/exclusions/allowlists, dedicated H3 rule, current statements, and body digests; accepted fixes rerun gates and produce the concrete reviewed scanner/docs hash integrated first in Task 1.
+Expected: scanner exits `0`, current docs pass five rules, historical body digests match, and no product behavior file is staged. An independent reviewer checks inventory/exclusions/allowlists, dedicated H3 rule, forbidden `published` rule and exact lifecycle sets, current statements, and body digests; accepted fixes rerun gates and produce the concrete reviewed scanner/docs hash integrated first in Task 1.
 
 ### Task 7: Execute L1–L4 and assemble deterministic embedded evidence
 
@@ -417,7 +418,7 @@ Expected: every producer exits `0`; M3 and M5 real gates have no skip/deselectio
 
 - [ ] **Step 2: Assemble embedded evidence atomically**
 
-The assembly program reads every artifact, redacts secrets/absolute paths, computes raw SHA-256, and writes sorted JSON atomically. It embeds: source commit; integration order with three concrete reviewed hashes; per-command exit code; parsed pass/fail/skip/deselect counts; bounded redacted stdout summaries; scanner count/rule counts/inventory digest; all six redacted scenario summaries/counts/digests; residuals; and redaction policy. It must not use artifact pathnames as substitutes for content.
+The assembly program reads every artifact, redacts secrets/absolute paths, computes raw SHA-256, and writes sorted JSON atomically. It embeds: source commit; integration order with three concrete reviewed hashes; per-command exit code; parsed pass/fail/skip/deselect counts; bounded redacted stdout summaries; scanner count/rule counts/inventory digest; all six redacted scenario summaries/counts/digests; publication-record lifecycle exact set `publishing|active|withdrawing|failed|withdrawn`; dataset-derived publication status exact set `unpublished|publishing|active|withdrawing|failed|withdrawn`; explicit assertion/count evidence that forbidden `published` occurrences equal zero; residuals; and redaction policy. It must not use artifact pathnames as substitutes for content.
 
 Required assertions include:
 
@@ -426,6 +427,11 @@ assert report["M5_GATE_STATUS"] == "PASS"
 assert [x["owner"] for x in report["integration_order"]] == ["m5/scanner-docs", "m5/real-acceptance", "m5/browser"]
 assert all(re.fullmatch(r"[0-9a-f]{40}", x["reviewed_commit"]) for x in report["integration_order"])
 assert report["gates"]["L4"]["counts"] == {"scenario": 6, "passed": 6, "failed": 0, "skipped": 0, "deselected": 0}
+assert report["publication_status_contract"] == {
+    "publication_record": ["publishing", "active", "withdrawing", "failed", "withdrawn"],
+    "dataset_derived": ["unpublished", "publishing", "active", "withdrawing", "failed", "withdrawn"],
+    "forbidden_published_count": 0,
+}
 assert all(gate["summary"] and gate["sha256"] and gate["exit_codes"] for gate in report["gates"].values())
 assert all(not report["residuals"][owner] for owner in ("M1", "M2", "M3", "M4"))
 ```
