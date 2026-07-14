@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime
-
-import mgrs
 
 from grid_core.app.core.enums import GridType, TimeGranularity
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.st_code import STCode
 from grid_core.app.utils.timecode import to_time_code
 from grid_core.app.utils.validator import parse_st_code
 
-# M1 contract: only the three production grid types remain.
-# ST prefix map updated in Task 8 with canonical prefixes gh / mgrs / i4h.
-# This file retains legacy prefixes temporarily; Task 8 replaces the full service.
+# M1 frozen contract: only the three production grid types.
 PREFIX_MAP = {
     GridType.GEOHASH: "gh",
     GridType.MGRS: "mgrs",
     GridType.ISEA4H: "i4h",
 }
 PREFIX_MAP_REVERSE = {v: k for k, v in PREFIX_MAP.items()}
-MGRS_CONVERTER = mgrs.MGRS()
 TIME_CODE_FORMATS_BY_LENGTH = {
     6: "%Y%m",
     8: "%Y%m%d",
@@ -33,36 +28,35 @@ TIME_CODE_FORMATS_BY_LENGTH = {
 class CodeService:
     def generate_st_code(
         self,
-        grid_type: GridType,
-        level: int,
-        space_code: str,
+        address: GridAddress,
         timestamp: datetime,
         time_granularity: TimeGranularity,
     ) -> STCode:
+        grid_type = GridType(address.grid_type)
         if grid_type not in PREFIX_MAP:
             raise ValidationError(f"Unsupported grid_type: {grid_type}")
         time_code = to_time_code(timestamp, time_granularity)
         return self.build_st_code(
             grid_type=grid_type,
-            level=level,
-            space_code=space_code,
+            grid_level=address.grid_level,
+            space_code=address.space_code,
             time_code=time_code,
         )
 
     def build_st_code(
         self,
         grid_type: GridType,
-        level: int,
+        grid_level: int,
         space_code: str,
         time_code: str,
     ) -> STCode:
         if grid_type not in PREFIX_MAP:
             raise ValidationError(f"Unsupported grid_type: {grid_type}")
         prefix = PREFIX_MAP[grid_type]
-        st_code_str = f"{prefix}:{level}:{space_code}:{time_code}"
+        st_code_str = f"{prefix}:{grid_level}:{space_code}:{time_code}"
         return STCode(
             grid_type=grid_type.value,
-            grid_level=level,
+            grid_level=grid_level,
             space_code=space_code,
             time_code=time_code,
             st_code=st_code_str,
@@ -77,7 +71,7 @@ class CodeService:
         self._validate_time_code(parsed["time_code"])
         return STCode(
             grid_type=grid_type.value,
-            grid_level=parsed["level"],
+            grid_level=parsed["grid_level"],
             space_code=parsed["space_code"],
             time_code=parsed["time_code"],
             st_code=st_code,
@@ -86,16 +80,15 @@ class CodeService:
     def batch_generate_st_codes(
         self,
         grid_type: GridType,
-        level: int,
+        grid_level: int,
         items: list[dict],
         time_granularity: TimeGranularity,
     ) -> list[str]:
         st_codes: list[str] = []
         for item in items:
+            address = GridAddress(grid_type=grid_type.value, grid_level=grid_level, space_code=item["space_code"])
             result = self.generate_st_code(
-                grid_type=grid_type,
-                level=level,
-                space_code=item["space_code"],
+                address=address,
                 timestamp=item["timestamp"],
                 time_granularity=time_granularity,
             )
