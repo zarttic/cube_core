@@ -104,24 +104,26 @@ class BatchAddressRequest(BaseModel):
     boundary_type: BoundaryType = BoundaryType.POLYGON
 
 
+class CodeToGeometryRequest(AddressRequest):
+    boundary_type: BoundaryType = BoundaryType.POLYGON
+
+
+class ParentRequest(AddressRequest):
+    pass
+
+
 # ---------------------------------------------------------------------------
-# ST-code request models — use requested_grid_level.
+# ST-code request models. Generation carries a GridAddress (mirrors the
+# frozen CubeEncoderSDK.generate_st_code(address, timestamp, ...) signature).
 # ---------------------------------------------------------------------------
 
 
 class STCodeGenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    grid_type: GridType
-    requested_grid_level: int
-    space_code: str
+    address: GridAddress
     timestamp: datetime
     time_granularity: TimeGranularity = TimeGranularity.MINUTE
-
-    @model_validator(mode="after")
-    def _validate_level(self) -> "STCodeGenerateRequest":
-        validate_requested_grid_level(self.grid_type, self.requested_grid_level)
-        return self
 
 
 class STCodeParseRequest(BaseModel):
@@ -147,31 +149,3 @@ class STCodeBatchGenerateRequest(BaseModel):
     def _validate_level(self) -> "STCodeBatchGenerateRequest":
         validate_requested_grid_level(self.grid_type, self.requested_grid_level)
         return self
-
-
-# ---------------------------------------------------------------------------
-# Legacy stub classes retained for import compatibility until Task 8 rewrites
-# the topology API routes.  These classes use bare string codes and are
-# deprecated; Task 8 replaces every usage with AddressRequest-based models.
-# ---------------------------------------------------------------------------
-
-
-class _LegacyCodeRequest(BaseModel):
-    """Base class for legacy string-code topology requests (Task 8 will remove)."""
-
-    grid_type: GridType
-    code: str
-
-
-class ParentRequest(_LegacyCodeRequest):
-    pass
-
-
-class CodeToGeometryRequest(_LegacyCodeRequest):
-    boundary_type: BoundaryType = BoundaryType.POLYGON
-
-
-class BatchCodeToGeometryRequest(BaseModel):
-    grid_type: GridType
-    codes: List[str] = Field(min_length=1, max_length=500)
-    boundary_type: BoundaryType = BoundaryType.POLYGON
