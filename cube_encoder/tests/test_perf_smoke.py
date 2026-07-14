@@ -11,12 +11,12 @@ def test_perf_smoke_main_writes_json_report(tmp_path, monkeypatch):
 
     payload = output.read_text(encoding="utf-8")
     assert "generated_at_utc" in payload
-    assert "s2_locate" in payload
+    assert "geohash_locate" in payload
 
 
 def test_perf_smoke_returns_structured_metrics_without_enforcement():
     report = run_perf_smoke(enforce=False)
-    assert "s2_locate" in report
+    assert "geohash_locate" in report
     assert "mgrs_cover_intersect" in report
     assert "topology_batch_geometries_20" in report
     for row in report.values():

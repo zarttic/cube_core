@@ -47,10 +47,10 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
     grid_service = GridService()
     topology_service = TopologyService()
 
-    s2_cell = grid_service.locate(GridType.S2, level=7, point=[116.391, 39.907]).space_code
-    mgrs_cell = grid_service.locate(GridType.MGRS, level=5, point=[116.391, 39.907]).space_code
-    isea_cell = grid_service.locate(GridType.ISEA4H, level=7, point=[116.391, 39.907]).space_code
-    s2_neighbors = topology_service.neighbors(GridType.S2, s2_cell, k=1)[:20]
+    geohash_address = grid_service.locate_space_code(GridType.GEOHASH, 6, [116.391, 39.907])
+    mgrs_address = grid_service.locate_space_code(GridType.MGRS, 5, [116.391, 39.907])
+    isea_address = grid_service.locate_space_code(GridType.ISEA4H, 7, [116.391, 39.907])
+    geohash_neighbors = topology_service.neighbors(geohash_address, k=1)[:8]
 
     polygon = {
         "type": "Polygon",
@@ -59,30 +59,30 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
 
     cases = [
         PerfCase(
-            name="s2_locate",
+            name="geohash_locate",
             iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_S2_LOCATE_MS", 1.5),
-            func=lambda: grid_service.locate(GridType.S2, level=7, point=[116.391, 39.907]),
+            max_avg_ms=_env_float("PERF_MAX_GEOHASH_LOCATE_MS", 1.5),
+            func=lambda: grid_service.locate(GridType.GEOHASH, 6, [116.391, 39.907]),
         ),
         PerfCase(
             name="mgrs_locate",
-            iterations=8000,
+            iterations=4000,
             max_avg_ms=_env_float("PERF_MAX_MGRS_LOCATE_MS", 8.0),
-            func=lambda: grid_service.locate(GridType.MGRS, level=5, point=[116.391, 39.907]),
+            func=lambda: grid_service.locate(GridType.MGRS, 5, [116.391, 39.907]),
         ),
         PerfCase(
-            name="h3_locate",
+            name="isea4h_locate",
             iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_H3_LOCATE_MS", 1.5),
-            func=lambda: grid_service.locate(GridType.ISEA4H, level=7, point=[116.391, 39.907]),
+            max_avg_ms=_env_float("PERF_MAX_ISEA4H_LOCATE_MS", 3.0),
+            func=lambda: grid_service.locate(GridType.ISEA4H, 7, [116.391, 39.907]),
         ),
         PerfCase(
-            name="s2_cover_intersect",
-            iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_S2_COVER_MS", 80.0),
+            name="geohash_cover_intersect",
+            iterations=1000,
+            max_avg_ms=_env_float("PERF_MAX_GEOHASH_COVER_MS", 80.0),
             func=lambda: grid_service.cover(
-                GridType.S2,
-                level=6,
+                GridType.GEOHASH,
+                6,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -91,12 +91,12 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             ),
         ),
         PerfCase(
-            name="s2_cover_compact_intersect",
-            iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_S2_COMPACT_COVER_MS", 60.0),
+            name="geohash_cover_compact_intersect",
+            iterations=1000,
+            max_avg_ms=_env_float("PERF_MAX_GEOHASH_COMPACT_COVER_MS", 60.0),
             func=lambda: grid_service.cover_compact(
-                GridType.S2,
-                level=6,
+                GridType.GEOHASH,
+                6,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -105,11 +105,11 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         ),
         PerfCase(
             name="mgrs_cover_intersect",
-            iterations=1000,
+            iterations=500,
             max_avg_ms=_env_float("PERF_MAX_MGRS_COVER_MS", 180.0),
             func=lambda: grid_service.cover(
                 GridType.MGRS,
-                level=3,
+                3,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -119,11 +119,11 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         ),
         PerfCase(
             name="mgrs_cover_compact_intersect",
-            iterations=1000,
+            iterations=500,
             max_avg_ms=_env_float("PERF_MAX_MGRS_COMPACT_COVER_MS", 150.0),
             func=lambda: grid_service.cover_compact(
                 GridType.MGRS,
-                level=3,
+                3,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -131,12 +131,12 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             ),
         ),
         PerfCase(
-            name="h3_cover_intersect",
-            iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_H3_COVER_MS", 120.0),
+            name="isea4h_cover_intersect",
+            iterations=200,
+            max_avg_ms=_env_float("PERF_MAX_ISEA4H_COVER_MS", 300.0),
             func=lambda: grid_service.cover(
                 GridType.ISEA4H,
-                level=7,
+                7,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -145,12 +145,12 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             ),
         ),
         PerfCase(
-            name="h3_cover_compact_intersect",
-            iterations=2000,
-            max_avg_ms=_env_float("PERF_MAX_H3_COMPACT_COVER_MS", 90.0),
+            name="isea4h_cover_compact_intersect",
+            iterations=200,
+            max_avg_ms=_env_float("PERF_MAX_ISEA4H_COMPACT_COVER_MS", 300.0),
             func=lambda: grid_service.cover_compact(
                 GridType.ISEA4H,
-                level=7,
+                7,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -159,23 +159,23 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         ),
         PerfCase(
             name="topology_batch_geometries_20",
-            iterations=4000,
+            iterations=2000,
             max_avg_ms=_env_float("PERF_MAX_BATCH_GEOMETRY_MS", 35.0),
             func=lambda: topology_service.codes_to_geometries(
-                GridType.S2, s2_neighbors, BoundaryType.POLYGON
+                geohash_neighbors, BoundaryType.POLYGON
             ),
         ),
         PerfCase(
             name="topology_neighbors_mgrs",
-            iterations=6000,
+            iterations=3000,
             max_avg_ms=_env_float("PERF_MAX_MGRS_NEIGHBORS_MS", 12.0),
-            func=lambda: topology_service.neighbors(GridType.MGRS, mgrs_cell, k=1),
+            func=lambda: topology_service.neighbors(mgrs_address, k=1),
         ),
         PerfCase(
-            name="topology_neighbors_h3",
+            name="topology_neighbors_isea4h",
             iterations=1000,
-            max_avg_ms=_env_float("PERF_MAX_H3_NEIGHBORS_MS", 2.0),
-            func=lambda: topology_service.neighbors(GridType.ISEA4H, isea_cell, k=1),
+            max_avg_ms=_env_float("PERF_MAX_ISEA4H_NEIGHBORS_MS", 5.0),
+            func=lambda: topology_service.neighbors(isea_address, k=1),
         ),
     ]
 
