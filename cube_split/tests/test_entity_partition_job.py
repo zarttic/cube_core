@@ -15,6 +15,18 @@ import cube_split.jobs.entity_partition_job as entity_partition_job
 from cube_split.jobs.entity_partition_job import run_entity_partition
 
 
+def test_infer_isea4h_level_uses_aperture_four_physical_edge_for_30m_source():
+    asset = entity_partition_job.AssetRecord(
+        scene_id="scene-a",
+        band="b04",
+        path="unused.tif",
+        acq_time="2026-04-21T00:00:00Z",
+        resolution=30.0,
+    )
+
+    assert entity_partition_job.infer_isea4h_level_for_assets([asset]) == 7
+
+
 class _FakeObjectRef:
     def __init__(self, value):
         self.value = value
@@ -178,7 +190,7 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
     assert row["source_asset_path"] == str(source.resolve())
     assert "entity_tiles/optical" in tile_path.as_posix()
     assert row["space_code"]
-    assert row["st_code"].startswith("hx:")
+    assert row["st_code"].startswith("i4h:")
     assert row["st_time_granularity"] == "day"
     assert tile_path.exists()
     with rasterio.open(tile_path) as ds:
@@ -200,7 +212,7 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     _write_tif(worker_source)
     cell = entity_partition_job.CubeEncoderSDK().locate(
         grid_type="isea4h",
-        level=1,
+        requested_grid_level=1,
         point=[116.016, 39.984],
     )
 
@@ -235,7 +247,7 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     assert rows[0]["asset_path"] != rows[0]["source_asset_path"]
 
 
-def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: Path):
+def test_entity_writer_uses_isea4h_grid_type_for_output_paths_and_rows(tmp_path: Path):
     run_dir = tmp_path / "run"
     source = tmp_path / "source.tif"
     _write_tif(source)
@@ -243,16 +255,16 @@ def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: P
     with rasterio.open(source) as ds:
         min_lon, min_lat, max_lon, max_lat = entity_partition_job._dataset_bounds_wgs84(ds)
     center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
-    cell = sdk.locate(grid_type="s2", level=6, point=center)
+    cell = sdk.locate(grid_type="isea4h", requested_grid_level=1, point=center)
     tasks = [
         {
-            "scene_id": "scene-s2",
+            "scene_id": "scene-isea4h",
             "band": "b04",
             "asset_path": str(source),
             "source_asset_path": str(source),
             "acq_time": "2026-04-21T00:00:00Z",
-            "grid_type": "s2",
-            "grid_level": 6,
+            "grid_type": "isea4h",
+            "grid_level": 1,
             "space_code": cell.space_code,
             "cover_mode": "intersect",
             "cell_min_lon": float(cell.bbox[0]),
@@ -271,9 +283,9 @@ def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: P
     )
 
     assert rows
-    assert rows[0]["grid_type"] == "s2"
+    assert rows[0]["grid_type"] == "isea4h"
     assert rows[0]["partition_method"] == "entity"
-    assert "/s2/" in rows[0]["asset_path"]
+    assert "/isea4h/" in rows[0]["asset_path"]
 
 
 def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_path: Path):
@@ -281,7 +293,7 @@ def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_pa
     source = tmp_path / "source_multiband.tif"
     _write_two_band_tif(source)
     sdk = entity_partition_job.CubeEncoderSDK()
-    cell = sdk.locate(grid_type="isea4h", level=1, point=[116.016, 39.984])
+    cell = sdk.locate(grid_type="isea4h", requested_grid_level=1, point=[116.016, 39.984])
     calls = 0
     original_geometry_mask = entity_partition_job.rasterio.mask.raster_geometry_mask
 
@@ -336,11 +348,11 @@ def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_pa
 
 def test_entity_tile_object_key_uses_row_grid_type():
     row = {
-        "scene_id": "scene-s2",
+        "scene_id": "scene-isea4h",
         "band": "b04",
         "acq_time": "2026-04-21T00:00:00Z",
-        "grid_type": "s2",
-        "grid_level": 6,
+        "grid_type": "isea4h",
+        "grid_level": 1,
         "space_code": "abc123",
     }
     args = SimpleNamespace(
@@ -352,7 +364,7 @@ def test_entity_tile_object_key_uses_row_grid_type():
 
     key = entity_partition_job._entity_tile_object_key(row, Path("tile.tif"), args)
 
-    assert "grid=s2/" in key
+    assert "grid=isea4h/" in key
 
 
 def test_entity_tile_upload_options_default_workers():
@@ -453,7 +465,7 @@ def test_entity_auto_parallelism_uses_split_groups_after_prefix_batching(monkeyp
                             "grid_level": task["grid_level"],
                             "space_code": task["space_code"],
                             "space_code_prefix": task["space_code"][:3],
-                            "st_code": f"hx:{task['grid_level']}:{task['space_code']}:19700101",
+                            "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:19700101",
                             "time_bucket": "19700101",
                             "cover_mode": task["cover_mode"],
                             "cell_min_lon": task["cell_min_lon"],
@@ -912,7 +924,7 @@ def test_entity_partition_ray_ingest_disabled_still_uses_minio_tiles(monkeypatch
                             "grid_level": task["grid_level"],
                             "space_code": task["space_code"],
                             "space_code_prefix": task["space_code"][:3],
-                            "st_code": f"hx:{task['grid_level']}:{task['space_code']}:19700101",
+                            "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:19700101",
                             "time_bucket": "19700101",
                             "cover_mode": task["cover_mode"],
                             "cell_min_lon": task["cell_min_lon"],
@@ -1054,7 +1066,7 @@ def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_p
             "grid_level": 6,
             "space_code": "86283082fffffff",
             "space_code_prefix": "862",
-            "st_code": "hx:6:86283082fffffff:20200801",
+            "st_code": "i4h:6:86283082fffffff:20200801",
             "time_bucket": "20200801",
             "entity_tile_uri": "s3://entity-bucket/cube/entity/fake.tif",
             "local_asset_path": str(tmp_path / "fake.tif"),
@@ -1205,7 +1217,7 @@ def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path)
                         "asset_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
                         "source_asset_path": task["asset_path"],
                         "output_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
-                "st_code": f"hx:1:{task['space_code']}:19700101",
+                "st_code": f"i4h:1:{task['space_code']}:19700101",
                 "window_col_off": 0,
                 "window_row_off": 0,
                         "window_width": 1,
@@ -1315,7 +1327,7 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
                 "grid_level": task["grid_level"],
                 "space_code": task["space_code"],
                 "space_code_prefix": "832",
-                "st_code": "hx:6:832830fffffffff:1980",
+                "st_code": "i4h:6:832830fffffffff:1980",
                 "time_bucket": "1980",
                 "st_time_granularity": "day",
                 "cover_mode": task["cover_mode"],
@@ -1406,7 +1418,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
                     "grid_level": 4,
                     "space_code": "842a107ffffffff",
                     "space_code_prefix": "842",
-                    "st_code": "hx:4:842a107ffffffff:19700101",
+                    "st_code": "i4h:4:842a107ffffffff:19700101",
                     "time_bucket": "19700101",
                     "cover_mode": "intersect",
                     "cell_min_lon": 0.0,
@@ -1531,7 +1543,7 @@ def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tm
                 "grid_level": task["grid_level"],
                 "space_code": task["space_code"],
                 "space_code_prefix": task["space_code"][:3],
-                "st_code": f"hx:{task['grid_level']}:{task['space_code']}:20260421",
+                "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:20260421",
                 "time_bucket": "20260421",
                 "cover_mode": task["cover_mode"],
                 "cell_min_lon": task["cell_min_lon"],

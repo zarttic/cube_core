@@ -2,19 +2,19 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import h3
 import numpy as np
 import rasterio
 import rasterio.mask
+from grid_core.app.models.grid_address import GridAddress
 from grid_core.sdk import CubeEncoderSDK
 from pyproj import Geod, Transformer
 from rasterio.warp import transform_geom
@@ -33,17 +33,17 @@ from cube_split.jobs.ray_logical_partition_job import (
 )
 from cube_split.jobs.ray_partition_core import (
     AssetRecord,
+    _bbox_intersection,
     _dataset_bounds_wgs84,
-    build_grid_tasks_driver,
-    build_manifest,
-    create_unique_run_dir,
     _local_file_identity,
     _object_identity,
     _read_identity_sidecar,
-    _bbox_intersection,
     _safe_window_from_bounds,
     _wgs84_to_dataset_bounds,
     _write_identity_sidecar,
+    build_grid_tasks_driver,
+    build_manifest,
+    create_unique_run_dir,
     resolve_asset_source_path,
     upload_source_assets_to_minio,
 )
@@ -52,6 +52,8 @@ from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 DEFAULT_ENTITY_TASKS_PER_GROUP = 64
 DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS = 16
+ISEA4H_AUTHALIC_RADIUS_M = 6_371_007.180918475
+ISEA4H_MAX_RESOLUTION = 15
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
 _ENTITY_MODULE_SEARCH_ROOTS = (
     os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
@@ -68,8 +70,8 @@ def _normalize_data_type(value: Any) -> str:
 
 def _normalize_grid_type(value: Any) -> str:
     grid_type = str(value or "isea4h").strip().lower()
-    if grid_type not in {"s2", "tile_matrix", "isea4h"}:
-        raise ValueError("grid_type must be one of: s2, tile_matrix, isea4h")
+    if grid_type != "isea4h":
+        raise ValueError("grid_type must be isea4h for entity partitioning")
     return grid_type
 
 
@@ -91,9 +93,14 @@ def infer_isea4h_level_for_assets(
         for asset in assets
     )
     target_edge_m = resolution * target_pixels_per_hex_edge
-    selected = 1
-    for level in range(1, 13):
-        if h3.average_hexagon_edge_length(level, unit="m") >= target_edge_m:
+    selected = 0
+    for level in range(ISEA4H_MAX_RESOLUTION + 1):
+        # ISEA4H is an aperture-4 equal-area grid. Its nominal hexagon edge is
+        # derived from the authalic sphere area and the documented cell count.
+        cell_count = 10 * 4**level + 2
+        cell_area_m2 = 4 * math.pi * ISEA4H_AUTHALIC_RADIUS_M**2 / cell_count
+        nominal_edge_m = math.sqrt(2 * cell_area_m2 / (3 * math.sqrt(3)))
+        if nominal_edge_m >= target_edge_m:
             selected = level
     return selected
 
@@ -189,7 +196,7 @@ def _ensure_center_cell_tasks(
             with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
                 min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
         center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
-        cell = sdk.locate(grid_type=grid_type, level=grid_level, point=center)
+        cell = sdk.locate(grid_type=grid_type, requested_grid_level=grid_level, point=center)
         out.append(
             {
                 "scene_id": asset.scene_id,
@@ -199,6 +206,7 @@ def _ensure_center_cell_tasks(
                 "grid_type": grid_type,
                 "grid_level": grid_level,
                 "space_code": cell.space_code,
+                "topology_code": cell.topology_code,
                 "cell_min_lon": float(cell.bbox[0]),
                 "cell_min_lat": float(cell.bbox[1]),
                 "cell_max_lon": float(cell.bbox[2]),
@@ -213,8 +221,13 @@ def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
 
 
-def _cell_geometry_for_dataset(sdk: CubeEncoderSDK, ds: rasterio.DatasetReader, *, grid_type: str, space_code: str) -> dict[str, Any]:
-    geom = sdk.code_to_geometry(grid_type=grid_type, code=space_code)
+def _cell_geometry_for_dataset(
+    sdk: CubeEncoderSDK,
+    ds: rasterio.DatasetReader,
+    *,
+    address: GridAddress,
+) -> dict[str, Any]:
+    geom = sdk.code_to_geometry(address=address)
     if ds.crs and ds.crs.to_string().upper() != "EPSG:4326":
         return transform_geom("EPSG:4326", ds.crs, geom)
     return geom
@@ -338,8 +351,12 @@ def _write_entity_tiles(
                             geom = _cell_geometry_for_dataset(
                                 sdk,
                                 ds,
-                                grid_type=geom_key[1],
-                                space_code=geom_key[2],
+                                address=GridAddress(
+                                    grid_type=geom_key[1],
+                                    grid_level=int(task["grid_level"]),
+                                    space_code=geom_key[2],
+                                    topology_code=task.get("topology_code"),
+                                ),
                             )
                             geometry_cache[geom_key] = geom
                             _add_timing(timing, "entity_geometry_elapsed_sec", time.perf_counter() - geom_start)
@@ -460,9 +477,12 @@ def _write_entity_tiles(
                         )
                         if st_key not in st_cache:
                             st_cache[st_key] = sdk.generate_st_code(
-                                grid_type=str(task["grid_type"]),
-                                level=int(task["grid_level"]),
-                                space_code=str(task["space_code"]),
+                                address=GridAddress(
+                                    grid_type=str(task["grid_type"]),
+                                    grid_level=int(task["grid_level"]),
+                                    space_code=str(task["space_code"]),
+                                    topology_code=task.get("topology_code"),
+                                ),
                                 timestamp=datetime.fromisoformat(acq_time.replace("Z", "+00:00")),
                                 time_granularity=st_time_granularity,
                             ).st_code
@@ -1311,20 +1331,22 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     backend = _resolve_backend(backend_requested, ray_address)
     if backend == "ray":
         _validate_entity_tile_upload_options(_entity_tile_upload_options(args))
-        source_uploader = lambda assets: upload_source_assets_to_minio(
-            assets,
-            prefix="cube/source",
-            options={
-                "endpoint": str(getattr(args, "minio_endpoint", "")),
-                "access_key": str(getattr(args, "minio_access_key", "")),
-                "secret_key": str(getattr(args, "minio_secret_key", "")),
-                "secure": bool(getattr(args, "minio_secure", False)),
-                "bucket": str(getattr(args, "minio_bucket", "")),
-                "dataset": str(getattr(args, "dataset", "demo")),
-                "sensor": str(getattr(args, "sensor", "unknown")),
-                "asset_version": str(getattr(args, "asset_version", "v1")),
-            },
-        )
+
+        def source_uploader(assets: list[AssetRecord]) -> list[AssetRecord]:
+            return upload_source_assets_to_minio(
+                assets,
+                prefix="cube/source",
+                options={
+                    "endpoint": str(getattr(args, "minio_endpoint", "")),
+                    "access_key": str(getattr(args, "minio_access_key", "")),
+                    "secret_key": str(getattr(args, "minio_secret_key", "")),
+                    "secure": bool(getattr(args, "minio_secure", False)),
+                    "bucket": str(getattr(args, "minio_bucket", "")),
+                    "dataset": str(getattr(args, "dataset", "demo")),
+                    "sensor": str(getattr(args, "sensor", "unknown")),
+                    "asset_version": str(getattr(args, "asset_version", "v1")),
+                },
+            )
 
     source_assets = build_manifest(
         input_dir,
@@ -1342,9 +1364,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     requested_level = int(getattr(args, "grid_level", 0) or 0)
     target_pixels = int(getattr(args, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE) or DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
-    inferred_level = requested_level if requested_level > 0 else (
-        infer_isea4h_level_for_assets(assets, target_pixels) if grid_type == "isea4h" else 6
-    )
+    inferred_level = requested_level if requested_level > 0 else infer_isea4h_level_for_assets(assets, target_pixels)
     grid_level = requested_level if requested_level > 0 else inferred_level
     max_cells_per_asset = int(getattr(args, "max_cells_per_asset", 0) or 0)
     if max_cells_per_asset < 0:
@@ -1591,7 +1611,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cog-level", type=int, default=0)
     parser.add_argument("--cog-num-threads", default="ALL_CPUS")
     parser.add_argument("--target-crs", default="EPSG:4326")
-    parser.add_argument("--grid-type", default="isea4h", choices=["s2", "tile_matrix", "isea4h"])
+    parser.add_argument("--grid-type", default="isea4h", choices=["isea4h"])
     parser.add_argument("--grid-level", type=int, default=0)
     parser.add_argument("--entity-clip-mode", default="exact", choices=["bbox", "exact"])
     parser.add_argument("--target-pixels-per-hex-edge", type=int, default=DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)

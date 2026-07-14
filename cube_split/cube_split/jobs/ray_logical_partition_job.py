@@ -12,7 +12,6 @@ from typing import Any
 from cube_split import runtime_config
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs, check_cancelled, shutdown_ray_if_needed
 from cube_split.jobs.ray_partition_core import (
-    PLANE_GRID_TYPE,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
     asset_record_to_dict,
@@ -59,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional target CRS for standardized COG assets, e.g. EPSG:4326. Empty keeps source CRS.",
     )
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "mgrs", "tile_matrix", "isea4h", "plane_grid"], help="Grid type")
+    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"], help="ST time code granularity")
@@ -331,30 +330,33 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    grid_type = str(getattr(args, "grid_type", "geohash") or "").strip().lower()
+    if grid_type not in {"geohash", "mgrs"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs")
+    args.grid_type = grid_type
     backend_requested = args.partition_backend
     if backend_requested == "auto":
         backend = "ray" if args.ray_address else "thread"
     else:
         backend = backend_requested
-    if str(args.grid_type or "").lower() == PLANE_GRID_TYPE and str(args.target_crs or "").strip():
-        raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
-
     source_uploader = None
     if backend == "ray":
-        source_uploader = lambda assets: upload_source_assets_to_minio(
-            assets,
-            prefix="cube/source",
-            options={
-                "endpoint": str(getattr(args, "minio_endpoint", "")),
-                "access_key": str(getattr(args, "minio_access_key", "")),
-                "secret_key": str(getattr(args, "minio_secret_key", "")),
-                "secure": bool(getattr(args, "minio_secure", False)),
-                "bucket": str(getattr(args, "minio_bucket", "")),
-                "dataset": str(getattr(args, "dataset", "demo")),
-                "sensor": str(getattr(args, "sensor", "unknown")),
-                "asset_version": str(getattr(args, "asset_version", "v1")),
-            },
-        )
+
+        def source_uploader(assets: list[Any]) -> list[Any]:
+            return upload_source_assets_to_minio(
+                assets,
+                prefix="cube/source",
+                options={
+                    "endpoint": str(getattr(args, "minio_endpoint", "")),
+                    "access_key": str(getattr(args, "minio_access_key", "")),
+                    "secret_key": str(getattr(args, "minio_secret_key", "")),
+                    "secure": bool(getattr(args, "minio_secure", False)),
+                    "bucket": str(getattr(args, "minio_bucket", "")),
+                    "dataset": str(getattr(args, "dataset", "demo")),
+                    "sensor": str(getattr(args, "sensor", "unknown")),
+                    "asset_version": str(getattr(args, "asset_version", "v1")),
+                },
+            )
 
     source_assets = build_manifest(
         input_dir,
@@ -495,8 +497,8 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     )
 
                     from cube_split.jobs.ray_partition_core import (
-                        _process_local_task_group,
                         _prepare_actor_cog_groups,
+                        _process_local_task_group,
                         _upload_actor_cogs,
                     )
 

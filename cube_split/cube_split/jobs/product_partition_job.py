@@ -23,7 +23,6 @@ from cube_split.jobs.ray_logical_partition_job import (
     _resolve_ray_chunk_size,
 )
 from cube_split.jobs.ray_partition_core import (
-    PLANE_GRID_TYPE,
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
     _process_local_task_group,
@@ -58,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
     parser.add_argument("--cog-input-dir", default="data/cog/product", help="Directory for standardized product COGs")
     parser.add_argument("--target-crs", default="", help="Optional target CRS for standardized COG assets. Empty keeps source CRS.")
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "tile_matrix", "isea4h", "plane_grid"], help="Grid type")
+    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--max-cells-per-asset", type=int, default=0, help="Safety limit for cover cells per asset (0 disables)")
@@ -337,6 +336,10 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     output_dir = Path(args.output_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    grid_type = str(getattr(args, "grid_type", "geohash") or "").strip().lower()
+    if grid_type not in {"geohash", "mgrs"}:
+        raise ValueError("grid_type must be one of: geohash, mgrs")
+    args.grid_type = grid_type
     check_cancelled(args)
 
     total_start = time.perf_counter()
@@ -345,27 +348,26 @@ def run_product_partition(args: argparse.Namespace) -> dict:
     backend = _resolve_backend(backend_requested, ray_address)
     if backend not in {"ray", "thread"}:
         raise ValueError("partition_backend must be one of: auto, ray, thread")
-    if str(args.grid_type or "").lower() == PLANE_GRID_TYPE and str(args.target_crs or "").strip():
-        raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
-
     manifest_path_raw = str(getattr(args, "manifest_path", "") or "").strip()
     manifest_path = Path(manifest_path_raw).expanduser() if manifest_path_raw else None
     source_uploader = None
     if backend == "ray":
-        source_uploader = lambda assets: upload_source_assets_to_minio(
-            assets,
-            prefix="cube/source",
-            options={
-                "endpoint": str(getattr(args, "minio_endpoint", "")),
-                "access_key": str(getattr(args, "minio_access_key", "")),
-                "secret_key": str(getattr(args, "minio_secret_key", "")),
-                "secure": bool(getattr(args, "minio_secure", False)),
-                "bucket": str(getattr(args, "minio_bucket", "")),
-                "dataset": str(getattr(args, "dataset", "dianzhong_ecological_security")),
-                "sensor": str(getattr(args, "sensor", "data_product")),
-                "asset_version": str(getattr(args, "asset_version", "v1")),
-            },
-        )
+
+        def source_uploader(assets: list[Any]) -> list[Any]:
+            return upload_source_assets_to_minio(
+                assets,
+                prefix="cube/source",
+                options={
+                    "endpoint": str(getattr(args, "minio_endpoint", "")),
+                    "access_key": str(getattr(args, "minio_access_key", "")),
+                    "secret_key": str(getattr(args, "minio_secret_key", "")),
+                    "secure": bool(getattr(args, "minio_secure", False)),
+                    "bucket": str(getattr(args, "minio_bucket", "")),
+                    "dataset": str(getattr(args, "dataset", "dianzhong_ecological_security")),
+                    "sensor": str(getattr(args, "sensor", "data_product")),
+                    "asset_version": str(getattr(args, "asset_version", "v1")),
+                },
+            )
     source_assets = build_manifest(
         input_dir,
         data_type="product",

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rasterio
 from rasterio.transform import from_origin
 
@@ -99,18 +100,26 @@ def _stub_product_source_asset_upload(monkeypatch) -> None:
     )
 
 
-def test_product_parse_args_allows_isea4h_grid_type(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["product_partition_job.py", "--grid-type", "isea4h"])
+def test_product_parse_args_allows_mgrs_grid_type(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["product_partition_job.py", "--grid-type", "mgrs"])
     args = parse_args()
-    assert args.grid_type == "isea4h"
+    assert args.grid_type == "mgrs"
 
 
-def test_product_parse_args_allows_plane_grid_and_keeps_source_crs_by_default(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["product_partition_job.py", "--grid-type", "plane_grid"])
+def test_product_parse_args_defaults_to_geohash_and_keeps_source_crs_by_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["product_partition_job.py"])
     args = parse_args()
-    assert args.grid_type == "plane_grid"
+    assert args.grid_type == "geohash"
     assert args.target_crs == ""
     assert args.max_cells_per_asset == 0
+
+
+def test_product_partition_rejects_entity_grid_from_direct_namespace(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    with pytest.raises(ValueError, match="geohash, mgrs"):
+        run_product_partition(Namespace(input_dir=str(input_dir), output_dir=str(tmp_path / "output"), grid_type="isea4h"))
 
 
 def _product_row(asset_path: Path, year: int = 1980) -> dict:
@@ -119,11 +128,11 @@ def _product_row(asset_path: Path, year: int = 1980) -> dict:
         "band": "product_value",
         "asset_path": str(asset_path),
         "acq_time": f"{year}-01-01T00:00:00Z",
-        "grid_type": "s2",
+        "grid_type": "geohash",
         "grid_level": 5,
         "space_code": "372c",
         "space_code_prefix": "372",
-        "st_code": f"s2:5:372c:{year}",
+        "st_code": f"gh:5:372c:{year}",
         "time_bucket": str(year),
         "cover_mode": "intersect",
         "cell_min_lon": 100.0,
@@ -216,10 +225,10 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
                 "band": "product_value",
                 "asset_path": str(tif),
                 "acq_time": "1980-01-01T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "372c",
-                "st_code": "s2:5:372c:19800101",
+                "st_code": "gh:5:372c:19800101",
                 "cell_min_lon": 100.0,
                 "cell_min_lat": 24.9,
                 "cell_max_lon": 100.1,
@@ -244,7 +253,7 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -317,7 +326,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -586,7 +595,7 @@ def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -660,7 +669,7 @@ def test_product_partition_ray_forces_minio_ingest_contract(monkeypatch, tmp_pat
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -730,7 +739,7 @@ def test_product_partition_fills_product_name_from_source_metadata(monkeypatch, 
             output_dir=str(output_dir),
             cog_input_dir=str(cog_dir),
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             max_cells_per_asset=20000,
@@ -901,11 +910,11 @@ def test_product_postgres_upserts_batch_merge_rows() -> None:
             "product",
             1980,
             "product_value",
-            "s2",
+            "geohash",
             7,
             f"35f0{idx}",
             "1980",
-            f"s2:7:35f0{idx}:1980",
+            f"gh:7:35f0{idx}:1980",
             116.1,
             39.8,
             116.2,

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
@@ -17,7 +18,6 @@ from cube_split.jobs.ray_logical_partition_job import (
     parse_args,
     run_logical_partition,
 )
-from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
 
 
@@ -123,17 +123,25 @@ def test_resolve_ray_actor_parallelism_caps_by_asset_count():
     assert _resolve_ray_actor_parallelism(groups, requested_parallelism=8) == 2
 
 
-def test_parse_args_allows_isea4h_grid_type(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "isea4h"])
+def test_parse_args_allows_mgrs_grid_type(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "mgrs"])
     args = parse_args()
-    assert args.grid_type == "isea4h"
+    assert args.grid_type == "mgrs"
 
 
-def test_parse_args_allows_plane_grid_and_defaults_cell_limit_to_unlimited(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "plane_grid"])
+def test_parse_args_defaults_to_geohash_and_unlimited_cell_limit(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py"])
     args = parse_args()
-    assert args.grid_type == "plane_grid"
+    assert args.grid_type == "geohash"
     assert args.max_cells_per_asset == 0
+
+
+def test_logical_partition_rejects_entity_grid_from_direct_namespace(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    with pytest.raises(ValueError, match="geohash, mgrs"):
+        run_logical_partition(Namespace(input_dir=str(input_dir), output_dir=str(tmp_path / "output"), grid_type="isea4h"))
 
 
 def test_parse_args_defaults_to_fastest_measured_cog_compression(monkeypatch):
@@ -241,7 +249,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
                 "band": "b04",
                 "asset_path": str(cog_dir / "source_cog.tif"),
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f4",
                 "cell_min_lon": 116.1,
@@ -258,7 +266,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
 
     def fake_process_local_task_group(group, time_granularity, include_sample_mean=False):
         row = dict(group[0])
-        row["st_code"] = "s2:5:35f4:20260421"
+        row["st_code"] = "gh:5:35f4:20260421"
         row["time_bucket"] = "20260421"
         row["space_code_prefix"] = "35f"
         row["intersect_min_lon"] = row["cell_min_lon"]
@@ -304,7 +312,7 @@ def test_logical_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             time_granularity="day",
@@ -370,7 +378,7 @@ def test_logical_partition_raises_clear_error_when_no_grid_tasks(monkeypatch, tm
                 cog_level=0,
                 cog_num_threads="ALL_CPUS",
                 target_crs="EPSG:4326",
-                grid_type="s2",
+                grid_type="geohash",
                 grid_level=1,
                 cover_mode="intersect",
                 time_granularity="day",
@@ -437,7 +445,7 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
                 "band": "b04",
                 "asset_path": source_asset.path,
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f4",
                 "cell_min_lon": 116.1,
@@ -455,7 +463,7 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
                 "band": "b04",
                 "asset_path": source_asset.path,
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f5",
                 "cell_min_lon": 116.2,
@@ -545,7 +553,7 @@ def test_logical_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             time_granularity="day",
@@ -623,7 +631,7 @@ def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
                 "band": "b04",
                 "asset_path": source_asset.path,
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f4",
                 "cell_min_lon": 116.1,
@@ -637,7 +645,7 @@ def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
                 "band": "b04",
                 "asset_path": source_asset.path,
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "36a1",
                 "cell_min_lon": 116.2,
@@ -713,7 +721,7 @@ def test_logical_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             time_granularity="day",
@@ -792,7 +800,7 @@ def test_logical_partition_radar_uses_worker_cog_timing(monkeypatch, tmp_path: P
                 "band": "vv",
                 "asset_path": source_asset.path,
                 "acq_time": "2018-06-15T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f4",
                 "cell_min_lon": 100.0,
@@ -806,7 +814,7 @@ def test_logical_partition_radar_uses_worker_cog_timing(monkeypatch, tmp_path: P
                 "band": "vv",
                 "asset_path": source_asset.path,
                 "acq_time": "2018-06-15T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f5",
                 "cell_min_lon": 100.1,
@@ -875,7 +883,7 @@ def test_logical_partition_radar_uses_worker_cog_timing(monkeypatch, tmp_path: P
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_type="s2",
+            grid_type="geohash",
             grid_level=5,
             cover_mode="intersect",
             time_granularity="day",
@@ -956,7 +964,7 @@ def test_logical_partition_ray_shutdowns_after_worker_failure(monkeypatch, tmp_p
                 "band": "b04",
                 "asset_path": "/source/scene_a.tif",
                 "acq_time": "2026-04-21T00:00:00Z",
-                "grid_type": "s2",
+                "grid_type": "geohash",
                 "grid_level": 5,
                 "space_code": "35f4",
                 "cell_min_lon": 116.1,
@@ -996,7 +1004,7 @@ def test_logical_partition_ray_shutdowns_after_worker_failure(monkeypatch, tmp_p
                 cog_level=0,
                 cog_num_threads="ALL_CPUS",
                 target_crs="EPSG:4326",
-                grid_type="s2",
+                grid_type="geohash",
                 grid_level=5,
                 cover_mode="intersect",
                 time_granularity="day",
