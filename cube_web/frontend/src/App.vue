@@ -5,6 +5,7 @@ import { authRequired, loadAuthRuntimeConfig } from '@/config';
 import { useSubUserStore } from '@/stores/subUser';
 
 const PartitionView = defineAsyncComponent(() => import('@/views/PartitionView.vue'));
+const QualityRecordsView = defineAsyncComponent(() => import('@/views/QualityRecordsView.vue'));
 const EncodingView = defineAsyncComponent(() => import('@/views/EncodingView.vue'));
 
 const currentPath = ref(normalizePath(window.location.pathname));
@@ -13,6 +14,7 @@ const userStore = useSubUserStore();
 
 const pageMap = {
   '/partition': PartitionView,
+  '/quality': QualityRecordsView,
   '/encoding': EncodingView,
 };
 

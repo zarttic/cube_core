@@ -171,7 +171,7 @@ npm --prefix cube_web/frontend run build
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_web/scripts/run_m3_quality_publication_gate.py
 ```
 
-Expected: every command exits `0`. The non-skipping M3 runner is the sole L4 authority: it invokes the `m3_real` marker, fails on skipped or deselected M3-real tests and missing/unreachable infrastructure, and covers actual OpenGauss, MinIO, Ray, publication gateway, full/filtered CSV and JSON export counts equal to parameterized OpenGauss counts, publication snapshots, and exact-ID withdrawal. Record evidence, create the local M3 integration commit, mark M3 `PASSED`, and only then mark M4 `READY`.
+Expected: every command exits `0`. The non-skipping M3 runner is the sole L4 authority: it invokes the `m3_real` marker, fails on skipped or deselected M3-real tests and missing/unreachable infrastructure, and covers actual OpenGauss, MinIO, Ray, full/filtered CSV and JSON export counts equal to parameterized OpenGauss counts, publication snapshots, and exact-ID OpenGauss `active -> withdrawn` transitions. Publication means queryable/usable data in this repository; no external publication gateway is required. Record evidence, create the local M3 integration commit, mark M3 `PASSED`, and only then mark M4 `READY`.
 
 ### Task 4: M4 — Frontend Architecture
 

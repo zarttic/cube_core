@@ -20,7 +20,7 @@ from cube_web.schemas import (
 )
 from cube_web.services.partition_contracts import validate_partition_method
 from cube_web.services.partition_dataset_runner import NormalizedPartitionDatasetRunner
-from cube_web.services.partition_domain_store import OpenGaussPartitionDomainStore
+from cube_web.services.partition_domain_store import OpenGaussPartitionDomainStore, set_partition_domain_store
 from cube_web.services.partition_service import PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
 
@@ -66,9 +66,11 @@ def create_legacy_partition_service(source_service: PartitionService | None = No
 
 partition_service = create_partition_service()
 legacy_partition_service = create_legacy_partition_service(partition_service)
+partition_domain_store = OpenGaussPartitionDomainStore(dsn=runtime_config.postgres_dsn())
+set_partition_domain_store(partition_domain_store)
 partition_workflow_service = PartitionWorkflowService(
     partition_service,
-    domain_store=OpenGaussPartitionDomainStore(dsn=runtime_config.postgres_dsn()),
+    domain_store=partition_domain_store,
     runner=NormalizedPartitionDatasetRunner(),
 )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request
@@ -11,18 +12,19 @@ from grid_core.sdk import CubeEncoderSDK, GridCoreError, NotImplementedCapabilit
 from cube_web.routes import partition as partition_route
 from cube_web.routes.auth import create_auth_router, require_auth_for_api
 from cube_web.routes.config import create_config_router
-from cube_web.routes.ingest import create_ingest_router
 from cube_web.routes.partition import create_partition_router
+from cube_web.routes.partition_datasets import create_partition_datasets_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
-from cube_web.services import health_service, quality_service
+from cube_web.services import health_service
+from cube_web.services.quality_worker import QualityRuntime
 
 ENCODER_SDK_CLASS = CubeEncoderSDK
 logger = logging.getLogger(__name__)
 
 
 def _repo_root():
-    return quality_service.repo_root()
+    return Path(__file__).resolve().parents[2]
 
 
 create_partition_service = partition_route.create_partition_service
@@ -34,11 +36,16 @@ partition_workflow_service = partition_route.partition_workflow_service
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        quality_runtime = QualityRuntime()
         try:
             partition_workflow_service.reconcile_orphaned_tasks()
         except Exception as exc:
             logger.warning("Skipping partition task reconcile during startup: %s", exc)
-        yield
+        try:
+            quality_runtime.start()
+            yield
+        finally:
+            quality_runtime.stop()
 
     web_app = FastAPI(title="cube-web", lifespan=lifespan)
     sdk = CubeEncoderSDK()
@@ -60,9 +67,9 @@ def create_app() -> FastAPI:
 
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())
-    api_router.include_router(create_ingest_router())
     api_router.include_router(create_config_router())
     api_router.include_router(create_partition_router())
+    api_router.include_router(create_partition_datasets_router())
     web_app.include_router(api_router)
     web_app.include_router(create_auth_router())
     return web_app

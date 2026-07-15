@@ -7,19 +7,14 @@ import { apiPrefixes, authHeaders, requestGet, requestJson } from '@/api/client'
 import ExpandableText from '@/components/ExpandableText.vue';
 
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
-const QualityHistoryDrawer = defineAsyncComponent(() => import('@/components/QualityHistoryDrawer.vue'));
 
 function initialModule() {
-  if (window.location.pathname === '/quality') return 'quality';
   return 'optical';
 }
 
 const activeModule = ref(initialModule());
 const dataDrawerVisible = ref(false);
-const qualityHistoryDrawerVisible = ref(false);
 const dataSearch = ref('');
-const qualityHistorySearch = ref('');
-const qualityHistoryStatus = ref('');
 const selectedOpticalBatchIds = ref([]);
 const expandedOpticalBatchId = ref('');
 const deselectedOpticalAssetKeys = ref({});
@@ -140,20 +135,6 @@ const selectedPartitionStage = computed(() => (
 ));
 const partitionContextDetailVisible = ref(false);
 const selectedPartitionContextLabel = ref('');
-const qualityLoading = ref(false);
-const qualityHistoryLoading = ref(false);
-const qualityExportLoading = ref(false);
-const qualityReport = ref(null);
-const qualityHistory = ref([]);
-const qualityError = ref('');
-const qualityTargetCrs = ref('EPSG:4326');
-const qualityHistoryLimit = ref(30);
-const qualityHistoryPage = ref(1);
-const qualityHistoryTotal = ref(0);
-const selectedQualityReportId = ref('');
-const qualityDataType = ref('optical');
-const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);
-
 function targetCrsForGrid(gridType, fallback) {
   return fallback || 'EPSG:4326';
 }
@@ -359,9 +340,8 @@ function partitionIngestStatus(result = lastPartitionResult.value) {
     return ['completed', 'succeeded'].includes(result.status) ? 'not_supported' : 'not_ready';
   }
   if (result.ingest_status) return result.ingest_status;
-  const qualityStatus = result.quality_status || result.quality_report?.status || '';
-  const reportId = result.quality_report_id || result.quality_report?.report_id || '';
-  if (['completed', 'succeeded'].includes(result.status) && reportId && !['FAIL', 'WARN'].includes(String(qualityStatus).toUpperCase())) {
+  const qualityStatus = result.quality_status || '';
+  if (['completed', 'succeeded'].includes(result.status) && !['FAIL', 'WARN'].includes(String(qualityStatus).toUpperCase())) {
     return result.ingest_enabled === false ? 'ready' : 'ingested';
   }
   return 'not_ready';
@@ -380,7 +360,7 @@ function partitionIngestStatusText(status) {
 }
 
 function partitionPersistDoneText(result, fallback) {
-  const prefix = result.quality_report_id ? `质检报告已保存：${result.quality_report_id}。` : fallback;
+  const prefix = fallback;
   const ingestStatus = partitionIngestStatus(result);
   if (ingestStatus === 'ingested') {
     return `${prefix}自动入库已完成。`;
@@ -1045,7 +1025,6 @@ async function fetchPartitionTaskRow(taskId) {
   const { partitionPrefix } = apiPrefixes();
   const task = await requestGet(`${partitionPrefix}/tasks/${taskId}`);
   const result = task.result || {};
-  const qualityReport = result.quality_report || {};
   return {
     task_id: task.task_id || taskId,
     status: task.status,
@@ -1054,8 +1033,7 @@ async function fetchPartitionTaskRow(taskId) {
     batch_id: result.batch_id,
     batch_name: result.batch_name,
     batch_status: result.batch_status,
-    quality_status: result.quality_status || qualityReport.status,
-    quality_report_id: result.quality_report_id || qualityReport.report_id,
+    quality_status: result.quality_status,
     quality_failure_reason: result.quality_failure_reason,
     ingest_status: result.ingest_status,
     ingest_job_id: result.ingest_job_id,
@@ -1065,8 +1043,7 @@ async function fetchPartitionTaskRow(taskId) {
     result,
     result_summary: {
       rows: result.rows ?? result.total_index_rows ?? result.metadata_rows,
-      quality_status: result.quality_status || qualityReport.status,
-      quality_report_id: result.quality_report_id || qualityReport.report_id,
+      quality_status: result.quality_status,
       run_dir: result.run_dir,
       rows_path: result.rows_path || result.output_path,
       execution_engine: result.execution_engine || result.partition_backend,
@@ -1291,15 +1268,6 @@ async function runPartitionBatchFromDetail() {
       setPartitionStage('persist', 'done', partitionPersistDoneText(result, '执行结果已返回。'));
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
-      if (activeModule.value === 'quality') {
-        if (result.quality_report) {
-          qualityReport.value = result.quality_report;
-          selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-          await loadQualityHistory();
-        } else {
-          await refreshQuality();
-        }
-      }
       ElMessage.success(operation === 'retry' ? '批次重试完成' : '批次执行完成');
     }
     await loadPartitionBatches();
@@ -1365,15 +1333,6 @@ async function retrySelectedPartitionAssetsFromDetail() {
       setPartitionStage('persist', 'done', partitionPersistDoneText(result, '重试结果已返回。'));
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
-      if (activeModule.value === 'quality') {
-        if (result.quality_report) {
-          qualityReport.value = result.quality_report;
-          selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-          await loadQualityHistory();
-        } else {
-          await refreshQuality();
-        }
-      }
       clearPartitionBatchDetailSelection();
       ElMessage.success('失败资产重试完成');
     }
@@ -1523,27 +1482,6 @@ const activeDataRows = computed(() => visibleDataRowsByModule.value[activeModule
 
 const activeDataLabel = computed(() => dataLabelsByModule[activeModule.value] || '已载入数据');
 
-const qualityManagedBatches = computed(() => {
-  if (qualityDataType.value === 'carbon') return managedCarbonBatches.value;
-  if (qualityDataType.value === 'radar') return managedRadarBatches.value;
-  if (qualityDataType.value === 'product') return managedProductBatches.value;
-  return managedOpticalBatches.value;
-});
-
-const qualityManualBatches = computed(() => (
-  qualityManagedBatches.value.filter((batch) => ['failed', 'manual_required', 'cancelled'].includes(batch.status))
-));
-
-const qualityManualBatchStats = computed(() => {
-  const batches = qualityManagedBatches.value;
-  const countByStatus = (status) => batches.filter((batch) => batch.status === status).length;
-  return [
-    { label: '失败批次', value: countByStatus('failed'), status: 'failed' },
-    { label: '人工确认', value: countByStatus('manual_required'), status: 'manual_required' },
-    { label: '运行中', value: batches.filter((batch) => ['queued', 'running', 'retrying'].includes(batch.status)).length, status: 'running' },
-  ];
-});
-
 const selectedDataName = computed(() => {
   if (activeModule.value === 'optical') {
     if (!selectedOpticalBatchIds.value.length) return '未选择';
@@ -1574,11 +1512,6 @@ const selectedDataName = computed(() => {
     return names.join('，');
   }
   return '未选择';
-});
-
-const selectedQualityRecord = computed(() => {
-  if (!selectedQualityReportId.value) return null;
-  return qualityHistory.value.find((row) => row.report_id === selectedQualityReportId.value) || null;
 });
 
 const selectedOpticalAssets = computed(() => {
@@ -1997,7 +1930,7 @@ const partitionMetricRows = computed(() => {
     { label: '剖分耗时(s)', value: result.partition_elapsed_sec ?? '-' },
     { label: '总耗时(s)', value: result.total_elapsed_sec ?? '-' },
     { label: '输出路径', value: result.output_path || result.rows_path || '-' },
-    { label: '质检状态', value: result.quality_status || result.quality_report?.status || '-' },
+    { label: '质检状态', value: result.quality_status || '-' },
     { label: '入库状态', value: partitionIngestStatusText(partitionIngestStatus(result)) },
   ];
   if (result.error) {
@@ -2059,7 +1992,6 @@ const selectedProductYearsText = computed(() => {
 });
 
 const partitionContextRows = computed(() => {
-  if (activeModule.value === 'quality') return [];
   const request = lastPartitionRequest.value || {};
   const payload = request.payload || {};
   const result = lastPartitionResult.value || {};
@@ -2126,7 +2058,6 @@ const partitionResultDetailRows = computed(() => {
     { label: '后台任务 ID', value: result.partition_task_id || '-' },
     { label: '执行 ID', value: result.execution_id || result.run_task_id || result.demo_task_id || '-' },
     { label: 'Ray 任务 ID', value: result.ray_task_id || '-' },
-    { label: '质检报告 ID', value: result.quality_report_id || result.quality_report?.report_id || '-' },
     { label: '索引文件', value: result.rows_path || result.output_path || '-' },
     { label: 'COG 输出', value: result.cog_output_dir || result.cog_input_dir || '-' },
     { label: '瓦片存储', value: result.asset_storage_backend || '-' },
@@ -2137,7 +2068,7 @@ const partitionResultDetailRows = computed(() => {
 });
 
 const partitionWarnNeedsRetry = computed(() => {
-  const status = lastPartitionResult.value?.quality_status || lastPartitionResult.value?.quality_report?.status;
+  const status = lastPartitionResult.value?.quality_status;
   return status === 'WARN';
 });
 
@@ -2153,25 +2084,6 @@ async function openDataDrawer() {
   if (partitionModules.has(activeModule.value)) {
     await loadPartitionBatches();
   }
-}
-
-function openQualityHistoryDrawer() {
-  qualityHistorySearch.value = '';
-  qualityHistoryStatus.value = '';
-  qualityHistoryPage.value = 1;
-  qualityHistoryDrawerVisible.value = true;
-  loadQualityHistory();
-}
-
-async function changeQualityHistoryPage(page) {
-  qualityHistoryPage.value = page;
-  await loadQualityHistory();
-}
-
-async function changeQualityHistoryPageSize(size) {
-  qualityHistoryLimit.value = size;
-  qualityHistoryPage.value = 1;
-  await loadQualityHistory();
 }
 
 function assetKey(asset) {
@@ -2815,356 +2727,7 @@ function stopPartitionTimer() {
   }
 }
 
-const qualityStatusType = computed(() => {
-  const status = qualityReport.value?.status;
-  if (status === 'PASS') return 'success';
-  if (status === 'WARN') return 'warning';
-  if (status === 'FAIL') return 'danger';
-  return 'info';
-});
-
-const qualitySummaryRows = computed(() => {
-  const summary = qualityReport.value?.summary || {};
-  if (qualityDataType.value === 'carbon') {
-    return [
-      { label: '观测行数', value: summary.observation_rows ?? summary.index_rows ?? '-' },
-      { label: '观测 ID 数', value: summary.distinct_observations ?? '-' },
-      { label: '空间格网数', value: summary.distinct_space_codes ?? '-' },
-      { label: '时空编码数', value: summary.distinct_st_codes ?? '-' },
-      { label: '平均 XCO2', value: summary.avg_xco2 != null ? Number(summary.avg_xco2).toFixed(3) : '-' },
-      { label: '告警项', value: summary.warning_checks ?? '-' },
-      { label: '失败项', value: summary.failed_checks ?? '-' },
-    ];
-  }
-  return [
-    { label: '索引行数', value: summary.index_rows ?? '-' },
-    { label: '资产数', value: summary.asset_count ?? '-' },
-    { label: '空间格网数', value: summary.distinct_space_codes ?? '-' },
-    { label: '时空编码数', value: summary.distinct_st_codes ?? '-' },
-    { label: '通过项', value: summary.passed_checks ?? '-' },
-    { label: '告警项', value: summary.warning_checks ?? '-' },
-    { label: '失败项', value: summary.failed_checks ?? '-' },
-  ];
-});
-
-function checkStatusType(status) {
-  if (status === 'PASS') return 'success';
-  if (status === 'WARN') return 'warning';
-  if (status === 'FAIL') return 'danger';
-  return 'info';
-}
-
-function statusText(status) {
-  if (status === 'PASS') return '通过';
-  if (status === 'WARN') return '告警';
-  if (status === 'FAIL') return '失败';
-  return '未知';
-}
-
-function checkNameText(name) {
-  const names = {
-    index_rows: '索引文件读取',
-    index_schema: '索引字段完整性',
-    time_bucket: '时间桶一致性',
-    cell_bbox: '格网范围合法性',
-    logical_duplicates: '逻辑资产重复',
-    product_years: '产品年份完整性',
-    carbon_rows: '观测行文件读取',
-    carbon_schema: '观测字段完整性',
-    carbon_coordinates: '观测坐标合法性',
-    xco2_range: 'XCO2 数值范围',
-    carbon_quality_flag: '质量标记分布',
-    carbon_duplicates: '观测 ID 重复',
-    carbon_footprint: '足迹几何合法性',
-    asset_readability: '资产可读性',
-    cog_crs: '参考系统一致性',
-    window_bounds: '窗口边界合法性',
-    pixel_sample: '像元抽样有效性',
-  };
-  return names[name] || name;
-}
-
-function checkMessageText(check) {
-  const messages = {
-    index_rows: '已读取剖分索引文件。',
-    index_schema: '索引行字段满足入库要求。',
-    time_bucket: '时间分桶与采集时间一致。',
-    cell_bbox: '格网经纬度范围合法。',
-    logical_duplicates: check.status === 'WARN' ? '存在同一场景同一波段对应多个资产的情况，入库前需要关注合并关系。' : '未发现逻辑资产重复。',
-    product_years: check.status === 'WARN' ? '产品年份与显式期望年份不一致。' : '产品年份元数据与本次输出一致。',
-    carbon_rows: '已读取碳卫星观测行文件。',
-    carbon_schema: '观测行字段满足碳卫星入库要求。',
-    carbon_coordinates: '观测中心点经纬度范围合法。',
-    xco2_range: 'XCO2 浓度值在预期范围内。',
-    carbon_quality_flag: '质量标记值符合碳卫星标准标记范围。',
-    carbon_duplicates: check.status === 'WARN' ? '存在重复观测 ID，入库前需要确认是否为重复观测。' : '未发现重复观测 ID。',
-    carbon_footprint: check.status === 'WARN' ? '部分观测足迹不是标准 Polygon/MultiPolygon。' : '观测足迹几何合法。',
-    asset_readability: '索引引用的资产均可读取。',
-    cog_crs: `资产参考系统已统一为 ${qualityReport.value?.target_crs || qualityTargetCrs.value}。`,
-    window_bounds: '索引窗口未超出资产尺寸。',
-    pixel_sample: check.status === 'WARN' ? '部分资产抽样像元为 0，建议结合原始影像确认是否为空值区域。' : '抽样像元有效。',
-  };
-  return messages[check.name] || check.message;
-}
-
-function checkDetailRows(check) {
-  const metrics = check.metrics || {};
-  if (check.name === 'logical_duplicates') {
-    return (metrics.duplicates || []).map((item) => ({
-      title: `${item.scene_id} / ${item.band}`,
-      lines: (item.asset_paths || []).map((path) => path.split('/').pop()),
-    }));
-  }
-  if (check.name === 'cog_crs') {
-    return (metrics.mismatches || []).map((item) => ({
-      title: item.path?.split('/').pop() || '未知资产',
-      lines: [`当前参考系统：${item.crs || '未识别'}`],
-    }));
-  }
-  if (check.name === 'window_bounds') {
-    return (metrics.invalid_windows || []).map((item) => ({
-      title: item.asset_path?.split('/').pop() || `索引行 ${item.line_no}`,
-      lines: [`窗口：${(item.window || []).join(', ')}`, `资产尺寸：${(item.asset_size || []).join(' x ')}`],
-    }));
-  }
-  if (check.name === 'pixel_sample') {
-    return (metrics.zero_assets || []).map((item) => ({
-      title: item.path?.split('/').pop() || '未知资产',
-      lines: [`抽样像元：${item.sample_pixels}`, `有效像元：${item.valid_pixels}`, `非零像元：${item.nonzero_pixels}`],
-    }));
-  }
-  if (check.name === 'product_years') {
-    return [
-      {
-        title: '年份覆盖',
-        lines: [
-          `期望年份：${(metrics.expected_years || []).join(', ') || '-'}`,
-          `已有年份：${(metrics.present_years || []).join(', ') || '-'}`,
-          `缺少年份：${(metrics.missing_years || []).join(', ') || '无'}`,
-          `非预期年份：${(metrics.unexpected_years || []).join(', ') || '无'}`,
-        ],
-      },
-    ];
-  }
-  if (check.name === 'carbon_schema') {
-    return (metrics.missing_rows || []).map((item) => ({
-      title: `观测行 ${item.line_no}`,
-      lines: [`缺失字段：${(item.missing || []).join(', ')}`],
-    }));
-  }
-  if (check.name === 'carbon_coordinates') {
-    return (metrics.invalid_rows || []).map((item) => ({
-      title: `观测行 ${item.line_no}`,
-      lines: [`原因：${item.reason}`, `坐标：${item.center_lon ?? '-'}, ${item.center_lat ?? '-'}`],
-    }));
-  }
-  if (check.name === 'xco2_range') {
-    const invalidRows = (metrics.invalid_rows || []).map((item) => ({
-      title: `观测行 ${item.line_no}`,
-      lines: [`原因：${item.reason}`, `XCO2：${item.xco2 ?? '-'}`],
-    }));
-    if (invalidRows.length) return invalidRows;
-    return [
-      {
-        title: 'XCO2 统计',
-        lines: [`最小值：${metrics.min_xco2 ?? '-'}`, `最大值：${metrics.max_xco2 ?? '-'}`, `平均值：${metrics.avg_xco2 ?? '-'}`],
-      },
-    ];
-  }
-  if (check.name === 'carbon_quality_flag') {
-    return [
-      {
-        title: '质量标记分布',
-        lines: Object.entries(metrics.quality_counts || {}).map(([flag, count]) => `Q${flag || '-'}：${count}`),
-      },
-    ];
-  }
-  if (check.name === 'carbon_duplicates') {
-    return (metrics.duplicates || []).map((item) => ({
-      title: item.observation_id,
-      lines: [`重复次数：${item.count}`],
-    }));
-  }
-  if (check.name === 'carbon_footprint') {
-    return (metrics.invalid_rows || []).map((item) => ({
-      title: `观测行 ${item.line_no}`,
-      lines: [`几何类型：${item.type || '-'}`],
-    }));
-  }
-  return [];
-}
-
-function qualitySourceText() {
-  if (qualityDataType.value === 'product') return '数据产品自动质检';
-  if (qualityDataType.value === 'carbon') return '碳卫星自动质检';
-  if (qualityDataType.value === 'radar') return '雷达遥感自动质检';
-  return '光学遥感自动质检';
-}
-
-function qualityBreakdownTitle() {
-  if (qualityDataType.value === 'product') return '年份行数';
-  if (qualityDataType.value === 'carbon') return '质量标记分布';
-  return '波段行数';
-}
-
-function qualityBreakdownRows() {
-  const summary = qualityReport.value?.summary || {};
-  if (qualityDataType.value === 'product') return summary.rows_by_year || {};
-  if (qualityDataType.value === 'carbon') return summary.quality_counts || {};
-  return summary.rows_by_band || {};
-}
-
-function qualityDataTypeForEndpoint(endpoint) {
-  if (endpoint === 'product') return 'product';
-  if (endpoint === 'carbon') return 'carbon';
-  if (endpoint === 'radar') return 'radar';
-  return 'optical';
-}
-
-function formatQualityTime(value) {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('zh-CN', { hour12: false });
-}
-
-async function loadQualityHistory() {
-  if (!qualityReportDataTypes.has(qualityDataType.value)) {
-    qualityHistory.value = [];
-    qualityHistoryTotal.value = 0;
-    qualityHistoryPage.value = 1;
-    return;
-  }
-  qualityHistoryLoading.value = true;
-  try {
-    const { qualityPrefix } = apiPrefixes();
-    const result = await requestJson(`${qualityPrefix}/${qualityDataType.value}/history`, {
-      target_crs: qualityTargetCrs.value,
-      page: qualityHistoryPage.value,
-      page_size: qualityHistoryLimit.value,
-      keyword: qualityHistorySearch.value.trim() || undefined,
-      status: qualityHistoryStatus.value || undefined,
-    });
-    qualityHistory.value = result.records || [];
-    qualityHistoryTotal.value = Number(result.total ?? result.count ?? qualityHistory.value.length);
-    qualityHistoryPage.value = Number(result.page || qualityHistoryPage.value);
-    qualityHistoryLimit.value = Number(result.page_size || qualityHistoryLimit.value);
-    if (!qualityHistory.value.length && qualityHistoryTotal.value > 0 && qualityHistoryPage.value > 1) {
-      qualityHistoryPage.value = Math.max(1, Math.ceil(qualityHistoryTotal.value / qualityHistoryLimit.value));
-      await loadQualityHistory();
-    }
-  } catch (error) {
-    qualityError.value = error.message;
-    ElMessage.error(error.message);
-  } finally {
-    qualityHistoryLoading.value = false;
-  }
-}
-
-async function runQualityCheck(reportId = '') {
-  if (!qualityReportDataTypes.has(qualityDataType.value)) {
-    qualityReport.value = null;
-    qualityError.value = '';
-    return;
-  }
-  qualityLoading.value = true;
-  qualityError.value = '';
-  try {
-    const { qualityPrefix } = apiPrefixes();
-    const endpoint = reportId ? `${qualityPrefix}/${qualityDataType.value}/report` : `${qualityPrefix}/${qualityDataType.value}/latest`;
-    const payload = reportId ? { report_id: reportId } : {};
-    qualityReport.value = await requestJson(endpoint, payload);
-    selectedQualityReportId.value = qualityReport.value.report_id || reportId;
-    const message = qualityReport.value.status === 'FAIL' ? '质检结果存在失败项' : '质检结果已加载';
-    ElMessage[qualityReport.value.status === 'FAIL' ? 'warning' : 'success'](message);
-  } catch (error) {
-    qualityError.value = error.message;
-    ElMessage.error(error.message);
-  } finally {
-    qualityLoading.value = false;
-  }
-}
-
-async function refreshQuality() {
-  await runQualityCheck();
-  await loadQualityHistory();
-}
-
-async function refreshQualityWorkspace() {
-  await Promise.all([
-    refreshQuality(),
-    loadPartitionBatches(),
-  ]);
-}
-
-async function selectQualityRecord(row) {
-  if (row.data_type && row.data_type !== qualityDataType.value) {
-    qualityDataType.value = row.data_type;
-  }
-  await runQualityCheck(row.report_id);
-  qualityHistoryDrawerVisible.value = false;
-}
-
-async function exportQualityReport(format) {
-  if (!qualityReport.value?.report_id) {
-    ElMessage.warning('请先加载质检结果');
-    return;
-  }
-  if (!['pdf', 'txt'].includes(format)) {
-    ElMessage.error('不支持的导出格式');
-    return;
-  }
-  qualityExportLoading.value = true;
-  try {
-    const { qualityPrefix } = apiPrefixes();
-    const response = await fetch(`${qualityPrefix}/${qualityDataType.value}/report/${format}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ report_id: qualityReport.value.report_id }),
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      let message = `${format.toUpperCase()}导出失败: ${response.status}`;
-      try {
-        const body = text ? JSON.parse(text) : {};
-        message = body?.detail || body?.error?.message || message;
-      } catch {
-        if (text) message = text;
-      }
-      throw new Error(message);
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    const runName = qualityReport.value.run_name || qualityReport.value.run_dir?.split('/').filter(Boolean).pop() || 'run';
-    link.href = url;
-    link.download = `quality-report-${qualityDataType.value}-${runName}.${format}`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    ElMessage.success(`${format.toUpperCase()}已导出`);
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    qualityExportLoading.value = false;
-  }
-}
-
-async function changeQualityDataType() {
-  qualityReport.value = null;
-  qualityHistory.value = [];
-  qualityHistoryTotal.value = 0;
-  qualityHistoryPage.value = 1;
-  selectedQualityReportId.value = '';
-  await refreshQualityWorkspace();
-}
-
 async function runDemo() {
-  if (activeModule.value === 'quality') {
-    await refreshQualityWorkspace();
-    return;
-  }
   stopPartitionTaskSync();
   resultLoading.value = true;
   resultRows.value = [];
@@ -3236,11 +2799,8 @@ async function loadManagedConfig() {
     const response = await requestJson(`${configPrefix}/get`, {});
     const config = response.config || {};
     const optical = config.partition?.optical || {};
-    const quality = config.quality?.optical || {};
     opticalGridType.value = optical.grid_type || opticalGridType.value;
     opticalGridLevel.value = Number(optical.grid_level || opticalGridLevel.value);
-    qualityTargetCrs.value = quality.target_crs || qualityTargetCrs.value;
-    qualityHistoryLimit.value = Number(quality.history_limit || qualityHistoryLimit.value);
   } catch (error) {
     ElMessage.warning(`配置加载失败，保留当前配置：${error.message}`);
   }
@@ -3288,12 +2848,6 @@ async function retryLastPartitionTask() {
       lastPartitionResult.value = result;
       resultRows.value = formatRows(result);
       setPartitionStage('persist', 'done', partitionPersistDoneText(result, '重试结果已返回。'));
-      if (activeModule.value === 'quality' && result.quality_report) {
-        qualityDataType.value = qualityDataTypeForEndpoint(retryRequest.endpoint);
-        qualityReport.value = result.quality_report;
-        selectedQualityReportId.value = result.quality_report.report_id || result.quality_report_id || '';
-        await loadQualityHistory();
-      }
       ElMessage.success('任务已重试完成');
     }
   } catch (error) {
@@ -3309,27 +2863,11 @@ async function retryLastPartitionTask() {
 }
 
 watch(activeModule, (moduleName) => {
-  if (moduleName === 'quality' && !qualityLoading.value) {
-    refreshQualityWorkspace();
-  }
   if (dataDrawerVisible.value && partitionModules.has(moduleName)) {
     loadPartitionBatches();
   }
   if (partitionTaskDrawerVisible.value && partitionModules.has(moduleName)) {
     loadActivePartitionTasks(1);
-  }
-});
-
-watch(qualityDataType, () => {
-  if (activeModule.value === 'quality') {
-    changeQualityDataType();
-  }
-});
-
-watch([qualityHistorySearch, qualityHistoryStatus], () => {
-  qualityHistoryPage.value = 1;
-  if (activeModule.value === 'quality' && qualityHistoryDrawerVisible.value) {
-    loadQualityHistory();
   }
 });
 
@@ -3386,9 +2924,6 @@ onMounted(async () => {
   await loadPartitionBatches();
   await loadPartitionTasks();
   applyDefaultGridLevels();
-  if (activeModule.value === 'quality') {
-    refreshQualityWorkspace();
-  }
 });
 
 onUnmounted(() => {
@@ -3406,7 +2941,6 @@ onUnmounted(() => {
           <button class="module-tab" :class="{ active: activeModule === 'carbon' }" @click="activeModule = 'carbon'">碳卫星</button>
           <button class="module-tab" :class="{ active: activeModule === 'radar' }" @click="activeModule = 'radar'">雷达遥感</button>
           <button class="module-tab" :class="{ active: activeModule === 'product' }" @click="activeModule = 'product'">信息产品</button>
-          <button class="module-tab" :class="{ active: activeModule === 'quality' }" @click="activeModule = 'quality'">自动化质检</button>
           <button class="module-tab" :class="{ active: activeModule === 'tasks' }" @click="activeModule = 'tasks'; loadPartitionTasks(1)">剖分任务队列</button>
         </div>
       </div>
@@ -3628,71 +3162,15 @@ onUnmounted(() => {
                   </div>
                 </template>
 
-                <template v-else>
-                  <div class="form-group">
-	                    <label>质检数据类型</label>
-	                    <el-select v-model="qualityDataType" class="legacy-control">
-	                      <el-option label="光学遥感" value="optical" />
-	                      <el-option label="数据产品" value="product" />
-	                      <el-option label="碳卫星" value="carbon" />
-	                      <el-option label="雷达遥感" value="radar" />
-	                    </el-select>
-	                  </div>
-                  <div class="form-group">
-                    <label>目标参考系统</label>
-                    <el-select v-model="qualityTargetCrs" class="legacy-control" @change="refreshQualityWorkspace">
-                      <el-option label="EPSG:4326" value="EPSG:4326" />
-                    </el-select>
-                  </div>
-	                  <div class="form-group">
-	                    <div class="quality-rule-list">
-	                      <template v-if="qualityDataType === 'carbon'">
-	                        <div>观测行文件读取</div>
-	                        <div>观测字段完整性</div>
-	                        <div>观测坐标合法性</div>
-	                        <div>XCO2 数值范围</div>
-	                        <div>质量标记分布</div>
-	                        <div>观测 ID 重复检查</div>
-	                      </template>
-	                      <template v-else>
-	                        <div>索引字段完整性</div>
-	                        <div>COG 可读性与 CRS</div>
-	                        <div>window 越界检查</div>
-	                        <div>像元抽样有效性</div>
-	                        <div v-if="qualityDataType === 'product'">产品年份完整性</div>
-	                      </template>
-	                    </div>
-	                  </div>
-                  <div class="form-group">
-                    <label>历史质检记录</label>
-                    <button type="button" class="quality-history-drawer-toggle" @click="openQualityHistoryDrawer">
-                      <span>
-                        <strong>{{ qualityHistoryTotal || qualityHistory.length }}</strong>
-                        <span>条记录</span>
-                      </span>
-                      <span>打开列表</span>
-                    </button>
-                    <div class="quality-selected-record">
-                      <span>当前选中</span>
-                      <strong>{{ selectedQualityRecord?.run_name || qualityReport?.run_dir?.split('/').filter(Boolean).pop() || '未选择' }}</strong>
-                      <small v-if="selectedQualityRecord">
-                        {{ selectedQualityRecord.dataset }} · {{ statusText(selectedQualityRecord.status) }} · {{ formatQualityTime(selectedQualityRecord.generated_at || selectedQualityRecord.modified_at) }}
-                      </small>
-                    </div>
-                  </div>
-                </template>
-
                 <div class="form-group action-buttons">
                   <el-button>重置</el-button>
-                  <el-button type="primary" :loading="activeModule === 'quality' ? qualityLoading : resultLoading" @click="runDemo">
-                    {{ activeModule === 'quality' ? '刷新结果' : '提交剖分任务' }}
-                  </el-button>
+                  <el-button type="primary" :loading="resultLoading" @click="runDemo">提交剖分任务</el-button>
                 </div>
               </div>
             </div>
 
             <div class="workspace-main">
-              <div v-if="activeModule !== 'quality'" class="map-panel">
+              <div class="map-panel">
                 <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="panel-header">
                   <div class="map-actions">
                     <el-input-number v-model="selectedMapGridLevel" :min="gridTypeForModule() === 'geohash' ? 1 : 0" :max="gridTypeForModule() === 'mgrs' ? 5 : 15" size="small" :disabled="!activeGridLevelManual" />
@@ -3705,121 +3183,13 @@ onUnmounted(() => {
                 </div>
                 <GlobeMap :markers="[]" :geometries="['optical', 'radar', 'product'].includes(activeModule) ? mapGeometries : []" />
               </div>
-              <div v-else class="quality-overview-panel">
-                <div class="panel-header">
-                  <h3>质检总览</h3>
-                </div>
-                <div class="quality-dashboard">
-                  <template v-if="qualityReport">
-                    <div class="quality-status-band" :class="qualityReport.status.toLowerCase()">
-                      <div>
-                        <span>批次状态</span>
-                        <strong>{{ statusText(qualityReport.status) }}</strong>
-                      </div>
-                      <el-tag :type="qualityStatusType" size="large">{{ qualityReport.target_crs }}</el-tag>
-                    </div>
-                    <div class="quality-metrics">
-                      <div v-for="item in qualitySummaryRows" :key="item.label" class="quality-metric">
-                        <span>{{ item.label }}</span>
-                        <strong>{{ item.value }}</strong>
-                      </div>
-                    </div>
-                    <div class="quality-band-table">
-                      <div class="quality-section-title">当前批次</div>
-                      <div class="quality-kv">
-                        <span>报告 ID</span>
-                        <strong>{{ qualityReport.report_id }}</strong>
-                      </div>
-                      <div class="quality-kv">
-                        <span>来源</span>
-                        <strong>{{ qualitySourceText() }}</strong>
-                      </div>
-                    </div>
-                    <div class="quality-band-table">
-                      <div class="quality-section-title">{{ qualityBreakdownTitle() }}</div>
-                      <div
-                        v-for="(value, band) in qualityBreakdownRows()"
-                        :key="band"
-                        class="quality-kv"
-                      >
-                        <span>{{ band }}</span>
-                        <strong>{{ value }}</strong>
-                      </div>
-                    </div>
-                  </template>
-                  <div v-else-if="qualityLoading" class="quality-empty-state compact">
-                    <div class="quality-empty-icon">QC</div>
-                    <p>正在自动加载最新质检结果</p>
-                  </div>
-                  <div v-else-if="qualityError" class="quality-empty-state compact">
-                    <div class="quality-empty-icon">ERR</div>
-                    <ExpandableText :text="qualityError" :lines="3" :threshold="100" />
-                  </div>
-                  <div v-else class="quality-empty-state compact">
-                    <div class="quality-empty-icon">QC</div>
-                    <p>等待自动质检结果</p>
-                  </div>
-
-                  <div class="quality-manual-section">
-                    <div class="quality-section-heading">
-                      <div>
-                        <strong>人工处置队列</strong>
-                        <span>{{ dataLabelsByModule[qualityDataType] || qualitySourceText() }}</span>
-                      </div>
-                      <el-button size="small" :icon="Refresh" :loading="partitionBatchLoading" @click="loadPartitionBatches">刷新队列</el-button>
-                    </div>
-                    <div class="quality-manual-stats">
-                      <div v-for="item in qualityManualBatchStats" :key="item.label" class="quality-manual-stat" :class="item.status">
-                        <span>{{ item.label }}</span>
-                        <strong>{{ item.value }}</strong>
-                      </div>
-                    </div>
-                    <div v-if="qualityManualBatches.length" class="quality-manual-list">
-                      <div v-for="batch in qualityManualBatches" :key="batch.id" class="quality-manual-batch">
-                        <div class="quality-manual-batch-main">
-                          <div class="quality-manual-batch-head">
-                            <strong>{{ batch.name }}</strong>
-                            <el-tag size="small" :type="partitionStatusType(batch.status)">{{ partitionStatusText(batch.status) }}</el-tag>
-                          </div>
-                          <div class="quality-manual-batch-meta">
-                            <span>{{ batch.id }}</span>
-                            <span>尝试 {{ batch.attempt_count || 0 }} 次</span>
-                            <span v-if="batch.last_task_id">最近任务 {{ batch.last_task_id }}</span>
-                          </div>
-                          <div class="quality-manual-batch-error">
-                            <ExpandableText :text="batch.last_error || batch.quality_failure_reason || '等待人工确认后继续处理'" :threshold="80" />
-                          </div>
-                        </div>
-                        <div class="quality-manual-batch-actions">
-                          <el-button size="small" :icon="Document" @click="openPartitionBatchDetail(batch)">详情</el-button>
-                          <el-button size="small" :type="partitionBatchActionType(batch)" :icon="partitionBatchActionIcon(batch)" @click="handlePartitionBatchPrimaryAction(batch)">
-                            {{ partitionBatchActionLabel(batch) }}
-                          </el-button>
-                          <el-button
-                            v-if="partitionBatchCanArchive(batch)"
-                            size="small"
-                            type="info"
-                            :icon="FolderChecked"
-                            :loading="partitionBatchDetailAction === partitionBatchArchiveActionKey(batch)"
-                            @click="archivePartitionBatch(batch)"
-                          >
-                            不再处理
-                          </el-button>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-else class="quality-manual-empty">当前数据类型没有需要人工处置的失败批次</div>
-                  </div>
-                </div>
-              </div>
             </div>
 
             <div class="workspace-result">
                 <div class="result-panel">
                   <div class="result-panel-header">
-                    <h3>{{ activeModule === 'quality' ? '质检结果' : '执行结果' }}</h3>
+                    <h3>执行结果</h3>
                     <el-button
-                      v-if="activeModule !== 'quality'"
                       size="small"
                       :icon="Document"
                       :loading="partitionTasksLoading"
@@ -3837,28 +3207,8 @@ onUnmounted(() => {
                     >
                       不再处理
                     </el-button>
-                    <el-dropdown
-                      v-if="activeModule === 'quality'"
-                      trigger="click"
-                    @command="exportQualityReport"
-                  >
-                    <el-button
-                      size="small"
-                      :loading="qualityExportLoading"
-                      :disabled="!qualityReport"
-                    >
-                      导出报告
-                    </el-button>
-                    <template #dropdown>
-                      <el-dropdown-menu>
-                        <el-dropdown-item command="pdf">导出 PDF</el-dropdown-item>
-                        <el-dropdown-item command="txt">导出 TXT</el-dropdown-item>
-                      </el-dropdown-menu>
-                    </template>
-                  </el-dropdown>
                 </div>
                 <div class="results-content">
-                  <template v-if="activeModule !== 'quality'">
                     <div class="partition-progress-panel">
                       <div class="quality-section-title">剖分进程</div>
                       <div class="partition-context-grid">
@@ -3925,40 +3275,6 @@ onUnmounted(() => {
                         <ExpandableText v-else :text="item.value" :threshold="80" />
                       </div>
                     </div>
-                  </template>
-                  <template v-if="activeModule === 'quality' && qualityReport">
-                    <div class="quality-check-list">
-                      <div v-for="check in qualityReport.checks" :key="check.name" class="quality-check-item" :class="check.status.toLowerCase()">
-                        <div class="quality-check-head">
-                          <strong>{{ checkNameText(check.name) }}</strong>
-                          <el-tag :type="checkStatusType(check.status)" size="small">{{ statusText(check.status) }}</el-tag>
-                        </div>
-                        <ExpandableText class="quality-check-message" :text="checkMessageText(check)" :threshold="100" />
-                        <div v-if="checkDetailRows(check).length" class="quality-check-details">
-                          <div v-for="detail in checkDetailRows(check)" :key="detail.title" class="quality-check-detail">
-                            <strong class="quality-check-detail-title" :title="detail.title">{{ detail.title }}</strong>
-                            <span v-for="line in detail.lines" :key="line" class="quality-check-detail-line" :title="String(line)">{{ line }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-if="qualityReport.assets?.length" class="quality-assets">
-                      <div class="quality-section-title">资产抽查</div>
-                      <div v-for="asset in qualityReport.assets.slice(0, 6)" :key="asset.path" class="quality-asset-row">
-                        <span>{{ asset.path.split('/').pop() }}</span>
-                        <strong>{{ asset.crs }}</strong>
-                      </div>
-                    </div>
-                  </template>
-                  <template v-else-if="resultRows.length">
-                    <div v-for="row in resultRows" :key="row.key" class="result-item">
-                      <div class="result-label">{{ row.key }}</div>
-                      <div class="result-value">{{ row.value }}</div>
-                    </div>
-                  </template>
-                  <div v-else class="empty-state">
-                    <p>{{ activeModule === 'quality' ? '尚未执行质检' : '配置参数并提交剖分任务' }}</p>
-                  </div>
                 </div>
               </div>
             </div>
@@ -4391,22 +3707,6 @@ onUnmounted(() => {
         />
       </div>
     </el-drawer>
-
-    <QualityHistoryDrawer
-      v-model:visible="qualityHistoryDrawerVisible"
-      v-model:search="qualityHistorySearch"
-      v-model:status="qualityHistoryStatus"
-      v-model:page="qualityHistoryPage"
-      v-model:page-size="qualityHistoryLimit"
-      :rows="qualityHistory"
-      :total="qualityHistoryTotal"
-      :loading="qualityHistoryLoading"
-      :data-type="qualityDataType"
-      :selected-report-id="selectedQualityReportId"
-      @select="selectQualityRecord"
-      @page-change="changeQualityHistoryPage"
-      @page-size-change="changeQualityHistoryPageSize"
-    />
 
     <el-dialog v-model="partitionStageDetailVisible" title="剖分进程详情" width="520px">
       <div v-if="selectedPartitionStage" class="partition-stage-detail">
