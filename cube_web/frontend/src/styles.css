@@ -774,10 +774,6 @@ section {
     position: relative;
 }
 
-.s2-visual {
-    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
-}
-
 .mgrs-visual {
     background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%);
 }
@@ -1224,11 +1220,6 @@ section {
 .grid-type-badge--mgrs {
     background: rgba(145, 65, 172, 0.12);
     color: #6f2e86;
-}
-
-.grid-type-badge--tile_matrix {
-    background: rgba(165, 81, 0, 0.12);
-    color: #8a4b00;
 }
 
 .grid-type-badge--isea4h {

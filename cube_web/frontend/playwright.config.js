@@ -18,23 +18,12 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m uvicorn cube_web.app:app --host 127.0.0.1 --port 50039',
-      port: 50039,
-      reuseExistingServer: false,
-      cwd: '..',
-      timeout: 120000,
-      env: {
-        CUBE_WEB_AUTH_REQUIRED: '0',
-      },
-    },
-    {
       command: 'npm run dev -- --host 127.0.0.1 --port 50040',
       port: 50040,
       reuseExistingServer: false,
       cwd: '.',
       timeout: 120000,
       env: {
-        VITE_DEV_API_TARGET: 'http://127.0.0.1:50039',
         VITE_AUTH_REQUIRED: '0',
       },
     },

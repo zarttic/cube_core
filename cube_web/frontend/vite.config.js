@@ -47,4 +47,10 @@ export default defineConfig({
     port: 50040,
     strictPort: true,
   },
+  test: {
+    include: ['tests/unit/**/*.spec.js'],
+    environment: 'jsdom',
+    setupFiles: ['./tests/unit/setup.js'],
+    globals: true,
+  },
 });

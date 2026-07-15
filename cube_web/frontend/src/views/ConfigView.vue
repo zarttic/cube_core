@@ -35,11 +35,6 @@ function emptyConfig() {
         cover_mode: 'intersect',
         time_granularity: 'day',
         max_cells_per_asset: 0,
-        cog_workers: 2,
-        cog_compress: 'LZW',
-        cog_predictor: 2,
-        cog_level: 0,
-        cog_num_threads: 'ALL_CPUS',
         partition_backend: 'ray',
         ray_parallelism: 0,
         partition_prefix_len: 3,
@@ -207,28 +202,8 @@ onMounted(loadConfig);
                 </el-form-item>
               </div>
 
-              <div class="config-section-title">COG 与执行参数</div>
+              <div class="config-section-title">执行参数</div>
               <div class="config-form-grid">
-                <el-form-item label="COG 工作线程">
-                  <el-input-number v-model="optical.cog_workers" :min="0" :max="64" />
-                </el-form-item>
-                <el-form-item label="COG 压缩">
-                  <el-select v-model="optical.cog_compress">
-                    <el-option label="LZW" value="LZW" />
-                    <el-option label="DEFLATE" value="DEFLATE" />
-                    <el-option label="ZSTD" value="ZSTD" />
-                    <el-option label="NONE" value="NONE" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="COG Predictor">
-                  <el-input-number v-model="optical.cog_predictor" :min="0" :max="3" />
-                </el-form-item>
-                <el-form-item label="COG Level">
-                  <el-input-number v-model="optical.cog_level" :min="0" :max="22" />
-                </el-form-item>
-                <el-form-item label="COG Num Threads">
-                  <el-input v-model="optical.cog_num_threads" />
-                </el-form-item>
                 <el-form-item label="执行后端">
                   <el-select v-model="optical.partition_backend">
                     <el-option label="Ray" value="ray" />

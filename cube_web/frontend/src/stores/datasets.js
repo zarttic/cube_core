@@ -1,0 +1,205 @@
+import { computed, reactive, ref } from 'vue';
+import { defineStore } from 'pinia';
+
+import { pageQuery, normalizePageResponse } from '@/api/pagination';
+import { createRequestScope } from '@/api/requestScope';
+import { requestGet } from '@/api/client';
+
+const detailTabs = ['overview', 'assets', 'bands', 'tiles', 'indexes', 'grid', 'quality', 'publications'];
+const paginatedTabs = ['assets', 'bands', 'tiles', 'indexes', 'grid', 'quality', 'publications'];
+
+function emptyDetail() {
+  return Object.fromEntries(detailTabs.map((tab) => [tab, null]));
+}
+
+function emptyTabPages() {
+  return Object.fromEntries(paginatedTabs.map((tab) => [tab, { page: 1, pageSize: 20, total: 0 }]));
+}
+
+export const useDatasetsStore = defineStore('datasets', () => {
+  const filters = reactive({
+    keyword: '',
+    dataType: '',
+    productType: '',
+    batchId: '',
+    gridType: '',
+    partitionStatus: '',
+    qualityStatus: '',
+    publishStatus: '',
+    timeStart: '',
+    timeEnd: '',
+    sortBy: 'updated_at',
+    sortOrder: 'desc',
+  });
+  const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
+  const records = ref([]);
+  const loading = ref(false);
+  const error = ref('');
+  const selectedDatasetId = ref('');
+  const detailVisible = ref(false);
+  const detailLoading = ref(false);
+  const detail = ref(emptyDetail());
+  const activeTab = ref('overview');
+  const selectedRows = ref([]);
+  const tabPages = reactive(emptyTabPages());
+  const listScope = createRequestScope();
+  const detailScope = createRequestScope();
+  const tabScopes = Object.fromEntries(paginatedTabs.map((tab) => [tab, createRequestScope()]));
+  let detailGeneration = 0;
+
+  const selectedDataset = computed(() => detail.value.overview);
+
+  function listParameters() {
+    return {
+      keyword: filters.keyword.trim(),
+      data_type: filters.dataType,
+      product_type: filters.productType,
+      batch_id: filters.batchId.trim(),
+      grid_type: filters.gridType,
+      partition_status: filters.partitionStatus,
+      quality_status: filters.qualityStatus,
+      publish_status: filters.publishStatus,
+      time_start: filters.timeStart,
+      time_end: filters.timeEnd,
+      page: pageState.page,
+      page_size: pageState.pageSize,
+      sort_by: filters.sortBy,
+      sort_order: filters.sortOrder,
+    };
+  }
+
+  async function loadList() {
+    const request = listScope.begin();
+    loading.value = true;
+    error.value = '';
+    try {
+      const response = await requestGet(`/v1/partition/datasets?${pageQuery(listParameters())}`, { signal: request.signal });
+      if (!listScope.isCurrent(request.token)) return;
+      const page = normalizePageResponse(response, pageState.page, pageState.pageSize);
+      records.value = page.items;
+      pageState.total = page.total;
+      pageState.page = page.page;
+      pageState.pageSize = page.pageSize;
+      if (!records.value.length && pageState.total > 0 && pageState.page > 1) {
+        pageState.page = Math.max(1, Math.ceil(pageState.total / pageState.pageSize));
+        await loadList();
+      }
+    } catch (requestError) {
+      if (request.signal.aborted || !listScope.isCurrent(request.token)) return;
+      error.value = requestError.message || '数据集加载失败';
+      throw requestError;
+    } finally {
+      if (listScope.isCurrent(request.token)) loading.value = false;
+    }
+  }
+
+  function resetDetail(nextDatasetId = '') {
+    detailScope.cancel();
+    Object.values(tabScopes).forEach((scope) => scope.cancel());
+    detailGeneration += 1;
+    selectedDatasetId.value = nextDatasetId;
+    detailVisible.value = Boolean(nextDatasetId);
+    activeTab.value = 'overview';
+    detail.value = emptyDetail();
+    selectedRows.value = [];
+    Object.assign(tabPages, emptyTabPages());
+  }
+
+  async function openDetail(datasetId) {
+    if (!datasetId) return;
+    resetDetail(datasetId);
+    const generation = detailGeneration;
+    const request = detailScope.begin();
+    detailLoading.value = true;
+    error.value = '';
+    try {
+      const overview = await requestGet(`/v1/partition/datasets/${encodeURIComponent(datasetId)}`, { signal: request.signal });
+      if (selectedDatasetId.value !== datasetId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
+      detail.value.overview = overview;
+    } catch (requestError) {
+      if (request.signal.aborted || selectedDatasetId.value !== datasetId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
+      error.value = requestError.message || '数据集详情加载失败';
+      throw requestError;
+    } finally {
+      if (selectedDatasetId.value === datasetId && generation === detailGeneration && detailScope.isCurrent(request.token)) {
+        detailLoading.value = false;
+      }
+    }
+  }
+
+  async function loadDetailTab(tab = activeTab.value) {
+    if (!paginatedTabs.includes(tab) || !selectedDatasetId.value) return;
+    const datasetId = selectedDatasetId.value;
+    const generation = detailGeneration;
+    const request = tabScopes[tab].begin();
+    const page = tabPages[tab];
+    try {
+      const query = pageQuery({ page: page.page, page_size: page.pageSize });
+      const response = await requestGet(
+        `/v1/partition/datasets/${encodeURIComponent(datasetId)}/${tab}?${query}`,
+        { signal: request.signal },
+      );
+      if (selectedDatasetId.value !== datasetId || generation !== detailGeneration || !tabScopes[tab].isCurrent(request.token)) return;
+      const normalized = normalizePageResponse(response, page.page, page.pageSize);
+      detail.value[tab] = normalized;
+      Object.assign(page, { page: normalized.page, pageSize: normalized.pageSize, total: normalized.total });
+    } catch (requestError) {
+      if (request.signal.aborted || selectedDatasetId.value !== datasetId || generation !== detailGeneration || !tabScopes[tab].isCurrent(request.token)) return;
+      error.value = requestError.message || '数据集明细加载失败';
+      throw requestError;
+    }
+  }
+
+  async function setActiveTab(tab) {
+    activeTab.value = tab;
+    selectedRows.value = [];
+    await loadDetailTab(tab);
+  }
+
+  async function setTabPage(tab, page) {
+    if (!tabPages[tab]) return;
+    tabPages[tab].page = page;
+    await loadDetailTab(tab);
+  }
+
+  async function setTabPageSize(tab, pageSize) {
+    if (!tabPages[tab]) return;
+    tabPages[tab].pageSize = pageSize;
+    tabPages[tab].page = 1;
+    await loadDetailTab(tab);
+  }
+
+  function closeDetail() {
+    resetDetail();
+    detailLoading.value = false;
+  }
+
+  function dispose() {
+    listScope.dispose();
+    resetDetail();
+  }
+
+  return {
+    filters,
+    pageState,
+    records,
+    loading,
+    error,
+    selectedDatasetId,
+    selectedDataset,
+    detailVisible,
+    detailLoading,
+    detail,
+    activeTab,
+    selectedRows,
+    tabPages,
+    loadList,
+    openDetail,
+    loadDetailTab,
+    setActiveTab,
+    setTabPage,
+    setTabPageSize,
+    closeDetail,
+    dispose,
+  };
+});

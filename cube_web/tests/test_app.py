@@ -354,11 +354,12 @@ def runtime_environment(monkeypatch):
     web_app.partition_workflow_service._store = None
 
 
-def test_header_navigation_does_not_expose_quality_as_top_level_item():
+def test_header_navigation_exposes_routed_dataset_and_quality_pages():
     nav_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "data" / "navigation.js").read_text(encoding="utf-8")
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
-    assert "{ label: '自动化质检'," not in nav_source
+    assert "{ label: '自动化质检', kind: 'internal', path: '/quality' }" in nav_source
+    assert "{ label: '数据集管理', kind: 'internal', path: '/datasets' }" in nav_source
     assert "{ label: '首页', kind: 'external', url: portalHomeUrl }" in nav_source
     assert "{ label: 'ARD数据载入', kind: 'external', url: '/ard' }" in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
@@ -375,18 +376,10 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
     assert order_source.index("'后台管理'") < order_source.index("'全球离散格网模型与编码'")
     assert "runtimeNavigation()" in nav_source
     assert "normalizeNavItem(item)" in nav_source
-    assert "HomeView" not in app_source
-    assert "'/':" not in app_source
-    assert ':href="item.path"' in app_source
-    assert "currentNavItems" in app_source
-    assert "const isAdmin = computed(() => userStore.role.value === '管理员');" in app_source
-    assert "const currentNavItems = computed(() => navItems(isAdmin.value));" in app_source
-    assert "function redirectNonAdminFromPartition()" in app_source
-    assert "window.location.replace(portalHomeUrl);" in app_source
+    assert "<RouterView v-if=\"authReady\" />" in app_source
     assert "const publicNavLabels = new Set(['全球离散格网模型与编码']);" in nav_source
     assert ".filter((item) => isAdmin || publicNavLabels.has(item.label))" in nav_source
-    assert "targetFromAuthState(state)" in app_source
-    assert "normalizePath(window.location.pathname)" in app_source
+    assert "targetFromState(state)" in app_source
 
 
 def test_auth_redirect_routes_through_backend_login_with_fixed_callback():
@@ -405,225 +398,40 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(encoding="utf-8")
 
     assert "await loadAuthRuntimeConfig();" in app_source
-    assert "if (authRequired()) {" in app_source
+    assert "if (authRequired() && !userStore.isAuthenticated.value)" in app_source
     assert "fetch('/api/config'" in config_source
     assert "auth_required" in config_source
     assert "navigation" in config_source
     assert "http://10.136." not in config_source
     assert "if (authRequired()) {" in store_source
-    assert "const target = targetFromAuthState(state) || safeLocalTarget(params.get('target')) || '/';" in app_source
-    assert "function safeLocalTarget(value)" in app_source
-    initialize_source = app_source.split("async function initializeAuth()", 1)[1].split("async function handleLogout()", 1)[0]
-    mounted_source = app_source.split("onMounted(async () => {", 1)[1].split("});", 1)[0]
-    assert initialize_source.index("if (code) {") < initialize_source.index("syncPathFromLocation();")
-    assert "authReady.value = false;" in initialize_source
-    assert "authReady.value = true;" in initialize_source
-    assert "syncPathFromLocation();" not in mounted_source
-    assert '<component v-if="authReady" :is="currentView" />' in app_source
+    assert "safeLocalTarget(params.get('target')) || '/partition'" in app_source
+    assert "resolveApplicationAuthReady();" in app_source
+    assert "onMounted(initializeApplicationAuth);" in app_source
 
 
-def test_partition_view_uses_explicit_module_endpoint_mapping():
+def test_partition_view_uses_strict_partition_store_and_production_grid_controls():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(encoding="utf-8")
+    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "partition.js").read_text(encoding="utf-8")
 
-    assert "const partitionEndpointsByModule = {" in source
-    assert "optical: 'optical'" in source
-    assert "carbon: 'carbon'" in source
-    assert "radar: 'radar'" in source
-    assert "product: 'product'" in source
-    assert "const partitionModules = new Set(['optical', 'carbon', 'radar', 'product']);" in source
-    assert "const operation = 'run';" in source
-    assert "testModules" not in source
-    assert "activeModule === 'entity'" not in source
-    assert "activeModule.value === 'entity'" not in source
-    assert ">实体剖分</button>" not in source
-    assert '<el-option label="GeoHash格网" value="geohash" />' in source
-    assert '<el-option label="MGRS格网" value="mgrs" />' in source
-    assert '<el-option label="六边形格网" value="isea4h" />' in source
+    assert "usePartitionStore" in source
+    assert "GridParameters" in source
+    assert "BatchAssetsPanel" in source
+    assert "TaskQueuePanel" in source
+    assert "const forbiddenRequestFields" in store_source
+    assert "requested_grid_level" in store_source
+    assert "partition_method: derivedPartitionMethod(form.gridType)" in store_source
+    assert "tasks/run" in store_source
+    assert "dataset_ids" in store_source
     assert 'value="s2"' not in source
     assert 'value="tile_matrix"' not in source
     assert 'value="plane_grid"' not in source
-    assert 'v-model="radarGridType"' in source
-    assert 'v-model="productGridType"' in source
-    carbon_block = source.split("<template v-else-if=\"activeModule === 'carbon'\">", 1)[1].split(
-        "<template v-else-if=\"activeModule === 'radar'\">",
-        1,
-    )[0]
-    radar_block = source.split("<template v-else-if=\"activeModule === 'radar'\">", 1)[1].split(
-        "<template v-else-if=\"activeModule === 'product'\">",
-        1,
-    )[0]
-    product_block = source.split("<template v-else-if=\"activeModule === 'product'\">", 1)[1].split("<template v-else>", 1)[0]
-    assert 'value="isea4h"' not in carbon_block
-    assert 'value="isea4h"' in radar_block
-    assert 'value="isea4h"' in product_block
-    assert "const opticalPartitionMethod = ref('logical');" in source
-    assert "const radarPartitionMethod = ref('logical');" in source
-    assert "const productPartitionMethod = ref('logical');" in source
-    assert 'v-model="opticalPartitionMethod"' in source
-    assert 'v-model="radarPartitionMethod"' in source
-    assert 'v-model="productPartitionMethod"' in source
-    assert "function partitionMethodForModule(moduleName = activeModule.value)" in source
-    assert "function gridLevelModeForModule(moduleName = activeModule.value)" in source
-    assert "partition_method: partitionMethodForModule('radar')" in source
-    assert "partition_method: partitionMethodForModule('product')" in source
-    assert "if (partitionMethod === 'entity') return defaultEntityGridLevel;" in source
-    assert "if (resolution < 10) return 8;" in source
-    assert "if (resolution <= 30) return 7;" in source
-    assert "const partitionStageDetailVisible = ref(false);" in source
-    assert "function openPartitionStageDetail(stage)" in source
-    assert '@click="openPartitionStageDetail(stage)"' in source
-    assert 'title="剖分进程详情"' in source
-    assert "function pruneBatchSelection(selectedIds, batches)" in source
-    assert "preferredBatchId" not in source
-    assert "selectedOpticalBatchIds.value = pruneBatchSelection(selectedOpticalBatchIds.value, managedOpticalBatches.value);" in source
-    assert "selectedCarbonBatchIds.value = pruneBatchSelection(selectedCarbonBatchIds.value, managedCarbonBatches.value);" in source
-    assert "selectedRadarBatchIds.value = pruneBatchSelection(selectedRadarBatchIds.value, managedRadarBatches.value);" in source
-    assert "selectedProductBatchIds.value = pruneBatchSelection(selectedProductBatchIds.value, managedProductBatches.value);" in source
-    assert "const partitionContextDetailVisible = ref(false);" in source
-    assert "function openPartitionContextDetail(item)" in source
-    assert '@click="openPartitionContextDetail(item)"' in source
-    assert 'title="剖分信息详情"' in source
-    assert "partition-stage-detail-message" in source
-    assert "const selectedCarbonObservations = computed(() => {" in source
-    assert "selected_observations: selectedObservations" in source
-    assert "selectedRadarAssets" in source
-    assert "const managedOpticalBatches = ref([]);" in source
-    assert "const partitionBatchDetailVisible = ref(false);" in source
-    assert "const visibleOpticalBatches = computed(() => managedOpticalBatches.value);" in source
-    assert "const visibleCarbonBatches = computed(() => managedCarbonBatches.value);" in source
-    assert "const visibleRadarBatches = computed(() => managedRadarBatches.value);" in source
-    assert "const visibleProductBatches = computed(() => managedProductBatches.value);" in source
-    assert "async function loadPartitionBatches()" in source
-    assert "requestGet(`${partitionPrefix}/batches?limit=500`)" in source
-    assert "function partitionBatchNeedsIngestAttention(batch)" in source
-    assert "['ready', 'previewed', 'failed'].includes(batch?.ingest_status)" in source
-    assert "function shouldDisplayManagedBatch(batch)" in source
-    assert "if (batch?.status === 'archived') return false;" in source
-    assert "return !partitionBatchAllSlotsCompleted(batch);" in source
-    assert "function partitionSlots(batch)" in source
-    assert "function partitionSlotGroups(batch)" in source
-    assert "function partitionSlotStatusText(status)" in source
-    assert "function partitionSlotStatusType(status)" in source
-    assert 'class="partition-slot-grid"' in source
-    assert 'class="partition-slot-chip"' in source
-    assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
-    assert (
-        "partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };"
-        in source
-    )
-    assert "return (batch.assets || []).map((asset) => {" in source
-    assert "取消会立即请求执行层中断当前任务" in source
-    assert "重试失败资产" in source
-    assert "async function archivePartitionBatch(batch)" in source
-    assert "function partitionTaskDisplayStatus(task)" in source
-    assert "return task?.status;" in source
-    assert "excludeArchivedBatch" in source
-    assert "requestGet(`${partitionPrefix}/tasks/${taskId}`)" in source
-    assert "const query = partitionTaskQuery({ keyword: taskId, limit: 20 });" not in source
-    assert "const completedResult = row.result || row.result_summary || {};" in source
-    assert "const cleanRow = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));" in source
-    assert "{ label: '入库状态', value: partitionIngestStatusText(partitionIngestStatus(result)) }" in source
-    assert "{ label: '正式入库'" not in source
-    assert "function partitionSupportsIngestStatus(dataType)" in source
-    assert "return ['optical', 'entity', 'radar', 'product'].includes(dataType);" in source
-    assert "function initialPartitionIngestStatus(dataType)" in source
-    assert "return result.ingest_enabled === false ? 'ready' : 'ingested';" in source
-    assert "ready: '待补入库'" in source
-    assert "async function previewOpticalIngest()" not in source
-    assert "async function confirmOpticalIngest()" not in source
-    assert "const opticalIngestConfirmReady = computed" not in source
-    assert "payload.batch_id = result.batch_id;" not in source
-    assert "ingest_status: initialPartitionIngestStatus(dataType)" in source
-    assert "setPartitionStage('persist', 'done', partitionPersistDoneText(lastPartitionResult.value, '执行结果已返回。'));" in source
-    assert (
-        "const ingestSummary = partitionBatchNeedsIngestAttention(batch) ? ` · ${partitionIngestStatusText(batch.ingest_status)}` : '';"
-        in source
-    )
-    assert "{ label: '批次状态', value: partitionStatusText(result.batch_status) }" in source
-    assert "const activePartitionTasks = ref([]);" in source
-    assert "const partitionTaskTotal = ref(0);" in source
-    assert "const activePartitionTaskTotal = ref(0);" in source
-    assert "const activePartitionTaskQueueStats = computed(() => partitionTaskStats(activePartitionTasks.value));" in source
-    assert (
-        "const activePartitionTaskDrawerTitle = computed(() => `${dataLabelsByModule[activeModule.value] || '当前模块'}剖分任务队列`);"
-        in source
-    )
-    assert "function partitionTaskQuery(params)" in source
-    assert "async function loadActivePartitionTasks(page = activePartitionTaskPage.value)" in source
-    assert "data_type: activeModule.value" in source
-    assert "async function openActivePartitionTaskDrawer()" in source
-    assert '<el-drawer v-model="partitionTaskDrawerVisible" :title="activePartitionTaskDrawerTitle"' in source
-    assert ':data="activePartitionTasks"' in source
-    assert 'v-model:current-page="activePartitionTaskPage"' in source
-    assert 'v-model:page-size="activePartitionTaskPageSize"' in source
-    assert 'empty-text="当前类别暂无剖分任务"' in source
-    assert "partitionTaskCanArchiveBatch(row)" in source
-    assert "function partitionTaskCanRequeueBatch(task)" in source
-    assert "requestJson(`${partitionPrefix}/batches/${batchId}/requeue`, {})" in source
-    assert "打回队列" in source
-    assert "const partitionResultArchiveBatch = computed" in source
-    assert "async function archiveLastPartitionResultBatch()" in source
-    assert "function applyArchivedPartitionBatch(batchId, archivedBatch = null)" in source
-    assert "loadActivePartitionTasks(activePartitionTaskPage.value)" in source
-    assert "async function syncSubmittedPartitionTask(taskId)" in source
-    assert "startPartitionTaskSync(submitted.task_id)" in source
-    assert "const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];" in source
-    assert "function partitionBatchCanRun(batch)" in source
-    assert 'v-else-if="partitionBatchCanRun(partitionBatchDetail)"' in source
-    assert "requestJson(`${partitionPrefix}/batches/${batchId}/archive`, {})" in source
-    assert "不再处理" in source
-    assert "archived: '已归档'" in source
-    assert "partitionBatchDetailTab === 'attempts'" in source
-    assert "visibleOpticalBatches" in source
-    assert "const selectedProductAssets = computed(() => {" in source
-    assert "const productMapGeometries = computed(() => mapGeometryItemsFromFootprints(productMapFootprints.value" in source
-    assert "activeModule.value === 'radar'" in source
-    assert "? selectedRadarAssets.value" in source
-    assert "? radarGridType.value" in source
-    assert "const defaultEntityGridLevel = 6;" in source
-    assert "const entityGridLevel = ref(defaultEntityGridLevel);" in source
-    assert "const radarEntityGridLevel = ref(defaultEntityGridLevel);" in source
-    assert "const productEntityGridLevel = ref(defaultEntityGridLevel);" in source
-    assert "return partitionMethodForModule('radar') === 'entity' ? radarEntityGridLevel.value : radarGridLevel.value;" in source
-    assert "return partitionMethodForModule('product') === 'entity' ? productEntityGridLevel.value : productGridLevel.value;" in source
-    assert "activeModule === 'product' ? '产品范围地图预览'" not in source
-    assert "selected_assets: selectedAssets" in source
-    assert "function buildPartitionFailureResult(error, request = {})" in source
-    assert "partition_method: payload.partition_method || partitionMethodForModule(dataType)" in source
-    assert "const partitionFailureMessage = computed" in source
-    assert "partitionFailureMessage" in source
-    assert "剖分失败，详情已写入执行结果" not in source
-    assert "submitPartitionOperation(partitionPrefix, endpoint, operation, payload)" in source
-    assert "function buildPartitionSubmittedResult(submitted, request, selectedCount)" in source
-    assert "剖分任务已提交，后台将连接 Ray 集群异步执行。" in source
-    assert "开始剖分" not in source
-    assert "提交剖分任务" in source
-    assert "/tasks/${operation}" in source
-    quality_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "QualityRecordsView.vue").read_text(encoding="utf-8")
-    assert "/records?" in quality_source
-    assert "/records/${id}/results" in quality_source
-    assert "/records/${id}/errors" in quality_source
-    assert "/records/${id}/errors/export?format=${format}" in quality_source
+    quality_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "quality.js").read_text(encoding="utf-8")
+    assert "/v1/quality/records?" in quality_source
+    assert "/v1/quality/records/${encodeURIComponent(qualityRunId)}/results" in quality_source
+    assert "/v1/quality/records/${encodeURIComponent(qualityRunId)}/errors" in quality_source
+    assert "/v1/quality/records/${encodeURIComponent(qualityRunId)}/errors/export" in quality_source
     assert "report_id" not in quality_source
     assert "PDF" not in quality_source and "TXT" not in quality_source
-    assert "schema-grid" in source
-    assert "defaultOpticalSchemaFields" in source
-    assert "defaultCarbonSchemaFields" in source
-    assert "defaultRadarSchemaFields" in source
-    assert "defaultProductSchemaFields" in source
-    assert "function schemaForBatch(batch)" in source
-    assert "function schemaCollapseTitle(batch)" in source
-    assert "function schemaFromManagedBatch(batch)" in source
-    assert "schema: schemaFromManagedBatch(batch)" in source
-    assert 'class="batch-schema-collapse"' in source
-    assert ':title="schemaCollapseTitle(batch)"' in source
-    assert "schemaForBatch(batch)" in source
-    assert "雷达栅格源文件路径或 MinIO 对象 URL" in source
-    assert "Sentinel-1 场景标识" in source
-    assert "band / polarization" in source
-    assert "覆盖范围 bbox（WGS84）" in source
-    assert "光学栅格源文件路径或 MinIO 对象 URL" in source
-    assert "碳卫星源文件路径或 MinIO 对象 URL" in source
     assert "buildLocalPartitionBatchDetail" not in source
     assert "dataRowsByModule" not in source
     assert "filteredDataRows" not in source
@@ -651,21 +459,13 @@ def test_api_client_uses_request_timeout():
     assert "timeoutSignal()" in source
 
 
-def test_partition_view_deduplicates_map_preview_and_grid_cover_requests():
+def test_partition_view_does_not_keep_retired_map_preview_requests():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(encoding="utf-8")
 
-    assert "function normalizedCornersKey(corners)" in source
-    assert "function normalizedBboxKey(corners)" in source
-    assert "function uniqueFootprintAssets(assets, labelForAsset)" in source
-    assert "const opticalMapFootprints = computed(() => uniqueFootprintAssets(" in source
-    assert "const productMapFootprints = computed(() => uniqueFootprintAssets(" in source
-    assert "const radarMapFootprints = computed(() => uniqueFootprintAssets(" in source
-    assert "function uniqueGridCoverFootprints(footprints)" in source
-    assert "function uniqueGridGeometryItems(chunks, gridType, level)" in source
-    assert "const footprints = uniqueGridCoverFootprints(mapFootprints).slice(0, 30);" in source
-    assert "mapGridGeometries.value = uniqueGridGeometryItems(chunks, gridType, gridLevel);" in source
-    assert "selectedAssets.slice(0, 30).map" not in source
-    assert "mapGridGeometries.value = chunks.flat();" not in source
+    assert "normalizedCornersKey" not in source
+    assert "uniqueGridCoverFootprints" not in source
+    assert "grid/cover" not in source
+    assert "格网预览将基于已选择的数据集" in source
 
 
 def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():

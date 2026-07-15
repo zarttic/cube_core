@@ -47,37 +47,64 @@ function timeoutSignal(timeoutMs = REQUEST_TIMEOUT_MS) {
   };
 }
 
-export async function requestJson(path, payload = {}) {
-  const { signal, clear } = timeoutSignal();
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: authHeaders(JSON_HEADERS),
-    body: JSON.stringify(payload),
-    signal,
+export function combineAbortSignals(signals = []) {
+  const activeSignals = signals.filter(Boolean);
+  if (!activeSignals.length) return { signal: undefined, dispose() {} };
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  activeSignals.forEach((signal) => {
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
   });
+  return {
+    signal: controller.signal,
+    dispose() {
+      activeSignals.forEach((signal) => signal.removeEventListener('abort', abort));
+    },
+  };
+}
+
+export async function request(path, { method = 'GET', body, headers = {}, signal, responseType = 'json' } = {}) {
+  const timeout = timeoutSignal();
+  const combined = combineAbortSignals([signal, timeout.signal]);
   try {
+    const response = await fetch(path, {
+      method,
+      headers: authHeaders(body === undefined ? headers : { ...JSON_HEADERS, ...headers }),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: combined.signal,
+    });
+    if (responseType === 'blob') {
+      if (!response.ok) await parseResponse(response);
+      return response;
+    }
     return await parseResponse(response);
   } finally {
-    clear();
+    combined.dispose();
+    timeout.clear();
   }
 }
 
-export async function requestGet(path) {
-  const { signal, clear } = timeoutSignal();
-  const response = await fetch(path, {
-    method: 'GET',
-    headers: authHeaders(),
-    signal,
-  });
-  try {
-    return await parseResponse(response);
-  } finally {
-    clear();
-  }
+export function requestJson(path, payload = {}, options = {}) {
+  return request(path, { ...options, method: options.method || 'POST', body: payload });
 }
 
-export async function requestPost(path, payload = {}) {
-  return requestJson(path, payload);
+export function requestGet(path, options = {}) {
+  return request(path, { ...options, method: 'GET' });
+}
+
+export function requestPost(path, payload = {}, options = {}) {
+  return requestJson(path, payload, options);
+}
+
+export async function download(path, options = {}) {
+  const response = await request(path, { ...options, responseType: 'blob' });
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+  return {
+    blob: await response.blob(),
+    filename: filenameMatch?.[1] || 'download',
+  };
 }
 
 export function apiPrefixes() {
