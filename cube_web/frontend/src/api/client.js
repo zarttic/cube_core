@@ -87,7 +87,6 @@ export function apiPrefixes() {
     topologyPrefix: '/v1/topology',
     partitionPrefix: '/v1/partition',
     qualityPrefix: '/v1/quality',
-    ingestPrefix: '/v1/ingest',
     configPrefix: '/v1/config',
   };
 }

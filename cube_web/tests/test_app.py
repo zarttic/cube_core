@@ -35,6 +35,12 @@ from cube_web.services.partition_workflow import PartitionWorkflowService, _part
 client = TestClient(app)
 
 
+def test_frontend_api_prefixes_do_not_expose_retired_ingest_api() -> None:
+    source = (Path(__file__).resolve().parents[1] / "frontend" / "src" / "api" / "client.js").read_text(encoding="utf-8")
+    assert "ingestPrefix" not in source
+    assert "/v1/ingest" not in source
+
+
 def normalized_task_run_request() -> dict:
     return {
         "batch_id": "batch-01",
