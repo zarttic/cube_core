@@ -53,7 +53,8 @@ test('quality exports omit visible page parameters', async ({ page }) => {
   await expect.poll(() => requests.length).toBe(1);
   expect(requests[0]).toContain('format=csv');
   expect(requests[0]).not.toMatch(/rule_code=|page=|page_size=/);
-  await page.getByRole('textbox', { name: '规则' }).fill('asset_readability');
+  await page.locator('.error-filters .el-select').click();
+  await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: 'asset_readability' }).click();
   await page.getByTestId('quality-export-filtered').click();
   await expect.poll(() => requests.length).toBe(2);
   expect(requests[1]).toContain('rule_code=asset_readability');

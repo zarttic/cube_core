@@ -25,6 +25,7 @@ const props = defineProps({
 });
 const emit = defineEmits(['close', 'tab-change', 'load-errors', 'error-page-change', 'error-page-size-change', 'export', 'rerun']);
 const title = computed(() => props.detail?.dataset_code ? `${props.detail.dataset_code} 质量详情` : '质量详情');
+const errorRuleOptions = computed(() => [...new Set(props.errors.map((item) => item.rule_code).filter(Boolean))]);
 
 function rerun() {
   if (props.detail?.dataset_id && props.detail?.output_version) {
@@ -64,7 +65,11 @@ function rerun() {
         </el-tab-pane>
         <el-tab-pane name="errors"><template #label><span data-testid="quality-detail-tab-errors">错误明细</span></template>
           <el-form class="error-filters" inline @submit.prevent="emit('load-errors')">
-            <el-form-item label="规则"><el-input v-model="errorFilters.ruleCode" clearable /></el-form-item>
+            <el-form-item label="规则">
+              <el-select v-model="errorFilters.ruleCode" clearable placeholder="全部规则">
+                <el-option v-for="ruleCode in errorRuleOptions" :key="ruleCode" :label="ruleCode" :value="ruleCode" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="错误码"><el-input v-model="errorFilters.errorCode" clearable /></el-form-item>
             <el-form-item label="字段"><el-input v-model="errorFilters.field" clearable /></el-form-item>
             <el-form-item><el-button type="primary" @click="emit('load-errors')">筛选</el-button></el-form-item>
