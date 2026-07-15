@@ -110,7 +110,6 @@ def _check_postgres() -> dict[str, Any]:
         return _fail("PostgreSQL DSN is not configured")
     start = time.perf_counter()
     try:
-        import psycopg
 
         from cube_web.services.db_pool import _PostgresPool
 

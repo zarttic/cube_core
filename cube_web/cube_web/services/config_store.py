@@ -6,14 +6,14 @@ from datetime import datetime
 from typing import Any
 
 from cube_split import runtime_config
+from grid_core.app.core.enums import GridType
+from grid_core.app.models.request import validate_requested_grid_level
 
 CONFIG_SCOPE = "cube_web"
-LEGACY_PARTITION_GRID_TYPE_ALIASES = {"mgrs": "tile_matrix", "geohash": "tile_matrix"}
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "partition": {
         "optical": {
-            "grid_type": "s2",
+            "grid_type": "geohash",
             "grid_level": 5,
             "grid_level_mode": "auto",
             "target_pixels_per_hex_edge": 768,
@@ -185,8 +185,9 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("config must be an object")
     merged = _deep_merge(default_config(), config or {})
     optical = merged["partition"]["optical"]
-    optical["grid_type"] = _choice(optical.get("grid_type"), {"s2", "tile_matrix", "isea4h", "plane_grid"}, "grid_type")
-    optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=1)
+    optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "mgrs", "isea4h"}, "grid_type")
+    optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=0)
+    validate_requested_grid_level(GridType(optical["grid_type"]), optical["grid_level"])
     optical["grid_level_mode"] = _choice(optical.get("grid_level_mode"), {"auto", "manual"}, "grid_level_mode")
     optical["target_pixels_per_hex_edge"] = _int_value(
         optical.get("target_pixels_per_hex_edge"),
@@ -232,13 +233,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def normalized_stored_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    stored = copy.deepcopy(config or {})
-    optical = stored.get("partition", {}).get("optical", {})
-    if isinstance(optical, dict):
-        grid_type = str(optical.get("grid_type") or "").strip().lower()
-        if grid_type in LEGACY_PARTITION_GRID_TYPE_ALIASES:
-            optical["grid_type"] = LEGACY_PARTITION_GRID_TYPE_ALIASES[grid_type]
-    return normalized_config(stored)
+    return normalized_config(copy.deepcopy(config or {}))
 
 
 def stored_config(config: dict[str, Any] | None) -> dict[str, Any]:

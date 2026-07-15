@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from cube_split.jobs.carbon_partition_job import _resolve_backend, _resolve_worker_count, run_carbon_partition
+import pytest
+
+from cube_split.jobs.carbon_partition_job import _resolve_backend, _resolve_worker_count, parse_args, run_carbon_partition
 from cube_split.partition.carbon import CarbonPartitionConfig
 
 
@@ -26,6 +29,16 @@ def test_carbon_partition_job_resolves_ray_worker_count():
     assert _resolve_worker_count(partition_workers=2, ray_parallelism=0, backend="ray") == 2
     assert _resolve_worker_count(partition_workers=2, ray_parallelism=6, backend="ray") == 6
     assert _resolve_worker_count(partition_workers=0, ray_parallelism=6, backend="process") == 1
+
+
+def test_carbon_partition_job_accepts_only_frozen_sdk_time_granularities(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["carbon_partition_job", "--time-granularity", "second"])
+
+    assert parse_args().time_granularity == "second"
+
+    monkeypatch.setattr(sys, "argv", ["carbon_partition_job", "--time-granularity", "year"])
+    with pytest.raises(SystemExit):
+        parse_args()
 
 
 def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
@@ -79,4 +92,4 @@ def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
     assert report["rows_path"] == str(rows_path.resolve())
     assert row["grid_type"] == "isea4h"
     assert row["grid_level"] == 5
-    assert row["st_code"].startswith("hx:5:")
+    assert row["st_code"].startswith("i4h:5:")

@@ -16,9 +16,8 @@ const optical = computed(() => config.value.partition.optical);
 const ingest = computed(() => config.value.ingest.optical);
 const quality = computed(() => config.value.quality.optical);
 const gridTypeLabels = {
-  s2: '四边形格网',
-  tile_matrix: '经纬度格网',
-  plane_grid: '平面格网',
+  geohash: 'GeoHash格网',
+  mgrs: 'MGRS格网',
   isea4h: '六边形格网',
 };
 
@@ -30,7 +29,7 @@ function emptyConfig() {
   return {
     partition: {
       optical: {
-        grid_type: 's2',
+        grid_type: 'geohash',
         grid_level: 5,
         target_crs: 'EPSG:4326',
         cover_mode: 'intersect',
@@ -174,14 +173,13 @@ onMounted(loadConfig);
               <div class="config-form-grid">
                 <el-form-item label="格网类型">
                   <el-select v-model="optical.grid_type">
-                    <el-option label="四边形格网" value="s2" />
-                    <el-option label="经纬度格网" value="tile_matrix" />
-                    <el-option label="平面格网" value="plane_grid" />
+                    <el-option label="GeoHash格网" value="geohash" />
+                    <el-option label="MGRS格网" value="mgrs" />
                     <el-option label="六边形格网" value="isea4h" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="格网层级">
-                  <el-input-number v-model="optical.grid_level" :min="1" :max="15" />
+                  <el-input-number v-model="optical.grid_level" :min="optical.grid_type === 'geohash' ? 1 : 0" :max="optical.grid_type === 'mgrs' ? 5 : 15" />
                 </el-form-item>
                 <el-form-item label="目标 CRS">
                   <el-select v-model="optical.target_crs" filterable allow-create>

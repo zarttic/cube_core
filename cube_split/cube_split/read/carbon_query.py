@@ -61,7 +61,7 @@ def query_carbon_observations(
     sdk = CubeEncoderSDK()
     cells = sdk.cover_compact(
         grid_type=grid_type,
-        level=grid_level,
+        requested_grid_level=grid_level,
         cover_mode="intersect",
         bbox=bbox,
         crs="EPSG:4326",

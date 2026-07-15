@@ -14,7 +14,9 @@ from typing import Any
 import numpy as np
 import rasterio
 import rasterio.mask
+from grid_core.app.core.enums import GridType
 from grid_core.app.models.grid_address import GridAddress
+from grid_core.app.models.request import validate_requested_grid_level
 from grid_core.sdk import CubeEncoderSDK
 from pyproj import Geod, Transformer
 from rasterio.warp import transform_geom
@@ -1362,10 +1364,16 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     assets = source_assets
 
-    requested_level = int(getattr(args, "grid_level", 0) or 0)
+    requested_value = getattr(args, "grid_level", None)
+    requested_level = None if requested_value is None else int(requested_value)
     target_pixels = int(getattr(args, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE) or DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
-    inferred_level = requested_level if requested_level > 0 else infer_isea4h_level_for_assets(assets, target_pixels)
-    grid_level = requested_level if requested_level > 0 else inferred_level
+    if requested_level is None:
+        inferred_level = infer_isea4h_level_for_assets(assets, target_pixels)
+        grid_level = inferred_level
+    else:
+        validate_requested_grid_level(GridType.ISEA4H, requested_level)
+        inferred_level = None
+        grid_level = requested_level
     max_cells_per_asset = int(getattr(args, "max_cells_per_asset", 0) or 0)
     if max_cells_per_asset < 0:
         raise ValueError("max_cells_per_asset must be greater than or equal to 0")
@@ -1538,7 +1546,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "grid_type": grid_type,
         "grid_level": grid_level,
         "inferred_grid_level": inferred_level,
-        "requested_grid_level": requested_level or None,
+        "requested_grid_level": requested_level,
         "target_pixels_per_hex_edge": target_pixels,
         "cover_mode": args.cover_mode,
         "execution_engine": backend,
@@ -1612,7 +1620,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cog-num-threads", default="ALL_CPUS")
     parser.add_argument("--target-crs", default="EPSG:4326")
     parser.add_argument("--grid-type", default="isea4h", choices=["isea4h"])
-    parser.add_argument("--grid-level", type=int, default=0)
+    parser.add_argument("--grid-level", type=int, default=None, help="Grid level; omit to infer automatically")
     parser.add_argument("--entity-clip-mode", default="exact", choices=["bbox", "exact"])
     parser.add_argument("--target-pixels-per-hex-edge", type=int, default=DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])
