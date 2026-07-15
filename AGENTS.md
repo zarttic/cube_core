@@ -141,6 +141,33 @@ CUBE_WEB_MINIO_ACCESS_KEY=<access-key>
 CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 ```
 
+### 隔离 worktree 与真实门禁
+
+- 新里程碑 worktree 必须从协调账本中已通过的前置 `integration_hash` 创建。不要从
+  旧验收 worktree、主 checkout 的脏状态或另一里程碑的 worker 分支开始。
+- `CUBE_WEB_ENV_FILE` 由 Python 运行时配置代码解析；它不会自动向 shell 导出变量。运行
+  需要 shell 环境变量的重置或真实门禁脚本时，使用受控子 shell 显式加载本地文件，例如：
+  ```bash
+  set -a
+  . "${CUBE_WEB_ENV_FILE:-$PWD/.cube_web.env}"
+  set +a
+  ```
+  不要打印该文件、`env` 全量输出、DSN 或凭据。
+- 真实门禁可以有测试专用变量，但不得将其写入 `.cube_web.env`、业务配置表或源码。脚本
+  应优先使用正式变量名；若历史测试要求 `RAY_ADDRESS` 而运行时使用
+  `CUBE_WEB_RAY_ADDRESS`，只在该次受控命令中显式映射。真实 `s3://` COG 必须先用 MinIO
+  `stat_object` 验证存在，再传入门禁。
+- 执行 `reset_partition_domain.py --execute` 前，必须同时指定
+  `CUBE_WEB_ENV=development`、`--dangerously-reset-partition-domain` 和与 DSN 实际连接
+  数据库完全相同的 `--database-name`。先 preview，确认对象清单只属于授权的领域表；重置
+  成功不等同于真实门禁通过，仍须完成所有 non-skipping 场景。
+- 在 worktree 内运行测试时，`PYTHONPATH` 必须指向该 worktree 的包目录。以
+  `cube_web/` 为当前目录时使用 `../cube_encoder:../cube_split:.`；错误的相对路径可能静默
+  导入用户 site-packages 中的旧 SDK。
+- 生成最终集成补丁前，待纳入的新增文件必须先 `git add`；`git diff <base>` 不会包含
+  未跟踪文件。最终干净集成 worktree 应从前置哈希重建并执行 `git apply --index` 和
+  `git diff --cached --check`，以避免把协调 worktree 的无关改动带入单一里程碑提交。
+
 当前运行端点：
 
 - **OpenGauss**: 主节点 `10.3.100.180:15400`，database `postgres`，使用 PostgreSQL 兼容 DSN。
@@ -274,11 +301,16 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   ```
 - **注意事项**:
   - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
-  - 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
-  - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
-  - 普通光学逻辑剖分（`s2`/`tile_matrix`）、源 CRS 保留型逻辑剖分（`plane_grid`，当前仅逻辑方式）和实体剖分（`s2`/`tile_matrix`/`isea4h`）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
-  - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
-  - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
+- 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
+- Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
+- Ray task payload 不得携带 MinIO access key 或 secret key。通过 Ray `runtime_env.env_vars`
+  从 worker 运行时环境传入；任务参数只保留业务数据和不敏感的对象定位信息。
+- 普通光学逻辑剖分（`s2`/`tile_matrix`）、源 CRS 保留型逻辑剖分（`plane_grid`，当前仅逻辑方式）和实体剖分（`s2`/`tile_matrix`/`isea4h`）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
+- Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
+- 源对象下载缓存必须按 URI 的稳定哈希隔离并校验预期 SHA-256；解析 `s3://` 路径时先
+  URL decode，避免中文对象键被二次编码。发生 `ENOSPC` 时只清理该 worker 的
+  `/tmp/cube_split_source_cache` 后重试一次，绝不能递归清理通用 `/tmp` 或其他任务目录。
+- `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
   - 碳卫星 `run` 任务可以使用 `input_dir` 或 `source_uri`/`selected_observations[].source_uri`；`run` 模式会执行入库，`demo` 兼容入口不得声称或触发入库。
   - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `s2`、`tile_matrix` 或 `isea4h`，实体默认 `grid_level=6`。普通逻辑剖分默认层级仍为 5；`plane_grid` 逻辑剖分默认保留源 CRS。`max_cells_per_asset=0` 表示不设上限，smoke/调试任务应显式设置小的正数。
   - `plane_grid` 当前按每个源资产的像素窗口生成 `<crs>/<level>/<col>/<row>` 形式的源平面编码；跨场景唯一性、WGS84 bbox 质检和地图预览仍属于后续重构范围，不得把该模式当作全局拓扑格网使用。
