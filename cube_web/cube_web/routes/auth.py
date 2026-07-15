@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -8,6 +9,25 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from cube_web.services import auth_service, runtime_config
 
 PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
+
+
+@dataclass(frozen=True)
+class Actor:
+    username: str
+    role: str
+
+
+def current_actor(request: Request) -> Actor:
+    actor = getattr(request.state, "actor", None)
+    if not isinstance(actor, Actor):
+        raise HTTPException(status_code=401, detail="Actor identity is required")
+    return actor
+
+
+def require_admin(actor: Actor) -> Actor:
+    if actor.role.strip().lower() not in {"admin", "administrator", "管理员"}:
+        raise HTTPException(status_code=403, detail="Administrator role is required")
+    return actor
 
 
 def create_auth_router() -> APIRouter:
@@ -91,10 +111,18 @@ def _safe_target_path(target: str) -> str:
 
 async def require_auth_for_api(request: Request, call_next):
     settings = auth_service.auth_settings()
-    if settings.required and request.url.path.startswith("/v1/") and request.url.path not in PUBLIC_V1_PATHS:
+    if request.url.path in PUBLIC_V1_PATHS:
+        request.state.actor = Actor(username="system:public-import", role="service")
+    elif settings.required and request.url.path.startswith("/v1/"):
         try:
             token = auth_service.bearer_token(request.headers.get("Authorization"))
-            auth_service.verify_access_token(token, settings)
+            payload = auth_service.verify_access_token(token, settings)
+            request.state.actor = Actor(
+                username=str(payload.get("username") or payload.get("name") or payload.get("sub") or "authenticated-user"),
+                role=str(payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"),
+            )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    else:
+        request.state.actor = Actor(username="local-development", role="admin")
     return await call_next(request)

@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
         help="Optional manifest .json/.jsonl. Defaults to Shandong 2020Q3 band2/band3 MinIO sources.",
     )
     parser.add_argument("--grid-types", default="geohash,mgrs", help="Comma-separated grid types: geohash,mgrs")
-    parser.add_argument("--geohash-level", type=int, default=5, help="Geohash level for the benchmark")
-    parser.add_argument("--mgrs-level", type=int, default=2, help="MGRS level for the benchmark")
+    parser.add_argument("--geohash-level", type=int, default=5, help="Geohash precision for the benchmark")
+    parser.add_argument("--mgrs-level", type=int, default=3, help="MGRS precision for the benchmark")
     parser.add_argument("--ray-parallelism-values", default="2", help="Comma-separated Ray actor counts")
     parser.add_argument("--chunk-sizes", default="1", help="Comma-separated chunk sizes")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each case this many times")

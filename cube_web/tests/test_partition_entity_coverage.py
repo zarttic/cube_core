@@ -7,9 +7,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from cube_web.routes.partition import create_partition_router
 from cube_web.services import partition_runners
+from cube_web.services.config_store import normalized_config
+from cube_web.services.partition_contracts import StrictPartitionRequest
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore
 from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
 from cube_web.services.partition_workflow import PartitionWorkflowService
@@ -95,14 +98,10 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
     suffix = "tif" if data_type == "product" else "dat"
     payload = {
         "input_dir": str(tmp_path / "missing"),
-        "selected_assets": [
-            _asset(f"s3://cube/cube/source/{data_type}/entity-{data_type}.{suffix}", f"entity-{data_type}", data_type)
-        ],
+        "selected_assets": [_asset(f"s3://cube/cube/source/{data_type}/entity-{data_type}.{suffix}", f"entity-{data_type}", data_type)],
         "grid_type": "isea4h",
         "partition_method": "entity",
         "grid_level": 2,
-        "grid_level_mode": "manual",
-        "target_pixels_per_hex_edge": 384,
         "max_cells_per_asset": 9,
         "ray_parallelism": 3,
         "partition_backend": "thread",
@@ -115,9 +114,66 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
         "minio_secret_key": "secret",
         "minio_bucket": "cube",
     }
-    if data_type == "product":
-        payload["time_granularity"] = "year"
     return payload
+
+
+def test_web_time_granularity_matches_frozen_sdk_contract():
+    payload = {
+        "batch_id": "time-contract",
+        "grid_type": "geohash",
+        "requested_grid_level": 5,
+        "partition_method": "logical",
+        "time_granularity": "second",
+        "datasets": [
+            {
+                "dataset_id": "dataset-time",
+                "dataset_code": "dataset-time",
+                "dataset_title": "Dataset time",
+                "data_type": "optical",
+                "assets": [
+                    {
+                        "source_asset_id": "asset-time",
+                        "cog_uri": "s3://cube/loader/time.tif",
+                        "checksum": "a" * 64,
+                        "bbox": [100.0, 20.0, 101.0, 21.0],
+                        "crs": "EPSG:4326",
+                        "time_start": "2026-05-30T00:00:00Z",
+                        "time_end": "2026-05-30T00:01:00Z",
+                    }
+                ],
+                "bands": [
+                    {
+                        "source_asset_id": "asset-time",
+                        "band_code": "B01",
+                        "band_name": "Band 1",
+                        "band_type": "spectral",
+                        "display_order": 0,
+                    }
+                ],
+            }
+        ],
+    }
+    assert StrictPartitionRequest.model_validate(payload).time_granularity == "second"
+    payload["time_granularity"] = "year"
+    with pytest.raises(ValidationError):
+        StrictPartitionRequest.model_validate(payload)
+
+    config = normalized_config({"partition": {"optical": {"time_granularity": "second"}}})
+    assert config["partition"]["optical"]["time_granularity"] == "second"
+    with pytest.raises(ValueError, match="time_granularity"):
+        normalized_config({"partition": {"optical": {"time_granularity": "year"}}})
+
+
+def test_carbon_runner_rejects_annual_sdk_time_granularity(tmp_path: Path):
+    with pytest.raises(ValueError, match="'year' is not a valid TimeGranularity"):
+        partition_runners._run_carbon_partition_demo(
+            payload={
+                "input_dir": str(tmp_path),
+                "grid_type": "isea4h",
+                "grid_level": 5,
+                "time_granularity": "year",
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -164,7 +220,6 @@ def test_product_and_radar_run_payloads_dispatch_isea4h_to_entity_partition(
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
     monkeypatch.setattr(logical_target, fail_logical_partition)
     monkeypatch.setattr(partition_runners, "optical_partition_defaults", lambda: {})
-    monkeypatch.setattr(f"cube_web.services.quality_checks.run_{data_type}_quality_check", None)
 
     result = getattr(partition_runners, runner_name)(_runtime_payload(data_type, tmp_path), mode="partition_run")
 
@@ -174,7 +229,7 @@ def test_product_and_radar_run_payloads_dispatch_isea4h_to_entity_partition(
     assert captured["data_type"] == data_type
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 2
-    assert captured["target_pixels_per_hex_edge"] == 384
+    assert "target_pixels_per_hex_edge" not in captured
     assert captured["max_cells_per_asset"] == 9
     assert captured["ray_parallelism"] == 3
     assert captured["partition_backend"] == "thread"

@@ -240,7 +240,10 @@ class ISEA4HEngine(BaseGridEngine):
                 for seqnum in range(1, cell_count(level) + 1):
                     if time.monotonic() > deadline:
                         raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-                    cells.append(_cell_shape(seqnum, level))
+                    # A full WGS84 polygon is expensive to construct for every
+                    # cell at high resolutions. Use cached envelopes to narrow
+                    # candidates, then build exact geometry only for matches.
+                    cells.append(box(*_cell_bbox(seqnum, level)))
                 cached = (STRtree(cells), cells)
                 _COVER_INDEX_CACHE[level] = cached
             return cached
@@ -255,7 +258,7 @@ class ISEA4HEngine(BaseGridEngine):
         def covers_area(container: object, contained: object) -> bool:
             return contained.difference(container).area <= 1e-12
 
-        index, cells = index_for(res)
+        index, _ = index_for(res)
         candidate_indexes = candidate_indexes_for(index)
         if cover_mode == CoverMode.MINIMAL.value and is_global_target:
             return [(seqnum, 0) for seqnum in range(1, cell_count(0) + 1)]
@@ -264,11 +267,11 @@ class ISEA4HEngine(BaseGridEngine):
         selected_by_target_variant: list[list[object]] = [[] for _ in target_variants]
         if cover_mode == CoverMode.MINIMAL.value:
             for current_res in range(res):
-                parent_index, parent_cells = index_for(current_res)
+                parent_index, _ = index_for(current_res)
                 for candidate_index in sorted(candidate_indexes_for(parent_index)):
                     if time.monotonic() > deadline:
                         raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-                    parent = parent_cells[candidate_index]
+                    parent = _cell_shape(candidate_index + 1, current_res)
                     parent_variants = longitude_variants(parent)
                     covered_variants = [
                         (target_index, parent_variant)
@@ -298,7 +301,7 @@ class ISEA4HEngine(BaseGridEngine):
         for candidate_index in sorted(candidate_indexes):
             if time.monotonic() > deadline:
                 raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-            cell = cells[candidate_index]
+            cell = _cell_shape(candidate_index + 1, res)
             cell_variants = longitude_variants(cell)
             intersects = any(
                 cell_variant.intersection(target_variant).area > 0.0

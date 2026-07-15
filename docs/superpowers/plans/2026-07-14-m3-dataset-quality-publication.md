@@ -8,6 +8,30 @@
 
 **Tech Stack:** Python 3.11, FastAPI 0.115+, Pydantic 2, psycopg 3, OpenGauss PostgreSQL-compatible SQL, MinIO 7.2+, Ray 2.55.x, pytest 8, Ruff, mypy
 
+## Current Contract Amendment (2026-07-15)
+
+There is no external data-service publication platform. For this repository,
+publication means that a quality-authorized dataset output is queryable and
+usable through the normalized OpenGauss-backed dataset APIs. This amendment
+overrides every earlier reference in this plan to a publication gateway,
+gateway configuration, gateway reconciliation, or gateway idempotency.
+
+- `publish_dataset` validates the same immutable current
+  `(dataset_id, output_version, quality_run_id)` tuple described below and
+  commits one `partition_publications` row with `status='active'` in that
+  transaction. `service_version_id` is the immutable `output_version` used by
+  query consumers; no external side effect is required.
+- `withdraw_publication` changes only the exact owned publication row to
+  `status='withdrawn'`, records actor/time/reason, and retains all history.
+  A withdrawn publication is not queryable as an active dataset output.
+- M3 code produces `active` and `withdrawn` directly. Legacy lifecycle values
+  remain only as schema-compatible historical values and must not introduce a
+  worker or external gateway.
+- The M3 real gate must prove actual MinIO/Ray/OpenGauss partitioning,
+  normalized quality/error export counts, and exact OpenGauss
+  `active -> withdrawn` state transitions. It must not require a gateway URL
+  or gateway probe.
+
 ## Global Constraints
 
 - This is a development-stage destructive refactor: do not migrate old quality reports and do not preserve old quality routes, response structures, PDF/TXT exports, run-directory identity, or compatibility adapters.

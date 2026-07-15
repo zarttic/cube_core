@@ -522,7 +522,7 @@ def main() -> int:
                 batch_id=f"{run_id}-optical-mgrs",
                 data_type="optical",
                 grid_type="mgrs",
-                grid_level=2,
+                grid_level=3,
                 sensor="optical_mosaic",
                 dataset=f"{run_id.replace('-', '_')}_optical",
                 time_granularity="day",

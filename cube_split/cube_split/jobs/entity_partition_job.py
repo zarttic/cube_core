@@ -14,11 +14,10 @@ from typing import Any
 import numpy as np
 import rasterio
 import rasterio.mask
-from grid_core.app.core.enums import GridType
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.request import validate_requested_grid_level
 from grid_core.sdk import CubeEncoderSDK
-from pyproj import Geod, Transformer
+from pyproj import Transformer
 from rasterio.warp import transform_geom
 
 from cube_split import runtime_config
@@ -47,15 +46,11 @@ from cube_split.jobs.ray_partition_core import (
     build_manifest,
     create_unique_run_dir,
     resolve_asset_source_path,
-    upload_source_assets_to_minio,
 )
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
-DEFAULT_TARGET_PIXELS_PER_HEX_EDGE = 768
 DEFAULT_ENTITY_TASKS_PER_GROUP = 64
 DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS = 16
-ISEA4H_AUTHALIC_RADIUS_M = 6_371_007.180918475
-ISEA4H_MAX_RESOLUTION = 15
 ENTITY_DATA_TYPES = {"optical", "product", "radar"}
 _ENTITY_MODULE_SEARCH_ROOTS = (
     os.environ.get("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", ""),
@@ -82,48 +77,6 @@ def _normalize_entity_clip_mode(value: Any) -> str:
     if mode not in {"bbox", "exact"}:
         raise ValueError("entity_clip_mode must be one of: bbox, exact")
     return mode
-
-
-def infer_isea4h_level_for_assets(
-    assets: list[AssetRecord],
-    target_pixels_per_hex_edge: int = DEFAULT_TARGET_PIXELS_PER_HEX_EDGE,
-) -> int:
-    if target_pixels_per_hex_edge <= 0:
-        raise ValueError("target_pixels_per_hex_edge must be greater than 0")
-    resolution = max(
-        float(asset.resolution) if asset.resolution is not None and float(asset.resolution) > 0 else _asset_pixel_size_m(asset.path)
-        for asset in assets
-    )
-    target_edge_m = resolution * target_pixels_per_hex_edge
-    selected = 0
-    for level in range(ISEA4H_MAX_RESOLUTION + 1):
-        # ISEA4H is an aperture-4 equal-area grid. Its nominal hexagon edge is
-        # derived from the authalic sphere area and the documented cell count.
-        cell_count = 10 * 4**level + 2
-        cell_area_m2 = 4 * math.pi * ISEA4H_AUTHALIC_RADIUS_M**2 / cell_count
-        nominal_edge_m = math.sqrt(2 * cell_area_m2 / (3 * math.sqrt(3)))
-        if nominal_edge_m >= target_edge_m:
-            selected = level
-    return selected
-
-
-def _asset_pixel_size_m(path: str | Path) -> float:
-    geod = Geod(ellps="WGS84")
-    with rasterio.open(resolve_asset_source_path(str(path))) as ds:
-        res_x = abs(float(ds.transform.a))
-        res_y = abs(float(ds.transform.e))
-        if ds.crs and ds.crs.is_projected:
-            return max(res_x, res_y)
-
-        min_lon, min_lat, max_lon, max_lat = _dataset_bounds_wgs84(ds)
-        center_lon = (min_lon + max_lon) / 2.0
-        center_lat = (min_lat + max_lat) / 2.0
-        _, _, x_m = geod.inv(center_lon, center_lat, center_lon + res_x, center_lat)
-        _, _, y_m = geod.inv(center_lon, center_lat, center_lon, center_lat + res_y)
-        pixel_size = max(abs(x_m), abs(y_m))
-        if not math.isfinite(pixel_size) or pixel_size <= 0:
-            raise ValueError(f"Cannot infer pixel size for asset: {path}")
-        return pixel_size
 
 
 def _time_bucket(acq_time: str, granularity: str) -> str:
@@ -1314,7 +1267,6 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
 
 
 def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
-    total_start = time.perf_counter()
     check_cancelled(args)
     for key in ("SPARK_HOME", "SPARK_CONF_DIR", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(key, None)
@@ -1327,35 +1279,17 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     grid_type = _normalize_grid_type(getattr(args, "grid_type", "isea4h"))
     entity_clip_mode = _normalize_entity_clip_mode(getattr(args, "entity_clip_mode", "exact"))
 
-    source_uploader = None
     backend_requested = str(getattr(args, "partition_backend", "thread") or "thread")
     ray_address = str(getattr(args, "ray_address", "") or "")
     backend = _resolve_backend(backend_requested, ray_address)
     if backend == "ray":
         _validate_entity_tile_upload_options(_entity_tile_upload_options(args))
 
-        def source_uploader(assets: list[AssetRecord]) -> list[AssetRecord]:
-            return upload_source_assets_to_minio(
-                assets,
-                prefix="cube/source",
-                options={
-                    "endpoint": str(getattr(args, "minio_endpoint", "")),
-                    "access_key": str(getattr(args, "minio_access_key", "")),
-                    "secret_key": str(getattr(args, "minio_secret_key", "")),
-                    "secure": bool(getattr(args, "minio_secure", False)),
-                    "bucket": str(getattr(args, "minio_bucket", "")),
-                    "dataset": str(getattr(args, "dataset", "demo")),
-                    "sensor": str(getattr(args, "sensor", "unknown")),
-                    "asset_version": str(getattr(args, "asset_version", "v1")),
-                },
-            )
-
     source_assets = build_manifest(
         input_dir,
         product_family=args.product_family,
         data_type=data_type,
         manifest_path=(Path(args.manifest_path) if args.manifest_path else None),
-        **({"source_uploader": source_uploader} if source_uploader is not None else {}),
     )
     if not source_assets:
         suffix_hint = ".dat/.TIF" if data_type == "radar" else ".TIF"
@@ -1364,16 +1298,8 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     assets = source_assets
 
-    requested_value = getattr(args, "grid_level", None)
-    requested_level = None if requested_value is None else int(requested_value)
-    target_pixels = int(getattr(args, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE) or DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
-    if requested_level is None:
-        inferred_level = infer_isea4h_level_for_assets(assets, target_pixels)
-        grid_level = inferred_level
-    else:
-        validate_requested_grid_level(GridType.ISEA4H, requested_level)
-        inferred_level = None
-        grid_level = requested_level
+    grid_level = int(getattr(args, "grid_level", 6) or 6)
+    validate_requested_grid_level(grid_type, grid_level)
     max_cells_per_asset = int(getattr(args, "max_cells_per_asset", 0) or 0)
     if max_cells_per_asset < 0:
         raise ValueError("max_cells_per_asset must be greater than or equal to 0")
@@ -1417,13 +1343,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
     )
     task_chunks = _chunk_tasks_for_ray(grouped_tasks, chunk_size)
 
-    ray_init_elapsed = 0.0
-    source_prepare_elapsed = 0.0
-    source_prepare_worker_elapsed = 0.0
-    worker_partition_elapsed = 0.0
-    worker_stats: dict[str, float] = {}
-    partition_stage_total_elapsed = 0.0
-    partition_start = time.perf_counter()
     requested_asset_storage_backend = str(getattr(args, "asset_storage_backend", "local") or "local")
     if requested_asset_storage_backend not in {"local", "minio"}:
         raise ValueError("asset_storage_backend must be one of: local, minio")
@@ -1438,6 +1357,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             "access_key": str(getattr(args, "minio_access_key", "")),
             "secret_key": str(getattr(args, "minio_secret_key", "")),
             "secure": bool(getattr(args, "minio_secure", False)),
+            "bucket": str(getattr(args, "minio_bucket", "")),
         }
         tile_upload_options = _entity_tile_upload_options(args)
         _validate_entity_tile_upload_options(tile_upload_options)
@@ -1456,15 +1376,8 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         )
         (
             rows,
-            ray_init_elapsed,
-            source_prepare_elapsed,
-            partition_elapsed,
-            source_prepare_worker_elapsed,
-            worker_partition_elapsed,
-            *stats_tail,
+            *_timing,
         ) = ray_result
-        worker_stats = dict(stats_tail[0]) if stats_tail else {}
-        partition_stage_total_elapsed = source_prepare_elapsed + partition_elapsed
     else:
         rows = _write_entity_tile_chunks_thread(
             task_chunks=task_chunks,
@@ -1475,12 +1388,8 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             data_type=data_type,
             clip_mode=entity_clip_mode,
         )
-        partition_elapsed = time.perf_counter() - partition_start
-        partition_stage_total_elapsed = partition_elapsed
     check_cancelled(args)
 
-    upload_elapsed = 0.0
-    metadata_elapsed = 0.0
     uploaded_tile_count = 0
     metadata_rows = 0
     metadata_backend = str(getattr(args, "metadata_backend", "none") or "none")
@@ -1495,15 +1404,12 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         uploaded_tile_count = _count_remote_entity_tiles(rows)
     elif asset_storage_backend == "minio":
         check_cancelled(args)
-        upload_start = time.perf_counter()
         asset_uri_map = _upload_entity_tiles_to_minio(rows, args)
-        upload_elapsed = time.perf_counter() - upload_start
         uploaded_tile_count = len(asset_uri_map)
         rows = _rows_with_asset_uris(rows, asset_uri_map)
 
     if metadata_backend == "postgres":
         check_cancelled(args)
-        metadata_start = time.perf_counter()
         metadata_args = argparse.Namespace(
             **{
                 **vars(args),
@@ -1512,7 +1418,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         metadata_stats = _write_entity_metadata_postgres(rows, metadata_args, run_dir)
-        metadata_elapsed = time.perf_counter() - metadata_start
         metadata_rows = int(metadata_stats["entity_tile_rows"])
     elif metadata_backend not in {"none", "local"}:
         raise ValueError("metadata_backend must be one of: none, local, postgres")
@@ -1532,7 +1437,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "status": "completed",
         "run_dir": str(run_dir.resolve()),
         "input_dir": str(input_dir.resolve()),
-        "cog_input_dir": "",
         "rows_path": str(entity_rows_path.resolve()),
         "index_rows_path": str(index_rows_path.resolve()),
         "source_asset_count": len(source_assets),
@@ -1545,9 +1449,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "grid_task_count": len(grid_tasks),
         "grid_type": grid_type,
         "grid_level": grid_level,
-        "inferred_grid_level": inferred_level,
-        "requested_grid_level": requested_level,
-        "target_pixels_per_hex_edge": target_pixels,
         "cover_mode": args.cover_mode,
         "execution_engine": backend,
         "partition_backend_requested": backend_requested,
@@ -1562,7 +1463,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "rows_by_band": rows_by_band,
         "ray_parallelism": parallelism if backend == "ray" else 0,
         "ray_address": ray_address if backend == "ray" else "",
-        "ray_init_elapsed_sec": round(ray_init_elapsed, 3),
         "chunk_size": chunk_size,
         "task_group_count": len(grouped_tasks),
         "ingest_enabled": ingest_enabled,
@@ -1575,29 +1475,6 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "asset_version": str(getattr(args, "asset_version", getattr(args, "tile_version", "v1"))),
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
         "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
-        "cog_elapsed_sec": 0.0,
-        "source_prepare_elapsed_sec": round(source_prepare_elapsed, 3),
-        "source_prepare_worker_elapsed_sec": round(source_prepare_worker_elapsed, 3),
-        "partition_elapsed_sec": round(partition_elapsed, 3),
-        "partition_stage_total_elapsed_sec": round(partition_stage_total_elapsed, 3),
-        "worker_partition_elapsed_sec": round(worker_partition_elapsed, 3),
-        "worker_entity_source_resolve_elapsed_sec": round(float(worker_stats.get("entity_source_resolve_elapsed_sec", 0.0)), 3),
-        "worker_entity_dataset_open_elapsed_sec": round(float(worker_stats.get("entity_dataset_open_elapsed_sec", 0.0)), 3),
-        "worker_entity_geometry_elapsed_sec": round(float(worker_stats.get("entity_geometry_elapsed_sec", 0.0)), 3),
-        "worker_entity_geometry_cache_hit_count": int(worker_stats.get("entity_geometry_cache_hit_count", 0.0)),
-        "worker_entity_dataset_bounds_elapsed_sec": round(float(worker_stats.get("entity_dataset_bounds_elapsed_sec", 0.0)), 3),
-        "worker_entity_tile_read_elapsed_sec": round(float(worker_stats.get("entity_tile_read_elapsed_sec", 0.0)), 3),
-        "worker_entity_tile_mask_elapsed_sec": round(float(worker_stats.get("entity_tile_mask_elapsed_sec", 0.0)), 3),
-        "worker_entity_tile_mask_cache_hit_count": int(worker_stats.get("entity_tile_mask_cache_hit_count", 0.0)),
-        "worker_entity_tile_empty_count": int(worker_stats.get("entity_tile_empty_count", 0.0)),
-        "worker_entity_tile_write_elapsed_sec": round(float(worker_stats.get("entity_tile_write_elapsed_sec", 0.0)), 3),
-        "worker_entity_writer_wall_elapsed_sec": round(float(worker_stats.get("entity_writer_wall_elapsed_sec", 0.0)), 3),
-        "worker_entity_tile_upload_elapsed_sec": round(float(worker_stats.get("entity_tile_upload_elapsed_sec", 0.0)), 3),
-        "worker_entity_tile_upload_count": int(worker_stats.get("entity_tile_upload_count", 0.0)),
-        "worker_entity_tile_count": int(worker_stats.get("entity_tile_count", 0.0)),
-        "upload_elapsed_sec": round(upload_elapsed, 3),
-        "metadata_elapsed_sec": round(metadata_elapsed, 3),
-        "total_elapsed_sec": round(time.perf_counter() - total_start, 3),
     }
     (run_dir / "job_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
@@ -1611,18 +1488,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--product-family", default="auto")
     parser.add_argument("--data-type", default="optical", choices=sorted(ENTITY_DATA_TYPES))
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--cog-input-dir", default="/tmp/cube_entity_cog")
-    parser.add_argument("--cog-overwrite", action="store_true")
-    parser.add_argument("--cog-workers", type=int, default=0)
-    parser.add_argument("--cog-compress", default="LZW")
-    parser.add_argument("--cog-predictor", type=int, default=2)
-    parser.add_argument("--cog-level", type=int, default=0)
-    parser.add_argument("--cog-num-threads", default="ALL_CPUS")
-    parser.add_argument("--target-crs", default="EPSG:4326")
     parser.add_argument("--grid-type", default="isea4h", choices=["isea4h"])
-    parser.add_argument("--grid-level", type=int, default=None, help="Grid level; omit to infer automatically")
+    parser.add_argument("--grid-level", type=int, default=6)
     parser.add_argument("--entity-clip-mode", default="exact", choices=["bbox", "exact"])
-    parser.add_argument("--target-pixels-per-hex-edge", type=int, default=DEFAULT_TARGET_PIXELS_PER_HEX_EDGE)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])
     parser.add_argument("--time-granularity", default="day", choices=["year", "month", "day", "hour", "minute"])
     parser.add_argument("--max-cells-per-asset", type=int, default=20000)

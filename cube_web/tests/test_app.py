@@ -4,11 +4,11 @@ import base64
 import hashlib
 import hmac
 import json
-import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -17,32 +17,67 @@ from fastapi.testclient import TestClient
 
 import cube_web.app as web_app
 import cube_web.routes.partition_adapters as partition_adapters
-import cube_web.routes.quality_adapters as quality_adapters
 from cube_web.app import ENCODER_SDK_CLASS, app
-from cube_web.schemas import PartitionDemoRequest
 from cube_web.services import auth_service as auth_service_module
 from cube_web.services import config_store as config_store_module
 from cube_web.services import health_service, partition_runners
 from cube_web.services import partition_job_store as partition_job_store_module
-from cube_web.services import quality_report_store as quality_report_store_module
 from cube_web.services.config_store import set_config_store
 from cube_web.services.db_pool import _PoolContext
+from cube_web.services.partition_contracts import StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, set_partition_job_store
 from cube_web.services.partition_loaded_schemas import ensure_standard_partition_schemas, standard_partition_schemas
 from cube_web.services.partition_remote_job import run_task as run_remote_partition_task
-from cube_web.services.partition_service import PartitionBackend, PartitionService
+from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
 from cube_web.services.partition_workflow import PartitionWorkflowService, _partition_slots_for_batch, classify_partition_error
-from cube_web.services.quality_report_store import set_quality_report_store
 
 client = TestClient(app)
 
 
-def test_partition_request_accepts_manual_isea4h_root_level():
-    request = PartitionDemoRequest(grid_type="isea4h", grid_level=0, grid_level_mode="manual")
-
-    assert request.grid_level == 0
-    assert request.grid_level_mode == "manual"
+def normalized_task_run_request() -> dict:
+    return {
+        "batch_id": "batch-01",
+        "grid_type": "geohash",
+        "requested_grid_level": 7,
+        "partition_method": "logical",
+        "cover_mode": "minimal",
+        "time_granularity": "day",
+        "max_cells_per_asset": 0,
+        "datasets": [
+            {
+                "dataset_id": "dataset-a",
+                "dataset_code": "DS-A",
+                "dataset_title": "Dataset A",
+                "data_type": "optical",
+                "product_type": "L2A",
+                "assets": [
+                    {
+                        "source_asset_id": "asset-a",
+                        "cog_uri": "s3://cube/loader/dataset-a/asset-a.tif",
+                        "checksum": "a" * 64,
+                        "bbox": [100.0, 20.0, 101.0, 21.0],
+                        "crs": "EPSG:4326",
+                        "time_start": "2026-07-01T00:00:00Z",
+                        "time_end": "2026-07-01T00:05:00Z",
+                        "attributes": {"scene_id": "scene-a"},
+                    }
+                ],
+                "bands": [
+                    {
+                        "source_asset_id": "asset-a",
+                        "band_code": "B04",
+                        "band_name": "Red",
+                        "band_type": "spectral",
+                        "unit": None,
+                        "display_order": 4,
+                        "attributes": {"wavelength_nm": 665},
+                    }
+                ],
+                "attributes": {},
+            }
+        ],
+    }
 
 
 def test_app_startup_reconcile_failure_does_not_block_requests(monkeypatch, caplog):
@@ -143,7 +178,7 @@ class FakeQualityReportStore:
         return self.get_report(data_type, rows[0]["report_id"])
 
     def list_reports(self, data_type, limit=20, *, offset=0, status=None, keyword=None):
-        return self._filtered_history(data_type, status=status, keyword=keyword)[offset:offset + limit]
+        return self._filtered_history(data_type, status=status, keyword=keyword)[offset : offset + limit]
 
     def count_reports(self, data_type, *, status=None, keyword=None):
         return len(self._filtered_history(data_type, status=status, keyword=keyword))
@@ -155,7 +190,8 @@ class FakeQualityReportStore:
         if keyword:
             needle = str(keyword).lower()
             rows = [
-                row for row in rows
+                row
+                for row in rows
                 if any(needle in str(row.get(key) or "").lower() for key in ("dataset", "run_name", "run_dir", "report_id"))
             ]
         return rows
@@ -294,7 +330,7 @@ def ard_carbon_observation(observation_id: str = "obs-a") -> dict:
 
 
 @pytest.fixture(autouse=True)
-def quality_store(monkeypatch):
+def runtime_environment(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_POSTGRES_DSN", "postgresql://test_user:test_password@10.3.100.180:15400/postgres")
     monkeypatch.setenv("CUBE_WEB_RAY_ADDRESS", "10.3.100.182:6379")
     monkeypatch.setenv("CUBE_WEB_MINIO_ENDPOINT", "10.3.100.179:9000")
@@ -302,23 +338,18 @@ def quality_store(monkeypatch):
     monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
     monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
     monkeypatch.delenv("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS", raising=False)
-    store = FakeQualityReportStore()
-    set_quality_report_store(store)
     config_store = FakeConfigStore()
     set_config_store(config_store)
     set_partition_job_store(InMemoryPartitionJobStore())
     web_app.partition_workflow_service._store = None
-    yield store
-    set_quality_report_store(None)
+    yield
     set_config_store(None)
     set_partition_job_store(None)
     web_app.partition_workflow_service._store = None
 
 
 def test_header_navigation_does_not_expose_quality_as_top_level_item():
-    nav_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "data" / "navigation.js").read_text(
-        encoding="utf-8"
-    )
+    nav_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "data" / "navigation.js").read_text(encoding="utf-8")
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
 
     assert "{ label: '自动化质检'," not in nav_source
@@ -353,9 +384,7 @@ def test_header_navigation_does_not_expose_quality_as_top_level_item():
 
 
 def test_auth_redirect_routes_through_backend_login_with_fixed_callback():
-    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(
-        encoding="utf-8"
-    )
+    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(encoding="utf-8")
 
     assert "function authRedirectUri()" in store_source
     assert "redirect_uri: authRedirectUri()," in store_source
@@ -367,9 +396,7 @@ def test_auth_redirect_routes_through_backend_login_with_fixed_callback():
 def test_frontend_auth_bootstrap_uses_runtime_config_flag():
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
     config_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "config.js").read_text(encoding="utf-8")
-    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(
-        encoding="utf-8"
-    )
+    store_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "stores" / "subUser.js").read_text(encoding="utf-8")
 
     assert "await loadAuthRuntimeConfig();" in app_source
     assert "if (authRequired()) {" in app_source
@@ -390,9 +417,7 @@ def test_frontend_auth_bootstrap_uses_runtime_config_flag():
 
 
 def test_partition_view_uses_explicit_module_endpoint_mapping():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
-        encoding="utf-8"
-    )
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(encoding="utf-8")
 
     assert "const partitionEndpointsByModule = {" in source
     assert "optical: 'optical'" in source
@@ -413,15 +438,15 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert 'value="plane_grid"' not in source
     assert 'v-model="radarGridType"' in source
     assert 'v-model="productGridType"' in source
-    carbon_block = source.split('<template v-else-if="activeModule === \'carbon\'">', 1)[1].split(
-        '<template v-else-if="activeModule === \'radar\'">',
+    carbon_block = source.split("<template v-else-if=\"activeModule === 'carbon'\">", 1)[1].split(
+        "<template v-else-if=\"activeModule === 'radar'\">",
         1,
     )[0]
-    radar_block = source.split('<template v-else-if="activeModule === \'radar\'">', 1)[1].split(
-        '<template v-else-if="activeModule === \'product\'">',
+    radar_block = source.split("<template v-else-if=\"activeModule === 'radar'\">", 1)[1].split(
+        "<template v-else-if=\"activeModule === 'product'\">",
         1,
     )[0]
-    product_block = source.split('<template v-else-if="activeModule === \'product\'">', 1)[1].split("<template v-else>", 1)[0]
+    product_block = source.split("<template v-else-if=\"activeModule === 'product'\">", 1)[1].split("<template v-else>", 1)[0]
     assert 'value="isea4h"' not in carbon_block
     assert 'value="isea4h"' in radar_block
     assert 'value="isea4h"' in product_block
@@ -473,10 +498,13 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "function partitionSlotGroups(batch)" in source
     assert "function partitionSlotStatusText(status)" in source
     assert "function partitionSlotStatusType(status)" in source
-    assert "class=\"partition-slot-grid\"" in source
-    assert "class=\"partition-slot-chip\"" in source
+    assert 'class="partition-slot-grid"' in source
+    assert 'class="partition-slot-chip"' in source
     assert "requestGet(`${partitionPrefix}/batches/${batchId}/attempts`)" in source
-    assert "partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };" in source
+    assert (
+        "partitionBatchDetail.value = resolved ? { ...resolved, id: batchId, batch_id: batchId } : { id: batchId, batch_id: batchId };"
+        in source
+    )
     assert "return (batch.assets || []).map((asset) => {" in source
     assert "取消会立即请求执行层中断当前任务" in source
     assert "重试失败资产" in source
@@ -501,13 +529,19 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "payload.batch_id = result.batch_id;" not in source
     assert "ingest_status: initialPartitionIngestStatus(dataType)" in source
     assert "setPartitionStage('persist', 'done', partitionPersistDoneText(lastPartitionResult.value, '执行结果已返回。'));" in source
-    assert "const ingestSummary = partitionBatchNeedsIngestAttention(batch) ? ` · ${partitionIngestStatusText(batch.ingest_status)}` : '';" in source
+    assert (
+        "const ingestSummary = partitionBatchNeedsIngestAttention(batch) ? ` · ${partitionIngestStatusText(batch.ingest_status)}` : '';"
+        in source
+    )
     assert "{ label: '批次状态', value: partitionStatusText(result.batch_status) }" in source
     assert "const activePartitionTasks = ref([]);" in source
     assert "const partitionTaskTotal = ref(0);" in source
     assert "const activePartitionTaskTotal = ref(0);" in source
     assert "const activePartitionTaskQueueStats = computed(() => partitionTaskStats(activePartitionTasks.value));" in source
-    assert "const activePartitionTaskDrawerTitle = computed(() => `${dataLabelsByModule[activeModule.value] || '当前模块'}剖分任务队列`);" in source
+    assert (
+        "const activePartitionTaskDrawerTitle = computed(() => `${dataLabelsByModule[activeModule.value] || '当前模块'}剖分任务队列`);"
+        in source
+    )
     assert "function partitionTaskQuery(params)" in source
     assert "async function loadActivePartitionTasks(page = activePartitionTaskPage.value)" in source
     assert "data_type: activeModule.value" in source
@@ -559,11 +593,13 @@ def test_partition_view_uses_explicit_module_endpoint_mapping():
     assert "开始剖分" not in source
     assert "提交剖分任务" in source
     assert "/tasks/${operation}" in source
-    assert '<el-option label="碳卫星" value="carbon" />' in source
-    assert '<el-option label="雷达遥感" value="radar" />' in source
-    assert "const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);" in source
-    assert "carbon_rows: '观测行文件读取'" in source
-    assert "function qualitySourceText()" in source
+    quality_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "QualityRecordsView.vue").read_text(encoding="utf-8")
+    assert "/records?" in quality_source
+    assert "/records/${id}/results" in quality_source
+    assert "/records/${id}/errors" in quality_source
+    assert "/records/${id}/errors/export?format=${format}" in quality_source
+    assert "report_id" not in quality_source
+    assert "PDF" not in quality_source and "TXT" not in quality_source
     assert "schema-grid" in source
     assert "defaultOpticalSchemaFields" in source
     assert "defaultCarbonSchemaFields" in source
@@ -610,9 +646,7 @@ def test_api_client_uses_request_timeout():
 
 
 def test_partition_view_deduplicates_map_preview_and_grid_cover_requests():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
-        encoding="utf-8"
-    )
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(encoding="utf-8")
 
     assert "function normalizedCornersKey(corners)" in source
     assert "function normalizedBboxKey(corners)" in source
@@ -629,9 +663,7 @@ def test_partition_view_deduplicates_map_preview_and_grid_cover_requests():
 
 
 def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "components" / "GlobeMap.vue").read_text(
-        encoding="utf-8"
-    )
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "components" / "GlobeMap.vue").read_text(encoding="utf-8")
 
     assert "const MIN_3D_ZOOM_DISTANCE = 5000;" in source
     assert "minimumZoomDistance = MIN_3D_ZOOM_DISTANCE" in source
@@ -687,9 +719,7 @@ def test_partition_schema_rejects_isea4h_logical_payload():
 
 
 def test_config_view_exposes_frozen_partition_grid_types_only():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "ConfigView.vue").read_text(
-        encoding="utf-8"
-    )
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "ConfigView.vue").read_text(encoding="utf-8")
 
     assert '<el-option label="GeoHash格网" value="geohash" />' in source
     assert '<el-option label="MGRS格网" value="mgrs" />' in source
@@ -700,9 +730,7 @@ def test_config_view_exposes_frozen_partition_grid_types_only():
 
 
 def test_encoding_view_exposes_frozen_grid_type_names():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "EncodingView.vue").read_text(
-        encoding="utf-8"
-    )
+    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "EncodingView.vue").read_text(encoding="utf-8")
 
     assert "geohash: 'GeoHash格网'" in source
     assert "mgrs: 'MGRS格网'" in source
@@ -712,32 +740,6 @@ def test_encoding_view_exposes_frozen_grid_type_names():
     assert 'value="s2"' not in source
     assert 'value="tile_matrix"' not in source
     assert "gh:6:wx4g0e:202603091530" in source
-
-
-def test_quality_report_store_requires_explicit_postgres_dsn(monkeypatch):
-    captured = {}
-
-    class DummyPostgresQualityReportStore:
-        def __init__(self, dsn):
-            captured["dsn"] = dsn
-
-    monkeypatch.delenv("CUBE_WEB_POSTGRES_DSN", raising=False)
-    monkeypatch.delenv("POSTGRES_DSN", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/tmp/cube-web-missing-env-file")
-    monkeypatch.setattr(
-        quality_report_store_module,
-        "PostgresQualityReportStore",
-        DummyPostgresQualityReportStore,
-    )
-    quality_report_store_module.set_quality_report_store(None)
-
-    try:
-        with pytest.raises(RuntimeError, match="PostgreSQL DSN is required"):
-            quality_report_store_module.get_quality_report_store()
-        assert "dsn" not in captured
-    finally:
-        quality_report_store_module.set_quality_report_store(None)
 
 
 def test_root_smoke_endpoint():
@@ -978,7 +980,12 @@ def test_grid_locate_sdk_endpoint():
 def test_code_parse_sdk_endpoint():
     locate_resp = client.post("/v1/grid/locate", json={"grid_type": "geohash", "requested_grid_level": 7, "point": [116.391, 39.907]})
     cell = locate_resp.json()["cell"]
-    address = {"grid_type": cell["grid_type"], "grid_level": cell["grid_level"], "space_code": cell["space_code"], "topology_code": cell["topology_code"]}
+    address = {
+        "grid_type": cell["grid_type"],
+        "grid_level": cell["grid_level"],
+        "space_code": cell["space_code"],
+        "topology_code": cell["topology_code"],
+    }
     gen_resp = client.post("/v1/code/st", json={"address": address, "timestamp": "2026-03-09T15:30:00Z", "time_granularity": "minute"})
     assert gen_resp.status_code == 200
     st_code = gen_resp.json()["st_code"]
@@ -1052,11 +1059,117 @@ def test_spatiotemporal_query_sdk_endpoint_with_point(monkeypatch):
 def test_partition_openapi_exposes_contract_models():
     schema = client.get("/openapi.json").json()
 
-    assert "PartitionDemoRequest" in schema["components"]["schemas"]
+    assert "StrictPartitionRequest" in schema["components"]["schemas"]
     assert "PartitionRetryRequest" in schema["components"]["schemas"]
     assert "PartitionTaskResponse" in schema["components"]["schemas"]
     assert "ConfigResponse" in schema["components"]["schemas"]
     assert "SpatiotemporalQueryRequest" in schema["components"]["schemas"]
+
+
+def _strict_task_route_client(scheduler: Mock) -> TestClient:
+    class FakeWorkflow:
+        def submit_strict(self, data_type, request, *, requested_by="operator"):
+            return scheduler(data_type, request, requested_by=requested_by)
+
+    route_app = FastAPI()
+    production = PartitionService({"optical": PartitionBackend(data_type="optical", run=lambda payload=None: {})})
+    route_app.include_router(web_app.partition_route.create_partition_router(service=production, workflow=FakeWorkflow()))
+    return TestClient(route_app)
+
+
+def _scheduled_task(*_args, **_kwargs) -> PartitionTask:
+    return PartitionTask(
+        task_id="partition-strict",
+        status="queued",
+        data_type="optical",
+        operation="run",
+        created_at=0.0,
+        updated_at=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.pop("batch_id"),
+        lambda p: p.pop("partition_method"),
+        lambda p: p["datasets"][0].pop("assets"),
+        lambda p: p["datasets"][0].pop("bands"),
+        lambda p: p.update(grid_level=7),
+        lambda p: p.update(grid_level_mode="manual"),
+        lambda p: p.update(dataset_ids=["dataset-a"]),
+        lambda p: p.update(partition_method="entity"),
+        lambda p: p["datasets"][0].update(observations=[]),
+    ],
+)
+def test_partition_tasks_run_rejects_non_contract_bodies(mutate) -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+    payload = normalized_task_run_request()
+    mutate(payload)
+
+    response = route_client.post("/partition/optical/tasks/run", json=payload)
+
+    assert response.status_code == 422
+    scheduler.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("grid_type", "level"),
+    [
+        ("geohash", 0),
+        ("geohash", 13),
+        ("mgrs", -1),
+        ("mgrs", 6),
+        ("isea4h", -1),
+        ("isea4h", 16),
+    ],
+)
+def test_partition_tasks_run_rejects_requested_grid_level_outside_m1_ranges(grid_type, level) -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+    payload = normalized_task_run_request()
+    payload.update(grid_type=grid_type, requested_grid_level=level)
+    payload["partition_method"] = "entity" if grid_type == "isea4h" else "logical"
+
+    response = route_client.post("/partition/optical/tasks/run", json=payload)
+
+    assert response.status_code == 422
+    scheduler.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("path", "mutate"),
+    [
+        ("/partition/unknown/tasks/run", lambda p: None),
+        ("/partition/radar/tasks/run", lambda p: None),
+        (
+            "/partition/optical/tasks/run",
+            lambda p: p["datasets"].append({**p["datasets"][0], "dataset_id": "dataset-b", "data_type": "radar"}),
+        ),
+    ],
+)
+def test_partition_tasks_run_rejects_path_body_type_mismatches(path, mutate) -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+    payload = normalized_task_run_request()
+    mutate(payload)
+
+    response = route_client.post(path, json=payload)
+
+    assert response.status_code == 422
+    scheduler.assert_not_called()
+
+
+def test_partition_tasks_run_schedules_exact_normalized_body() -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+    payload = normalized_task_run_request()
+
+    response = route_client.post("/partition/optical/tasks/run", json=payload)
+
+    assert response.status_code == 202
+    scheduler.assert_called_once_with("optical", StrictPartitionRequest.model_validate(payload), requested_by="operator")
 
 
 def test_partition_services_split_production_and_legacy_registries():
@@ -1206,16 +1319,14 @@ def test_config_update_rejects_legacy_tile_matrix_grid_type():
 
 def test_stored_config_rejects_legacy_grid_type():
     with pytest.raises(ValueError, match="grid_type"):
-        config_store_module.normalized_stored_config(
-            {"partition": {"optical": {"grid_type": "s2", "grid_level": 5}}}
-        )
+        config_store_module.normalized_stored_config({"partition": {"optical": {"grid_type": "s2", "grid_level": 5}}})
 
 
-def test_default_partition_config_uses_fastest_measured_cog_compression():
+def test_default_partition_config_has_no_source_conversion_controls():
     config = config_store_module.default_config()
 
-    assert config["partition"]["optical"]["cog_compress"] == "LZW"
-    assert config["partition"]["optical"]["cog_predictor"] == 2
+    assert "cog_compress" not in config["partition"]["optical"]
+    assert "cog_predictor" not in config["partition"]["optical"]
 
 
 def test_config_update_rejects_invalid_values():
@@ -1232,17 +1343,25 @@ def test_config_update_rejects_legacy_contains_cover_mode():
     assert "cover_mode" in resp.json()["detail"]
 
 
-def test_partition_demo_rejects_legacy_contains_cover_mode():
-    resp = client.post(
-        "/v1/partition/optical/demo",
-        json={
-            "grid_type": "geohash",
-            "grid_level": 5,
-            "cover_mode": "contains",
-        },
+def test_partition_demo_compatibility_adapter_keeps_legacy_payload_untyped():
+    legacy = PartitionService(
+        {
+            "optical": PartitionBackend(
+                data_type="optical",
+                demo=lambda payload=None: {"status": "completed", "payload": payload or {}},
+            )
+        }
+    )
+    route_app = FastAPI()
+    route_app.include_router(web_app.partition_route.create_partition_router(legacy_service=legacy))
+
+    response = TestClient(route_app).post(
+        "/partition/optical/demo",
+        json={"grid_type": "s2", "grid_level": 0, "cover_mode": "contains"},
     )
 
-    assert resp.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["payload"]["cover_mode"] == "contains"
 
 
 def test_carbon_partition_demo_endpoint(monkeypatch):
@@ -1358,8 +1477,10 @@ def test_carbon_partition_demo_runner_does_not_claim_ingest_enabled(monkeypatch,
 
     monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
     monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
-    monkeypatch.setattr("cube_split.ingest.carbon_ingest_job.run_carbon_ingest", lambda args: (_ for _ in ()).throw(AssertionError("demo should not ingest")))
-    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
+    monkeypatch.setattr(
+        "cube_split.ingest.carbon_ingest_job.run_carbon_ingest",
+        lambda args: (_ for _ in ()).throw(AssertionError("demo should not ingest")),
+    )
 
     result = partition_runners._run_carbon_partition_demo(payload={"input_dir": str(source_dir)})
 
@@ -1413,7 +1534,6 @@ def test_carbon_partition_run_ingests_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(partition_runners, "_partition_run_dir", fake_partition_run_dir)
     monkeypatch.setattr("cube_split.jobs.carbon_partition_job.run_carbon_partition", fake_run_carbon_partition)
     monkeypatch.setattr("cube_split.ingest.carbon_ingest_job.run_carbon_ingest", fake_run_carbon_ingest)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
 
     result = partition_runners._run_carbon_partition_demo(
         mode="partition_run",
@@ -1535,11 +1655,8 @@ def test_carbon_partition_demo_runner_passes_source_uris_from_payload(monkeypatc
         "cube_split.ingest.carbon_ingest_job.run_carbon_ingest",
         lambda args: {"input_rows": 1, "carbon_fact_rows": 1, "metadata_backend": "postgres"},
     )
-    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
 
-    result = partition_runners._run_carbon_partition_demo(
-        payload={"source_uri": "s3://cube/cube/source/carbon/oco2.nc4"}
-    )
+    result = partition_runners._run_carbon_partition_demo(payload={"source_uri": "s3://cube/cube/source/carbon/oco2.nc4"})
 
     assert result["data_type"] == "carbon"
     assert captured["input_dir"] == tmp_path / "run-root" / "input"
@@ -1576,7 +1693,6 @@ def test_carbon_partition_run_accepts_selected_observation_source_uris(monkeypat
         "cube_split.ingest.carbon_ingest_job.run_carbon_ingest",
         lambda args: {"input_rows": 1, "carbon_fact_rows": 1, "metadata_backend": "postgres"},
     )
-    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", None)
 
     result = partition_runners._run_carbon_partition_demo(
         mode="partition_run",
@@ -1687,7 +1803,6 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
                 "optical": {
                     "grid_type": "geohash",
                     "grid_level": 9,
-                    "target_crs": "EPSG:3857",
                     "partition_backend": "thread",
                     "ray_parallelism": 0,
                 }
@@ -1709,7 +1824,6 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
         }
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_from_payload(
         {"input_dir": str(tmp_path), "grid_level": 4, "cube_version": "cube-smoke"},
@@ -1719,7 +1833,7 @@ def test_optical_partition_runner_uses_config_defaults_without_overriding_payloa
     assert result["mode"] == "partition_test_no_ingest"
     assert captured["grid_type"] == "geohash"
     assert captured["grid_level"] == 4
-    assert captured["target_crs"] == "EPSG:3857"
+    assert "target_crs" not in captured
     assert captured["partition_backend"] == "thread"
     assert captured["ray_parallelism"] == 0
     assert captured["cube_version"] == "cube-smoke"
@@ -1749,7 +1863,6 @@ def test_optical_partition_runner_preserves_e2e_performance_params(monkeypatch, 
         }
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     partition_runners._run_optical_partition_from_payload(
         {
@@ -1791,7 +1904,6 @@ def test_optical_partition_runner_infers_grid_level_from_selected_asset_resoluti
         }
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     partition_runners._run_optical_partition_from_payload(
         {
@@ -1820,7 +1932,6 @@ def test_optical_partition_runner_allows_remote_selected_assets_without_existing
         }
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_from_payload(
         {
@@ -1859,12 +1970,13 @@ def test_product_partition_runner_allows_remote_selected_assets_without_existing
         }
 
     monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
 
     result = partition_runners._run_product_partition_demo(
         {
             "input_dir": str(tmp_path / "missing"),
-            "selected_assets": [ard_raster_asset("s3://cube/cube/source/product/remote-product.tif", "remote-product", data_type="product")],
+            "selected_assets": [
+                ard_raster_asset("s3://cube/cube/source/product/remote-product.tif", "remote-product", data_type="product")
+            ],
             "partition_backend": "ray",
             "grid_type": "geohash",
             "grid_level": 5,
@@ -1905,14 +2017,12 @@ def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypa
 
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fail_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_from_payload(
         {
             "input_dir": str(tmp_path),
             "grid_type": "isea4h",
             "grid_level": 9,
-            "target_pixels_per_hex_edge": 512,
         },
         mode="partition_test_no_ingest",
     )
@@ -1922,7 +2032,7 @@ def test_optical_partition_runner_dispatches_isea4h_to_entity_partition(monkeypa
     assert result["output_path"].endswith("entity_index_rows.jsonl")
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 9
-    assert captured["target_pixels_per_hex_edge"] == 512
+    assert "target_pixels_per_hex_edge" not in captured
     assert captured["ray_parallelism"] == 0
 
 
@@ -1984,7 +2094,6 @@ def test_optical_partition_runner_dispatches_geohash_to_logical_partition(monkey
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_from_payload(
         {
@@ -2032,14 +2141,12 @@ def test_optical_partition_runner_allows_manual_isea4h_level(monkeypatch, tmp_pa
         }
 
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     partition_runners._run_optical_partition_from_payload(
         {
             "input_dir": str(tmp_path),
             "grid_type": "isea4h",
             "grid_level": grid_level,
-            "grid_level_mode": "manual",
         },
         mode="partition_test_no_ingest",
     )
@@ -2068,7 +2175,6 @@ def test_optical_partition_test_runner_passes_none_for_auto_isea4h_level(monkeyp
         }
 
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     partition_runners._run_optical_partition_from_payload(
         {
@@ -2078,7 +2184,7 @@ def test_optical_partition_test_runner_passes_none_for_auto_isea4h_level(monkeyp
         mode="partition_test_no_ingest",
     )
 
-    assert captured["grid_level"] is None
+    assert captured["grid_level"] == 6
 
 
 def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(monkeypatch, tmp_path):
@@ -2103,7 +2209,6 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
         }
 
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_entity_partition_test(
         {
@@ -2118,35 +2223,12 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
     assert result["partition_type"] == "entity"
     assert result["output_path"].endswith("entity_index_rows.jsonl")
     assert result["ingest_enabled"] is False
-    assert captured["grid_level"] is None
+    assert captured["grid_level"] == 6
     assert captured["partition_backend"] == "ray"
     assert captured["ray_address"] == "10.3.100.182:6379"
     assert captured["metadata_backend"] == "postgres"
     assert captured["asset_storage_backend"] == "minio"
     assert captured["ingest_enabled"] is False
-
-
-@pytest.mark.parametrize(
-    ("payload", "message"),
-    [
-        ({"grid_type": "geohash", "grid_level": 5}, "entity partition requires grid_type=isea4h"),
-        ({"grid_type": "isea4h", "grid_level": 5, "partition_method": "logical"}, "requires partition_method=entity"),
-    ],
-)
-def test_entity_partition_runner_rejects_non_entity_grid_contract(monkeypatch, tmp_path, payload, message):
-    monkeypatch.setattr(
-        "cube_split.jobs.entity_partition_job.run_entity_partition",
-        lambda _args: (_ for _ in ()).throw(AssertionError("entity job must not run")),
-    )
-
-    with pytest.raises(ValueError, match=message):
-        partition_runners._run_entity_partition_test({"input_dir": str(tmp_path), **payload})
-
-
-def test_partition_demo_rejects_invalid_grid_level():
-    resp = client.post("/v1/partition/optical/demo", json={"grid_type": "geohash", "grid_level": 0})
-
-    assert resp.status_code == 422
 
 
 def test_partition_run_accepts_mgrs_grid_type_in_request_model():
@@ -2220,89 +2302,6 @@ def test_partition_run_response_is_result_payload_not_internal_task_fields():
     assert "task_id" not in body
     assert body["status"] == "completed"
     assert body["source"] == "production"
-
-
-def test_partition_run_can_run_as_async_task(monkeypatch):
-    def fake_run_product_partition_run(payload=None):
-        assert payload["grid_type"] == "geohash"
-        assert payload["grid_level"] == 5
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "product",
-            "rows": 20,
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    submit_resp = client.post(
-        "/v1/partition/product/tasks/run",
-        json={"grid_type": "geohash", "grid_level": 5, "partition_backend": "thread"},
-    )
-
-    assert submit_resp.status_code == 202
-    submitted = submit_resp.json()
-    assert submitted["status"] in {"queued", "running", "completed"}
-    assert submitted["data_type"] == "product"
-    assert submitted["operation"] == "run"
-
-    task_body = None
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{submitted['task_id']}")
-        assert task_resp.status_code == 200
-        task_body = task_resp.json()
-        if task_body["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    assert task_body is not None
-    assert task_body["status"] == "completed"
-    assert task_body["result"]["mode"] == "partition_run"
-    assert task_body["result"]["rows"] == 20
-
-
-def test_partition_run_submits_remote_ray_job_for_ray_backend(monkeypatch):
-    submitted = {}
-    store = web_app.partition_workflow_service.store
-    setattr(store, "supports_remote_jobs", True)
-
-    class FakeRayClient:
-        def submit_job(self, **kwargs):
-            submitted.update(kwargs)
-            return kwargs.get("submission_id") or kwargs.get("job_id")
-
-    monkeypatch.setattr("cube_web.services.partition_workflow._build_ray_job_client", lambda address: FakeRayClient())
-
-    try:
-        submit_resp = client.post(
-            "/v1/partition/product/tasks/run",
-            json={
-                "grid_type": "geohash",
-                "grid_level": 5,
-                "partition_backend": "ray",
-                "ray_address": "10.3.100.182:6379",
-                "ray_parallelism": 4,
-                "chunk_size": 2,
-                "postgres_batch_size": 250,
-                "selected_assets": [ard_raster_asset("s3://cube/cube/source/product/remote-run.tif", "remote-run-scene", data_type="product")],
-            },
-        )
-
-        assert submit_resp.status_code == 202
-        body = submit_resp.json()
-        assert body["status"] == "queued"
-        assert submitted["submission_id"] == body["task_id"]
-        assert "cube_web.services.partition_remote_job" in submitted["entrypoint"]
-        assert submitted["metadata"]["data_type"] == "product"
-        task = web_app.partition_workflow_service.store.get_attempt(body["task_id"])
-        assert task is not None
-        assert task["status"] == "queued"
-        assert task["payload"]["ray_parallelism"] == 4
-        assert task["payload"]["chunk_size"] == 2
-        assert task["payload"]["postgres_batch_size"] == 250
-    finally:
-        if hasattr(store, "supports_remote_jobs"):
-            delattr(store, "supports_remote_jobs")
 
 
 def test_partition_task_detail_reads_persisted_attempt_without_memory_task():
@@ -2579,260 +2578,6 @@ def test_partition_workflow_classifies_source_missing_before_transient():
     assert classify_partition_error(error) == "source_missing"
 
 
-def test_partition_direct_carbon_run_without_assets_marks_batch_succeeded(monkeypatch):
-    def fake_run_carbon_partition_run(_payload=None):
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "carbon",
-            "rows": 1,
-            "execution_engine": "ray",
-            "quality_status": "PASS",
-            "quality_report_id": "carbon-direct-pass",
-            "quality_report": {"report_id": "carbon-direct-pass", "status": "PASS"},
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_carbon_partition_run", fake_run_carbon_partition_run)
-
-    submit_resp = client.post(
-        "/v1/partition/carbon/tasks/run",
-        json={
-            "batch_id": "CARBON_DIRECT_RUN_SUCCESS",
-            "batch_name": "Carbon direct run success",
-            "grid_type": "isea4h",
-            "grid_level": 5,
-            "source_uri": "s3://cube/cube/source/carbon/direct-success.nc4",
-        },
-    )
-    assert submit_resp.status_code == 202
-    task_id = submit_resp.json()["task_id"]
-
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/CARBON_DIRECT_RUN_SUCCESS").json()
-    assert batch["status"] == "succeeded"
-    assert batch["quality_status"] == "PASS"
-    assert batch["last_error"] is None
-
-
-def test_partition_direct_run_with_batch_is_persisted_in_task_queue(monkeypatch):
-    payload = {
-        "batch_id": "DIRECT_RUN_QUEUE",
-        "batch_name": "Direct run queue",
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [
-            ard_raster_asset(
-                "s3://cube/cube/source/product/direct-a.tif",
-                "direct-a",
-                data_type="product",
-                asset_id="direct-asset-a",
-            )
-        ],
-    }
-
-    def fake_run_product_partition_run(received=None):
-        assert received["batch_id"] == "DIRECT_RUN_QUEUE"
-        assert received["selected_assets"][0]["asset_id"] == "direct-asset-a"
-        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 20}
-
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    submit_resp = client.post("/v1/partition/product/tasks/run", json=payload)
-    assert submit_resp.status_code == 202
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE").json()
-    attempts = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE/attempts").json()["attempts"]
-    assets = client.get("/v1/partition/batches/DIRECT_RUN_QUEUE/assets").json()["assets"]
-    queue = client.get("/v1/partition/tasks", params={"keyword": "DIRECT_RUN_QUEUE", "limit": 10}).json()["tasks"]
-
-    assert batch["status"] == "succeeded"
-    assert batch["last_task_id"] == task_id
-    assert batch["attempt_count"] == 1
-    assert attempts[0]["task_id"] == task_id
-    assert attempts[0]["status"] == "succeeded"
-    assert attempts[0]["operation"] == "auto_run"
-    assert attempts[0]["payload"]["batch_id"] == "DIRECT_RUN_QUEUE"
-    assert attempts[0]["runner_result"]["rows"] == 20
-    assert assets[0]["asset_id"] == "direct-asset-a"
-    assert assets[0]["attempt_count"] == 1
-    assert assets[0]["status"] == "succeeded"
-    assert queue[0]["task_id"] == task_id
-    assert queue[0]["batch_id"] == "DIRECT_RUN_QUEUE"
-    assert queue[0]["operation"] == "run"
-    assert queue[0]["asset_count"] == 1
-
-
-def test_partition_direct_run_without_batch_id_remains_compatible(monkeypatch):
-    def fake_run_product_partition_run(payload=None):
-        assert payload["grid_type"] == "geohash"
-        assert payload["grid_level"] == 5
-        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 12}
-
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    submit_resp = client.post("/v1/partition/product/tasks/run", json={"grid_type": "geohash", "grid_level": 5})
-
-    assert submit_resp.status_code == 202
-    submitted = submit_resp.json()
-    assert submitted["operation"] == "run"
-    task_id = submitted["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    task = client.get(f"/v1/partition/tasks/{task_id}").json()
-    queue = client.get("/v1/partition/tasks", params={"keyword": task_id}).json()["tasks"]
-    assert task["status"] == "completed"
-    assert queue[0]["task_id"] == task_id
-    assert queue[0]["batch_id"].startswith("runtime-partition-")
-    assert queue[0]["asset_count"] == 0
-
-
-def test_partition_direct_run_rejects_mismatched_batch_type():
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "DIRECT_TYPE_MISMATCH",
-            "batch_name": "Direct type mismatch",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/mismatch.tif", "mismatch")],
-        },
-    )
-
-    resp = client.post(
-        "/v1/partition/product/tasks/run",
-        json={"batch_id": "DIRECT_TYPE_MISMATCH", "grid_type": "geohash", "grid_level": 5},
-    )
-
-    assert resp.status_code == 422
-    assert "not a product batch" in resp.json()["detail"]
-
-
-def test_partition_direct_run_unsupported_type_does_not_persist_orphan_queue():
-    resp = client.post("/v1/partition/unknown/tasks/run", json={"batch_id": "DIRECT_UNSUPPORTED_TYPE"})
-
-    assert resp.status_code == 404
-    assert client.get("/v1/partition/batches/DIRECT_UNSUPPORTED_TYPE").status_code == 404
-    assert client.get("/v1/partition/tasks", params={"keyword": "DIRECT_UNSUPPORTED_TYPE"}).json()["tasks"] == []
-
-
-def test_partition_direct_run_refreshes_existing_runtime_batch_assets(monkeypatch):
-    seen_assets = []
-
-    def fake_run_product_partition_run(payload=None):
-        seen_assets.append([asset["asset_id"] for asset in payload["selected_assets"]])
-        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": len(payload["selected_assets"])}
-
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    first_payload = {
-        "batch_id": "DIRECT_REFRESH_RUNTIME",
-        "batch_name": "Direct refresh runtime",
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [
-            ard_raster_asset(
-                "s3://cube/cube/source/product/refresh-a.tif",
-                "refresh-a",
-                data_type="product",
-                asset_id="refresh-a",
-            )
-        ],
-    }
-    second_payload = {
-        **first_payload,
-        "selected_assets": [
-            ard_raster_asset(
-                "s3://cube/cube/source/product/refresh-b.tif",
-                "refresh-b",
-                data_type="product",
-                asset_id="refresh-b",
-            )
-        ],
-    }
-
-    for payload in (first_payload, second_payload):
-        task_id = client.post("/v1/partition/product/tasks/run", json=payload).json()["task_id"]
-        for _ in range(20):
-            if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
-                break
-            time.sleep(0.01)
-
-    assets = client.get("/v1/partition/batches/DIRECT_REFRESH_RUNTIME/assets").json()["assets"]
-
-    assert seen_assets == [["refresh-a"], ["refresh-b"]]
-    assert [asset["asset_id"] for asset in assets] == ["refresh-b"]
-    assert assets[0]["source_uri"] == "s3://cube/cube/source/product/refresh-b.tif"
-    assert assets[0]["attempt_count"] == 1
-    assert assets[0]["status"] == "succeeded"
-
-
-def test_partition_direct_run_resets_same_asset_id_when_runtime_payload_changes(monkeypatch):
-    def fake_run_product_partition_run(payload=None):
-        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": len(payload["selected_assets"])}
-
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    first_payload = {
-        "batch_id": "DIRECT_REFRESH_SAME_ASSET",
-        "batch_name": "Direct refresh same asset",
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [
-            ard_raster_asset(
-                "s3://cube/cube/source/product/same-a.tif",
-                "same-a",
-                data_type="product",
-                asset_id="same-asset",
-            )
-        ],
-    }
-    second_payload = {
-        **first_payload,
-        "selected_assets": [
-            ard_raster_asset(
-                "s3://cube/cube/source/product/same-b.tif",
-                "same-b",
-                data_type="product",
-                asset_id="same-asset",
-            )
-        ],
-    }
-
-    first_task_id = client.post("/v1/partition/product/tasks/run", json=first_payload).json()["task_id"]
-    for _ in range(20):
-        if client.get(f"/v1/partition/tasks/{first_task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    second_task_id = client.post("/v1/partition/product/tasks/run", json=second_payload).json()["task_id"]
-    for _ in range(20):
-        if client.get(f"/v1/partition/tasks/{second_task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    attempts = client.get("/v1/partition/batches/DIRECT_REFRESH_SAME_ASSET/attempts").json()["attempts"]
-    assets = client.get("/v1/partition/batches/DIRECT_REFRESH_SAME_ASSET/assets").json()["assets"]
-
-    assert attempts[0]["asset_ids"] == ["same-asset"]
-    assert assets[0]["source_uri"] == "s3://cube/cube/source/product/same-b.tif"
-    assert assets[0]["attempt_count"] == 1
-    assert assets[0]["status"] == "succeeded"
-
-
 def test_partition_task_queue_paginates_and_validates_page_size():
     resp = client.get("/v1/partition/tasks", params={"page": 1, "page_size": 2})
     assert resp.status_code == 200
@@ -2981,7 +2726,9 @@ def test_postgres_runtime_batch_preserves_existing_normalized_payload_for_non_ru
         batch_id="PG_NON_RUNTIME",
         batch_name="Non runtime batch",
         data_type="product",
-        payload={"selected_assets": [ard_raster_asset("s3://cube/cube/source/product/non-runtime.tif", "non-runtime", data_type="product")]},
+        payload={
+            "selected_assets": [ard_raster_asset("s3://cube/cube/source/product/non-runtime.tif", "non-runtime", data_type="product")]
+        },
     )
 
     sql_text = "\n".join(sql for sql, _params in executed)
@@ -3231,11 +2978,7 @@ def test_postgres_store_ensure_schema_backfills_supported_and_unsupported_ingest
 
     store.ensure_schema()
 
-    sql, params = next(
-        (sql, params)
-        for sql, params in executed
-        if "UPDATE partition_batches" in sql and "SET ingest_status = CASE" in sql
-    )
+    sql, params = next((sql, params) for sql, params in executed if "UPDATE partition_batches" in sql and "SET ingest_status = CASE" in sql)
 
     tracked = sorted(partition_job_store_module.INGEST_TRACKED_DATA_TYPES)
     assert "WHERE data_type = ANY(%s::text[])" in sql
@@ -4114,7 +3857,7 @@ def test_partition_schema_import_infers_non_carbon_grid_level_from_resolution():
     assert optical_resp.json()["normalized_payload"]["grid_level"] == 7
     assert radar_resp.json()["normalized_payload"]["grid_level"] == 7
     assert product_resp.json()["normalized_payload"]["grid_level"] == 7
-    assert optical_resp.json()["normalized_payload"]["grid_level_mode"] == "auto"
+    assert "grid_level_mode" not in optical_resp.json()["normalized_payload"]
     assert "grid_level" not in carbon_resp.json()["normalized_payload"]
 
 
@@ -4137,7 +3880,7 @@ def test_partition_schema_import_defaults_isea4h_grid_level_to_6():
 
     assert resp.status_code == 200
     assert resp.json()["normalized_payload"]["grid_level"] == 6
-    assert resp.json()["normalized_payload"]["grid_level_mode"] == "auto"
+    assert "grid_level_mode" not in resp.json()["normalized_payload"]
 
 
 def test_partition_batch_attempts_listed_for_batch_detail(monkeypatch):
@@ -4254,6 +3997,7 @@ def test_partition_batch_detail_includes_partition_slots_and_rejects_duplicate_c
             "rows": 3,
         },
     )
+
     class DummyTask:
         def __init__(self, task_id: str, payload: dict[str, Any]) -> None:
             self.task_id = task_id
@@ -4271,7 +4015,9 @@ def test_partition_batch_detail_includes_partition_slots_and_rejects_duplicate_c
             }
 
     class DummyTaskStore:
-        def submit(self, data_type, operation, runner, task_id=None, on_started=None, on_succeeded=None, on_failed=None, cancellation_check=None):
+        def submit(
+            self, data_type, operation, runner, task_id=None, on_started=None, on_succeeded=None, on_failed=None, cancellation_check=None
+        ):
             del runner, on_started, on_succeeded, on_failed, cancellation_check
             return DummyTask(task_id or "dummy-task", {"data_type": data_type, "operation": operation})
 
@@ -4299,7 +4045,9 @@ def test_partition_batch_detail_includes_partition_slots_and_rejects_duplicate_c
     slots = detail_resp.json()["partition_slots"]
     logical_slot = next(slot for slot in slots if slot["grid_type"] == "geohash" and slot["partition_method"] == "logical")
     assert {(slot["grid_type"], slot["partition_method"]) for slot in slots} == {
-        ("geohash", "logical"), ("mgrs", "logical"), ("isea4h", "entity")
+        ("geohash", "logical"),
+        ("mgrs", "logical"),
+        ("isea4h", "entity"),
     }
     assert logical_slot["status"] == "completed"
     assert logical_slot["disabled"] is True
@@ -4467,66 +4215,6 @@ def test_partition_batch_archive_rejects_active_batch(start_attempt, expected_st
     assert batch_resp.json()["status"] == expected_status
 
 
-def test_partition_task_queue_lists_direct_and_batch_attempts(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUEUE_LIST",
-            "batch_name": "Batch queue list",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/list-a.tif", "list-a", asset_id="list-a")],
-        },
-    )
-
-    def fake_run_optical_partition_run(payload=None):
-        return {"status": "completed", "mode": "partition_run", "data_type": "optical", "rows": 1}
-
-    def fake_run_product_partition_run(payload=None):
-        return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 2}
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-    monkeypatch.setattr(partition_adapters, "run_product_partition_run", fake_run_product_partition_run)
-
-    batch_resp = client.post("/v1/partition/batches/BATCH_QUEUE_LIST/run", json={})
-    direct_resp = client.post(
-        "/v1/partition/product/tasks/run",
-        json={
-            "batch_id": "DIRECT_QUEUE_LIST",
-            "batch_name": "Direct queue list",
-            "grid_type": "geohash",
-            "grid_level": 5,
-            "selected_assets": [
-                ard_raster_asset(
-                    "s3://cube/cube/source/product/list-product.tif",
-                    "list-product",
-                    data_type="product",
-                    asset_id="list-product",
-                )
-            ],
-        },
-    )
-    task_ids = {batch_resp.json()["task_id"], direct_resp.json()["task_id"]}
-    for task_id in task_ids:
-        for _ in range(20):
-            if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
-                break
-            time.sleep(0.01)
-
-    queue_resp = client.get("/v1/partition/tasks", params={"limit": 20})
-    assert queue_resp.status_code == 200
-    rows = {row["task_id"]: row for row in queue_resp.json()["tasks"] if row["task_id"] in task_ids}
-
-    assert set(rows) == task_ids
-    assert rows[batch_resp.json()["task_id"]]["batch_id"] == "BATCH_QUEUE_LIST"
-    assert rows[batch_resp.json()["task_id"]]["data_type"] == "optical"
-    assert rows[direct_resp.json()["task_id"]]["batch_id"] == "DIRECT_QUEUE_LIST"
-    assert rows[direct_resp.json()["task_id"]]["data_type"] == "product"
-    assert rows[direct_resp.json()["task_id"]]["asset_count"] == 1
-    assert all(row["status"] == "succeeded" for row in rows.values())
-    assert all(row["created_at"] for row in rows.values())
-    assert all(row["updated_at"] for row in rows.values())
-
-
 def test_partition_batch_run_reuses_active_task_instead_of_duplicate_attempt(monkeypatch):
     client.post(
         "/v1/partition/schemas/import",
@@ -4573,437 +4261,6 @@ def test_partition_batch_run_reuses_active_task_instead_of_duplicate_attempt(mon
     batch = client.get("/v1/partition/batches/BATCH_ACTIVE_IDEMPOTENT").json()
     assert batch["status"] == "succeeded"
     assert len(calls) == 1
-
-
-def test_partition_batch_run_persists_quality_pass(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_PASS",
-            "batch_name": "Quality pass",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/q-pass.tif", "q-pass")],
-        },
-    )
-
-    def fake_run_optical_partition_run(payload=None):
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 3,
-            "ingest_enabled": True,
-            "quality_status": "PASS",
-            "quality_report_id": "quality-pass-report",
-            "quality_report": {
-                "report_id": "quality-pass-report",
-                "status": "PASS",
-                "checks": [{"name": "index_rows", "status": "PASS"}],
-            },
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_PASS/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/BATCH_QUALITY_PASS").json()
-    attempts = client.get("/v1/partition/batches/BATCH_QUALITY_PASS/attempts").json()["attempts"]
-    assert batch["status"] == "succeeded"
-    assert batch["quality_status"] == "PASS"
-    assert batch["quality_report_id"] == "quality-pass-report"
-    assert batch["ingest_status"] == "ingested"
-    assert batch["ingested_at"]
-    assert attempts[0]["runner_result"]["quality_status"] == "PASS"
-    task = client.get(f"/v1/partition/tasks/{task_id}").json()
-    assert task["result"]["quality_report_id"] == "quality-pass-report"
-    assert task["result"]["ingest_status"] == "ingested"
-    assert task["result"]["ingested_at"]
-
-
-def test_partition_batch_quality_pass_without_ingest_stays_ready(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_PASS_NO_INGEST",
-            "batch_name": "Quality pass without ingest",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/q-pass-no-ingest.tif", "q-pass-no-ingest")],
-        },
-    )
-
-    def fake_run_optical_partition_run(payload=None):
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 3,
-            "ingest_enabled": False,
-            "quality_status": "PASS",
-            "quality_report_id": "quality-pass-no-ingest-report",
-            "quality_report": {
-                "report_id": "quality-pass-no-ingest-report",
-                "status": "PASS",
-                "checks": [{"name": "index_rows", "status": "PASS"}],
-            },
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_PASS_NO_INGEST/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/BATCH_QUALITY_PASS_NO_INGEST").json()
-    task = client.get(f"/v1/partition/tasks/{task_id}").json()
-    assert batch["status"] == "succeeded"
-    assert batch["quality_status"] == "PASS"
-    assert batch["ingest_status"] == "ready"
-    assert batch["ingested_at"] is None
-    assert task["result"]["ingest_status"] == "ready"
-    assert task["result"].get("ingested_at") is None
-
-
-def test_partition_batch_quality_fail_marks_manual_required(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_FAIL",
-            "batch_name": "Quality fail",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/q-fail.tif", "q-fail")],
-        },
-    )
-
-    def fake_run_optical_partition_run(payload=None):
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 3,
-            "quality_status": "FAIL",
-            "quality_report_id": "quality-fail-report",
-            "quality_report": {
-                "report_id": "quality-fail-report",
-                "status": "FAIL",
-                "checks": [{"name": "asset_readability", "status": "FAIL", "message": "missing COG asset"}],
-            },
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_FAIL/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/BATCH_QUALITY_FAIL").json()
-    assets = client.get("/v1/partition/batches/BATCH_QUALITY_FAIL/assets").json()["assets"]
-    assert batch["status"] == "manual_required"
-    assert batch["quality_status"] == "FAIL"
-    assert batch["quality_report_id"] == "quality-fail-report"
-    assert batch["ingest_status"] == "not_ready"
-    assert "asset_readability" in batch["last_error"]
-    assert assets[0]["status"] == "succeeded"
-
-
-def test_partition_batch_quality_warn_retries_warning_asset(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_WARN_RETRY",
-            "batch_name": "Quality warn retry",
-            "data_type": "optical",
-            "assets": [
-                ard_raster_asset("s3://cube/cube/source/optocal/a.tif", "warn-a", asset_id="asset-a"),
-                ard_raster_asset("s3://cube/cube/source/optocal/b.tif", "warn-b", asset_id="asset-b"),
-            ],
-        },
-    )
-    calls = []
-
-    def fake_run_optical_partition_run(payload=None):
-        calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
-        if len(calls) == 1:
-            return {
-                "status": "completed",
-                "mode": "partition_run",
-                "data_type": "optical",
-                "rows": 3,
-                "quality_status": "WARN",
-                "quality_report_id": "quality-warn-report",
-                "quality_report": {
-                    "report_id": "quality-warn-report",
-                    "status": "WARN",
-                    "checks": [
-                        {
-                            "name": "pixel_sample",
-                            "status": "WARN",
-                            "metrics": {"zero_assets": [{"path": "/tmp/demo/cog/b_cog.tif"}]},
-                        }
-                    ],
-                },
-            }
-        assert calls[-1] == ["asset-b"]
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 1,
-            "quality_status": "PASS",
-            "quality_report_id": "quality-warn-pass-report",
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(30):
-        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    warned_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY").json()
-    assert warned_batch["status"] == "succeeded"
-    assert warned_batch["quality_status"] == "WARN"
-    assert warned_batch["last_error"] is None
-
-    retry_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/retry", json={})
-    retry_task_id = retry_resp.json()["task_id"]
-    for _ in range(30):
-        if client.get(f"/v1/partition/tasks/{retry_task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    passed_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY").json()
-    attempts = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY/attempts").json()["attempts"]
-    assert calls == [["asset-a", "asset-b"], ["asset-b"]]
-    assert passed_batch["status"] == "succeeded"
-    assert passed_batch["quality_status"] == "PASS"
-    assert attempts[0]["operation"] == "manual_retry"
-    assert attempts[0]["asset_ids"] == ["asset-b"]
-    assert attempts[0]["retry_strategy"] == "quality_warning_assets"
-
-
-def test_partition_batch_quality_warn_keeps_succeeded_status(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_WARN_SUCCESS",
-            "batch_name": "Quality warn success",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/warn-success.tif", "warn-success")],
-        },
-    )
-
-    def fake_run_optical_partition_run(payload=None):
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 3,
-            "quality_status": "WARN",
-            "quality_report_id": "quality-warn-success-report",
-            "quality_report": {
-                "report_id": "quality-warn-success-report",
-                "status": "WARN",
-                "checks": [{"name": "pixel_sample", "status": "WARN", "metrics": {"zero_assets": [{"path": "/tmp/demo/cog/a_cog.tif"}]}}],
-            },
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_SUCCESS/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        task_resp = client.get(f"/v1/partition/tasks/{task_id}")
-        if task_resp.json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_SUCCESS").json()
-    task = client.get(f"/v1/partition/tasks/{task_id}").json()
-    assert batch["status"] == "succeeded"
-    assert batch["quality_status"] == "WARN"
-    assert batch["quality_report_id"] == "quality-warn-success-report"
-    assert task["result"]["quality_status"] == "WARN"
-    assert task["result"]["status"] == "completed"
-
-
-def test_partition_batch_quality_warn_retry_matches_hashed_cog_warning_assets(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_WARN_RETRY_HASHED",
-            "batch_name": "Quality warn retry hashed",
-            "data_type": "optical",
-            "assets": [
-                ard_raster_asset("s3://cube/cube/source/optocal/hashed-a.tif", "warn-hashed-a", asset_id="asset-a"),
-                ard_raster_asset("s3://cube/cube/source/optocal/hashed-b.tif", "warn-hashed-b", asset_id="asset-b"),
-            ],
-        },
-    )
-    calls = []
-
-    def fake_run_optical_partition_run(payload=None):
-        calls.append([asset["asset_id"] for asset in payload["selected_assets"]])
-        if len(calls) == 1:
-            return {
-                "status": "completed",
-                "mode": "partition_run",
-                "data_type": "optical",
-                "rows": 3,
-                "quality_status": "WARN",
-                "quality_report_id": "quality-warn-hashed-report",
-                "quality_report": {
-                    "report_id": "quality-warn-hashed-report",
-                    "status": "WARN",
-                    "checks": [
-                        {
-                            "name": "pixel_sample",
-                            "status": "WARN",
-                            "metrics": {
-                                "zero_assets": [
-                                    {"path": "s3://cube/demo/hashed-b_a1b2c3d4e5_cog.tif"},
-                                ]
-                            },
-                        }
-                    ],
-                },
-            }
-        assert calls[-1] == ["asset-b"]
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 1,
-            "quality_status": "PASS",
-            "quality_report_id": "quality-warn-hashed-pass-report",
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(30):
-        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    warned_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED").json()
-    assert warned_batch["status"] == "succeeded"
-    assert warned_batch["quality_status"] == "WARN"
-
-    retry_resp = client.post("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED/retry", json={})
-    retry_task_id = retry_resp.json()["task_id"]
-    for _ in range(30):
-        if client.get(f"/v1/partition/tasks/{retry_task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    passed_batch = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED").json()
-    attempts = client.get("/v1/partition/batches/BATCH_QUALITY_WARN_RETRY_HASHED/attempts").json()["attempts"]
-    assert calls == [["asset-a", "asset-b"], ["asset-b"]]
-    assert passed_batch["status"] == "succeeded"
-    assert passed_batch["quality_status"] == "PASS"
-    assert attempts[0]["operation"] == "manual_retry"
-    assert attempts[0]["asset_ids"] == ["asset-b"]
-    assert attempts[0]["retry_strategy"] == "quality_warning_assets"
-
-
-def test_partition_batch_retry_clears_stale_quality_result_then_persists_pass(monkeypatch):
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": "BATCH_QUALITY_RETRY_PASS",
-            "batch_name": "Quality retry pass",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/q-retry.tif", "q-retry")],
-        },
-    )
-    release_retry = threading.Event()
-    calls = []
-
-    def fake_run_optical_partition_run(payload=None):
-        calls.append(payload)
-        if len(calls) == 1:
-            return {
-                "status": "completed",
-                "mode": "partition_run",
-                "data_type": "optical",
-                "rows": 3,
-                "quality_status": "FAIL",
-                "quality_report_id": "quality-retry-fail-report",
-                "quality_failure_reason": "cloud mask failed",
-            }
-        release_retry.wait(timeout=3)
-        return {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "rows": 3,
-            "quality_status": "PASS",
-            "quality_report_id": "quality-retry-pass-report",
-            "quality_report": {"report_id": "quality-retry-pass-report", "status": "PASS"},
-        }
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_run", fake_run_optical_partition_run)
-
-    submit_resp = client.post("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS/run", json={})
-    task_id = submit_resp.json()["task_id"]
-    for _ in range(20):
-        if client.get(f"/v1/partition/tasks/{task_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.01)
-
-    failed_batch = client.get("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS").json()
-    assert failed_batch["status"] == "manual_required"
-    assert failed_batch["quality_status"] == "FAIL"
-    assert failed_batch["quality_report_id"] == "quality-retry-fail-report"
-
-    retry_resp = client.post("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS/retry", json={})
-    retry_task_id = retry_resp.json()["task_id"]
-    for _ in range(50):
-        retry_batch = client.get("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS").json()
-        if len(calls) == 2 and retry_batch["status"] == "running":
-            break
-        time.sleep(0.02)
-
-    retry_batch = client.get("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS").json()
-    assert retry_batch["status"] == "running"
-    assert retry_batch["quality_status"] is None
-    assert retry_batch["quality_report_id"] is None
-    assert retry_batch["quality_failure_reason"] is None
-
-    release_retry.set()
-    for _ in range(40):
-        task = client.get(f"/v1/partition/tasks/{retry_task_id}").json()
-        if task["status"] == "completed":
-            break
-        time.sleep(0.02)
-
-    passed_batch = client.get("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS").json()
-    attempts = client.get("/v1/partition/batches/BATCH_QUALITY_RETRY_PASS/attempts").json()["attempts"]
-    assert passed_batch["status"] == "succeeded"
-    assert passed_batch["last_error"] is None
-    assert passed_batch["quality_status"] == "PASS"
-    assert passed_batch["quality_report_id"] == "quality-retry-pass-report"
-    assert [attempt["operation"] for attempt in attempts] == ["manual_retry", "auto_run"]
-    assert attempts[0]["source_task_id"] == task_id
-    assert attempts[0]["retry_strategy"] == "full_batch"
-    assert attempts[0]["failure_reason"] == "cloud mask failed"
 
 
 def test_partition_batch_auto_retries_once_then_requires_manual(monkeypatch):
@@ -5864,7 +5121,9 @@ def test_partition_remote_job_runs_persisted_attempt_and_stores_result(monkeypat
             "rows": 7,
         }
 
-    monkeypatch.setattr("cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None)
+    monkeypatch.setattr(
+        "cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None
+    )
 
     try:
         exit_code = run_remote_partition_task("partition-remote-task")
@@ -5927,7 +5186,9 @@ def test_partition_remote_job_skips_cancelled_attempt_before_runner_start(monkey
         runner_called["value"] = True
         return {"status": "completed", "mode": "partition_run", "data_type": "product", "rows": 1}
 
-    monkeypatch.setattr("cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None)
+    monkeypatch.setattr(
+        "cube_web.services.partition_remote_job._runner_for_data_type", lambda data_type: fake_runner if data_type == "product" else None
+    )
 
     try:
         exit_code = run_remote_partition_task("partition-remote-cancelled")
@@ -5999,7 +5260,6 @@ def test_optical_partition_test_runner_returns_generated_assets(monkeypatch, tmp
         }
 
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", None)
 
     result = partition_runners._run_optical_partition_test(
         {"input_dir": str(source), "partition_backend": "thread", "grid_type": "geohash", "grid_level": 5}
@@ -6020,14 +5280,14 @@ def test_optical_partition_test_runner_returns_generated_assets(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(
-    ("data_type", "runner_name", "job_path", "quality_path"),
+    ("data_type", "runner_name", "job_path"),
     [
-        ("optical", "_run_optical_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition", "cube_web.services.quality_checks.run_optical_quality_check"),
-        ("product", "_run_product_partition_test", "cube_split.jobs.product_partition_job.run_product_partition", "cube_web.services.quality_checks.run_product_quality_check"),
-        ("radar", "_run_radar_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition", "cube_web.services.quality_checks.run_radar_quality_check"),
+        ("optical", "_run_optical_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition"),
+        ("product", "_run_product_partition_test", "cube_split.jobs.product_partition_job.run_product_partition"),
+        ("radar", "_run_radar_partition_test", "cube_split.jobs.ray_logical_partition_job.run_logical_partition"),
     ],
 )
-def test_partition_test_runners_generate_real_assets_when_demo_data_is_missing(monkeypatch, tmp_path, data_type, runner_name, job_path, quality_path):
+def test_partition_test_runners_generate_real_assets_when_demo_data_is_missing(monkeypatch, tmp_path, data_type, runner_name, job_path):
     missing = tmp_path / "missing-input"
     captured = {}
 
@@ -6052,7 +5312,6 @@ def test_partition_test_runners_generate_real_assets_when_demo_data_is_missing(m
         }
 
     monkeypatch.setattr(job_path, fake_partition)
-    monkeypatch.setattr(quality_path, None)
 
     result = getattr(partition_runners, runner_name)(
         {"input_dir": str(missing), "partition_backend": "thread", "grid_type": "geohash", "grid_level": 5}
@@ -6071,315 +5330,6 @@ def test_partition_test_runners_generate_real_assets_when_demo_data_is_missing(m
         assert dataset.crs.to_string() == "EPSG:4326"
         assert dataset.width == 32
         assert dataset.height == 32
-
-
-def test_optical_ingest_preview_does_not_write(monkeypatch, quality_store):
-    run_dir = Path("/tmp/cube_web_partition_demo/test_app_ingest_preview")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    asset_path = run_dir / "asset_cog.tif"
-    row = {
-        "scene_id": "scene-1",
-        "band": "sr_band2",
-        "asset_path": str(asset_path),
-        "acq_time": "2020-07-01T00:00:00Z",
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "space_code": "35f4",
-        "st_code": "s2:5:35f4:20200701",
-        "time_bucket": "20200701",
-        "cell_min_lon": 116.0,
-        "cell_min_lat": 39.9,
-        "cell_max_lon": 116.1,
-        "cell_max_lat": 40.0,
-        "window_col_off": 1,
-        "window_row_off": 2,
-        "window_width": 4,
-        "window_height": 5,
-    }
-    (run_dir / "index_rows.jsonl").write_text(__import__("json").dumps(row) + "\n", encoding="utf-8")
-    quality_store.upsert_report(
-        "optical",
-        str(run_dir),
-        {
-            "report_id": "optical-ingest-preview",
-            "status": "PASS",
-            "target_crs": "EPSG:4326",
-            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
-            "checks": [],
-            "assets": [],
-        },
-    )
-
-    def fail_if_called(args):
-        raise AssertionError("preview must not call run_ingest")
-
-    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fail_if_called)
-    monkeypatch.setattr(
-        "cube_web.services.ingest_service._existing_conflicts",
-        lambda _raw_records, _cube_records: {"raw_asset_rows": 0, "cube_fact_rows": 0},
-    )
-
-    resp = client.post("/v1/ingest/optical/preview", json={"report_id": "optical-ingest-preview"})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "pre_ingest_preview"
-    assert body["would_write"] is False
-    assert body["input_rows"] == 1
-    assert body["raw_asset_rows"] == 1
-    assert body["cube_fact_rows"] == 1
-    assert body["cube_version"].startswith("demo-")
-
-
-def test_optical_ingest_confirm_uses_demo_versions_and_minio_storage(monkeypatch, quality_store):
-    run_dir = "/tmp/cube_web_partition_demo/test_app_ingest_confirm"
-    Path(run_dir).mkdir(parents=True, exist_ok=True)
-    (Path(run_dir) / "index_rows.jsonl").write_text("", encoding="utf-8")
-    quality_store.upsert_report(
-        "optical",
-        run_dir,
-        {
-            "report_id": "optical-ingest-confirm",
-            "status": "PASS",
-            "target_crs": "EPSG:4326",
-            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
-            "checks": [],
-            "assets": [],
-        },
-    )
-    captured = {}
-
-    def fake_run_ingest(args):
-        captured.update(vars(args))
-        return {
-            "run_dir": args.run_dir,
-            "input_rows": 1,
-            "materialized_cog_assets": 1,
-            "raw_asset_rows": 1,
-            "cube_fact_rows": 1,
-            "metadata_backend": args.metadata_backend,
-            "asset_storage_backend": args.asset_storage_backend,
-        }
-
-    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fake_run_ingest)
-
-    resp = client.post(
-        "/v1/ingest/optical/confirm",
-        json={"report_id": "optical-ingest-confirm", "minio_upload_workers": 9, "postgres_batch_size": 512},
-    )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "confirmed_ingest"
-    assert body["status"] == "succeeded"
-    assert body["cube_version"].startswith("demo-")
-    assert captured["metadata_backend"] == "postgres"
-    assert captured["asset_storage_backend"] == "minio"
-    assert captured["minio_endpoint"] == "10.3.100.179:9000"
-    assert captured["minio_bucket"] == "cube"
-    assert captured["minio_upload_workers"] == 9
-    assert captured["postgres_batch_size"] == 512
-    assert captured["cog_materialize_mode"] == "symlink"
-    assert captured["asset_version"].startswith("demo-")
-
-
-def test_optical_ingest_confirm_persists_batch_ingest_status(monkeypatch, quality_store):
-    batch_id = "BATCH_OPTICAL_INGEST_CONFIRM"
-    report_id = "optical-ingest-confirm-batch"
-    run_dir = "/tmp/cube_web_partition_demo/test_app_ingest_confirm_batch"
-    Path(run_dir).mkdir(parents=True, exist_ok=True)
-    (Path(run_dir) / "index_rows.jsonl").write_text("", encoding="utf-8")
-    quality_store.upsert_report(
-        "optical",
-        run_dir,
-        {
-            "report_id": report_id,
-            "status": "PASS",
-            "target_crs": "EPSG:4326",
-            "summary": {"index_rows": 1, "failed_checks": 0, "warning_checks": 0},
-            "checks": [],
-            "assets": [],
-        },
-    )
-    client.post(
-        "/v1/partition/schemas/import",
-        json={
-            "batch_id": batch_id,
-            "batch_name": "Batch ingest confirm",
-            "data_type": "optical",
-            "assets": [ard_raster_asset("s3://cube/cube/source/optocal/ingest-confirm.tif", "ingest-confirm")],
-        },
-    )
-    store = web_app.partition_workflow_service.store
-    store.create_attempt(task_id="partition-ingest-confirm", batch_id=batch_id, operation="auto_run", payload={})
-    store.succeed_attempt(
-        "partition-ingest-confirm",
-        {
-            "status": "completed",
-            "mode": "partition_run",
-            "data_type": "optical",
-            "run_dir": run_dir,
-            "quality_status": "PASS",
-            "quality_report_id": report_id,
-            "quality_report": {"report_id": report_id, "status": "PASS"},
-        },
-    )
-
-    def fake_run_ingest(args):
-        return {
-            "run_dir": args.run_dir,
-            "input_rows": 1,
-            "materialized_cog_assets": 1,
-            "raw_asset_rows": 1,
-            "cube_fact_rows": 1,
-        }
-
-    monkeypatch.setattr("cube_web.services.ingest_service.ray_ingest_job.run_ingest", fake_run_ingest)
-
-    resp = client.post("/v1/ingest/optical/confirm", json={"report_id": report_id})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    batch = client.get(f"/v1/partition/batches/{batch_id}").json()
-    assert body["batch_id"] == batch_id
-    assert body["ingest_status"] == "ingested"
-    assert body["ingested_at"]
-    assert batch["ingest_status"] == "ingested"
-    assert batch["ingest_job_id"] == body["job_id"]
-    assert batch["ingested_at"]
-
-
-def test_optical_partition_retry_endpoint_reruns_warning_assets(monkeypatch):
-    original_payload = {
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [
-            {
-                "source_uri": "scene_a/asset_a.tif",
-                "scene_id": "scene_a",
-                "acq_time": "2020-07-01T00:00:00Z",
-                "bands": ["sr_band2"],
-                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
-            },
-            {
-                "source_uri": "scene_b/asset_b.tif",
-                "scene_id": "scene_b",
-                "acq_time": "2020-07-01T00:00:00Z",
-                "bands": ["sr_band3"],
-                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
-            },
-        ],
-    }
-    retry_request = {
-        "request": {"endpoint": "optical", "payload": original_payload},
-        "last_result": {
-            "quality_report": {
-                "status": "WARN",
-                "checks": [
-                    {
-                        "name": "pixel_sample",
-                        "status": "WARN",
-                        "metrics": {"zero_assets": [{"path": "/tmp/demo/cog/asset_b_cog.tif"}]},
-                    }
-                ],
-            }
-        },
-    }
-
-    def fake_run_optical_partition_from_payload(payload=None, mode="partition_demo"):
-        assert mode == "partition_retry"
-        assert [asset["source_uri"] for asset in payload["selected_assets"]] == ["scene_b/asset_b.tif"]
-        return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 3}
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
-
-    resp = client.post("/v1/partition/optical/retry", json=retry_request)
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "partition_retry"
-    assert body["retry"]["strategy"] == "warning_assets"
-    assert body["retry"]["warning_check_names"] == ["pixel_sample"]
-    assert body["retry"]["retried_asset_count"] == 1
-
-
-def test_optical_partition_retry_endpoint_matches_hashed_cog_warning_assets(monkeypatch):
-    original_payload = {
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [
-            {
-                "source_uri": "scene_a/asset_a.tif",
-                "scene_id": "scene_a",
-                "acq_time": "2020-07-01T00:00:00Z",
-                "bands": ["sr_band2"],
-                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
-            },
-            {
-                "source_uri": "scene_b/asset_b.tif",
-                "scene_id": "scene_b",
-                "acq_time": "2020-07-01T00:00:00Z",
-                "bands": ["sr_band3"],
-                "corners": [[117.0, 36.0], [117.2, 36.0], [117.2, 35.8], [117.0, 35.8]],
-            },
-        ],
-    }
-    retry_request = {
-        "request": {"endpoint": "optical", "payload": original_payload},
-        "last_result": {
-            "quality_report": {
-                "status": "WARN",
-                "checks": [
-                    {
-                        "name": "pixel_sample",
-                        "status": "WARN",
-                        "metrics": {"zero_assets": [{"path": "s3://cube/demo/asset_b_a1b2c3d4e5_cog.tif"}]},
-                    }
-                ],
-            }
-        },
-    }
-
-    def fake_run_optical_partition_from_payload(payload=None, mode="partition_demo"):
-        assert mode == "partition_retry"
-        assert [asset["source_uri"] for asset in payload["selected_assets"]] == ["scene_b/asset_b.tif"]
-        return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 3}
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
-
-    resp = client.post("/v1/partition/optical/retry", json=retry_request)
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["retry"]["strategy"] == "warning_assets"
-    assert body["retry"]["retried_asset_count"] == 1
-
-
-def test_optical_partition_retry_endpoint_falls_back_to_full_request(monkeypatch):
-    original_payload = {
-        "grid_type": "geohash",
-        "grid_level": 5,
-        "selected_assets": [{"source_uri": "scene_a/asset_a.tif"}, {"source_uri": "scene_b/asset_b.tif"}],
-    }
-    retry_request = {
-        "request": {"endpoint": "optical", "payload": original_payload},
-        "last_result": {"quality_report": {"status": "WARN", "checks": [{"name": "logical_duplicates", "status": "WARN"}]}},
-    }
-
-    def fake_run_optical_partition_from_payload(payload=None, mode="partition_demo"):
-        assert mode == "partition_retry"
-        assert payload == original_payload
-        return {"status": "completed", "mode": mode, "data_type": "optical", "rows": 5}
-
-    monkeypatch.setattr(partition_adapters, "run_optical_partition_from_payload", fake_run_optical_partition_from_payload)
-
-    resp = client.post("/v1/partition/optical/retry", json=retry_request)
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["retry"]["strategy"] == "full_request"
-    assert body["retry"]["warning_check_names"] == ["logical_duplicates"]
-    assert body["retry"]["retried_asset_count"] == 0
 
 
 def test_carbon_partition_retry_endpoint(monkeypatch):
@@ -6502,7 +5452,6 @@ def test_product_partition_test_runner_uses_selected_assets(monkeypatch, tmp_pat
 
     monkeypatch.setattr(partition_runners, "_demo_run_dir", fake_demo_run_dir)
     monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
 
     result = partition_runners._run_product_partition_test(
         {
@@ -6572,15 +5521,12 @@ def test_product_partition_test_runner_dispatches_isea4h_to_entity_partition(mon
 
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
     monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fail_product_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
 
     result = partition_runners._run_product_partition_test(
         {
             "input_dir": str(tmp_path),
             "grid_type": "isea4h",
             "grid_level": 6,
-            "grid_level_mode": "manual",
-            "target_pixels_per_hex_edge": 512,
         }
     )
 
@@ -6592,7 +5538,7 @@ def test_product_partition_test_runner_dispatches_isea4h_to_entity_partition(mon
     assert captured["product_family"] == "product"
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 6
-    assert captured["target_pixels_per_hex_edge"] == 512
+    assert "target_pixels_per_hex_edge" not in captured
     assert captured["time_granularity"] == "year"
     assert captured["ingest_enabled"] is False
     assert captured["ray_parallelism"] == 0
@@ -6626,7 +5572,6 @@ def test_product_partition_test_runner_dispatches_tile_matrix_to_logical_partiti
 
     monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
 
     result = partition_runners._run_product_partition_test(
         {
@@ -6672,7 +5617,6 @@ def test_product_partition_runner_parses_minio_secure_string(monkeypatch, tmp_pa
         }
 
     monkeypatch.setattr("cube_split.jobs.product_partition_job.run_product_partition", fake_run_product_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_product_quality_check", None)
 
     partition_runners._run_product_partition_test(
         {
@@ -6862,9 +5806,7 @@ def test_radar_partition_test_runner_dispatches_isea4h_to_entity_partition(monke
             "input_dir": str(tmp_path),
             "grid_type": "isea4h",
             "grid_level": 6,
-            "grid_level_mode": "manual",
             "partition_backend": "thread",
-            "target_pixels_per_hex_edge": 512,
         }
     )
 
@@ -6876,7 +5818,7 @@ def test_radar_partition_test_runner_dispatches_isea4h_to_entity_partition(monke
     assert captured["product_family"] == "sentinel1"
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 6
-    assert captured["target_pixels_per_hex_edge"] == 512
+    assert "target_pixels_per_hex_edge" not in captured
     assert captured["partition_backend"] == "thread"
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"
@@ -6910,13 +5852,8 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     def fail_entity_partition(_args):
         raise AssertionError("tile_matrix radar partition should use logical partition")
 
-    def fake_run_radar_quality_check(args):
-        captured["quality_run_dir"] = args.run_dir
-        return {"status": "PASS", "summary": {"index_rows": 1}, "checks": []}
-
     monkeypatch.setattr("cube_split.jobs.ray_logical_partition_job.run_logical_partition", fake_run_logical_partition)
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fail_entity_partition)
-    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_radar_quality_check)
 
     result = partition_runners._run_radar_partition_test(
         {
@@ -6930,9 +5867,6 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
     assert result["mode"] == "partition_test_no_ingest"
     assert result["data_type"] == "radar"
     assert result["output_path"].endswith("index_rows.jsonl")
-    assert result["quality_status"] == "PASS"
-    assert result["quality_report_id"]
-    assert captured["quality_run_dir"] == str(tmp_path / "logical-run")
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
     assert captured["grid_type"] == "geohash"
@@ -6945,9 +5879,7 @@ def test_radar_partition_test_runner_dispatches_tile_matrix_to_logical_partition
 
 def test_radar_partition_runner_rejects_legacy_plane_grid(tmp_path):
     with pytest.raises(ValueError, match="grid_type must be one of"):
-        partition_runners._run_radar_partition_test(
-            {"input_dir": str(tmp_path), "grid_type": "plane_grid", "grid_level": 11}
-        )
+        partition_runners._run_radar_partition_test({"input_dir": str(tmp_path), "grid_type": "plane_grid", "grid_level": 11})
 
 
 def test_radar_partition_retry_endpoint(monkeypatch):
@@ -6972,388 +5904,3 @@ def test_radar_partition_retry_endpoint(monkeypatch):
     body = resp.json()
     assert body["mode"] == "partition_retry"
     assert body["retry"]["strategy"] == "full_request"
-
-
-def test_optical_quality_endpoint(monkeypatch):
-    run_dir = "/tmp/cube_web_partition_demo/quality/run"
-
-    def fake_run_quality_check(args):
-        assert args.run_dir == run_dir
-        assert args.target_crs == "EPSG:4326"
-        return {
-            "status": "PASS",
-            "summary": {"index_rows": 3, "failed_checks": 0, "warning_checks": 0},
-            "checks": [{"name": "index_rows", "status": "PASS", "message": "ok"}],
-        }
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fake_run_quality_check)
-
-    resp = client.post("/v1/quality/optical/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "PASS"
-    assert body["report_id"]
-    assert body["run_dir"] == run_dir
-    assert body["summary"]["index_rows"] == 3
-
-
-def test_radar_quality_endpoint(monkeypatch):
-    run_dir = "/tmp/cube_web_partition_demo/radar/run"
-
-    def fake_run_quality_check(args):
-        assert args.run_dir == run_dir
-        assert args.target_crs == "EPSG:4326"
-        return {
-            "status": "PASS",
-            "summary": {"index_rows": 4, "failed_checks": 0, "warning_checks": 0},
-            "checks": [{"name": "index_rows", "status": "PASS", "message": "ok"}],
-            "data_type": "radar",
-        }
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_radar_quality_check", fake_run_quality_check)
-
-    resp = client.post("/v1/quality/radar/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "PASS"
-    assert body["data_type"] == "radar"
-    assert body["report_id"]
-    assert body["run_dir"] == run_dir
-    assert body["summary"]["index_rows"] == 4
-
-
-def test_carbon_quality_endpoint(monkeypatch):
-    run_dir = "/tmp/cube_web_partition_demo/carbon/run"
-
-    def fake_run_quality_check(args):
-        assert args.run_dir == run_dir
-        assert args.target_crs == "EPSG:4326"
-        return {
-            "status": "PASS",
-            "summary": {"index_rows": 2, "observation_rows": 2, "quality_counts": {"1": 2}, "failed_checks": 0, "warning_checks": 0},
-            "checks": [{"name": "carbon_rows", "status": "PASS", "message": "ok"}],
-            "assets": [],
-        }
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_carbon_quality_check", fake_run_quality_check)
-
-    resp = client.post("/v1/quality/carbon/run", json={"run_dir": run_dir, "target_crs": "EPSG:4326"})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "PASS"
-    assert body["data_type"] == "carbon"
-    assert body["report_id"]
-    assert body["run_dir"] == run_dir
-    assert body["summary"]["observation_rows"] == 2
-
-
-def test_quality_report_requires_report_id():
-    resp = client.post("/v1/quality/optical/report", json={})
-
-    assert resp.status_code == 422
-
-
-def test_optical_quality_latest_endpoint(quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/latest-run",
-        {
-            "report_id": "optical-latest",
-            "status": "WARN",
-            "target_crs": "EPSG:4326",
-            "summary": {"index_rows": 9, "failed_checks": 0, "warning_checks": 1},
-            "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "duplicate"}],
-            "assets": [],
-        },
-    )
-
-    resp = client.post("/v1/quality/optical/latest", json={})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "WARN"
-    assert body["run_dir"] == "/tmp/latest-run"
-    assert body["summary"]["warning_checks"] == 1
-
-
-def test_optical_quality_latest_reads_database_without_rerun(monkeypatch, quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/dataset_a/run_20260515_010203",
-        {
-          "report_id": "optical-existing",
-          "status": "PASS",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {"index_rows": 11, "failed_checks": 0, "warning_checks": 0},
-          "checks": [{"name": "index_rows", "status": "PASS", "message": "cached"}],
-          "assets": []
-        },
-    )
-
-    def fail_if_called(args):
-        raise AssertionError("latest should read the database instead of re-running quality checks")
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
-
-    body = quality_adapters.quality_optical_latest({})
-
-    assert body["status"] == "PASS"
-    assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
-    assert body["summary"]["index_rows"] == 11
-    assert body["checks"][0]["message"] == "cached"
-
-
-def test_optical_quality_report_endpoint_reads_database_without_rerun(monkeypatch, quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/dataset_a/run_20260515_010203",
-        {
-          "report_id": "optical-report",
-          "status": "WARN",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {"index_rows": 7, "failed_checks": 0, "warning_checks": 1},
-          "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "cached warn"}],
-          "assets": []
-        },
-    )
-
-    def fail_if_called(args):
-        raise AssertionError("report viewing should not re-run quality checks")
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
-
-    body = quality_adapters.quality_optical_report({"report_id": "optical-report"})
-
-    assert body["status"] == "WARN"
-    assert body["run_dir"] == "/tmp/dataset_a/run_20260515_010203"
-    assert body["summary"]["index_rows"] == 7
-    assert body["checks"][0]["message"] == "cached warn"
-
-
-def test_optical_quality_report_pdf_endpoint_reads_database_without_rerun(monkeypatch, tmp_path, quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/dataset_a/run_20260515_010203",
-        {
-          "report_id": "optical-pdf",
-          "status": "PASS",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {"index_rows": 7, "asset_count": 2, "failed_checks": 0, "warning_checks": 0},
-          "checks": [{"name": "index_rows", "status": "PASS", "message": "cached"}],
-          "assets": [{"path": "/data/a.tif", "crs": "EPSG:4326"}]
-        },
-    )
-
-    def fail_if_called(args):
-        raise AssertionError("PDF export should not re-run quality checks")
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
-
-    response = quality_adapters.quality_optical_report_pdf({"report_id": "optical-pdf"})
-
-    assert response.media_type == "application/pdf"
-    assert response.body.startswith(b"%PDF-")
-    assert b"Quality Inspection Report" not in response.body
-    pdf_path = tmp_path / "quality_report.pdf"
-    txt_path = tmp_path / "quality_report.txt"
-    pdf_path.write_bytes(response.body)
-    subprocess.run(["pdftotext", str(pdf_path), str(txt_path)], check=True)
-    text = txt_path.read_text(encoding="utf-8")
-    assert "质检报告" in text
-    assert "质检概要" in text
-
-
-def test_optical_quality_report_txt_endpoint_reads_database_without_rerun(monkeypatch, quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/dataset_a/run_20260515_010203",
-        {
-          "report_id": "optical-txt",
-          "status": "WARN",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {"index_rows": 7, "asset_count": 2, "failed_checks": 0, "warning_checks": 1},
-          "checks": [{"name": "logical_duplicates", "status": "WARN", "message": "cached warn"}],
-          "assets": [{"path": "/data/a.tif", "crs": "EPSG:4326"}]
-        },
-    )
-
-    def fail_if_called(args):
-        raise AssertionError("TXT export should not re-run quality checks")
-
-    monkeypatch.setattr("cube_web.services.quality_checks.run_optical_quality_check", fail_if_called)
-
-    response = quality_adapters.quality_optical_report_txt({"report_id": "optical-txt"})
-
-    assert response.media_type == "text/plain"
-    text = response.body.decode("utf-8")
-    assert "质检报告" in text
-    assert "质检状态：WARN" in text
-    assert "检查项" in text
-
-
-def test_quality_report_txt_routes_are_registered():
-    route_paths = set(app.openapi()["paths"])
-
-    assert "/v1/quality/optical/report/txt" in route_paths
-    assert "/v1/quality/radar/report/txt" in route_paths
-    assert "/v1/quality/product/report/txt" in route_paths
-    assert "/v1/quality/carbon/report/txt" in route_paths
-
-
-def test_quality_report_export_frontend_sends_auth_header():
-    source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(
-        encoding="utf-8"
-    )
-
-    assert "import { apiPrefixes, authHeaders, requestGet, requestJson } from '@/api/client';" in source
-    assert "headers: authHeaders({ 'Content-Type': 'application/json' })" in source
-
-
-def test_optical_quality_history_endpoint(quality_store):
-    quality_store.upsert_report(
-        "optical",
-        "/tmp/dataset_a/run_20260515_010203",
-        {
-          "report_id": "optical-history",
-          "status": "PASS",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {
-            "index_rows": 1,
-            "asset_count": 1,
-            "passed_checks": 7,
-            "warning_checks": 0,
-            "failed_checks": 0
-          }
-        },
-    )
-
-    body = quality_adapters.quality_optical_history({"target_crs": "EPSG:4326"})
-
-    assert body["count"] == 1
-    assert body["total"] == 1
-    assert body["page"] == 1
-    assert body["page_size"] == 20
-    record = body["records"][0]
-    assert record["dataset"] == "dataset_a"
-    assert record["run_name"] == "run_20260515_010203"
-    assert record["status"] == "PASS"
-    assert record["summary"]["index_rows"] == 1
-
-
-def test_quality_history_endpoint_supports_pagination_and_filters(quality_store):
-    for index in range(25):
-        quality_store.upsert_report(
-            "optical",
-            f"/tmp/dataset_page/run_{index:02d}",
-            {
-                "report_id": f"optical-page-{index:02d}",
-                "status": "WARN" if index % 2 else "PASS",
-                "target_crs": "EPSG:4326",
-                "generated_at": f"2026-05-15T01:{index:02d}:03Z",
-                "summary": {"index_rows": index + 1},
-            },
-        )
-
-    body = quality_adapters.quality_optical_history({"page": 2, "page_size": 10})
-
-    assert body["count"] == 10
-    assert body["total"] == 25
-    assert body["page"] == 2
-    assert body["page_size"] == 10
-    assert body["records"][0]["report_id"] == "optical-page-14"
-    assert body["records"][-1]["report_id"] == "optical-page-05"
-
-    filtered = quality_adapters.quality_optical_history({"page": 1, "page_size": 5, "status": "WARN", "keyword": "run_1"})
-    assert filtered["total"] == 5
-    assert filtered["count"] == 5
-    assert all(record["status"] == "WARN" for record in filtered["records"])
-    assert all("run_1" in record["run_name"] for record in filtered["records"])
-
-
-def test_quality_history_http_endpoint_preserves_large_legacy_limit(quality_store):
-    for index in range(250):
-        quality_store.upsert_report(
-            "optical",
-            f"/tmp/dataset_http/run_{index:03d}",
-            {
-                "report_id": f"optical-http-{index:03d}",
-                "status": "PASS",
-                "target_crs": "EPSG:4326",
-                "generated_at": f"2026-05-15T{index // 60:02d}:{index % 60:02d}:03Z",
-                "summary": {"index_rows": index + 1},
-            },
-        )
-
-    resp = client.post("/v1/quality/optical/history", json={"limit": 250})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["count"] == 250
-    assert body["total"] == 250
-    assert body["page_size"] == 250
-
-
-def test_product_quality_history_endpoint(quality_store):
-    quality_store.upsert_report(
-        "product",
-        "/tmp/product_epsg4326/run_20260515_010203",
-        {
-          "report_id": "product-history",
-          "status": "PASS",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {
-            "index_rows": 5,
-            "asset_count": 5,
-            "product_years": [1980, 1990, 2000, 2010, 2020],
-            "passed_checks": 8,
-            "warning_checks": 0,
-            "failed_checks": 0
-          }
-        },
-    )
-
-    body = quality_adapters.quality_product_history({"target_crs": "EPSG:4326"})
-
-    assert body["count"] == 1
-    record = body["records"][0]
-    assert record["data_type"] == "product"
-    assert record["dataset"] == "product_epsg4326"
-    assert record["summary"]["index_rows"] == 5
-
-
-def test_carbon_quality_history_endpoint(quality_store):
-    quality_store.upsert_report(
-        "carbon",
-        "/tmp/carbon/run_20260515_010203",
-        {
-          "report_id": "carbon-history",
-          "status": "PASS",
-          "target_crs": "EPSG:4326",
-          "generated_at": "2026-05-15T01:02:03Z",
-          "summary": {
-            "index_rows": 2,
-            "observation_rows": 2,
-            "quality_counts": {"1": 2},
-            "passed_checks": 7,
-            "warning_checks": 0,
-            "failed_checks": 0
-          }
-        },
-    )
-
-    body = quality_adapters.quality_carbon_history({"target_crs": "EPSG:4326"})
-
-    assert body["count"] == 1
-    record = body["records"][0]
-    assert record["data_type"] == "carbon"
-    assert record["dataset"] == "carbon"
-    assert record["summary"]["observation_rows"] == 2
