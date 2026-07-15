@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, ref } from 'vue';
+import { computed, defineAsyncComponent, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 
 import { apiPrefixes, requestJson } from '@/api/client';
@@ -10,7 +10,7 @@ const activeModule = ref('division');
 const loading = ref(false);
 
 const division = ref({
-  gridType: 's2',
+  gridType: 'geohash',
   inputType: 'point',
   level: 6,
   lat: 39.9042,
@@ -20,7 +20,7 @@ const division = ref({
 
 const encoding = ref({
   operation: 'encode',
-  gridType: 's2',
+  gridType: 'geohash',
   timeGranularity: 'minute',
   timestamp: '',
   decodeInput: '',
@@ -31,7 +31,7 @@ const encoding = ref({
 
 const topology = ref({
   operation: 'neighbors',
-  gridType: 's2',
+  gridType: 'geohash',
   level: 6,
   lat: 39.9042,
   lng: 116.4074,
@@ -71,14 +71,25 @@ const emptyText = computed(() => {
 });
 
 const gridTypeLabels = {
-  s2: '四边形格网',
-  mgrs: '平面格网',
-  tile_matrix: '经纬度格网',
+  geohash: 'GeoHash格网',
+  mgrs: 'MGRS格网',
   isea4h: '六边形格网',
 };
 
 function formatGridType(gridType) {
   return gridTypeLabels[gridType] || gridType || '-';
+}
+
+function gridLevelMinimum(gridType) {
+  return gridType === 'geohash' ? 1 : 0;
+}
+
+function gridLevelMaximum(gridType) {
+  return gridType === 'mgrs' ? 5 : gridType === 'isea4h' ? 15 : 12;
+}
+
+function clampGridLevel(value, gridType) {
+  return Math.min(gridLevelMaximum(gridType), Math.max(gridLevelMinimum(gridType), Number(value) || 0));
 }
 
 const activeGridType = computed(() => {
@@ -96,19 +107,11 @@ const contextualMapHint = computed(() => {
         ? '平面格网会按覆盖范围展示单元；拖拽圈画后会自动聚焦。'
         : '点击地图后会自动定位到当前平面格网单元并放大显示。';
     }
-    if (division.value.gridType === 'tile_matrix') {
-      return division.value.inputType === 'draw'
-        ? '经纬度格网会按规则行列单元展示；拖拽圈画后会自动聚焦。'
-        : '点击地图后会定位到当前经纬度格网单元。';
-    }
     return division.value.inputType === 'draw'
       ? '选择“圈画”后按住拖拽绘制范围'
       : '选择“点”后点击地图选点';
   }
   if (activeModule.value === 'operations') {
-    if (topology.value.gridType === 'tile_matrix') {
-      return '点击地图选择经纬度格网基准点；结果会按格网单元展示。';
-    }
     return topology.value.gridType === 'mgrs'
       ? '点击地图选择平面格网基准点；结果会按格网单元展示。'
       : '点击地图选择基准点';
@@ -118,8 +121,6 @@ const contextualMapHint = computed(() => {
   }
   return encoding.value.gridType === 'mgrs'
     ? '点击地图选择平面格网编码点；结果会展示空间编码。'
-    : encoding.value.gridType === 'tile_matrix'
-      ? '点击地图选择经纬度格网编码点；结果会展示层级与空间编码。'
     : '点击地图选择编码点';
 });
 
@@ -127,13 +128,11 @@ const legendItems = computed(() => {
   if (activeModule.value === 'encoding') return [];
   const primaryLabel = activeGridType.value === 'mgrs'
     ? '平面格网单元'
-    : activeGridType.value === 'tile_matrix'
-      ? '经纬度格网单元'
     : activeModule.value === 'operations'
       ? '中心单元'
       : `${formatGridType(activeGridType.value)}单元`;
   return [
-    { colorClass: activeGridType.value === 'mgrs' ? 'mgrs' : activeGridType.value === 'tile_matrix' ? 'tile-matrix' : 'active', label: primaryLabel },
+    { colorClass: activeGridType.value === 'mgrs' ? 'mgrs' : 'active', label: primaryLabel },
     { colorClass: 'neighbor', label: '邻接单元' },
     { colorClass: 'covered', label: activeModule.value === 'operations' ? '父单元' : '覆盖区域' },
   ];
@@ -141,26 +140,19 @@ const legendItems = computed(() => {
 
 function gridGeometryStyle(gridType, variant) {
   const isMgrs = gridType === 'mgrs';
-  const isTileMatrix = gridType === 'tile_matrix';
   if (variant === 'focus') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.24, weight: 3 }
-      : isTileMatrix
-        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.2, weight: 2.5 }
       : { color: '#1a5fb4', fillColor: '#1a5fb4', fillOpacity: 0.18, weight: 2 };
   }
   if (variant === 'cover') {
     return isMgrs
       ? { color: '#c061cb', fillColor: '#c061cb', fillOpacity: 0.2, weight: 2.5 }
-      : isTileMatrix
-        ? { color: '#e5a50a', fillColor: '#e5a50a', fillOpacity: 0.16, weight: 2 }
       : { color: '#f5c211', fillColor: '#f5c211', fillOpacity: 0.16, weight: 2 };
   }
   if (variant === 'base') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.16, weight: 3 }
-      : isTileMatrix
-        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.14, weight: 3 }
       : { color: '#1a5fb4', fillColor: '#1a5fb4', fillOpacity: 0.12, weight: 3 };
   }
   if (variant === 'parent') {
@@ -169,8 +161,6 @@ function gridGeometryStyle(gridType, variant) {
   if (variant === 'conversion') {
     return isMgrs
       ? { color: '#9141ac', fillColor: '#9141ac', fillOpacity: 0.18, weight: 3 }
-      : isTileMatrix
-        ? { color: '#a55100', fillColor: '#a55100', fillOpacity: 0.16, weight: 3 }
       : { color: '#26a269', fillColor: '#26a269', fillOpacity: 0.16, weight: 3 };
   }
   return { color: '#26a269', fillColor: '#26a269', fillOpacity: 0.16, weight: 2 };
@@ -292,21 +282,12 @@ function geometryFromCell(cell) {
   return null;
 }
 
-async function geometryItemsFromCodes(topologyPrefix, gridType, codes, style) {
-  const uniqueCodes = Array.from(new Set(codes.filter(Boolean))).slice(0, 120);
-  if (!uniqueCodes.length) return [];
-  const data = await requestJson(`${topologyPrefix}/geometries`, {
-    grid_type: gridType,
-    codes: uniqueCodes,
-    boundary_type: 'polygon',
-  });
-  return uniqueCodes
-    .map((code) => ({
-      geometry: data.geometries?.[code],
-      label: code,
-      ...style,
-    }))
-    .filter((item) => item.geometry);
+async function geometryItemsFromAddresses(topologyPrefix, addresses, style) {
+  const uniqueAddresses = Array.from(new Map(addresses.filter(Boolean).map((address) => [`${address.grid_type}:${address.grid_level}:${address.space_code}`, address])).values()).slice(0, 120);
+  return Promise.all(uniqueAddresses.map(async (address) => {
+    const data = await requestJson(`${topologyPrefix}/geometry`, { address, boundary_type: 'polygon' });
+    return { geometry: data.geometry, label: address.space_code, ...style };
+  }));
 }
 
 async function runGridDivision() {
@@ -315,7 +296,7 @@ async function runGridDivision() {
   if (config.inputType === 'point') {
     const data = await requestJson(`${gridPrefix}/locate`, {
       grid_type: config.gridType,
-      level: config.level,
+      requested_grid_level: config.level,
       point: [Number(config.lng), Number(config.lat)],
     });
     const geometry = geometryFromCell(data.cell);
@@ -328,15 +309,12 @@ async function runGridDivision() {
       { label: '操作', value: 'locate' },
       { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '格网编码', value: data.cell.space_code, code: true },
-      { label: '层级', value: String(data.cell.level) },
+    { label: '层级', value: String(data.cell.grid_level) },
       ...(config.gridType === 'mgrs' && data.cell.metadata?.zone
         ? [{ label: '分带', value: data.cell.metadata.zone }]
         : []),
       ...(config.gridType === 'mgrs' && data.cell.metadata?.precision !== undefined
         ? [{ label: '精度', value: String(data.cell.metadata.precision) }]
-        : []),
-      ...(config.gridType === 'tile_matrix'
-        ? [{ label: '瓦片行列', value: `x=${data.cell.metadata?.x}, y=${data.cell.metadata?.y}` }]
         : []),
       { label: '中心坐标', value: `${data.cell.center[1].toFixed(6)}, ${data.cell.center[0].toFixed(6)}` },
       { label: '时间', value: new Date().toLocaleString('zh-CN') },
@@ -347,7 +325,7 @@ async function runGridDivision() {
   const bbox = buildBboxFromRadius(Number(config.lng), Number(config.lat), Number(config.radius));
   const data = await requestJson(`${gridPrefix}/cover`, {
     grid_type: config.gridType,
-    level: config.level,
+    requested_grid_level: config.level,
     cover_mode: 'intersect',
     boundary_type: 'polygon',
     geometry: null,
@@ -379,12 +357,11 @@ async function runGridEncoding() {
   if (config.operation === 'decode') {
     const parsed = await requestJson(`${codePrefix}/parse`, { st_code: config.decodeInput.trim() });
     await requestJson(`${topologyPrefix}/geometry`, {
-      grid_type: parsed.grid_type,
-      code: parsed.space_code,
+      address: { grid_type: parsed.grid_type, grid_level: parsed.grid_level, space_code: parsed.space_code },
       boundary_type: 'polygon',
     });
     encodingParts.value = {
-      level: String(parsed.level),
+      level: String(parsed.grid_level),
       space: parsed.space_code,
       time: parsed.time_code,
       full: config.decodeInput.trim(),
@@ -401,13 +378,11 @@ async function runGridEncoding() {
 
   const located = await requestJson(`${gridPrefix}/locate`, {
     grid_type: config.gridType,
-    level: config.level,
+    requested_grid_level: config.level,
     point: [Number(config.lng), Number(config.lat)],
   });
   const codeResp = await requestJson(`${codePrefix}/st`, {
-    grid_type: config.gridType,
-    level: config.level,
-    space_code: located.cell.space_code,
+    address: located.cell,
     timestamp,
     time_granularity: config.timeGranularity,
   });
@@ -426,24 +401,33 @@ async function runGridEncoding() {
     ...(config.gridType === 'mgrs' && located.cell.metadata?.zone
       ? [{ label: '分带', value: located.cell.metadata.zone }]
       : []),
-    ...(config.gridType === 'tile_matrix'
-      ? [{ label: '瓦片行列', value: `x=${located.cell.metadata?.x}, y=${located.cell.metadata?.y}` }]
-      : []),
     { label: '完整时空编码', value: codeResp.st_code, code: true },
     { label: '时间粒度', value: config.timeGranularity },
     { label: '时间', value: new Date(timestamp).toLocaleString('zh-CN') },
   ]);
 }
 
+watch(() => division.value.gridType, (gridType) => {
+  division.value.level = clampGridLevel(division.value.level, gridType);
+});
+watch(() => encoding.value.gridType, (gridType) => {
+  encoding.value.level = clampGridLevel(encoding.value.level, gridType);
+});
+watch(() => topology.value.gridType, (gridType) => {
+  topology.value.level = clampGridLevel(topology.value.level, gridType);
+  topology.value.targetLevel = clampGridLevel(topology.value.targetLevel, gridType);
+  conversion.value.targetLevel = clampGridLevel(conversion.value.targetLevel, gridType);
+});
+
 async function resolveTopologySelection(gridPrefix) {
   const config = topology.value;
   const located = await requestJson(`${gridPrefix}/locate`, {
     grid_type: config.gridType,
-    level: config.level,
+    requested_grid_level: config.level,
     point: [Number(config.lng), Number(config.lat)],
   });
   return {
-    baseCodes: [located.cell.space_code],
+    baseAddresses: [located.cell],
     selectionPoint: [Number(config.lng), Number(config.lat)],
   };
 }
@@ -459,8 +443,7 @@ async function appendConversionRows(rows, ctx) {
       return;
     }
     const bboxResp = await requestJson(`${topologyPrefix}/geometry`, {
-      grid_type: config.gridType,
-      code: representativeCode,
+      address: representativeCode,
       boundary_type: 'bbox',
     });
     const bbox = bboxResp.geometry.bbox;
@@ -472,7 +455,7 @@ async function appendConversionRows(rows, ctx) {
   const [lng, lat] = selectionPoint || [116.4074, 39.9042];
   const locateResp = await requestJson(`${gridPrefix}/locate`, {
     grid_type: config.gridType,
-    level: conversionConfig.targetLevel,
+    requested_grid_level: conversionConfig.targetLevel,
     point: [lng, lat],
   });
   rows.push({ label: '转换方向', value: '坐标 -> 编码' });
@@ -492,41 +475,40 @@ async function runTopologyOperation() {
     const { gridPrefix, topologyPrefix } = apiPrefixes();
     const config = topology.value;
     const selection = await resolveTopologySelection(gridPrefix);
-    let baseCodes = selection.baseCodes;
-    const originalBaseCount = baseCodes.length;
-    if (baseCodes.length > 120) baseCodes = baseCodes.slice(0, 120);
+    let baseAddresses = selection.baseAddresses;
+    const originalBaseCount = baseAddresses.length;
+    if (baseAddresses.length > 120) baseAddresses = baseAddresses.slice(0, 120);
 
-    const resultCodes = new Set();
+    const resultAddresses = new Map();
     const failedCodes = [];
     if (config.operation === 'neighbors') {
-      for (const code of baseCodes) {
+      for (const address of baseAddresses) {
         try {
-          const data = await requestJson(`${topologyPrefix}/neighbors`, { grid_type: config.gridType, code, k: config.neighborK });
-          data.result_codes.forEach((item) => resultCodes.add(item));
+          const data = await requestJson(`${topologyPrefix}/neighbors`, { address, k: config.neighborK });
+          data.addresses.forEach((item) => resultAddresses.set(`${item.grid_type}:${item.grid_level}:${item.space_code}`, item));
         } catch {
-          failedCodes.push(code);
+          failedCodes.push(address.space_code);
         }
       }
     } else if (config.operation === 'parent') {
-      for (const code of baseCodes) {
+      for (const address of baseAddresses) {
         try {
-          const data = await requestJson(`${topologyPrefix}/parent`, { grid_type: config.gridType, code });
-          resultCodes.add(data.parent_code);
+          const data = await requestJson(`${topologyPrefix}/parent`, { address });
+          resultAddresses.set(`${data.address.grid_type}:${data.address.grid_level}:${data.address.space_code}`, data.address);
         } catch {
-          failedCodes.push(code);
+          failedCodes.push(address.space_code);
         }
       }
     } else if (config.operation === 'children') {
-      for (const code of baseCodes) {
+      for (const address of baseAddresses) {
         try {
           const data = await requestJson(`${topologyPrefix}/children`, {
-            grid_type: config.gridType,
-            code,
-            target_level: config.targetLevel,
+            address,
+            target_grid_level: config.targetLevel,
           });
-          data.child_codes.forEach((item) => resultCodes.add(item));
+          data.addresses.forEach((item) => resultAddresses.set(`${item.grid_type}:${item.grid_level}:${item.space_code}`, item));
         } catch {
-          failedCodes.push(code);
+          failedCodes.push(address.space_code);
         }
       }
     }
@@ -536,9 +518,9 @@ async function runTopologyOperation() {
       { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
       { label: '基准编码数', value: String(originalBaseCount) },
       { label: '运算类型', value: config.operation },
-      { label: '输入编码样例', value: baseCodes.slice(0, 8).join(', '), code: true },
-      { label: '结果数量', value: String(resultCodes.size) },
-      { label: '结果编码样例', value: Array.from(resultCodes).slice(0, 8).join(', '), code: true },
+      { label: '输入编码样例', value: baseAddresses.slice(0, 8).map((item) => item.space_code).join(', '), code: true },
+      { label: '结果数量', value: String(resultAddresses.size) },
+      { label: '结果编码样例', value: Array.from(resultAddresses.values()).slice(0, 8).map((item) => item.space_code).join(', '), code: true },
     ];
     if (config.operation === 'neighbors') rows.splice(5, 0, { label: 'k', value: String(config.neighborK) });
     if (config.operation === 'children') rows.splice(5, 0, { label: '目标层级', value: String(config.targetLevel) });
@@ -547,8 +529,8 @@ async function runTopologyOperation() {
     const resultStyle = config.operation === 'parent'
       ? gridGeometryStyle(config.gridType, 'parent')
       : gridGeometryStyle(config.gridType, 'result');
-    const baseGeometryItems = await geometryItemsFromCodes(topologyPrefix, config.gridType, baseCodes, gridGeometryStyle(config.gridType, 'base'));
-    const resultGeometryItems = await geometryItemsFromCodes(topologyPrefix, config.gridType, Array.from(resultCodes), resultStyle);
+    const baseGeometryItems = await geometryItemsFromAddresses(topologyPrefix, baseAddresses, gridGeometryStyle(config.gridType, 'base'));
+    const resultGeometryItems = await geometryItemsFromAddresses(topologyPrefix, Array.from(resultAddresses.values()), resultStyle);
     gridGeometries.value = [...resultGeometryItems, ...baseGeometryItems];
     ElMessage.success('拓扑运算完成');
   } catch (error) {
@@ -566,23 +548,23 @@ async function runCoordinateConversion() {
     const { gridPrefix, topologyPrefix } = apiPrefixes();
     const config = topology.value;
     const selection = await resolveTopologySelection(gridPrefix);
-    const baseCode = selection.baseCodes[0];
+    const baseAddress = selection.baseAddresses[0];
     const rows = [
       { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
-      { label: '基准编码', value: baseCode, code: true },
+      { label: '基准编码', value: baseAddress.space_code, code: true },
     ];
     await appendConversionRows(rows, {
       gridPrefix,
       topologyPrefix,
-      representativeCode: baseCode,
+      representativeCode: baseAddress,
       selectionPoint: selection.selectionPoint,
     });
     setOperationRows(conversionRows, rows);
     const renderCodes = conversion.value.convertDir === 'code2coord'
-      ? [baseCode]
-      : [rows.find((row) => row.label === '转换结果')?.value];
-    gridGeometries.value = await geometryItemsFromCodes(topologyPrefix, config.gridType, renderCodes, gridGeometryStyle(config.gridType, 'conversion'));
+      ? [baseAddress]
+      : [await requestJson(`${gridPrefix}/locate`, { grid_type: config.gridType, requested_grid_level: conversion.value.targetLevel, point: selection.selectionPoint })];
+    gridGeometries.value = await geometryItemsFromAddresses(topologyPrefix, renderCodes.map((item) => item.cell || item), gridGeometryStyle(config.gridType, 'conversion'));
     ElMessage.success('坐标转换完成');
   } catch (error) {
     ElMessage.error(error.message);
@@ -636,15 +618,15 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <div class="radio-group">
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>经纬度格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>GeoHash格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
                   </div>
                   <div class="form-group">
                     <label>精度/层级</label>
                     <div class="range-group">
-                      <input v-model.number="division.level" type="range" min="1" max="12" class="form-range">
+                      <input v-model.number="division.level" type="range" :min="gridLevelMinimum(division.gridType)" :max="gridLevelMaximum(division.gridType)" class="form-range">
                       <span class="range-value">{{ division.level }}级</span>
                     </div>
                   </div>
@@ -662,10 +644,14 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
-                      <option value="s2">四边形格网</option>
-                      <option value="tile_matrix">经纬度格网</option>
+                      <option value="geohash">GeoHash格网</option>
+                      <option value="mgrs">MGRS格网</option>
                       <option value="isea4h">六边形格网</option>
                     </select>
+                  </div>
+                  <div class="form-group">
+                    <label>格网层级</label>
+                    <input v-model.number="encoding.level" type="number" class="form-input" :min="gridLevelMinimum(encoding.gridType)" :max="gridLevelMaximum(encoding.gridType)">
                   </div>
                   <div class="form-group">
                     <label>时间粒度</label>
@@ -692,7 +678,7 @@ async function runDemo() {
                   </div>
                   <div v-else class="form-group">
                     <label>格网编码</label>
-                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: tm:8:8/420/71:202603091530">
+                    <input v-model="encoding.decodeInput" type="text" class="form-input" placeholder="例如: gh:6:wx4g0e:202603091530">
                   </div>
                 </template>
 
@@ -702,15 +688,15 @@ async function runDemo() {
                     <div class="form-group">
                       <label>格网类型</label>
                       <div class="radio-group">
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="s2"><span class="radio-custom"></span><span>四边形格网</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="tile_matrix"><span class="radio-custom"></span><span>经纬度格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>GeoHash格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>
                     </div>
                     <div class="form-group">
                       <label>基准层级</label>
                       <div class="range-group">
-                        <input v-model.number="topology.level" type="range" min="1" max="12" class="form-range">
+                        <input v-model.number="topology.level" type="range" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)" class="form-range">
                         <span class="range-value">{{ topology.level }}级</span>
                       </div>
                     </div>
@@ -743,7 +729,7 @@ async function runDemo() {
                       </div>
                       <div v-if="topology.operation === 'children'" class="form-group">
                         <label>子单元目标层级</label>
-                        <input v-model.number="topology.targetLevel" type="number" class="form-input" min="1" max="12">
+                        <input v-model.number="topology.targetLevel" type="number" class="form-input" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)">
                       </div>
                       <div class="form-group action-buttons compact">
                         <button class="btn btn-secondary" type="button" @click="topologyRows = []">清空拓扑结果</button>
@@ -762,7 +748,7 @@ async function runDemo() {
                       </div>
                       <div class="form-group">
                         <label>转换目标层级</label>
-                        <input v-model.number="conversion.targetLevel" type="number" class="form-input" min="1" max="12">
+                        <input v-model.number="conversion.targetLevel" type="number" class="form-input" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)">
                       </div>
                       <div class="form-group action-buttons compact">
                         <button class="btn btn-secondary" type="button" @click="conversionRows = []">清空转换结果</button>

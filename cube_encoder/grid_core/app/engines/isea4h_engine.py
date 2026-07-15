@@ -5,10 +5,18 @@ No H3 or DGGRID imports at runtime.
 """
 from __future__ import annotations
 
+import time
+
+from shapely import affinity
+from shapely.geometry import Polygon, box, mapping
+from shapely.ops import unary_union
+from shapely.validation import make_valid
+
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
 from grid_core.app.engines.isea4h.addressing import (
+    cell_count,
     locate_cell,
     q2di_to_seqnum,
     validate_seqnum,
@@ -18,11 +26,16 @@ from grid_core.app.engines.isea4h.topology import cell_children, cell_neighbors,
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
+from grid_core.app.utils.geometry import normalize_ring_longitudes
 
 _LEVEL_MIN = 0
 _LEVEL_MAX = 15
-_MAX_COVER_CELLS = 50_000
+_MAX_CANDIDATE_CELLS = 500_000
+_MAX_OUTPUT_CELLS = 100_000
+_MAX_COVER_SECONDS = 30.0
 _GRID_TYPE = "isea4h"
+_COVER_INDEX_CACHE: dict[int, tuple[object, list[object]]] = {}
+_WGS84_BOUNDS = box(-180.0, -90.0, 180.0, 90.0)
 
 
 def _validate_level(level: int) -> int:
@@ -31,6 +44,38 @@ def _validate_level(level: int) -> int:
             f"ISEA4H requested_grid_level must be in [{_LEVEL_MIN}, {_LEVEL_MAX}]"
         )
     return level
+
+
+def _unwrap_geojson_longitudes(geometry: dict) -> dict:
+    geometry_type = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    if geometry_type == "Polygon" and isinstance(coordinates, list):
+        return {
+            **geometry,
+            "coordinates": [
+                normalize_ring_longitudes([(float(point[0]), float(point[1])) for point in ring])
+                for ring in coordinates
+            ],
+        }
+    if geometry_type == "MultiPolygon" and isinstance(coordinates, list):
+        normalized_polygons = [
+            [normalize_ring_longitudes([(float(point[0]), float(point[1])) for point in ring]) for ring in polygon]
+            for polygon in coordinates
+        ]
+        if normalized_polygons:
+            anchor = sum(point[0] for point in normalized_polygons[0][0]) / len(normalized_polygons[0][0])
+            for polygon in normalized_polygons[1:]:
+                center = sum(point[0] for point in polygon[0]) / len(polygon[0])
+                offset = round((anchor - center) / 360.0) * 360.0
+                if offset:
+                    for ring in polygon:
+                        for point in ring:
+                            point[0] += offset
+        return {
+            **geometry,
+            "coordinates": normalized_polygons,
+        }
+    return geometry
 
 
 def _make_address(seqnum: int, res: int) -> GridAddress:
@@ -42,30 +87,69 @@ def _make_address(seqnum: int, res: int) -> GridAddress:
     )
 
 
-def _closed_ring(seqnum: int, res: int) -> list[tuple[float, float]]:
+def _continuous_ring(seqnum: int, res: int) -> list[list[float]]:
+    """Return a local, antimeridian-continuous cell boundary."""
+    corners = cell_boundary_polygon(seqnum, res)
+    candidates: list[list[list[float]]] = []
+    for start in range(len(corners)):
+        ring = normalize_ring_longitudes(corners[start:] + corners[:start])
+        if abs(ring[-1][0] - ring[0][0]) <= 180.0 + 1e-6:
+            candidates.append(ring)
+    if not candidates:
+        return normalize_ring_longitudes(corners)
+    return min(candidates, key=lambda ring: max(point[0] for point in ring) - min(point[0] for point in ring))
+
+
+def _closed_ring(seqnum: int, res: int) -> list[list[float]]:
     """Boundary corners with the first point repeated to close the ring."""
-    poly = cell_boundary_polygon(seqnum, res)
-    return poly + [poly[0]]
+    ring = _continuous_ring(seqnum, res)
+    return ring + [ring[0]]
+
+
+def _to_wgs84_shape(geometry: object):
+    if not geometry.is_valid:
+        geometry = make_valid(geometry)
+    pieces = [
+        affinity.translate(geometry, xoff=360.0 * offset).intersection(_WGS84_BOUNDS)
+        for offset in (-1, 0, 1)
+    ]
+    return make_valid(unary_union([piece for piece in pieces if not piece.is_empty]))
+
+
+def _cell_shape(seqnum: int, res: int):
+    return _to_wgs84_shape(Polygon(_closed_ring(seqnum, res)))
+
+
+def _cell_geometry(seqnum: int, res: int) -> dict:
+    return dict(mapping(_cell_shape(seqnum, res)))
+
+
+def _wrap_longitude(lon: float) -> float:
+    wrapped = (lon + 180.0) % 360.0 - 180.0
+    return 180.0 if wrapped == -180.0 and lon > 0.0 else wrapped
+
+
+def _cell_bbox(seqnum: int, res: int) -> list[float]:
+    ring = _continuous_ring(seqnum, res)
+    min_lon = min(point[0] for point in ring)
+    max_lon = max(point[0] for point in ring)
+    min_lat = min(point[1] for point in ring)
+    max_lat = max(point[1] for point in ring)
+    if max_lon - min_lon <= 180.0 + 1e-6:
+        return [_wrap_longitude(min_lon), min_lat, _wrap_longitude(max_lon), max_lat]
+    return list(_cell_shape(seqnum, res).bounds)
 
 
 def _make_cell(seqnum: int, res: int) -> GridCell:
     lon, lat = cell_center(seqnum, res)
-    corners = cell_boundary_polygon(seqnum, res)
-    lons = [p[0] for p in corners]
-    lats = [p[1] for p in corners]
-    bbox = [min(lons), min(lats), max(lons), max(lats)]
-    ring = corners + [corners[0]]
-    geometry = {
-        "type": "Polygon",
-        "coordinates": [[[lon_, lat_] for lon_, lat_ in ring]],
-    }
+    geometry = _cell_shape(seqnum, res)
     return GridCell(
         grid_type=_GRID_TYPE,
         grid_level=res,
         space_code=str(seqnum),
         center=[lon, lat],
-        bbox=bbox,
-        geometry=geometry,
+        bbox=_cell_bbox(seqnum, res),
+        geometry=dict(mapping(geometry)),
         metadata={},
     )
 
@@ -99,125 +183,152 @@ class ISEA4HEngine(BaseGridEngine):
         self, geometry: dict, requested_grid_level: int, cover_mode: str
     ) -> list[GridCell]:
         res = _validate_level(requested_grid_level)
-        cells = self._cover_seqnums(geometry, res, cover_mode)
-        return [_make_cell(s, res) for s in cells]
+        cells = self._cover_cells(geometry, res, cover_mode)
+        return [_make_cell(seqnum, cell_res) for seqnum, cell_res in cells]
 
     def cover_geometry_compact(
         self, geometry: dict, requested_grid_level: int, cover_mode: str
     ) -> list[CompactGridCell]:
         res = _validate_level(requested_grid_level)
-        seqnums = self._cover_seqnums(geometry, res, cover_mode)
-        if cover_mode == CoverMode.MINIMAL.value:
-            seqnums = self._coarsen_minimal(seqnums, res)
-        result = []
-        for s in seqnums:
-            corners = cell_boundary_polygon(s, res)
-            lons = [p[0] for p in corners]
-            lats = [p[1] for p in corners]
-            bbox = [min(lons), min(lats), max(lons), max(lats)]
+        cells = self._cover_cells(geometry, res, cover_mode)
+        result: list[CompactGridCell] = []
+        for seqnum, cell_res in cells:
+            bbox = _cell_bbox(seqnum, cell_res)
             result.append(CompactGridCell(
                 grid_type=_GRID_TYPE,
-                grid_level=res,
-                space_code=str(s),
+                grid_level=cell_res,
+                space_code=str(seqnum),
                 bbox=bbox,
             ))
         return result
 
-    def _cover_seqnums(self, geometry: dict, res: int, cover_mode: str) -> list[int]:
-        """Return sorted seqnums covering the geometry at res.
-
-        Uses point-sampling: iterates a grid of sample points within the
-        geometry bbox at half-cell spacing, locates each point, and collects
-        distinct seqnums.  For intersect/minimal modes this is exact; for
-        contain it is approximate (excludes boundary cells).
-        """
+    def _cover_cells(self, geometry: dict, res: int, cover_mode: str) -> list[tuple[int, int]]:
+        """Return an exact positive-area cover while preserving cell levels."""
         try:
-            from shapely.geometry import Point as ShapelyPoint
+            from shapely import affinity
             from shapely.geometry import shape as shapely_shape
+            from shapely.ops import unary_union
+            from shapely.strtree import STRtree
         except ImportError:
             raise ValidationError("shapely is required for ISEA4H cover")
 
-        target = shapely_shape(geometry)
+        if cover_mode not in {mode.value for mode in CoverMode}:
+            raise ValidationError(f"ISEA4H cover does not support cover_mode={cover_mode!r}")
+        target = shapely_shape(_unwrap_geojson_longitudes(geometry))
+        target = _to_wgs84_shape(target)
         if target.is_empty:
             return []
+        def longitude_variants(value: object) -> tuple[object, ...]:
+            return tuple(affinity.translate(value, xoff=360.0 * offset) for offset in range(-2, 3))
 
-        bbox = target.bounds  # (minx, miny, maxx, maxy)
+        target_variants = (target,)
+        target_query_variants = longitude_variants(target)
+        min_lon, min_lat, max_lon, max_lat = target.bounds
+        is_global_target = min_lon <= -180.0 and min_lat <= -90.0 and max_lon >= 180.0 and max_lat >= 90.0
+        if cell_count(res) > _MAX_CANDIDATE_CELLS:
+            raise ValidationError(
+                f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
+                f"limit={_MAX_CANDIDATE_CELLS}, observed={cell_count(res)}"
+            )
+        deadline = time.monotonic() + _MAX_COVER_SECONDS
+        output: list[tuple[int, int]] = []
 
-        # Approximate cell angular size; sample at 1/3 cell spacing for good coverage
-        cell_deg = 40.0 / (2**res)
-        step = max(0.001, cell_deg / 3.0)
+        def index_for(level: int) -> tuple[object, list[object]]:
+            cached = _COVER_INDEX_CACHE.get(level)
+            if cached is None:
+                cells: list[object] = []
+                for seqnum in range(1, cell_count(level) + 1):
+                    if time.monotonic() > deadline:
+                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
+                    cells.append(_cell_shape(seqnum, level))
+                cached = (STRtree(cells), cells)
+                _COVER_INDEX_CACHE[level] = cached
+            return cached
 
-        seqnums: set[int] = set()
+        def candidate_indexes_for(index: object) -> set[int]:
+            return {
+                int(candidate_index)
+                for target_variant in target_query_variants
+                for candidate_index in index.query(target_variant)
+            }
 
-        # Add representative point to ensure we always have at least one seed
-        rp = target.representative_point()
-        sample_points = [(float(rp.x), float(rp.y))]
+        def covers_area(container: object, contained: object) -> bool:
+            return contained.difference(container).area <= 1e-12
 
-        # Grid sweep
-        lon = bbox[0]
-        while lon <= bbox[2] + step * 0.5:
-            lat = bbox[1]
-            while lat <= bbox[3] + step * 0.5:
-                lat_c = max(-89.9, min(89.9, lat))
-                pt = ShapelyPoint(lon, lat_c)
-                if target.intersects(pt):
-                    sample_points.append((lon, lat_c))
-                lat += step
-            lon += step
+        index, cells = index_for(res)
+        candidate_indexes = candidate_indexes_for(index)
+        if cover_mode == CoverMode.MINIMAL.value and is_global_target:
+            return [(seqnum, 0) for seqnum in range(1, cell_count(0) + 1)]
 
-        if len(seqnums) > _MAX_COVER_CELLS:
-            raise ValidationError(f"ISEA4H cover result exceeds {_MAX_COVER_CELLS} cells")
+        selected_parents: list[tuple[int, int, object]] = []
+        selected_by_target_variant: list[list[object]] = [[] for _ in target_variants]
+        if cover_mode == CoverMode.MINIMAL.value:
+            for current_res in range(res):
+                parent_index, parent_cells = index_for(current_res)
+                for candidate_index in sorted(candidate_indexes_for(parent_index)):
+                    if time.monotonic() > deadline:
+                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
+                    parent = parent_cells[candidate_index]
+                    parent_variants = longitude_variants(parent)
+                    covered_variants = [
+                        (target_index, parent_variant)
+                        for target_index, target_variant in enumerate(target_variants)
+                        for parent_variant in parent_variants
+                        if covers_area(target_variant, parent_variant)
+                    ]
+                    if not covered_variants:
+                        continue
+                    if any(
+                        covers_area(unary_union(selected_by_target_variant[target_index]), parent_variant)
+                        for target_index, parent_variant in covered_variants
+                        if selected_by_target_variant[target_index]
+                    ):
+                        continue
+                    selected_parents.append((candidate_index + 1, current_res, parent))
+                    for target_index, parent_variant in covered_variants:
+                        selected_by_target_variant[target_index].append(parent_variant)
 
-        for lon_, lat_ in sample_points:
-            try:
-                quad, i, j = locate_cell(lon_, lat_, res)
-                seqnums.add(q2di_to_seqnum(quad, i, j, res))
-            except Exception:
+        remaining_by_target_variant = [
+            target_variant.difference(unary_union(selected_by_target_variant[target_index]))
+            if selected_by_target_variant[target_index]
+            else target_variant
+            for target_index, target_variant in enumerate(target_variants)
+        ]
+
+        for candidate_index in sorted(candidate_indexes):
+            if time.monotonic() > deadline:
+                raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
+            cell = cells[candidate_index]
+            cell_variants = longitude_variants(cell)
+            intersects = any(
+                cell_variant.intersection(target_variant).area > 0.0
+                for cell_variant in cell_variants
+                for target_variant in target_variants
+            )
+            if not intersects:
                 continue
-            if len(seqnums) > _MAX_COVER_CELLS:
-                raise ValidationError(f"ISEA4H cover result exceeds {_MAX_COVER_CELLS} cells")
+            contained = is_global_target or any(
+                covers_area(target_variant, cell_variant)
+                for cell_variant in cell_variants
+                for target_variant in target_variants
+            )
+            covered_by_parent = False
+            if cover_mode == CoverMode.MINIMAL.value and selected_parents:
+                covered_by_parent = not any(
+                    cell_variant.intersection(remaining).area > 1e-12
+                    for cell_variant in cell_variants
+                    for remaining in remaining_by_target_variant
+                )
+            if (cover_mode != CoverMode.CONTAIN.value or contained) and not covered_by_parent:
+                output.append((candidate_index + 1, res))
+            if len(output) > _MAX_OUTPUT_CELLS:
+                raise ValidationError(
+                    f"ISEA4H cover exceeded MAX_OUTPUT_CELLS: "
+                    f"limit={_MAX_OUTPUT_CELLS}, observed={len(output)}"
+                )
 
-        if cover_mode == CoverMode.CONTAIN.value:
-            # Remove cells whose computed center is outside the target
-            filtered = set()
-            for s in seqnums:
-                try:
-                    center_lon, center_lat = cell_center(s, res)
-                    if target.contains(ShapelyPoint(center_lon, center_lat)):
-                        filtered.add(s)
-                except Exception:
-                    pass
-            seqnums = filtered
-
-        return sorted(seqnums)
-
-    def _coarsen_minimal(self, seqnums: list[int], res: int) -> list[int]:
-        """Replace complete child sets with their parent for minimal cover."""
-        if res == 0:
-            return seqnums
-        selected = set(seqnums)
-        changed = True
-        current_res = res
-        while changed and current_res > 0:
-            changed = False
-            grouped: dict[int, list[int]] = {}
-            for s in list(selected):
-                try:
-                    p = cell_parent(s, current_res)
-                    grouped.setdefault(p, []).append(s)
-                except Exception:
-                    continue
-            for parent_seq, children_seqs in grouped.items():
-                try:
-                    expected = set(cell_children(parent_seq, current_res - 1, current_res))
-                except Exception:
-                    continue
-                if expected and set(children_seqs) >= expected:
-                    selected.difference_update(children_seqs)
-                    selected.add(parent_seq)
-                    changed = True
-            current_res -= 1
-        return sorted(selected)
+        output.extend((seqnum, current_res) for seqnum, current_res, _ in selected_parents)
+        return sorted(output, key=lambda cell: (cell[1], cell[0]))
 
     # ------------------------------------------------------------------
     # Geometry
@@ -225,11 +336,7 @@ class ISEA4HEngine(BaseGridEngine):
 
     def code_to_geometry(self, address: GridAddress) -> dict:
         seqnum, res = self._parse(address)
-        ring = _closed_ring(seqnum, res)
-        return {
-            "type": "Polygon",
-            "coordinates": [[[lon_, lat_] for lon_, lat_ in ring]],
-        }
+        return _cell_geometry(seqnum, res)
 
     def code_to_center(self, address: GridAddress) -> list[float]:
         seqnum, res = self._parse(address)
@@ -238,10 +345,7 @@ class ISEA4HEngine(BaseGridEngine):
 
     def code_to_bbox(self, address: GridAddress) -> list[float]:
         seqnum, res = self._parse(address)
-        corners = cell_boundary_polygon(seqnum, res)
-        lons = [p[0] for p in corners]
-        lats = [p[1] for p in corners]
-        return [min(lons), min(lats), max(lons), max(lats)]
+        return _cell_bbox(seqnum, res)
 
     # ------------------------------------------------------------------
     # Topology

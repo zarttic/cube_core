@@ -25,6 +25,8 @@ from grid_core.app.engines.isea4h.addressing import (
 from grid_core.app.engines.isea4h.constants import HEX_R
 
 _R2D = 180.0 / math.pi
+_DGGRID_NORTH_POLE_LON = -179.1061274
+_DGGRID_SOUTH_POLE_LON = -157.3603104
 
 # Hexagon corner offsets in the continuous (ccRF) frame, matching
 # DgHexC1Grid2D::setAddVertices (r = HEX_R = 1/sqrt(3)).
@@ -47,6 +49,9 @@ def cell_center(seqnum: int, res: int) -> tuple[float, float]:
     """Return the (lon_deg, lat_deg) centre of the ISEA4H cell *seqnum*."""
     quad, i, j = seqnum_to_q2di(seqnum, res)
     lat, lon = q2di_to_geo(quad, i, j, res)
+    if abs(abs(lat) - math.pi / 2.0) < 1e-9:
+        # DGGRID assigns deterministic longitudes to the geographic poles.
+        lon = math.radians(_DGGRID_NORTH_POLE_LON if lat > 0.0 else _DGGRID_SOUTH_POLE_LON)
     return (_norm_lon(lon * _R2D), lat * _R2D)
 
 

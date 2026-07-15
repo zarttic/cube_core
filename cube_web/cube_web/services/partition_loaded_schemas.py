@@ -213,7 +213,7 @@ def _raster_schema(
     normalized_payload = {
         "batch_id": batch_id,
         "batch_name": batch_name,
-        "grid_type": "s2",
+        "grid_type": "geohash",
         "grid_level": DEFAULT_LOGICAL_GRID_LEVEL,
         "grid_level_mode": "auto",
         "target_crs": "EPSG:4326",

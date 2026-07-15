@@ -75,11 +75,11 @@ def _parse_time(value: str) -> datetime:
 def _time_bucket(value: str, granularity: str) -> str:
     dt = _parse_time(value)
     formats = {
-        "year": "%Y",
         "month": "%Y%m",
         "day": "%Y%m%d",
         "hour": "%Y%m%d%H",
         "minute": "%Y%m%d%H%M",
+        "second": "%Y%m%d%H%M%S",
     }
     if granularity not in formats:
         raise ValueError(f"Unsupported time_granularity: {granularity}")
@@ -103,13 +103,11 @@ def partition_observation(
     encoder = sdk or CubeEncoderSDK()
     cell = encoder.locate(
         grid_type=config.grid_type,
-        level=config.grid_level,
+        requested_grid_level=config.grid_level,
         point=[observation.lon, observation.lat],
     )
     st_code = encoder.generate_st_code(
-        grid_type=config.grid_type,
-        level=int(cell.level),
-        space_code=cell.space_code,
+        address=cell,
         timestamp=_parse_time(observation.acq_time),
         time_granularity=config.time_granularity,
     ).st_code
@@ -121,7 +119,7 @@ def partition_observation(
         "acq_time": observation.acq_time,
         "time_bucket": _time_bucket(observation.acq_time, config.time_granularity),
         "grid_type": config.grid_type,
-        "grid_level": int(cell.level),
+        "grid_level": int(cell.grid_level),
         "space_code": cell.space_code,
         "st_code": st_code,
         "xco2": float(observation.xco2),
@@ -744,25 +742,18 @@ def _partition_observation_chunk(
     config: CarbonPartitionConfig,
 ) -> list[dict[str, Any]]:
     sdk = CubeEncoderSDK()
-    located = sdk.batch_locate_st_codes(
-        grid_type=config.grid_type,
-        level=config.grid_level,
-        items=[
-            {
-                "point": [obs.lon, obs.lat],
-                "timestamp": _parse_time(obs.acq_time),
-            }
-            for obs in observations
-        ],
-        time_granularity=config.time_granularity,
-    )
-    if len(located) != len(observations):
-        raise RuntimeError(
-            "batch locate returned "
-            f"{len(located)} cells for {len(observations)} carbon observations"
-        )
     rows: list[dict[str, Any]] = []
-    for observation, cell in zip(observations, located):
+    for observation in observations:
+        address = sdk.locate(
+            grid_type=config.grid_type,
+            requested_grid_level=config.grid_level,
+            point=[observation.lon, observation.lat],
+        )
+        st_code = sdk.generate_st_code(
+            address=address,
+            timestamp=_parse_time(observation.acq_time),
+            time_granularity=config.time_granularity,
+        ).st_code
         rows.append(
             {
                 "data_type": "carbon",
@@ -770,11 +761,11 @@ def _partition_observation_chunk(
                 "product_type": normalize_carbon_product_type(config.product_type),
                 "observation_id": observation.observation_id,
                 "acq_time": observation.acq_time,
-                "time_bucket": cell["time_code"],
+                "time_bucket": _time_bucket(observation.acq_time, config.time_granularity),
                 "grid_type": config.grid_type,
-                "grid_level": int(cell["grid_level"]),
-                "space_code": cell["space_code"],
-                "st_code": cell["st_code"],
+                "grid_level": int(address.grid_level),
+                "space_code": address.space_code,
+                "st_code": st_code,
                 "xco2": float(observation.xco2),
                 "quality_flag": observation.quality_flag,
                 "center_lon": float(observation.lon),

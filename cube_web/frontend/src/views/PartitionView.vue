@@ -35,30 +35,29 @@ const deselectedProductAssetKeys = ref({});
 const defaultLogicalGridLevel = 5;
 const defaultEntityGridLevel = 6;
 const gridTypeLabels = {
-  s2: '四边形格网',
-  tile_matrix: '经纬度格网',
-  plane_grid: '平面格网',
+  geohash: 'GeoHash格网',
+  mgrs: 'MGRS格网',
   isea4h: '六边形格网',
 };
 const partitionMethodLabels = {
   logical: '逻辑剖分',
   entity: '实体剖分',
 };
-const partitionGridTypes = ['tile_matrix', 'plane_grid', 's2', 'isea4h'];
+const partitionGridTypes = ['geohash', 'mgrs', 'isea4h'];
 const partitionMethods = ['logical', 'entity'];
 const partitionArchiveableStatuses = ['failed', 'manual_required', 'cancelled'];
 const partitionActiveStatuses = ['queued', 'running', 'retrying', 'cancel_requested'];
 const partitionTaskPollIntervalMs = 1500;
 const partitionTaskMaxPolls = 1200;
-const opticalGridType = ref('s2');
+const opticalGridType = ref('geohash');
 const opticalGridLevel = ref(defaultLogicalGridLevel);
 const entityGridLevel = ref(defaultEntityGridLevel);
 const opticalPartitionMethod = ref('logical');
-const radarGridType = ref('s2');
+const radarGridType = ref('geohash');
 const radarGridLevel = ref(5);
 const radarEntityGridLevel = ref(defaultEntityGridLevel);
 const radarPartitionMethod = ref('logical');
-const productGridType = ref('s2');
+const productGridType = ref('geohash');
 const productGridLevel = ref(5);
 const productEntityGridLevel = ref(defaultEntityGridLevel);
 const productPartitionMethod = ref('logical');
@@ -156,7 +155,7 @@ const qualityDataType = ref('optical');
 const qualityReportDataTypes = new Set(['optical', 'radar', 'product', 'carbon']);
 
 function targetCrsForGrid(gridType, fallback) {
-  return gridType === 'plane_grid' ? '' : (fallback || 'EPSG:4326');
+  return fallback || 'EPSG:4326';
 }
 
 function parseResolution(value) {
@@ -607,28 +606,15 @@ function partitionSlotStatusType(status) {
 
 function partitionBatchAllSlotsCompleted(batch) {
   const slots = partitionSlots(batch);
-  return slots.length === partitionGridTypes.length * partitionMethods.length
-    && slots.every((slot) => slot.status === 'completed');
+  return slots.length === 3 && slots.every((slot) => slot.status === 'completed');
 }
 
 function partitionSlotGroups(batch) {
   if (!batch || batch.data_type === 'carbon') return [];
-  const slotsByKey = new Map(partitionSlots(batch).map((slot) => [`${slot.grid_type}:${slot.partition_method}`, slot]));
-  return partitionGridTypes.map((gridType) => ({
-    grid_type: gridType,
-    grid_label: formatGridType(gridType),
-    slots: partitionMethods.map((partitionMethod) => (
-      slotsByKey.get(`${gridType}:${partitionMethod}`) || {
-        grid_type: gridType,
-        grid_label: formatGridType(gridType),
-        partition_method: partitionMethod,
-        method_label: partitionMethodText(partitionMethod),
-        status: 'available',
-        disabled: false,
-        latest_task_id: null,
-        finished_at: null,
-      }
-    )),
+  return partitionSlots(batch).map((slot) => ({
+    grid_type: slot.grid_type,
+    grid_label: slot.grid_label || formatGridType(slot.grid_type),
+    slots: [slot],
   }));
 }
 
@@ -1906,6 +1892,10 @@ function setPartitionMethodForModule(moduleName, partitionMethod) {
   }
 }
 
+function syncPartitionMethodForGrid(moduleName) {
+  setPartitionMethodForModule(moduleName, gridTypeForModule(moduleName) === 'isea4h' ? 'entity' : 'logical');
+}
+
 function selectedAssetsForModule(moduleName = activeModule.value) {
   if (moduleName === 'product') return selectedProductAssets.value;
   if (moduleName === 'radar') return selectedRadarAssets.value;
@@ -2540,7 +2530,7 @@ async function loadMapGridForSelectedAssets() {
     const requests = footprints.map(async (footprint) => {
       const result = await requestJson(`${gridPrefix}/cover`, {
         grid_type: gridType,
-        level: gridLevel,
+        requested_grid_level: gridLevel,
         cover_mode: 'intersect',
         boundary_type: 'polygon',
         bbox: cornersToBbox(footprint.corners),
@@ -3344,6 +3334,7 @@ watch([qualityHistorySearch, qualityHistoryStatus], () => {
 });
 
 watch(opticalGridType, () => {
+  syncPartitionMethodForGrid('optical');
   applyDefaultGridLevel('optical');
   mapGridGeometries.value = [];
 });
@@ -3352,6 +3343,8 @@ watch(opticalPartitionMethod, () => {
   applyDefaultGridLevel('optical');
   mapGridGeometries.value = [];
 });
+watch(radarGridType, () => syncPartitionMethodForGrid('radar'));
+watch(productGridType, () => syncPartitionMethodForGrid('product'));
 
 watch([selectedOpticalAssets, opticalGridType, opticalPartitionMethod], () => {
   applyDefaultGridLevel('optical');
@@ -3534,17 +3527,16 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="opticalGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="s2" />
-                      <el-option label="经纬度格网" value="tile_matrix" />
-                      <el-option label="平面格网" value="plane_grid" />
+                      <el-option label="GeoHash格网" value="geohash" />
+                      <el-option label="MGRS格网" value="mgrs" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                   <div class="form-group">
                     <label>剖分方式</label>
                     <el-radio-group v-model="opticalPartitionMethod" class="legacy-control partition-method-group">
-                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
-                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                      <el-radio-button label="logical" :disabled="opticalGridType === 'isea4h'">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity" :disabled="opticalGridType !== 'isea4h'">实体剖分</el-radio-button>
                     </el-radio-group>
                   </div>
                 </template>
@@ -3588,17 +3580,16 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="radarGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="s2" />
-                      <el-option label="经纬度格网" value="tile_matrix" />
-                      <el-option label="平面格网" value="plane_grid" />
+                      <el-option label="GeoHash格网" value="geohash" />
+                      <el-option label="MGRS格网" value="mgrs" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                   <div class="form-group">
                     <label>剖分方式</label>
                     <el-radio-group v-model="radarPartitionMethod" class="legacy-control partition-method-group">
-                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
-                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                      <el-radio-button label="logical" :disabled="radarGridType === 'isea4h'">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity" :disabled="radarGridType !== 'isea4h'">实体剖分</el-radio-button>
                     </el-radio-group>
                   </div>
                 </template>
@@ -3623,17 +3614,16 @@ onUnmounted(() => {
                   <div class="form-group">
                     <label>剖分格网</label>
                     <el-select v-model="productGridType" class="legacy-control">
-                      <el-option label="四边形格网" value="s2" />
-                      <el-option label="经纬度格网" value="tile_matrix" />
-                      <el-option label="平面格网" value="plane_grid" />
+                      <el-option label="GeoHash格网" value="geohash" />
+                      <el-option label="MGRS格网" value="mgrs" />
                       <el-option label="六边形格网" value="isea4h" />
                     </el-select>
                   </div>
                   <div class="form-group">
                     <label>剖分方式</label>
                     <el-radio-group v-model="productPartitionMethod" class="legacy-control partition-method-group">
-                      <el-radio-button label="logical">逻辑剖分</el-radio-button>
-                      <el-radio-button label="entity">实体剖分</el-radio-button>
+                      <el-radio-button label="logical" :disabled="productGridType === 'isea4h'">逻辑剖分</el-radio-button>
+                      <el-radio-button label="entity" :disabled="productGridType !== 'isea4h'">实体剖分</el-radio-button>
                     </el-radio-group>
                   </div>
                 </template>
@@ -3705,7 +3695,7 @@ onUnmounted(() => {
               <div v-if="activeModule !== 'quality'" class="map-panel">
                 <div v-if="['optical', 'radar', 'product'].includes(activeModule)" class="panel-header">
                   <div class="map-actions">
-                    <el-input-number v-model="selectedMapGridLevel" :min="1" :max="15" size="small" :disabled="!activeGridLevelManual" />
+                    <el-input-number v-model="selectedMapGridLevel" :min="gridTypeForModule() === 'geohash' ? 1 : 0" :max="gridTypeForModule() === 'mgrs' ? 5 : 15" size="small" :disabled="!activeGridLevelManual" />
                     <el-button size="small" :icon="activeGridLevelManual ? Refresh : EditPen" @click="activeGridLevelManual ? restoreDefaultGridLevel() : confirmGridLevelManualEdit()">
                       {{ activeGridLevelManual ? '恢复默认' : '修改层级' }}
                     </el-button>

@@ -9,6 +9,7 @@ import pytest
 from grid_core.app.engines.isea4h.addressing import cell_count
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
 from grid_core.app.models.grid_address import GridAddress
+from grid_core.app.utils.geometry import bbox_to_polygon
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "isea4h")
 ENGINE = ISEA4HEngine()
@@ -83,12 +84,13 @@ def test_center_returns_two_floats() -> None:
     assert len(center) == 2
 
 
-def test_bbox_valid_range() -> None:
+def test_bbox_valid_range_or_antimeridian_wrap() -> None:
     addr = GridAddress(grid_type="isea4h", grid_level=1, space_code="2")
     bbox = ENGINE.code_to_bbox(addr)
     assert len(bbox) == 4
-    assert bbox[0] <= bbox[2]
     assert bbox[1] <= bbox[3]
+    assert all(-180.0 <= lon <= 180.0 for lon in (bbox[0], bbox[2]))
+    assert not bbox_to_polygon(bbox).is_empty
 
 
 def test_neighbors_returns_grid_addresses() -> None:

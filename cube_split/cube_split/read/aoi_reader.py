@@ -97,7 +97,7 @@ def read_aoi_rgb(
     sdk = CubeEncoderSDK()
     cells = sdk.cover_compact(
         grid_type=grid_type,
-        level=grid_level,
+        requested_grid_level=grid_level,
         cover_mode=cover_mode,
         bbox=bbox,
         crs="EPSG:4326",

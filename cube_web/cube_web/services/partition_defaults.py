@@ -24,9 +24,12 @@ _RESOLUTION_KEYS = (
 
 def normalize_partition_method(partition_method: Any, *, grid_type: str | None = None) -> str:
     method = str(partition_method or "").strip().lower()
-    if method in {"logical", "entity"}:
-        return method
-    return "entity" if str(grid_type or "").lower() == "isea4h" else "logical"
+    expected = "entity" if str(grid_type or "").lower() == "isea4h" else "logical"
+    if method and method not in {"logical", "entity"}:
+        raise ValueError("partition_method must be one of: logical, entity")
+    if method and method != expected:
+        raise ValueError(f"{grid_type} requires partition_method={expected}")
+    return method or expected
 
 
 def default_grid_level_for_grid_type(grid_type: str | None) -> int:
@@ -53,15 +56,11 @@ def default_grid_level_for_resolution(
     method = normalize_partition_method(partition_method, grid_type=grid_type)
     if method == "entity":
         return fallback if fallback is not None else DEFAULT_ENTITY_GRID_LEVEL
+    if str(grid_type or "").lower() == "mgrs":
+        return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
     parsed = _parse_resolution(resolution)
     if parsed is None:
         return fallback if fallback is not None else default_grid_level_for_partition(grid_type, method)
-    if str(grid_type or "").lower() == "isea4h" and method == "logical":
-        if parsed < 10:
-            return 8
-        if parsed <= 30:
-            return 7
-        return 6
     if parsed < 10:
         return 8
     if parsed <= 30:
@@ -101,12 +100,12 @@ def apply_resolution_grid_defaults(
 ) -> dict[str, Any]:
     if data_type == "carbon":
         return payload
-    payload.setdefault("grid_type", "s2")
+    payload.setdefault("grid_type", "geohash")
     grid_level = payload.get("grid_level")
     if grid_level is None or grid_level == "":
         payload["grid_level"] = default_grid_level_from_assets(
             payload.get("selected_assets") if isinstance(payload.get("selected_assets"), list) else [],
-            grid_type=str(payload.get("grid_type") or "s2"),
+            grid_type=str(payload.get("grid_type") or "geohash"),
             partition_method=payload.get("partition_method"),
             fallback=fallback_grid_level,
         )

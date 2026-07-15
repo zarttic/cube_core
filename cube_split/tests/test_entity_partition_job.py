@@ -153,7 +153,7 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_level=0,
+            grid_level=None,
             target_pixels_per_hex_edge=768,
             cover_mode="intersect",
             time_granularity="day",
@@ -202,6 +202,71 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
         assert ds.profile["tiled"] is True
         assert ds.profile["blockxsize"] == 512
         assert ds.profile["blockysize"] == 512
+
+
+def test_entity_partition_preserves_manual_isea4h_root_level(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    _write_tif(input_dir / "demo_scene_blue.tif")
+
+    def fake_grid_tasks(*, assets, grid_type, grid_level, **_kwargs):
+        return [
+            {
+                "scene_id": assets[0].scene_id,
+                "band": assets[0].band,
+                "asset_path": assets[0].path,
+                "grid_type": grid_type,
+                "grid_level": grid_level,
+                "space_code": "root",
+            }
+        ]
+
+    monkeypatch.setattr(entity_partition_job, "build_grid_tasks_driver", fake_grid_tasks)
+    monkeypatch.setattr(entity_partition_job, "_ensure_center_cell_tasks", lambda _assets, tasks, *_args: tasks)
+    monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_thread", lambda **_kwargs: [])
+
+    report = run_entity_partition(
+        SimpleNamespace(
+            input_dir=str(input_dir),
+            manifest_path="",
+            product_family="auto",
+            output_dir=str(tmp_path / "output"),
+            grid_level=0,
+            target_pixels_per_hex_edge=768,
+            cover_mode="intersect",
+            time_granularity="day",
+            max_cells_per_asset=20000,
+            partition_prefix_len=3,
+            partition_backend="thread",
+            ray_address="",
+            ray_parallelism=0,
+            chunk_size=0,
+            asset_storage_backend="local",
+            metadata_backend="none",
+        )
+    )
+
+    assert report["requested_grid_level"] == 0
+    assert report["grid_level"] == 0
+    assert report["inferred_grid_level"] is None
+
+
+@pytest.mark.parametrize("grid_type", ["s2", "tile_matrix"])
+def test_entity_partition_rejects_non_isea4h_grid_types(tmp_path: Path, grid_type: str):
+    with pytest.raises(ValueError, match="grid_type must be isea4h"):
+        run_entity_partition(SimpleNamespace(input_dir=str(tmp_path), output_dir=str(tmp_path / "output"), grid_type=grid_type))
+
+
+def test_entity_partition_cli_uses_none_for_auto_grid_level(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["entity_partition_job", "--input-dir", "input", "--output-dir", "output"])
+    assert entity_partition_job.parse_args().grid_level is None
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["entity_partition_job", "--input-dir", "input", "--output-dir", "output", "--grid-level", "0"],
+    )
+    assert entity_partition_job.parse_args().grid_level == 0
 
 
 def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):

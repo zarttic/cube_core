@@ -13,6 +13,7 @@ from uuid import uuid4
 from cube_split import runtime_config
 
 from cube_web.services.http_errors import HTTPException
+from cube_web.services.partition_defaults import normalize_partition_method
 from cube_web.services.partition_job_store import (
     InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
@@ -22,15 +23,17 @@ from cube_web.services.partition_job_store import (
     get_partition_job_store,
 )
 from cube_web.services.partition_service import PartitionService, PartitionTask
-from cube_web.services.partition_defaults import normalize_partition_method
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 TASK_SYNC_WAIT_SECONDS = 30.0
 RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
-PARTITION_SLOT_GRID_TYPES = ("tile_matrix", "plane_grid", "s2", "isea4h")
-PARTITION_SLOT_METHODS = ("logical", "entity")
+PARTITION_SLOT_MATRIX = (
+    ("geohash", "logical"),
+    ("mgrs", "logical"),
+    ("isea4h", "entity"),
+)
 
 
 class PartitionWorkflowService:
@@ -857,12 +860,13 @@ def _partition_slot_grid_type(payload: dict[str, Any], batch: dict[str, Any]) ->
     if payload_grid_type:
         return payload_grid_type
     batch_grid_type = str((batch.get("normalized_payload") or {}).get("grid_type") or "").strip().lower()
-    return batch_grid_type or "s2"
+    return batch_grid_type or "geohash"
 
 
 def _partition_slot_method(payload: dict[str, Any], batch: dict[str, Any]) -> str:
     grid_type = _partition_slot_grid_type(payload, batch)
-    runner_result = payload.get("runner_result") if isinstance(payload.get("runner_result"), dict) else {}
+    raw_runner_result = payload.get("runner_result")
+    runner_result: dict[str, Any] = raw_runner_result if isinstance(raw_runner_result, dict) else {}
     return normalize_partition_method(
         payload.get("partition_method")
         or runner_result.get("partition_method")
@@ -890,9 +894,8 @@ def _partition_slot_status(attempt_status: str) -> str:
 
 def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, str]:
     grid_labels = {
-        "tile_matrix": "经纬度格网",
-        "plane_grid": "平面格网",
-        "s2": "四边形格网",
+        "geohash": "GeoHash格网",
+        "mgrs": "MGRS格网",
         "isea4h": "六边形格网",
     }
     method_labels = {
@@ -904,19 +907,18 @@ def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, 
 
 def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     slots: dict[tuple[str, str], dict[str, Any]] = {}
-    for grid_type in PARTITION_SLOT_GRID_TYPES:
-        for partition_method in PARTITION_SLOT_METHODS:
-            grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
-            slots[(grid_type, partition_method)] = {
-                "grid_type": grid_type,
-                "grid_label": grid_label,
-                "partition_method": partition_method,
-                "method_label": method_label,
-                "status": "available",
-                "disabled": False,
-                "latest_task_id": None,
-                "finished_at": None,
-            }
+    for grid_type, partition_method in PARTITION_SLOT_MATRIX:
+        grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
+        slots[(grid_type, partition_method)] = {
+            "grid_type": grid_type,
+            "grid_label": grid_label,
+            "partition_method": partition_method,
+            "method_label": method_label,
+            "status": "available",
+            "disabled": False,
+            "latest_task_id": None,
+            "finished_at": None,
+        }
 
     sorted_attempts = sorted(
         [attempt for attempt in attempts if isinstance(attempt, dict)],
@@ -928,8 +930,10 @@ def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, A
         reverse=True,
     )
     for attempt in sorted_attempts:
-        payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
-        runner_result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
+        raw_payload = attempt.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        raw_runner_result = attempt.get("runner_result")
+        runner_result: dict[str, Any] = raw_runner_result if isinstance(raw_runner_result, dict) else {}
         combined_payload = {**payload, "runner_result": runner_result}
         grid_type = _partition_slot_grid_type(combined_payload, batch)
         partition_method = _partition_slot_method(combined_payload, batch)

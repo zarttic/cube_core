@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from grid_core.app.core.enums import GridType as EncoderGridType
+from grid_core.app.models.request import validate_requested_grid_level
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CubeWebModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-GridType = Literal["s2", "mgrs", "tile_matrix", "isea4h"]
+GridType = Literal["geohash", "mgrs", "isea4h"]
 PartitionBackend = Literal["auto", "ray", "thread", "process", "local"]
 
 
@@ -28,7 +30,7 @@ class OpticalAssetSelection(CubeWebModel):
 class PartitionDemoRequest(CubeWebModel):
     partition_method: Literal["logical", "entity"] | None = None
     grid_type: GridType | None = None
-    grid_level: int | None = Field(default=None, ge=1)
+    grid_level: int | None = Field(default=None, ge=0)
     grid_level_mode: Literal["auto", "manual"] | None = None
     target_pixels_per_hex_edge: int | None = Field(default=None, ge=1)
     input_dir: str | None = None
@@ -52,6 +54,12 @@ class PartitionDemoRequest(CubeWebModel):
     quality_rule: Literal["best_quality_wins", "latest_wins"] | None = None
     minio_upload_workers: int | None = Field(default=None, ge=1)
     postgres_batch_size: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_grid_level(self) -> "PartitionDemoRequest":
+        if self.grid_type is not None and self.grid_level is not None:
+            validate_requested_grid_level(EncoderGridType(self.grid_type), self.grid_level)
+        return self
 
 
 class PartitionRequestRecord(CubeWebModel):
@@ -154,9 +162,14 @@ class SpatiotemporalQueryRequest(CubeWebModel):
     quality_flags: list[str] | None = None
     product_type: str = "xco2"
     grid_type: GridType = "isea4h"
-    grid_level: int = Field(default=5, ge=1)
+    grid_level: int = Field(default=5, ge=0)
     cube_version: str = "v1"
     limit: int = Field(default=1000, ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def _validate_grid_level(self) -> "SpatiotemporalQueryRequest":
+        validate_requested_grid_level(EncoderGridType(self.grid_type), self.grid_level)
+        return self
 
 
 class OpticalIngestRequest(CubeWebModel):

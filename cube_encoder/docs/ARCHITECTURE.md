@@ -43,6 +43,7 @@
 - API 和 SDK 共享同一套服务层能力。
 - 引擎实现可替换，但输出模型保持稳定。
 - CRS 默认按 `EPSG:4326` 对外表达，特殊投影细节封装在引擎内部。
+- ISEA4H cover 使用按 resolution 缓存的精确单元空间索引，`intersect` 只保留正面积相交单元，`contain` 只保留被 AOI 完整覆盖的单元；`minimal` 可返回低层级单元。
 - `cover_mode=minimal` 允许返回低于请求层级的格网单元，用于减少复杂边界的冗余覆盖。
 - 请求层级字段统一为 `requested_grid_level`；返回单元保留实际 `grid_level`。拓扑与几何操作以 `GridAddress` 为入参，因为 ISEA4H 的 seqnum 只有连同分辨率才有意义，MGRS 拓扑结果需同时保留标准码与 `topology_code` 两个身份。
 

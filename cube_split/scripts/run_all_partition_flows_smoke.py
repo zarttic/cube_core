@@ -45,11 +45,11 @@ class AcceptanceCase:
 
 ACCEPTANCE_CASES = (
     AcceptanceCase(
-        "optical_s2",
-        "small optical s2 partition",
+        "optical_geohash",
+        "small optical geohash partition",
         "optical",
-        "s2",
-        4,
+        "geohash",
+        5,
         require_quality=True,
         aoi_readback=True,
     ),
@@ -68,18 +68,18 @@ ACCEPTANCE_CASES = (
         1,
     ),
     AcceptanceCase(
-        "radar_s2",
-        "small radar s2 partition",
+        "radar_geohash",
+        "small radar geohash partition",
         "radar",
-        "s2",
-        4,
+        "geohash",
+        5,
     ),
     AcceptanceCase(
-        "product_s2",
-        "product s2 partition",
+        "product_geohash",
+        "product geohash partition",
         "product",
-        "s2",
-        4,
+        "geohash",
+        5,
         require_quality=True,
     ),
     AcceptanceCase(
@@ -95,7 +95,7 @@ ACCEPTANCE_CASES = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run optical, radar, and product partition flows through s2, tile_matrix, and isea4h."
+        description="Run optical, radar, and product partition flows through geohash, mgrs, and isea4h."
     )
     parser.add_argument("--work-dir", default="/tmp/cube_partition_flow_smoke", help="Local smoke input/output root")
     parser.add_argument("--summary-path", default="", help="Output summary JSON path")
@@ -284,12 +284,10 @@ def _runner(data_type: str, mode: str) -> PartitionRunner:
 
 
 def _grid_level(grid_type: str) -> int:
-    if grid_type == "s2":
-        return 4
+    if grid_type == "geohash":
+        return 5
     if grid_type == "mgrs":
         return 2
-    if grid_type == "tile_matrix":
-        return 6
     if grid_type == "isea4h":
         return 1
     raise ValueError(f"Unsupported grid_type: {grid_type}")
@@ -550,15 +548,15 @@ def _aoi_readback_acceptance(
     minio: runtime_config.MinioSettings,
     output_path: Path,
 ) -> dict[str, Any]:
-    source = next((item for item in items if item.get("id") == "optical_s2"), None)
+    source = next((item for item in items if item.get("id") == "optical_geohash"), None)
     if not source or source.get("status") != "pass":
-        return _failed_item("aoi_readback", "AOI readback", "optical_s2 did not pass")
+        return _failed_item("aoi_readback", "AOI readback", "optical_geohash did not pass")
     start = time.perf_counter()
     try:
         from cube_split.read.aoi_reader import read_aoi_rgb
 
         first_row = _first_jsonl_row(str(source.get("rows_path") or ""))
-        _require(bool(first_row), "AOI readback requires optical_s2 index rows")
+        _require(bool(first_row), "AOI readback requires optical_geohash index rows")
         asset = selected_assets["optical"][0]
         band = str(first_row.get("band") or asset.get("band") or asset.get("bands", [""])[0])
         _require(bool(band), "AOI readback requires a band")
@@ -571,8 +569,8 @@ def _aoi_readback_acceptance(
             minio_endpoint=minio.endpoint,
             minio_access_key=minio.access_key,
             minio_secret_key=minio.secret_key,
-            grid_type=str(source.get("grid_type") or "s2"),
-            grid_level=int(source.get("grid_level") or 4),
+            grid_type=str(source.get("grid_type") or "geohash"),
+            grid_level=int(source.get("grid_level") or 5),
             cover_mode="intersect",
             cube_version=str(base_payload["cube_version"]),
         )
@@ -656,7 +654,7 @@ def main() -> None:
         selected_assets=selected_assets,
         base_payload=base_payload,
         minio=minio,
-        output_path=work_dir / "aoi_readback" / "optical_s2_aoi.tif",
+        output_path=work_dir / "aoi_readback" / "optical_geohash_aoi.tif",
     )
     results.append(aoi_item)
     print(json.dumps(aoi_item, ensure_ascii=False))
