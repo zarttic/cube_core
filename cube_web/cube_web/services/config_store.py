@@ -15,17 +15,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "optical": {
             "grid_type": "geohash",
             "grid_level": 5,
-            "grid_level_mode": "auto",
-            "target_pixels_per_hex_edge": 768,
-            "target_crs": "EPSG:4326",
             "cover_mode": "intersect",
             "time_granularity": "day",
             "max_cells_per_asset": 0,
-            "cog_workers": 2,
-            "cog_compress": "LZW",
-            "cog_predictor": 2,
-            "cog_level": 0,
-            "cog_num_threads": "ALL_CPUS",
             "partition_backend": "ray",
             "ray_parallelism": 0,
             "partition_prefix_len": 3,
@@ -188,21 +180,9 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     optical["grid_type"] = _choice(optical.get("grid_type"), {"geohash", "mgrs", "isea4h"}, "grid_type")
     optical["grid_level"] = _int_value(optical.get("grid_level"), "grid_level", minimum=0)
     validate_requested_grid_level(GridType(optical["grid_type"]), optical["grid_level"])
-    optical["grid_level_mode"] = _choice(optical.get("grid_level_mode"), {"auto", "manual"}, "grid_level_mode")
-    optical["target_pixels_per_hex_edge"] = _int_value(
-        optical.get("target_pixels_per_hex_edge"),
-        "target_pixels_per_hex_edge",
-        minimum=1,
-    )
-    optical["target_crs"] = _text_value(optical.get("target_crs"), "target_crs")
     optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
     optical["time_granularity"] = _choice(optical.get("time_granularity"), {"second", "minute", "hour", "day", "month"}, "time_granularity")
     optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=0)
-    optical["cog_workers"] = _int_value(optical.get("cog_workers"), "cog_workers", minimum=0)
-    optical["cog_compress"] = _choice(optical.get("cog_compress"), {"LZW", "DEFLATE", "ZSTD", "NONE"}, "cog_compress")
-    optical["cog_predictor"] = _int_value(optical.get("cog_predictor"), "cog_predictor", minimum=0)
-    optical["cog_level"] = _int_value(optical.get("cog_level"), "cog_level", minimum=0)
-    optical["cog_num_threads"] = _text_value(optical.get("cog_num_threads"), "cog_num_threads")
     optical["partition_backend"] = _choice(optical.get("partition_backend"), {"ray", "thread", "process"}, "partition_backend")
     optical["ray_parallelism"] = _int_value(optical.get("ray_parallelism"), "ray_parallelism", minimum=0)
     optical["partition_prefix_len"] = _int_value(optical.get("partition_prefix_len"), "partition_prefix_len", minimum=1)

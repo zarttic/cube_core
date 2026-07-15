@@ -4,7 +4,8 @@ from importlib import import_module
 
 from fastapi import HTTPException
 
-from cube_web.schemas import PartitionDemoRequest, PartitionRetryRequest, payload_from_model
+from cube_web.schemas import PartitionRetryRequest, payload_from_model
+from cube_web.services.partition_contracts import StrictPartitionRequest
 
 
 def _partition_runners():
@@ -132,7 +133,7 @@ def run_optical_partition_retry(payload: dict | None = None) -> dict:
     return result
 
 
-def partition_carbon_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_carbon_demo(payload: dict | None = None) -> dict:
     try:
         if payload is None:
             return run_carbon_partition_demo()
@@ -141,7 +142,7 @@ def partition_carbon_demo(payload: PartitionDemoRequest | dict | None = None) ->
         raise_http_unless_cancelled(exc)
 
 
-def partition_carbon_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_carbon_test(payload: dict | None = None) -> dict:
     try:
         return run_carbon_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
@@ -155,14 +156,14 @@ def partition_carbon_retry(payload: PartitionRetryRequest | dict | None = None) 
         raise_http_unless_cancelled(exc)
 
 
-def partition_product_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_product_demo(payload: dict | None = None) -> dict:
     try:
         return run_product_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_product_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_product_test(payload: dict | None = None) -> dict:
     try:
         return run_product_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
@@ -176,14 +177,14 @@ def partition_product_retry(payload: PartitionRetryRequest | dict | None = None)
         raise_http_unless_cancelled(exc)
 
 
-def partition_entity_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_entity_demo(payload: dict | None = None) -> dict:
     try:
         return run_entity_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_entity_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_entity_test(payload: dict | None = None) -> dict:
     try:
         return run_entity_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
@@ -197,14 +198,14 @@ def partition_entity_retry(payload: PartitionRetryRequest | dict | None = None) 
         raise_http_unless_cancelled(exc)
 
 
-def partition_radar_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_radar_demo(payload: dict | None = None) -> dict:
     try:
         return run_radar_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_radar_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_radar_test(payload: dict | None = None) -> dict:
     try:
         return run_radar_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
@@ -218,14 +219,14 @@ def partition_radar_retry(payload: PartitionRetryRequest | dict | None = None) -
         raise_http_unless_cancelled(exc)
 
 
-def partition_optical_demo(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_optical_demo(payload: dict | None = None) -> dict:
     try:
         return run_optical_partition_demo(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_optical_test(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_optical_test(payload: dict | None = None) -> dict:
     try:
         return run_optical_partition_test(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
@@ -239,35 +240,35 @@ def partition_optical_retry(payload: PartitionRetryRequest | dict | None = None)
         raise_http_unless_cancelled(exc)
 
 
-def partition_optical_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_optical_run(payload: StrictPartitionRequest | None = None) -> dict:
     try:
         return run_optical_partition_run(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_carbon_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_carbon_run(payload: StrictPartitionRequest | None = None) -> dict:
     try:
         return run_carbon_partition_run(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_product_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_product_run(payload: StrictPartitionRequest | None = None) -> dict:
     try:
         return run_product_partition_run(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_radar_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_radar_run(payload: StrictPartitionRequest | None = None) -> dict:
     try:
         return run_radar_partition_run(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:
         raise_http_unless_cancelled(exc)
 
 
-def partition_entity_run(payload: PartitionDemoRequest | dict | None = None) -> dict:
+def partition_entity_run(payload: StrictPartitionRequest | None = None) -> dict:
     try:
         return run_entity_partition_run(payload_from_model(payload) if payload is not None else None)
     except Exception as exc:

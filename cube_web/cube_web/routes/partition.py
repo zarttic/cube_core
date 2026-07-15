@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 from importlib import import_module
+from typing import Literal
 
-from fastapi import APIRouter, Query
+from cube_split import runtime_config
+from fastapi import APIRouter, HTTPException, Query
 
 from cube_web.schemas import (
     PartitionAssetRetryRequest,
     PartitionBatchRunRequest,
-    PartitionDemoRequest,
     PartitionResult,
     PartitionRetryRequest,
     PartitionSchemaImportRequest,
     PartitionSchemaReconcileRequest,
     PartitionTaskCreateResponse,
     PartitionTaskResponse,
+    StrictPartitionRequest,
     payload_from_model,
 )
+from cube_web.services.partition_contracts import validate_partition_method
+from cube_web.services.partition_dataset_runner import NormalizedPartitionDatasetRunner
+from cube_web.services.partition_domain_store import OpenGaussPartitionDomainStore
 from cube_web.services.partition_service import PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
 
@@ -61,7 +66,11 @@ def create_legacy_partition_service(source_service: PartitionService | None = No
 
 partition_service = create_partition_service()
 legacy_partition_service = create_legacy_partition_service(partition_service)
-partition_workflow_service = PartitionWorkflowService(partition_service)
+partition_workflow_service = PartitionWorkflowService(
+    partition_service,
+    domain_store=OpenGaussPartitionDomainStore(dsn=runtime_config.postgres_dsn()),
+    runner=NormalizedPartitionDatasetRunner(),
+)
 
 
 def create_partition_router(
@@ -83,11 +92,11 @@ def create_partition_router(
         ).to_dict()
 
     @router.post("/{data_type}/demo", response_model=PartitionResult)
-    def partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+    def partition_demo(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.demo(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/run", response_model=PartitionResult)
-    def partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+    def partition_run(data_type: str, payload: dict | None = None) -> dict:
         return workflow_service.run_payload_sync(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/retry", response_model=PartitionResult)
@@ -95,23 +104,30 @@ def create_partition_router(
         return legacy_service.retry(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/test", response_model=PartitionResult)
-    def partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+    def partition_test(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.test(data_type, payload_from_model(payload))
 
     @router.post("/{data_type}/tasks/demo", response_model=PartitionTaskCreateResponse, status_code=202)
-    def submit_partition_demo(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+    def submit_partition_demo(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.submit(data_type, "demo", payload_from_model(payload)).to_dict()
 
     @router.post("/{data_type}/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
-    def submit_partition_run(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
-        return workflow_service.run_payload(data_type, payload_from_model(payload)).to_dict()
+    def submit_partition_run(
+        data_type: Literal["optical", "radar", "product", "carbon"],
+        payload: StrictPartitionRequest,
+    ) -> dict:
+        if {dataset.data_type for dataset in payload.datasets} != {data_type}:
+            raise HTTPException(status_code=422, detail="path data_type must match every dataset data_type")
+        partition_method = validate_partition_method(payload.grid_type, payload.partition_method)
+        request = payload.model_copy(update={"partition_method": partition_method})
+        return workflow_service.submit_strict(data_type, request).to_dict()
 
     @router.post("/{data_type}/tasks/retry", response_model=PartitionTaskCreateResponse, status_code=202)
     def submit_partition_retry(data_type: str, payload: PartitionRetryRequest | None = None) -> dict:
         return legacy_service.submit(data_type, "retry", payload_from_model(payload)).to_dict()
 
     @router.post("/{data_type}/tasks/test", response_model=PartitionTaskCreateResponse, status_code=202)
-    def submit_partition_test(data_type: str, payload: PartitionDemoRequest | None = None) -> dict:
+    def submit_partition_test(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.submit(data_type, "test", payload_from_model(payload)).to_dict()
 
     @router.get("/tasks")

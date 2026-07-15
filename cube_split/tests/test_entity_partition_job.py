@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,18 +12,6 @@ from rasterio.transform import from_origin
 
 import cube_split.jobs.entity_partition_job as entity_partition_job
 from cube_split.jobs.entity_partition_job import run_entity_partition
-
-
-def test_infer_isea4h_level_uses_aperture_four_physical_edge_for_30m_source():
-    asset = entity_partition_job.AssetRecord(
-        scene_id="scene-a",
-        band="b04",
-        path="unused.tif",
-        acq_time="2026-04-21T00:00:00Z",
-        resolution=30.0,
-    )
-
-    assert entity_partition_job.infer_isea4h_level_for_assets([asset]) == 7
 
 
 class _FakeObjectRef:
@@ -98,7 +85,7 @@ def _write_tif(path: Path) -> None:
         dtype=data.dtype,
         crs="EPSG:4326",
         transform=transform,
-        ) as ds:
+    ) as ds:
         ds.write(data)
 
 
@@ -126,11 +113,7 @@ def _write_two_band_tif(path: Path) -> None:
 
 
 def _stub_source_asset_upload(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_upload_source_assets_to_minio(assets, *, prefix, options=None):
-        _ = prefix, options
-        return [replace(asset, path=asset.path) for asset in assets]
-
-    monkeypatch.setattr(entity_partition_job, "upload_source_assets_to_minio", fake_upload_source_assets_to_minio)
+    _ = monkeypatch
 
 
 def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
@@ -153,7 +136,7 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_level=None,
+            grid_level=0,
             target_pixels_per_hex_edge=768,
             cover_mode="intersect",
             time_granularity="day",
@@ -176,8 +159,7 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
     assert report["partition_type"] == "entity"
     assert report["data_type"] == "optical"
     assert report["grid_type"] == "isea4h"
-    assert report["requested_grid_level"] is None
-    assert report["grid_level"] == report["inferred_grid_level"]
+    assert report["grid_level"] == 6
     assert report["rows"] == len(rows)
     assert report["entity_tile_count"] == len(rows) >= 1
     assert (run_dir / "index_rows.jsonl").exists()
@@ -202,71 +184,6 @@ def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
         assert ds.profile["tiled"] is True
         assert ds.profile["blockxsize"] == 512
         assert ds.profile["blockysize"] == 512
-
-
-def test_entity_partition_preserves_manual_isea4h_root_level(monkeypatch, tmp_path: Path):
-    input_dir = tmp_path / "input"
-    input_dir.mkdir()
-    _write_tif(input_dir / "demo_scene_blue.tif")
-
-    def fake_grid_tasks(*, assets, grid_type, grid_level, **_kwargs):
-        return [
-            {
-                "scene_id": assets[0].scene_id,
-                "band": assets[0].band,
-                "asset_path": assets[0].path,
-                "grid_type": grid_type,
-                "grid_level": grid_level,
-                "space_code": "root",
-            }
-        ]
-
-    monkeypatch.setattr(entity_partition_job, "build_grid_tasks_driver", fake_grid_tasks)
-    monkeypatch.setattr(entity_partition_job, "_ensure_center_cell_tasks", lambda _assets, tasks, *_args: tasks)
-    monkeypatch.setattr(entity_partition_job, "_write_entity_tile_chunks_thread", lambda **_kwargs: [])
-
-    report = run_entity_partition(
-        SimpleNamespace(
-            input_dir=str(input_dir),
-            manifest_path="",
-            product_family="auto",
-            output_dir=str(tmp_path / "output"),
-            grid_level=0,
-            target_pixels_per_hex_edge=768,
-            cover_mode="intersect",
-            time_granularity="day",
-            max_cells_per_asset=20000,
-            partition_prefix_len=3,
-            partition_backend="thread",
-            ray_address="",
-            ray_parallelism=0,
-            chunk_size=0,
-            asset_storage_backend="local",
-            metadata_backend="none",
-        )
-    )
-
-    assert report["requested_grid_level"] == 0
-    assert report["grid_level"] == 0
-    assert report["inferred_grid_level"] is None
-
-
-@pytest.mark.parametrize("grid_type", ["s2", "tile_matrix"])
-def test_entity_partition_rejects_non_isea4h_grid_types(tmp_path: Path, grid_type: str):
-    with pytest.raises(ValueError, match="grid_type must be isea4h"):
-        run_entity_partition(SimpleNamespace(input_dir=str(tmp_path), output_dir=str(tmp_path / "output"), grid_type=grid_type))
-
-
-def test_entity_partition_cli_uses_none_for_auto_grid_level(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["entity_partition_job", "--input-dir", "input", "--output-dir", "output"])
-    assert entity_partition_job.parse_args().grid_level is None
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["entity_partition_job", "--input-dir", "input", "--output-dir", "output", "--grid-level", "0"],
-    )
-    assert entity_partition_job.parse_args().grid_level == 0
 
 
 def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
@@ -312,7 +229,7 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     assert rows[0]["asset_path"] != rows[0]["source_asset_path"]
 
 
-def test_entity_writer_uses_isea4h_grid_type_for_output_paths_and_rows(tmp_path: Path):
+def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: Path):
     run_dir = tmp_path / "run"
     source = tmp_path / "source.tif"
     _write_tif(source)
@@ -320,16 +237,16 @@ def test_entity_writer_uses_isea4h_grid_type_for_output_paths_and_rows(tmp_path:
     with rasterio.open(source) as ds:
         min_lon, min_lat, max_lon, max_lat = entity_partition_job._dataset_bounds_wgs84(ds)
     center = [(min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0]
-    cell = sdk.locate(grid_type="isea4h", requested_grid_level=1, point=center)
+    cell = sdk.locate(grid_type="isea4h", requested_grid_level=6, point=center)
     tasks = [
         {
-            "scene_id": "scene-isea4h",
+            "scene_id": "scene-s2",
             "band": "b04",
             "asset_path": str(source),
             "source_asset_path": str(source),
             "acq_time": "2026-04-21T00:00:00Z",
             "grid_type": "isea4h",
-            "grid_level": 1,
+            "grid_level": 6,
             "space_code": cell.space_code,
             "cover_mode": "intersect",
             "cell_min_lon": float(cell.bbox[0]),
@@ -413,11 +330,11 @@ def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_pa
 
 def test_entity_tile_object_key_uses_row_grid_type():
     row = {
-        "scene_id": "scene-isea4h",
+        "scene_id": "scene-s2",
         "band": "b04",
         "acq_time": "2026-04-21T00:00:00Z",
-        "grid_type": "isea4h",
-        "grid_level": 1,
+        "grid_type": "s2",
+        "grid_level": 6,
         "space_code": "abc123",
     }
     args = SimpleNamespace(
@@ -429,7 +346,7 @@ def test_entity_tile_object_key_uses_row_grid_type():
 
     key = entity_partition_job._entity_tile_object_key(row, Path("tile.tif"), args)
 
-    assert "grid=isea4h/" in key
+    assert "grid=s2/" in key
 
 
 def test_entity_tile_upload_options_default_workers():
@@ -530,7 +447,7 @@ def test_entity_auto_parallelism_uses_split_groups_after_prefix_batching(monkeyp
                             "grid_level": task["grid_level"],
                             "space_code": task["space_code"],
                             "space_code_prefix": task["space_code"][:3],
-                            "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:19700101",
+                            "st_code": f"hx:{task['grid_level']}:{task['space_code']}:19700101",
                             "time_bucket": "19700101",
                             "cover_mode": task["cover_mode"],
                             "cell_min_lon": task["cell_min_lon"],
@@ -989,7 +906,7 @@ def test_entity_partition_ray_ingest_disabled_still_uses_minio_tiles(monkeypatch
                             "grid_level": task["grid_level"],
                             "space_code": task["space_code"],
                             "space_code_prefix": task["space_code"][:3],
-                            "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:19700101",
+                            "st_code": f"hx:{task['grid_level']}:{task['space_code']}:19700101",
                             "time_bucket": "19700101",
                             "cover_mode": task["cover_mode"],
                             "cell_min_lon": task["cell_min_lon"],
@@ -1131,7 +1048,7 @@ def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_p
             "grid_level": 6,
             "space_code": "86283082fffffff",
             "space_code_prefix": "862",
-            "st_code": "i4h:6:86283082fffffff:20200801",
+            "st_code": "hx:6:86283082fffffff:20200801",
             "time_bucket": "20200801",
             "entity_tile_uri": "s3://entity-bucket/cube/entity/fake.tif",
             "local_asset_path": str(tmp_path / "fake.tif"),
@@ -1282,9 +1199,9 @@ def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path)
                         "asset_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
                         "source_asset_path": task["asset_path"],
                         "output_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
-                "st_code": f"i4h:1:{task['space_code']}:19700101",
-                "window_col_off": 0,
-                "window_row_off": 0,
+                        "st_code": f"hx:1:{task['space_code']}:19700101",
+                        "window_col_off": 0,
+                        "window_row_off": 0,
                         "window_width": 1,
                         "window_height": 1,
                         "nodata": 0,
@@ -1392,7 +1309,7 @@ def test_entity_partition_passes_data_type_to_manifest_and_writer(monkeypatch, t
                 "grid_level": task["grid_level"],
                 "space_code": task["space_code"],
                 "space_code_prefix": "832",
-                "st_code": "i4h:6:832830fffffffff:1980",
+                "st_code": "hx:6:832830fffffffff:1980",
                 "time_bucket": "1980",
                 "st_time_granularity": "day",
                 "cover_mode": task["cover_mode"],
@@ -1483,7 +1400,7 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
                     "grid_level": 4,
                     "space_code": "842a107ffffffff",
                     "space_code_prefix": "842",
-                    "st_code": "i4h:4:842a107ffffffff:19700101",
+                    "st_code": "hx:4:842a107ffffffff:19700101",
                     "time_bucket": "19700101",
                     "cover_mode": "intersect",
                     "cell_min_lon": 0.0,
@@ -1546,161 +1463,14 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
 
     assert report["execution_engine"] == "ray"
     assert report["partition_backend_used"] == "ray"
-    assert report["ray_parallelism"] == 1
+    assert report["ray_parallelism"] == 2
     assert report["ray_address"] == "10.3.100.182:6379"
-    assert report["ray_init_elapsed_sec"] == 0.25
-    assert report["source_prepare_elapsed_sec"] == 0.2
-    assert report["partition_elapsed_sec"] == 0.3
-    assert report["source_prepare_worker_elapsed_sec"] == 0.4
-    assert report["worker_partition_elapsed_sec"] == 0.5
-    assert captured["parallelism"] == 1
+    assert captured["parallelism"] == 2
     assert captured["ray_address"] == "10.3.100.182:6379"
     assert captured["assets_by_path"] is None
     assert captured["tile_upload_options"]["minio_bucket"] == "entity-bucket"
     assert report["asset_storage_backend"] == "minio"
     assert report["uploaded_tile_count"] == 1
-
-
-def test_entity_ray_worker_reads_source_without_intermediate_cog(monkeypatch, tmp_path: Path):
-    fake_ray = _FakeRay()
-    calls: list[tuple[str, object]] = []
-
-    monkeypatch.setattr(entity_partition_job, "_load_ray", lambda: fake_ray)
-    monkeypatch.setattr(entity_partition_job, "_ray_runtime_env_from_env", lambda: {"env_vars": {}})
-    monkeypatch.setattr(entity_partition_job, "_prepend_sys_paths", lambda paths: None)
-    monkeypatch.setattr(entity_partition_job, "_ray_project_roots", lambda: [str(tmp_path)])
-    monkeypatch.setattr(entity_partition_job, "_ray_actor_options_from_env", lambda: {})
-    def fake_convert_asset_to_cog(*args, **kwargs):
-        raise AssertionError("entity ray worker should not convert source assets to intermediate COG")
-
-    def fake_upload_cog_to_minio(*args, **kwargs):
-        raise AssertionError("entity ray worker should not upload intermediate COG before tile writing")
-
-    def fake_upload_tiles(rows, args):
-        calls.append(("tile_upload_bucket", args.minio_bucket))
-        return {row["asset_path"]: f"s3://{args.minio_bucket}/entity/{Path(row['asset_path']).name}" for row in rows}
-
-    def fake_writer(
-        tasks,
-        run_dir,
-        time_granularity,
-        partition_prefix_len,
-        data_type="optical",
-        source_options=None,
-        timing=None,
-        clip_mode="exact",
-        tile_upload_options=None,
-    ):
-        _ = time_granularity, partition_prefix_len, timing, clip_mode
-        calls.append(("writer_assets", [task["asset_path"] for task in tasks]))
-        calls.append(("source_options", source_options))
-        rows = [
-            {
-                "partition_type": "entity",
-                "data_type": data_type,
-                "scene_id": task["scene_id"],
-                "band": task["band"],
-                "asset_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
-                "source_asset_path": task.get("source_asset_path", task["asset_path"]),
-                "output_path": str((run_dir / f"{task['space_code']}.tif").resolve()),
-                "acq_time": task["acq_time"],
-                "grid_type": "isea4h",
-                "grid_level": task["grid_level"],
-                "space_code": task["space_code"],
-                "space_code_prefix": task["space_code"][:3],
-                "st_code": f"i4h:{task['grid_level']}:{task['space_code']}:20260421",
-                "time_bucket": "20260421",
-                "cover_mode": task["cover_mode"],
-                "cell_min_lon": task["cell_min_lon"],
-                "cell_min_lat": task["cell_min_lat"],
-                "cell_max_lon": task["cell_max_lon"],
-                "cell_max_lat": task["cell_max_lat"],
-                "window_col_off": 0,
-                "window_row_off": 0,
-                "window_width": 1,
-                "window_height": 1,
-                "nodata": 0,
-                "valid_pixel_ratio": 1.0,
-            }
-            for task in tasks
-        ]
-        if tile_upload_options:
-            calls.append(("tile_upload_bucket", tile_upload_options["minio_bucket"]))
-            for row in rows:
-                row["source_asset_path"] = row["source_asset_path"]
-                row["asset_path"] = f"s3://{tile_upload_options['minio_bucket']}/entity/{Path(row['asset_path']).name}"
-                row["output_path"] = row["asset_path"]
-            if timing is not None:
-                timing["entity_tile_upload_count"] = float(len(rows))
-                timing["entity_tile_upload_elapsed_sec"] = 0.0
-        return rows
-
-    monkeypatch.setattr("cube_split.jobs.ray_partition_core.convert_asset_to_cog", fake_convert_asset_to_cog)
-    monkeypatch.setattr("cube_split.jobs.ray_partition_core.upload_cog_to_minio", fake_upload_cog_to_minio)
-    monkeypatch.setattr(entity_partition_job, "_write_entity_tiles", fake_writer)
-    monkeypatch.setattr(entity_partition_job, "_upload_entity_tiles_to_minio", fake_upload_tiles)
-    monkeypatch.setattr(entity_partition_job, "resolve_asset_source_path", lambda source_uri, options=None: source_uri)
-
-    source_path = "/source/scene.tif"
-    task_a = {
-        "scene_id": "scene-a",
-        "band": "b04",
-        "asset_path": source_path,
-        "acq_time": "2026-04-21T00:00:00Z",
-        "grid_type": "isea4h",
-        "grid_level": 1,
-        "space_code": "811ffffffffffff",
-        "cover_mode": "intersect",
-        "cell_min_lon": 0.0,
-        "cell_min_lat": 0.0,
-        "cell_max_lon": 1.0,
-        "cell_max_lat": 1.0,
-    }
-    task_b = {**task_a, "space_code": "812ffffffffffff"}
-
-    (
-        rows,
-        ray_init_elapsed,
-        source_prepare_elapsed,
-        partition_elapsed,
-        source_prepare_worker_elapsed,
-        worker_partition_elapsed,
-        worker_stats,
-    ) = entity_partition_job._write_entity_tile_chunks_ray(
-        task_chunks=[[[task_a]], [[task_b]]],
-        run_dir=tmp_path / "run",
-        time_granularity="day",
-        partition_prefix_len=3,
-        parallelism=1,
-        ray_address="10.3.100.182:6379",
-        data_type="optical",
-        source_options={"endpoint": "10.3.100.179:9000"},
-        tile_upload_options={
-            "minio_bucket": "cube",
-            "minio_endpoint": "10.3.100.179:9000",
-            "minio_access_key": "access",
-            "minio_secret_key": "secret",
-        },
-    )
-
-    assert ray_init_elapsed >= 0
-    assert source_prepare_elapsed >= 0
-    assert partition_elapsed >= 0
-    assert source_prepare_worker_elapsed >= 0
-    assert worker_partition_elapsed >= 0
-    assert worker_stats["entity_tile_upload_count"] == 2
-    assert worker_stats["entity_tile_upload_elapsed_sec"] >= 0
-    assert worker_stats["entity_writer_wall_elapsed_sec"] >= 0
-    assert calls == [
-        ("writer_assets", [source_path, source_path]),
-        ("source_options", None),
-        ("tile_upload_bucket", "cube"),
-    ]
-    assert [row["asset_path"] for row in rows] == ["s3://cube/entity/811ffffffffffff.tif", "s3://cube/entity/812ffffffffffff.tif"]
-    assert [row["source_asset_path"] for row in rows] == [source_path, source_path]
-    assert all("local_asset_path" not in row for row in rows)
-    assert fake_ray.kill_calls == 1
-    assert fake_ray.shutdown_calls == 1
 
 
 def test_entity_ray_prepare_sources_only_actor_assigned_assets(monkeypatch, tmp_path: Path):
@@ -1712,7 +1482,9 @@ def test_entity_ray_prepare_sources_only_actor_assigned_assets(monkeypatch, tmp_
     monkeypatch.setattr(entity_partition_job, "_prepend_sys_paths", lambda paths: None)
     monkeypatch.setattr(entity_partition_job, "_ray_project_roots", lambda: [str(tmp_path)])
     monkeypatch.setattr(entity_partition_job, "_ray_actor_options_from_env", lambda: {})
-    monkeypatch.setattr(entity_partition_job, "_upload_entity_tiles_to_minio", lambda rows, args: {row["asset_path"]: row["asset_path"] for row in rows})
+    monkeypatch.setattr(
+        entity_partition_job, "_upload_entity_tiles_to_minio", lambda rows, args: {row["asset_path"]: row["asset_path"] for row in rows}
+    )
 
     def fake_resolve(source_uri, options=None):
         prepared.append([source_uri])
@@ -1821,22 +1593,24 @@ def test_entity_ray_process_groups_falls_back_to_shared_source_prepare_helper(mo
 
     entity_partition_job._write_entity_tile_chunks_ray(
         task_chunks=[
-            [[
-                {
-                    "scene_id": "scene-a",
-                    "band": "b1",
-                    "asset_path": "s3://cube/source/a.tif",
-                    "acq_time": "2026-04-21T00:00:00Z",
-                    "grid_type": "isea4h",
-                    "grid_level": 1,
-                    "space_code": "811ffffffffffff",
-                    "cover_mode": "intersect",
-                    "cell_min_lon": 0.0,
-                    "cell_min_lat": 0.0,
-                    "cell_max_lon": 1.0,
-                    "cell_max_lat": 1.0,
-                }
-            ]]
+            [
+                [
+                    {
+                        "scene_id": "scene-a",
+                        "band": "b1",
+                        "asset_path": "s3://cube/source/a.tif",
+                        "acq_time": "2026-04-21T00:00:00Z",
+                        "grid_type": "isea4h",
+                        "grid_level": 1,
+                        "space_code": "811ffffffffffff",
+                        "cover_mode": "intersect",
+                        "cell_min_lon": 0.0,
+                        "cell_min_lat": 0.0,
+                        "cell_max_lon": 1.0,
+                        "cell_max_lat": 1.0,
+                    }
+                ]
+            ]
         ],
         run_dir=tmp_path / "run",
         time_granularity="day",

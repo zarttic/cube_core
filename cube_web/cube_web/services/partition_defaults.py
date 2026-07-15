@@ -109,7 +109,6 @@ def apply_resolution_grid_defaults(
             partition_method=payload.get("partition_method"),
             fallback=fallback_grid_level,
         )
-        payload.setdefault("grid_level_mode", "auto")
     return payload
 
 

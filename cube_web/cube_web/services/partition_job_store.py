@@ -1071,6 +1071,11 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_batches_type_status ON partition_batches(data_type, status)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_assets_batch_status ON partition_assets(batch_id, status)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_partition_attempts_batch ON partition_job_attempts(batch_id, created_at DESC)")
+                # M2 keeps scheduling tables intact and installs its versioned
+                # dataset domain only after their FK targets are present.
+                from cube_web.services.partition_domain_schema import apply_schema
+
+                apply_schema(conn)
                 conn.commit()
             self._schema_ensured = True
 
