@@ -10,12 +10,13 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from cube_split import runtime_config
+from grid_core.app.core.enums import GridType, TimeGranularity
+from grid_core.app.models.request import validate_requested_grid_level
 
 from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
 from cube_web.services.partition_defaults import (
     DEFAULT_ISEA4H_GRID_LEVEL,
-    default_grid_level_for_grid_type,
     default_grid_level_for_partition,
     default_grid_level_from_assets,
     normalize_partition_method,
@@ -25,7 +26,7 @@ from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
-PARTITION_GRID_TYPES = {"s2", "mgrs", "tile_matrix", "isea4h", "plane_grid"}
+PARTITION_GRID_TYPES = {"geohash", "mgrs", "isea4h"}
 PARTITION_METHODS = {"logical", "entity"}
 
 
@@ -483,19 +484,19 @@ def _int_payload_value(payload: dict, key: str, default: int) -> int:
         raise ValueError(f"{key} must be an integer") from None
 
 
-def _partition_grid_type(payload: dict) -> str:
-    grid_type = str(payload.get("grid_type") or "s2").lower()
+def _requested_grid_level(payload: dict, grid_type: str, default: int) -> int:
+    grid_level = _int_payload_value(payload, "grid_level", default)
+    return validate_requested_grid_level(GridType(grid_type), grid_level)
+
+
+def _partition_grid_type(payload: dict, *, default: str = "geohash") -> str:
+    grid_type = str(payload.get("grid_type") or default).lower()
     if grid_type not in PARTITION_GRID_TYPES:
-        raise ValueError("grid_type must be one of: s2, mgrs, tile_matrix, isea4h, plane_grid")
+        raise ValueError("grid_type must be one of: geohash, mgrs, isea4h")
     return grid_type
 
 
 def _target_crs_for_grid(payload: dict, grid_type: str, *, explicit_payload: dict | None = None) -> str:
-    explicit = explicit_payload if explicit_payload is not None else payload
-    if grid_type == "plane_grid":
-        if str(explicit.get("target_crs") or "").strip():
-            raise ValueError("plane_grid requires target_crs to be empty so source CRS is preserved")
-        return ""
     return str(payload.get("target_crs") or "EPSG:4326")
 
 
@@ -504,11 +505,12 @@ def _max_cells_per_asset(payload: dict) -> int:
 
 
 def _partition_method(payload: dict | None, *, grid_type: str | None = None) -> str:
-    method = normalize_partition_method((payload or {}).get("partition_method"), grid_type=grid_type)
-    if method not in PARTITION_METHODS:
+    supplied = str((payload or {}).get("partition_method") or "").strip().lower()
+    if supplied and supplied not in PARTITION_METHODS:
         raise ValueError("partition_method must be one of: logical, entity")
-    if str(grid_type or "").lower() == "plane_grid" and method == "entity":
-        raise ValueError("plane_grid is supported for logical partition only")
+    method = normalize_partition_method(None, grid_type=grid_type)
+    if supplied and supplied != method:
+        raise ValueError(f"{grid_type} requires partition_method={method}")
     return method
 
 
@@ -657,6 +659,10 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
 
     raw_payload = payload or {}
+    grid_type = _partition_grid_type(raw_payload, default="isea4h")
+    partition_method = _partition_method(raw_payload, grid_type=grid_type)
+    if grid_type != "isea4h" or partition_method != "entity":
+        raise ValueError("entity partition requires grid_type=isea4h and partition_method=entity")
     if mode == "partition_run":
         _require_run_source(raw_payload, data_type="entity")
     payload = _payload_with_defaults(payload, optical_partition_defaults())
@@ -693,12 +699,6 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         default_manifest = input_dir / "manifest.json"
         manifest_path = default_manifest if default_manifest.exists() else Path("")
 
-    grid_type = _partition_grid_type(raw_payload)
-    partition_method = normalize_partition_method(raw_payload.get("partition_method"), grid_type=grid_type)
-    if not str(raw_payload.get("partition_method") or "").strip():
-        partition_method = "entity"
-    if grid_type == "plane_grid" and partition_method == "entity":
-        raise ValueError("plane_grid is supported for logical partition only")
     default_grid_level = DEFAULT_ENTITY_TEST_GRID_LEVEL if mode == "partition_test_no_ingest" else DEFAULT_ENTITY_GRID_LEVEL
     default_grid_level = default_grid_level_from_assets(
         raw_payload.get("selected_assets") if isinstance(raw_payload.get("selected_assets"), list) else [],
@@ -706,13 +706,13 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         partition_method=partition_method,
         fallback=default_grid_level,
     )
-    grid_level = _int_payload_value(raw_payload, "grid_level", default_grid_level)
-    if grid_level < 0:
-        raise ValueError("grid_level must be greater than or equal to 0")
-    grid_level_mode = str(raw_payload.get("grid_level_mode") or "manual").lower()
+    grid_level = _requested_grid_level(raw_payload, grid_type, default_grid_level)
+    grid_level_mode = str(
+        raw_payload.get("grid_level_mode") or ("manual" if raw_payload.get("grid_level") is not None else "auto")
+    ).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = 0 if grid_level_mode == "auto" else grid_level
+    entity_grid_level = None if grid_level_mode == "auto" else grid_level
 
     args = SimpleNamespace(
         input_dir=str(input_dir),
@@ -778,9 +778,9 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         **report,
     }
     response["data_type"] = "entity"
-    response["partition_method"] = partition_method
+    response["partition_method"] = "entity"
     response["partition_type"] = "entity"
-    response["grid_type"] = str(report.get("grid_type") or grid_type)
+    response["grid_type"] = grid_type
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
         quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
@@ -858,6 +858,9 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     from cube_split.jobs.carbon_partition_job import run_carbon_partition
 
     payload = payload or {}
+    grid_type = _partition_grid_type(payload, default="isea4h")
+    partition_method = _partition_method(payload, grid_type=grid_type)
+    grid_level = _requested_grid_level(payload, grid_type, 5)
     if mode == "partition_run":
         _require_run_source(payload, data_type="carbon")
     sample = repo_root() / "cube_split" / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
@@ -881,9 +884,9 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
     args = SimpleNamespace(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
-        grid_type=str(payload.get("grid_type") or "isea4h"),
-        grid_level=_int_payload_value(payload, "grid_level", 5),
-        time_granularity=str(payload.get("time_granularity") or "day"),
+        grid_type=grid_type,
+        grid_level=grid_level,
+        time_granularity=TimeGranularity(str(payload.get("time_granularity") or "day")).value,
         product_type=str(payload.get("product_type") or "xco2"),
         max_observations=_int_payload_value(payload, "max_observations", 0 if mode == "partition_run" else 1000),
         partition_chunk_size=_int_payload_value(payload, "partition_chunk_size", 250),
@@ -932,8 +935,10 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "quality_counts": quality_counts,
         "elapsed_sec": round(elapsed, 3),
         "rows_per_sec": round(int(result["rows"]) / elapsed, 1) if elapsed > 0 else 0,
-        "grid_type": result["grid_type"],
-        "grid_level": result["grid_level"],
+        "grid_type": grid_type,
+        "grid_level": grid_level,
+        "partition_method": partition_method,
+        "partition_type": partition_method,
         "workers": workers,
         "batch_id": payload.get("batch_id") or "",
         "batch_name": payload.get("batch_name") or "",
@@ -1020,14 +1025,12 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         partition_method=partition_method,
         fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
-    grid_level = _int_payload_value(payload, "grid_level", grid_level_default)
-    if grid_level <= 0:
-        raise ValueError("grid_level must be greater than 0")
-    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level = _requested_grid_level(payload, grid_type, grid_level_default)
+    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
     grid_level_mode = str(payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
+    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
 
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
@@ -1174,14 +1177,12 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         partition_method=partition_method,
         fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
-    grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
-    if grid_level <= 0:
-        raise ValueError("grid_level must be greater than 0")
-    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level = _requested_grid_level(raw_payload, grid_type, grid_level_default)
+    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
     grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
+    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
     partition_backend = str(payload.get("partition_backend") or "thread")
     ray_address = str(
         payload.get("ray_address") or (runtime_config.require_ray_address() if partition_backend in {"auto", "ray"} else "")
@@ -1349,14 +1350,12 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         partition_method=partition_method,
         fallback=grid_level_default,
     )
-    grid_level = _int_payload_value(raw_payload, "grid_level", grid_level_default)
-    if grid_level <= 0:
-        raise ValueError("grid_level must be greater than 0")
-    default_grid_level_mode = "manual" if partition_method == "entity" and grid_type == "isea4h" else "auto"
+    grid_level = _requested_grid_level(raw_payload, grid_type, grid_level_default)
+    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
     grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
     if grid_level_mode not in {"auto", "manual"}:
         raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = 0 if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
+    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
 
     args = SimpleNamespace(
         input_dir=str(run_input_dir),

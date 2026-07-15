@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import cube_split.ingest.carbon_ingest_job as carbon_ingest_job
 from cube_split.ingest.carbon_ingest_job import run_carbon_ingest
-from cube_split.read.carbon_query import _parse_args, summarize_xco2
+from cube_split.read.carbon_query import _parse_args, query_carbon_observations, summarize_xco2
 
 
 def _carbon_row(observation_id: str) -> dict:
@@ -166,3 +166,39 @@ def test_carbon_query_defaults_match_carbon_partition_grid(monkeypatch):
 
     assert args.grid_type == "isea4h"
     assert args.grid_level == 5
+
+
+def test_carbon_query_uses_frozen_sdk_cover_signature(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeSDK:
+        def cover_compact(self, grid_type, requested_grid_level, cover_mode, bbox, crs):
+            calls.append(
+                {
+                    "grid_type": grid_type,
+                    "requested_grid_level": requested_grid_level,
+                    "cover_mode": cover_mode,
+                    "bbox": bbox,
+                    "crs": crs,
+                }
+            )
+            return []
+
+    monkeypatch.setattr("cube_split.read.carbon_query.CubeEncoderSDK", FakeSDK)
+
+    assert query_carbon_observations(
+        bbox=[116.3, 39.8, 116.4, 39.9],
+        time_start="20260424",
+        time_end="20260424",
+        grid_type="geohash",
+        grid_level=5,
+    ) == []
+    assert calls == [
+        {
+            "grid_type": "geohash",
+            "requested_grid_level": 5,
+            "cover_mode": "intersect",
+            "bbox": [116.3, 39.8, 116.4, 39.9],
+            "crs": "EPSG:4326",
+        }
+    ]

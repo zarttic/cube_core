@@ -27,7 +27,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-endpoint", default=minio.endpoint, help="MinIO endpoint host:port")
     parser.add_argument("--minio-access-key", default=minio.access_key, help="MinIO access key")
     parser.add_argument("--minio-secret-key", default=minio.secret_key, help="MinIO secret key")
-    parser.add_argument("--grid-type", default="s2", choices=["s2", "mgrs", "isea4h"])
+    parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs", "isea4h"])
     parser.add_argument("--grid-level", type=int, default=7)
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"])
     parser.add_argument("--cube-version", default="v1")
@@ -81,7 +81,7 @@ def read_aoi_rgb(
     minio_endpoint: str = "",
     minio_access_key: str = "",
     minio_secret_key: str = "",
-    grid_type: str = "s2",
+    grid_type: str = "geohash",
     grid_level: int = 7,
     cover_mode: str = "intersect",
     cube_version: str = "v1",
@@ -97,7 +97,7 @@ def read_aoi_rgb(
     sdk = CubeEncoderSDK()
     cells = sdk.cover_compact(
         grid_type=grid_type,
-        level=grid_level,
+        requested_grid_level=grid_level,
         cover_mode=cover_mode,
         bbox=bbox,
         crs="EPSG:4326",

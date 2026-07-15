@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
-
 TERMINAL_TASK_STATUSES = {"completed", "failed", "manual_required", "cancelled"}
 TERMINAL_BATCH_STATUSES = {"succeeded", "failed", "manual_required", "cancelled", "archived"}
 
@@ -498,14 +497,14 @@ def main() -> int:
 
     success_cases: list[tuple[str, str, dict[str, Any]]] = [
         (
-            "optical_s2_success",
+            "optical_geohash_success",
             "optical",
             _raster_runtime_payload(
                 run_id=run_id,
-                batch_id=f"{run_id}-optical-s2",
+                batch_id=f"{run_id}-optical-geohash",
                 data_type="optical",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="optical_mosaic",
                 dataset=f"{run_id.replace('-', '_')}_optical",
                 time_granularity="day",
@@ -516,14 +515,14 @@ def main() -> int:
             ),
         ),
         (
-            "optical_tile_matrix_success",
+            "optical_mgrs_success",
             "optical",
             _raster_runtime_payload(
                 run_id=run_id,
-                batch_id=f"{run_id}-optical-tile",
+                batch_id=f"{run_id}-optical-mgrs",
                 data_type="optical",
-                grid_type="tile_matrix",
-                grid_level=6,
+                grid_type="mgrs",
+                grid_level=3,
                 sensor="optical_mosaic",
                 dataset=f"{run_id.replace('-', '_')}_optical",
                 time_granularity="day",
@@ -552,14 +551,14 @@ def main() -> int:
             ),
         ),
         (
-            "radar_s2_success",
+            "radar_geohash_success",
             "radar",
             _raster_runtime_payload(
                 run_id=run_id,
-                batch_id=f"{run_id}-radar-s2",
+                batch_id=f"{run_id}-radar-geohash",
                 data_type="radar",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="sentinel1_sar",
                 dataset=f"{run_id.replace('-', '_')}_radar",
                 time_granularity="day",
@@ -570,14 +569,14 @@ def main() -> int:
             ),
         ),
         (
-            "product_s2_success",
+            "product_geohash_success",
             "product",
             _raster_runtime_payload(
                 run_id=run_id,
-                batch_id=f"{run_id}-product-s2",
+                batch_id=f"{run_id}-product-geohash",
                 data_type="product",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="data_product",
                 dataset=f"{run_id.replace('-', '_')}_product",
                 time_granularity="year",
@@ -611,8 +610,8 @@ def main() -> int:
                 run_id=run_id,
                 batch_id=f"{run_id}-optical-missing",
                 data_type="optical",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="optical_mosaic",
                 dataset=f"{run_id.replace('-', '_')}_optical",
                 time_granularity="day",
@@ -629,8 +628,8 @@ def main() -> int:
                 run_id=run_id,
                 batch_id=f"{run_id}-radar-missing",
                 data_type="radar",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="sentinel1_sar",
                 dataset=f"{run_id.replace('-', '_')}_radar",
                 time_granularity="day",
@@ -647,8 +646,8 @@ def main() -> int:
                 run_id=run_id,
                 batch_id=f"{run_id}-product-missing",
                 data_type="product",
-                grid_type="s2",
-                grid_level=4,
+                grid_type="geohash",
+                grid_level=5,
                 sensor="data_product",
                 dataset=f"{run_id.replace('-', '_')}_product",
                 time_granularity="year",

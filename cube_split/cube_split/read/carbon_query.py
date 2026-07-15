@@ -18,7 +18,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--time-end", required=True, help="End time bucket such as 20201231")
     parser.add_argument("--quality-flags", nargs="*", default=None, help="Quality flags to include")
     parser.add_argument("--product-type", default="xco2", help="Product type")
-    parser.add_argument("--grid-type", default="isea4h", choices=["s2", "mgrs", "isea4h"])
+    parser.add_argument("--grid-type", default="isea4h", choices=["geohash", "mgrs", "isea4h"])
     parser.add_argument("--grid-level", type=int, default=5)
     parser.add_argument("--cube-version", default="v1")
     parser.add_argument("--limit", type=int, default=10000)
@@ -61,7 +61,7 @@ def query_carbon_observations(
     sdk = CubeEncoderSDK()
     cells = sdk.cover_compact(
         grid_type=grid_type,
-        level=grid_level,
+        requested_grid_level=grid_level,
         cover_mode="intersect",
         bbox=bbox,
         crs="EPSG:4326",

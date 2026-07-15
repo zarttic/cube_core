@@ -13,8 +13,8 @@ from cube_split import runtime_config
 print(runtime_config.ray_address())
 PY
 )}"
-GRID_TYPE="${GRID_TYPE:-s2}"
-GRID_LEVEL="${GRID_LEVEL:-7}"
+GRID_TYPE="${GRID_TYPE:-geohash}"
+GRID_LEVEL="${GRID_LEVEL:-5}"
 COVER_MODE="${COVER_MODE:-intersect}"
 TIME_GRANULARITY="${TIME_GRANULARITY:-day}"
 RAY_PARALLELISM="${RAY_PARALLELISM:-0}"

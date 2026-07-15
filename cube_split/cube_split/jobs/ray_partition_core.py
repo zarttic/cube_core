@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 import time
-from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -15,9 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import rasterio
-from grid_core.sdk import CubeEncoderSDK
+from grid_core.sdk import CubeEncoderSDK, GridAddress
 from pyproj import Transformer
 from rasterio.enums import Resampling
 from rasterio.shutil import copy as rio_copy
@@ -33,8 +33,7 @@ from cube_split.runtime_config import (
     minio_settings,
 )
 
-PLANE_GRID_TYPE = "plane_grid"
-PLANE_GRID_BASE_CHUNK_LEVEL = 13
+SUPPORTED_GRID_TYPES = frozenset({"geohash", "mgrs", "isea4h"})
 
 
 @dataclass
@@ -738,10 +737,6 @@ def _dataset_bounds_wgs84(ds: rasterio.DatasetReader) -> tuple[float, float, flo
     return b.left, b.bottom, b.right, b.top
 
 
-def _bbox_intersects(a: list[float] | tuple[float, float, float, float], b: list[float] | tuple[float, float, float, float]) -> bool:
-    return float(a[0]) < float(b[2]) and float(a[2]) > float(b[0]) and float(a[1]) < float(b[3]) and float(a[3]) > float(b[1])
-
-
 def _bbox_intersection(
     a: list[float] | tuple[float, float, float, float],
     b: list[float] | tuple[float, float, float, float],
@@ -782,6 +777,7 @@ def _prepare_task_rows_for_partitioning(
         "day": "%Y%m%d",
         "hour": "%Y%m%d%H",
         "minute": "%Y%m%d%H%M",
+        "second": "%Y%m%d%H%M%S",
     }[time_granularity]
 
     task_rows: list[dict] = []
@@ -793,120 +789,10 @@ def _prepare_task_rows_for_partitioning(
     return task_rows
 
 
-def _is_plane_grid(grid_type: str) -> bool:
-    return str(grid_type or "").strip().lower() == PLANE_GRID_TYPE
-
-
-def _plane_grid_chunk_pixels(grid_level: int) -> int:
-    level = int(grid_level)
-    if level < 1:
-        raise ValueError("plane_grid level must be >= 1")
-    return 2 ** max(0, PLANE_GRID_BASE_CHUNK_LEVEL - level)
-
-
-def _plane_grid_crs_token(ds: rasterio.DatasetReader) -> str:
-    if ds.crs is None:
-        raise ValueError("plane_grid requires source assets with a CRS")
-    authority = ds.crs.to_authority()
-    if authority and authority[0] and authority[1]:
-        return f"{authority[0].lower()}{authority[1]}"
-    crs_text = ds.crs.to_string()
-    digest = hashlib.sha1(crs_text.encode("utf-8")).hexdigest()[:12]
-    return f"crs{digest}"
-
-
-def _safe_window_from_offsets(
-    ds: rasterio.DatasetReader,
-    col_off: int,
-    row_off: int,
-    width: int,
-    height: int,
-) -> Optional[Window]:
-    col_off = max(0, int(col_off))
-    row_off = max(0, int(row_off))
-    width = int(min(ds.width - col_off, max(0, int(width))))
-    height = int(min(ds.height - row_off, max(0, int(height))))
-    if width <= 0 or height <= 0:
-        return None
-    return Window(col_off=col_off, row_off=row_off, width=width, height=height)
-
-
-def _plane_grid_cells(ds: rasterio.DatasetReader, grid_level: int) -> list[dict[str, Any]]:
-    chunk_pixels = _plane_grid_chunk_pixels(grid_level)
-    crs_token = _plane_grid_crs_token(ds)
-    crs_text = ds.crs.to_string() if ds.crs is not None else ""
-    cells: list[dict[str, Any]] = []
-
-    for row_index, row_off in enumerate(range(0, ds.height, chunk_pixels)):
-        height = min(chunk_pixels, ds.height - row_off)
-        for col_index, col_off in enumerate(range(0, ds.width, chunk_pixels)):
-            width = min(chunk_pixels, ds.width - col_off)
-            win = Window(col_off=col_off, row_off=row_off, width=width, height=height)
-            left, bottom, right, top = rasterio.windows.bounds(win, ds.transform)
-            min_x, max_x = sorted((float(left), float(right)))
-            min_y, max_y = sorted((float(bottom), float(top)))
-            space_code = f"{crs_token}/{int(grid_level)}/{col_index}/{row_index}"
-            cells.append(
-                {
-                    "grid_level": int(grid_level),
-                    "space_code": space_code,
-                    "cell_crs": crs_text,
-                    "cell_crs_token": crs_token,
-                    "plane_grid_chunk_pixels": int(chunk_pixels),
-                    "plane_grid_col": int(col_index),
-                    "plane_grid_row": int(row_index),
-                    "cell_min_x": min_x,
-                    "cell_min_y": min_y,
-                    "cell_max_x": max_x,
-                    "cell_max_y": max_y,
-                    "cell_min_lon": min_x,
-                    "cell_min_lat": min_y,
-                    "cell_max_lon": max_x,
-                    "cell_max_lat": max_y,
-                    "window_col_off": int(col_off),
-                    "window_row_off": int(row_off),
-                    "window_width": int(width),
-                    "window_height": int(height),
-                }
-            )
-    return cells
-
-
-def _build_plane_grid_tasks_for_asset(asset: AssetRecord, grid_level: int, cover_mode: str) -> list[dict]:
-    with rasterio.open(resolve_asset_source_path(asset.path)) as ds:
-        cells = _plane_grid_cells(ds, grid_level)
-
-    return [
-        {
-            "scene_id": asset.scene_id,
-            "band": asset.band,
-            "asset_path": asset.path,
-            "acq_time": asset.acq_time,
-            "grid_type": PLANE_GRID_TYPE,
-            "grid_level": int(cell["grid_level"]),
-            "space_code": cell["space_code"],
-            "cell_min_lon": cell["cell_min_lon"],
-            "cell_min_lat": cell["cell_min_lat"],
-            "cell_max_lon": cell["cell_max_lon"],
-            "cell_max_lat": cell["cell_max_lat"],
-            "cell_min_x": cell["cell_min_x"],
-            "cell_min_y": cell["cell_min_y"],
-            "cell_max_x": cell["cell_max_x"],
-            "cell_max_y": cell["cell_max_y"],
-            "cell_crs": cell["cell_crs"],
-            "cell_crs_token": cell["cell_crs_token"],
-            "plane_grid_chunk_pixels": cell["plane_grid_chunk_pixels"],
-            "plane_grid_col": cell["plane_grid_col"],
-            "plane_grid_row": cell["plane_grid_row"],
-            "window_col_off": cell["window_col_off"],
-            "window_row_off": cell["window_row_off"],
-            "window_width": cell["window_width"],
-            "window_height": cell["window_height"],
-            "cover_mode": cover_mode,
-            "resolution": asset.resolution,
-        }
-        for cell in cells
-    ]
+def _st_time_granularity(time_granularity: str) -> str:
+    # Product rows retain annual business buckets, while the frozen SDK has no
+    # yearly ST code. Encode the acquisition day in the ST address instead.
+    return "day" if time_granularity == "year" else time_granularity
 
 
 def _cover_codes(
@@ -919,44 +805,23 @@ def _cover_codes(
     max_lon: float,
     max_lat: float,
     bbox_cache: dict[str, list[float]],
-) -> list[tuple[str, int, list[float]]]:
-    def resolve_bbox(code: str) -> list[float]:
-        if code not in bbox_cache:
-            bbox_cache[code] = sdk.code_to_bbox(grid_type=grid_type, code=code)
-        return bbox_cache[code]
-
-    if grid_type == "s2" and grid_level >= 7:
-        coarse_level = max(1, grid_level - 2)
-        coarse_cells = sdk.cover_compact(
-            grid_type=grid_type,
-            level=coarse_level,
-            cover_mode=cover_mode,
-            bbox=[min_lon, min_lat, max_lon, max_lat],
-            crs="EPSG:4326",
-        )
-        target_bbox = [min_lon, min_lat, max_lon, max_lat]
-        seen: set[str] = set()
-        refined: list[tuple[str, int, list[float]]] = []
-        for coarse in coarse_cells:
-            child_codes = sdk.children(grid_type=grid_type, code=coarse.space_code, target_level=grid_level)
-            for code in child_codes:
-                if code in seen:
-                    continue
-                cb = resolve_bbox(code)
-                if not _bbox_intersects(cb, target_bbox):
-                    continue
-                seen.add(code)
-                refined.append((code, grid_level, cb))
-        return refined
-
+) -> list[tuple[GridAddress, list[float]]]:
     cells = sdk.cover_compact(
         grid_type=grid_type,
-        level=grid_level,
+        requested_grid_level=grid_level,
         cover_mode=cover_mode,
         bbox=[min_lon, min_lat, max_lon, max_lat],
         crs="EPSG:4326",
     )
-    return [(cell.space_code, int(cell.level), cell.bbox) for cell in cells]
+    covered: list[tuple[GridAddress, list[float]]] = []
+    for cell in cells:
+        cache_key = cell.topology_code or f"{cell.grid_type}:{cell.grid_level}:{cell.space_code}"
+        bbox = bbox_cache.get(cache_key)
+        if bbox is None:
+            bbox = sdk.code_to_bbox(address=cell)
+            bbox_cache[cache_key] = bbox
+        covered.append((cell, bbox))
+    return covered
 
 
 def build_grid_tasks_driver(
@@ -967,21 +832,12 @@ def build_grid_tasks_driver(
     max_cells_per_asset: int,
 ) -> list[dict]:
     grid_type = str(grid_type or "").strip().lower()
-    if _is_plane_grid(grid_type):
-        tasks: list[dict] = []
-        for asset in assets:
-            asset_tasks = _build_plane_grid_tasks_for_asset(asset, grid_level, cover_mode)
-            if max_cells_per_asset > 0 and len(asset_tasks) > max_cells_per_asset:
-                raise RuntimeError(
-                    "Cover cells exceed max limit for asset %s: %d > %d"
-                    % (asset.path, len(asset_tasks), max_cells_per_asset)
-                )
-            tasks.extend(asset_tasks)
-        return tasks
+    if grid_type not in SUPPORTED_GRID_TYPES:
+        raise ValueError(f"Unsupported production grid_type: {grid_type}")
 
     sdk = CubeEncoderSDK()
     bbox_cache: dict[str, list[float]] = {}
-    scene_cover_cache: dict[tuple[str, float, float, float, float], list[tuple[str, int, list[float]]]] = {}
+    scene_cover_cache: dict[tuple[str, float, float, float, float], list[tuple[GridAddress, list[float]]]] = {}
     tasks: list[dict] = []
 
     for asset in assets:
@@ -1013,7 +869,7 @@ def build_grid_tasks_driver(
                 % (asset.path, len(cells), max_cells_per_asset)
             )
 
-        for space_code, level, cb in cells:
+        for cell, cb in cells:
             tasks.append(
                 {
                     "scene_id": asset.scene_id,
@@ -1021,8 +877,9 @@ def build_grid_tasks_driver(
                     "asset_path": asset.path,
                     "acq_time": asset.acq_time,
                     "grid_type": grid_type,
-                    "grid_level": int(level),
-                    "space_code": space_code,
+                    "grid_level": int(cell.grid_level),
+                    "space_code": cell.space_code,
+                    "topology_code": cell.topology_code,
                     "cell_min_lon": float(cb[0]),
                     "cell_min_lat": float(cb[1]),
                     "cell_max_lon": float(cb[2]),
@@ -1076,28 +933,6 @@ def _safe_window_from_bounds(ds: rasterio.DatasetReader, left: float, bottom: fl
     return Window(col_off=col_off, row_off=row_off, width=width, height=height)
 
 
-def _window_bounds_xy(ds: rasterio.DatasetReader, win: Window) -> tuple[float, float, float, float]:
-    left, bottom, right, top = rasterio.windows.bounds(win, ds.transform)
-    min_x, max_x = sorted((float(left), float(right)))
-    min_y, max_y = sorted((float(bottom), float(top)))
-    return min_x, min_y, max_x, max_y
-
-
-def _plane_grid_window_from_row(ds: rasterio.DatasetReader, row: Any) -> Optional[Window]:
-    col_off = getattr(row, "window_col_off", None)
-    row_off = getattr(row, "window_row_off", None)
-    width = getattr(row, "window_width", None)
-    height = getattr(row, "window_height", None)
-    if None not in (col_off, row_off, width, height):
-        return _safe_window_from_offsets(ds, int(col_off), int(row_off), int(width), int(height))
-
-    min_x = float(getattr(row, "cell_min_x", getattr(row, "cell_min_lon")))
-    min_y = float(getattr(row, "cell_min_y", getattr(row, "cell_min_lat")))
-    max_x = float(getattr(row, "cell_max_x", getattr(row, "cell_max_lon")))
-    max_y = float(getattr(row, "cell_max_y", getattr(row, "cell_max_lat")))
-    return _safe_window_from_bounds(ds, min_x, min_y, max_x, max_y)
-
-
 def process_partition(rows: Iterator[Any], time_granularity: str, include_sample_mean: bool = True) -> Iterator[dict]:
     sdk = CubeEncoderSDK()
     st_cache: dict[str, str] = {}
@@ -1121,78 +956,29 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
             assert open_ds is not None
 
             acq_dt = datetime.fromisoformat(row.acq_time.replace("Z", "+00:00"))
-            st_key = "%s|%d|%s|%s|%s" % (
+            st_key = "%s|%d|%s|%s|%s|%s" % (
                 row.grid_type,
                 row.grid_level,
                 row.space_code,
+                getattr(row, "topology_code", None),
                 row.acq_time,
                 time_granularity,
             )
             if st_key in st_cache:
                 st_code = st_cache[st_key]
             else:
-                st_code = sdk.generate_st_code(
+                address = GridAddress(
                     grid_type=row.grid_type,
-                    level=row.grid_level,
+                    grid_level=int(row.grid_level),
                     space_code=row.space_code,
+                    topology_code=getattr(row, "topology_code", None),
+                )
+                st_code = sdk.generate_st_code(
+                    address=address,
                     timestamp=acq_dt,
-                    time_granularity=time_granularity,
+                    time_granularity=_st_time_granularity(time_granularity),
                 ).st_code
                 st_cache[st_key] = st_code
-
-            if _is_plane_grid(row.grid_type):
-                win = _plane_grid_window_from_row(open_ds, row)
-                if win is None:
-                    continue
-                min_x, min_y, max_x, max_y = _window_bounds_xy(open_ds, win)
-
-                sample_mean = None
-                if include_sample_mean:
-                    band1 = open_ds.read(1, window=win, masked=True)
-                    if band1.size > 0 and band1.count() > 0:
-                        sample_mean = float(band1.mean())
-
-                cell_crs = str(getattr(row, "cell_crs", "") or (open_ds.crs.to_string() if open_ds.crs else ""))
-                yield {
-                    "scene_id": row.scene_id,
-                    "band": row.band,
-                    "asset_path": row.asset_path,
-                    "acq_time": row.acq_time,
-                    "grid_type": row.grid_type,
-                    "grid_level": int(row.grid_level),
-                    "space_code": row.space_code,
-                    "space_code_prefix": getattr(row, "space_code_prefix", str(row.space_code)[:3]),
-                    "st_code": st_code,
-                    "time_bucket": row.time_bucket,
-                    "cover_mode": row.cover_mode,
-                    "cell_min_lon": float(getattr(row, "cell_min_lon", min_x)),
-                    "cell_min_lat": float(getattr(row, "cell_min_lat", min_y)),
-                    "cell_max_lon": float(getattr(row, "cell_max_lon", max_x)),
-                    "cell_max_lat": float(getattr(row, "cell_max_lat", max_y)),
-                    "cell_min_x": float(getattr(row, "cell_min_x", min_x)),
-                    "cell_min_y": float(getattr(row, "cell_min_y", min_y)),
-                    "cell_max_x": float(getattr(row, "cell_max_x", max_x)),
-                    "cell_max_y": float(getattr(row, "cell_max_y", max_y)),
-                    "cell_crs": cell_crs,
-                    "cell_crs_token": str(getattr(row, "cell_crs_token", "") or ""),
-                    "plane_grid_chunk_pixels": int(getattr(row, "plane_grid_chunk_pixels", 0) or 0),
-                    "plane_grid_col": int(getattr(row, "plane_grid_col", 0) or 0),
-                    "plane_grid_row": int(getattr(row, "plane_grid_row", 0) or 0),
-                    "window_col_off": int(win.col_off),
-                    "window_row_off": int(win.row_off),
-                    "window_width": int(win.width),
-                    "window_height": int(win.height),
-                    "intersect_min_lon": float(min_x),
-                    "intersect_min_lat": float(min_y),
-                    "intersect_max_lon": float(max_x),
-                    "intersect_max_lat": float(max_y),
-                    "intersect_min_x": float(min_x),
-                    "intersect_min_y": float(min_y),
-                    "intersect_max_x": float(max_x),
-                    "intersect_max_y": float(max_y),
-                    "sample_mean_band1": sample_mean,
-                }
-                continue
 
             if ds_bounds_wgs84 is None:
                 ds_bounds_wgs84 = _dataset_bounds_wgs84(open_ds)
@@ -1236,6 +1022,7 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 "grid_type": row.grid_type,
                 "grid_level": int(row.grid_level),
                 "space_code": row.space_code,
+                "topology_code": getattr(row, "topology_code", None),
                 "space_code_prefix": row.space_code_prefix,
                 "st_code": st_code,
                 "time_bucket": row.time_bucket,

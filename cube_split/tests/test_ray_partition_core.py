@@ -46,13 +46,13 @@ def _write_tif(path: Path) -> None:
 
 def _write_projected_tif(path: Path) -> None:
     transform = from_origin(500000.0, 4100000.0, 10.0, 10.0)
-    data = np.arange(64, dtype=np.uint8).reshape((1, 8, 8))
+    data = np.ones((1, 12, 12), dtype=np.uint8)
     with rasterio.open(
         path,
         "w",
         driver="GTiff",
-        width=8,
-        height=8,
+        width=12,
+        height=12,
         count=1,
         dtype=data.dtype,
         crs="EPSG:32650",
@@ -75,7 +75,11 @@ def test_build_manifest_supports_landsat_collection_filenames(tmp_path: Path):
     assert records[0].sensor == "landsat9_oli_tirs"
 
 
-def test_build_grid_tasks_driver_supports_tile_matrix_with_asset_bbox():
+@pytest.mark.parametrize(
+    ("grid_type", "grid_level"),
+    [("geohash", 6), ("mgrs", 1), ("isea4h", 2)],
+)
+def test_build_grid_tasks_driver_uses_supported_sdk_grid_types(grid_type: str, grid_level: int):
     tasks = build_grid_tasks_driver(
         assets=[
             AssetRecord(
@@ -86,21 +90,101 @@ def test_build_grid_tasks_driver_supports_tile_matrix_with_asset_bbox():
                 bbox=[116.38, 39.90, 116.40, 39.91],
             )
         ],
-        grid_type="tile_matrix",
-        grid_level=8,
+        grid_type=grid_type,
+        grid_level=grid_level,
         cover_mode="intersect",
         max_cells_per_asset=20000,
     )
 
     assert len(tasks) > 0
-    assert {task["grid_type"] for task in tasks} == {"tile_matrix"}
-    assert all(task["space_code"].count("/") == 2 for task in tasks)
+    assert {task["grid_type"] for task in tasks} == {grid_type}
+    assert {task["grid_level"] for task in tasks} == {grid_level}
+    assert all("topology_code" in task for task in tasks)
+    if grid_type == "mgrs":
+        assert all(task["topology_code"] for task in tasks)
+    else:
+        assert all(task["topology_code"] is None for task in tasks)
 
 
-def test_plane_grid_uses_source_crs_windows_for_projected_raster(tmp_path: Path):
+@pytest.mark.parametrize("grid_type", ["s2", "plane_grid", "tile_matrix"])
+def test_build_grid_tasks_driver_rejects_non_production_grid_types(grid_type: str):
+    with pytest.raises(ValueError, match="Unsupported production grid_type"):
+        build_grid_tasks_driver(
+            assets=[
+                AssetRecord(
+                    scene_id="scene",
+                    band="b1",
+                    path="/tmp/scene.tif",
+                    acq_time="2026-03-09T00:00:00Z",
+                    bbox=[116.38, 39.90, 116.40, 39.91],
+                )
+            ],
+            grid_type=grid_type,
+            grid_level=1,
+            cover_mode="intersect",
+            max_cells_per_asset=0,
+        )
+
+
+def test_logical_partition_uses_sdk_address_for_mgrs_st_code(tmp_path: Path):
+    source = tmp_path / "scene.tif"
+    _write_tif(source)
+    tasks = build_grid_tasks_driver(
+        assets=[
+            AssetRecord(
+                scene_id="scene",
+                band="b1",
+                path=str(source),
+                acq_time="2026-03-09T00:00:00Z",
+                bbox=[116.0, 39.92, 116.08, 40.0],
+            )
+        ],
+        grid_type="mgrs",
+        grid_level=1,
+        cover_mode="intersect",
+        max_cells_per_asset=20000,
+    )
+
+    task_rows = _prepare_task_rows_for_partitioning(tasks, partition_prefix_len=8, time_granularity="day")
+    rows = _process_local_task_group(task_rows, "day", include_sample_mean=True)
+
+    assert rows
+    assert all(row["grid_type"] == "mgrs" for row in rows)
+    assert all(row["topology_code"] for row in rows)
+    assert all(row["st_code"].startswith("mgrs:1:") for row in rows)
+    assert all(row["window_width"] > 0 and row["window_height"] > 0 for row in rows)
+
+
+def test_logical_partition_encodes_annual_buckets_with_day_st_codes(tmp_path: Path):
+    source = tmp_path / "product_2026.tif"
+    _write_tif(source)
+    tasks = build_grid_tasks_driver(
+        assets=[
+            AssetRecord(
+                scene_id="product_2026",
+                band="product_value",
+                path=str(source),
+                acq_time="2026-03-09T00:00:00Z",
+                bbox=[116.0, 39.92, 116.08, 40.0],
+            )
+        ],
+        grid_type="geohash",
+        grid_level=5,
+        cover_mode="intersect",
+        max_cells_per_asset=20000,
+    )
+
+    task_rows = _prepare_task_rows_for_partitioning(tasks, partition_prefix_len=5, time_granularity="year")
+    rows = _process_local_task_group(task_rows, "year", include_sample_mean=False)
+
+    assert rows
+    assert all(row["time_bucket"] == "2026" for row in rows)
+    assert all(row["st_code"].endswith(":20260309") for row in rows)
+
+
+def test_logical_partition_bounds_mgrs_windows_for_projected_raster(tmp_path: Path):
     source = tmp_path / "projected.tif"
     _write_projected_tif(source)
-
     tasks = build_grid_tasks_driver(
         assets=[
             AssetRecord(
@@ -110,41 +194,21 @@ def test_plane_grid_uses_source_crs_windows_for_projected_raster(tmp_path: Path)
                 acq_time="2026-03-09T00:00:00Z",
             )
         ],
-        grid_type="plane_grid",
-        grid_level=11,
+        grid_type="mgrs",
+        grid_level=3,
         cover_mode="intersect",
-        max_cells_per_asset=0,
+        max_cells_per_asset=20000,
     )
 
-    assert len(tasks) == 4
-    first = tasks[0]
-    assert first["space_code"] == "epsg32650/11/0/0"
-    assert first["window_col_off"] == 0
-    assert first["window_row_off"] == 0
-    assert first["window_width"] == 4
-    assert first["window_height"] == 4
-    assert first["cell_crs"] == "EPSG:32650"
-    assert first["cell_min_x"] == 500000.0
-    assert first["cell_max_x"] == 500040.0
-    assert first["cell_min_y"] == 4099960.0
-    assert first["cell_max_y"] == 4100000.0
+    task_rows = _prepare_task_rows_for_partitioning(tasks, partition_prefix_len=8, time_granularity="day")
+    rows = _process_local_task_group(task_rows, "day", include_sample_mean=False)
 
-    task_rows = _prepare_task_rows_for_partitioning(tasks[:1], partition_prefix_len=8, time_granularity="day")
-    rows = _process_local_task_group(task_rows, "day", include_sample_mean=True)
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["grid_type"] == "plane_grid"
-    assert row["st_code"] == "pg:11:epsg32650/11/0/0:20260309"
-    assert row["window_col_off"] == 0
-    assert row["window_row_off"] == 0
-    assert row["window_width"] == 4
-    assert row["window_height"] == 4
-    assert row["intersect_min_x"] == 500000.0
-    assert row["intersect_max_x"] == 500040.0
-    assert row["intersect_min_y"] == 4099960.0
-    assert row["intersect_max_y"] == 4100000.0
-    assert row["sample_mean_band1"] == float(np.arange(64, dtype=np.uint8).reshape((8, 8))[:4, :4].mean())
+    assert rows
+    assert all(row["grid_type"] == "mgrs" for row in rows)
+    assert all(row["window_col_off"] >= 0 and row["window_row_off"] >= 0 for row in rows)
+    assert all(0 < row["window_width"] <= 12 and 0 < row["window_height"] <= 12 for row in rows)
+    assert all(row["window_col_off"] + row["window_width"] <= 12 for row in rows)
+    assert all(row["window_row_off"] + row["window_height"] <= 12 for row in rows)
 
 
 def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):
@@ -358,7 +422,7 @@ def test_upload_source_assets_to_minio_skips_existing_s3_assets(tmp_path: Path, 
     records = upload_source_assets_to_minio(
         [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
         prefix="cube/source",
-        options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+        options={"endpoint": "minio.test:9000", "access_key": "test-access", "secret_key": "test-secret", "bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
     )
 
     assert uploaded == []
@@ -400,7 +464,7 @@ def test_upload_source_assets_to_minio_reuploads_when_local_identity_changes(tmp
     records = upload_source_assets_to_minio(
         [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
         prefix="cube/source",
-        options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+        options={"endpoint": "minio.test:9000", "access_key": "test-access", "secret_key": "test-secret", "bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
     )
 
     assert uploaded
@@ -489,7 +553,7 @@ def test_upload_source_assets_to_minio_raises_on_non_missing_stat_errors(tmp_pat
         upload_source_assets_to_minio(
             [AssetRecord(scene_id="scene", band="b04", path=str(source), acq_time="2026-04-21T00:00:00Z")],
             prefix="cube/source",
-            options={"bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
+                options={"endpoint": "minio.test:9000", "access_key": "test-access", "secret_key": "test-secret", "bucket": "cube", "dataset": "demo", "sensor": "optical", "asset_version": "v1"},
         )
 
 

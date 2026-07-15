@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from cube_split.partition.carbon import (
     _partition_source_slice_chunk,
     _plan_oco2_lite_source_slices,
     _ray_runtime_env_from_env,
+    _time_bucket,
     load_oco2_lite_observations,
     partition_observation,
 )
@@ -97,11 +99,19 @@ def test_carbon_observation_partition_outputs_observation_fact():
     assert row["grid_type"] == "isea4h"
     assert row["grid_level"] == 5
     assert row["space_code"]
-    assert row["st_code"].startswith("hx:5:")
+    assert row["st_code"].startswith("i4h:5:")
     assert row["footprint_geojson"]["type"] == "Polygon"
     assert row["source_uri"] == "s3://bucket/oco2.nc4"
     assert row["source_index"] == 7
     assert json.loads(row["metadata_json"]) == {"orbit": 42}
+
+
+def test_carbon_time_bucket_matches_frozen_sdk_granularities():
+    value = "2026-04-24T03:04:05Z"
+
+    assert _time_bucket(value, "second") == "20260424030405"
+    with pytest.raises(ValueError, match="Unsupported time_granularity: year"):
+        _time_bucket(value, "year")
 
 
 def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
@@ -129,7 +139,7 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="s2", grid_level=7),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7),
         workers=1,
     )
 
@@ -168,7 +178,7 @@ def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="s2",
+            grid_type="isea4h",
             grid_level=7,
             selected_source_indexes=(1, 3),
         ),
@@ -212,7 +222,7 @@ def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="s2", grid_level=7),
+        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="isea4h", grid_level=7),
         workers=1,
     )
 
@@ -271,18 +281,18 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
     thread_ids: set[int] = set()
 
     class FakeSDK:
-        def batch_locate_st_codes(self, **kwargs):
+        def locate(self, **kwargs):
             thread_ids.add(threading.get_ident())
             time.sleep(0.02)
-            return [
-                {
-                    "grid_level": kwargs["level"],
-                    "space_code": item["point"][0],
-                    "st_code": f"s2:7:{item['point'][0]}:20260424",
-                    "time_code": "20260424",
-                }
-                for item in kwargs["items"]
-            ]
+            return SimpleNamespace(
+                grid_type="isea4h",
+                grid_level=kwargs["requested_grid_level"],
+                space_code=str(kwargs["point"][0]),
+                topology_code=None,
+            )
+
+        def generate_st_code(self, *, address, **_kwargs):
+            return SimpleNamespace(st_code=f"i4h:{address.grid_level}:{address.space_code}:20260424")
 
     monkeypatch.setattr("cube_split.partition.carbon.CubeEncoderSDK", FakeSDK)
 
@@ -290,7 +300,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="s2",
+            grid_type="isea4h",
             grid_level=7,
             partition_chunk_size=1,
             partition_backend="thread",
@@ -326,7 +336,7 @@ def test_carbon_service_applies_max_observations_across_whole_run(tmp_path: Path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, max_observations=4),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, max_observations=4),
         workers=1,
     )
 
@@ -357,18 +367,18 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
     thread_ids: set[int] = set()
 
     class FakeSDK:
-        def batch_locate_st_codes(self, **kwargs):
+        def locate(self, **kwargs):
             thread_ids.add(threading.get_ident())
             time.sleep(0.02)
-            return [
-                {
-                    "grid_level": kwargs["level"],
-                    "space_code": item["point"][0],
-                    "st_code": f"s2:7:{item['point'][0]}:20260424",
-                    "time_code": "20260424",
-                }
-                for item in kwargs["items"]
-            ]
+            return SimpleNamespace(
+                grid_type="isea4h",
+                grid_level=kwargs["requested_grid_level"],
+                space_code=str(kwargs["point"][0]),
+                topology_code=None,
+            )
+
+        def generate_st_code(self, *, address, **_kwargs):
+            return SimpleNamespace(st_code=f"i4h:{address.grid_level}:{address.space_code}:20260424")
 
     monkeypatch.setattr("cube_split.partition.carbon.CubeEncoderSDK", FakeSDK)
 
@@ -376,7 +386,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
         input_dir=input_dir,
         output_dir=output_dir,
         config=CarbonPartitionConfig(
-            grid_type="s2",
+            grid_type="isea4h",
             grid_level=7,
             partition_chunk_size=1,
             partition_backend="thread",
@@ -428,7 +438,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, partition_chunk_size=1),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, partition_chunk_size=1),
         workers=4,
     )
 
@@ -436,26 +446,29 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     assert len(load_thread_ids) > 1
 
 
-def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
+def test_carbon_partition_chunk_uses_frozen_sdk_address_calls(monkeypatch):
     calls: list[dict] = []
+    generated: list[tuple[object, object, object]] = []
 
     class FakeSDK:
-        def batch_locate_st_codes(self, **kwargs):
-            calls.append(kwargs)
-            return [
+        def locate(self, grid_type, requested_grid_level, point):
+            calls.append(
                 {
-                    "grid_level": kwargs["level"],
-                    "space_code": "cell-a",
-                    "st_code": "s2:7:cell-a:20260424",
-                    "time_code": "20260424",
-                },
-                {
-                    "grid_level": kwargs["level"],
-                    "space_code": "cell-b",
-                    "st_code": "s2:7:cell-b:20260424",
-                    "time_code": "20260424",
-                },
-            ]
+                    "grid_type": grid_type,
+                    "requested_grid_level": requested_grid_level,
+                    "point": point,
+                }
+            )
+            return SimpleNamespace(
+                grid_type="isea4h",
+                grid_level=requested_grid_level,
+                space_code=f"cell-{len(calls)}",
+                topology_code=None,
+            )
+
+        def generate_st_code(self, address, timestamp, time_granularity):
+            generated.append((address, timestamp, time_granularity))
+            return SimpleNamespace(st_code=f"i4h:{address.grid_level}:{address.space_code}:20260424")
 
     monkeypatch.setattr("cube_split.partition.carbon.CubeEncoderSDK", FakeSDK)
     observations = [
@@ -479,51 +492,14 @@ def test_carbon_partition_chunk_uses_sdk_batch_locate_st_codes(monkeypatch):
 
     rows = _partition_observation_chunk(
         observations,
-        CarbonPartitionConfig(grid_type="s2", grid_level=7),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=7),
     )
 
-    assert [row["space_code"] for row in rows] == ["cell-a", "cell-b"]
-    assert calls[0]["items"][0]["point"] == [116.391, 39.907]
-    assert calls[0]["items"][1]["point"] == [116.392, 39.908]
-
-
-def test_carbon_partition_chunk_rejects_mismatched_batch_locate_results(monkeypatch):
-    class FakeSDK:
-        def batch_locate_st_codes(self, **kwargs):
-            return [
-                {
-                    "grid_level": kwargs["level"],
-                    "space_code": "cell-a",
-                    "st_code": "s2:7:cell-a:20260424",
-                    "time_code": "20260424",
-                }
-            ]
-
-    monkeypatch.setattr("cube_split.partition.carbon.CubeEncoderSDK", FakeSDK)
-    observations = [
-        CarbonSatelliteObservation(
-            satellite="OCO2",
-            observation_id="snd-a",
-            acq_time="2026-04-24T00:00:00Z",
-            lon=116.391,
-            lat=39.907,
-            xco2=420.5,
-        ),
-        CarbonSatelliteObservation(
-            satellite="OCO2",
-            observation_id="snd-b",
-            acq_time="2026-04-24T00:00:00Z",
-            lon=116.392,
-            lat=39.908,
-            xco2=421.5,
-        ),
-    ]
-
-    with pytest.raises(RuntimeError, match="1 cells for 2 carbon observations"):
-        _partition_observation_chunk(
-            observations,
-            CarbonPartitionConfig(grid_type="s2", grid_level=7),
-        )
+    assert [row["space_code"] for row in rows] == ["cell-1", "cell-2"]
+    assert calls[0]["point"] == [116.391, 39.907]
+    assert calls[1]["point"] == [116.392, 39.908]
+    assert [call[0].space_code for call in generated] == ["cell-1", "cell-2"]
+    assert [call[2] for call in generated] == ["day", "day"]
 
 
 def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
@@ -566,7 +542,7 @@ def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
         ],
     ]
 
-    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="s2", grid_level=7), worker_count=2)
+    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="isea4h", grid_level=7), worker_count=2)
 
     assert len(rows) == 2
     assert executor_calls == [2]
@@ -893,7 +869,7 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
                 "grid_type": config.grid_type,
                 "grid_level": config.grid_level,
                 "space_code": "cell-a",
-                "st_code": "hx:5:cell-a:20260424",
+                "st_code": "i4h:5:cell-a:20260424",
                 "source_uri": "s3://cube/cube/source/carbon/oco2.nc4",
             }
         ],
@@ -951,7 +927,7 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
                 "grid_type": config.grid_type,
                 "grid_level": config.grid_level,
                 "space_code": "cell-a",
-                "st_code": "hx:5:cell-a:20260424",
+                "st_code": "i4h:5:cell-a:20260424",
                 "source_uri": chunks[0][0].source_uri,
             }
         ],
@@ -1124,7 +1100,7 @@ def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=sample_path.parent,
         output_dir=tmp_path / "out",
-        config=CarbonPartitionConfig(grid_type="s2", grid_level=7, max_observations=3),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, max_observations=3),
         workers=1,
     )
 

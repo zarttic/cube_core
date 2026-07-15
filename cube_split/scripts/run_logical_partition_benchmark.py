@@ -13,7 +13,6 @@ from typing import Any
 from cube_split import runtime_config
 from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
-
 SHANDONG_CORNERS_CUT = [
     [114.757377, 38.503521],
     [122.774914, 38.503521],
@@ -82,9 +81,9 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional manifest .json/.jsonl. Defaults to Shandong 2020Q3 band2/band3 MinIO sources.",
     )
-    parser.add_argument("--grid-types", default="s2,tile_matrix", help="Comma-separated grid types: s2,tile_matrix")
-    parser.add_argument("--s2-level", type=int, default=5, help="S2 level for the benchmark")
-    parser.add_argument("--tile-matrix-level", type=int, default=5, help="tile_matrix level for the benchmark")
+    parser.add_argument("--grid-types", default="geohash,mgrs", help="Comma-separated grid types: geohash,mgrs")
+    parser.add_argument("--geohash-level", type=int, default=5, help="Geohash precision for the benchmark")
+    parser.add_argument("--mgrs-level", type=int, default=3, help="MGRS precision for the benchmark")
     parser.add_argument("--ray-parallelism-values", default="2", help="Comma-separated Ray actor counts")
     parser.add_argument("--chunk-sizes", default="1", help="Comma-separated chunk sizes")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each case this many times")
@@ -125,11 +124,11 @@ def _csv_ints(value: str) -> list[int]:
 
 
 def _grid_cases(args: argparse.Namespace) -> list[tuple[str, int]]:
-    levels = {"s2": int(args.s2_level), "tile_matrix": int(args.tile_matrix_level)}
+    levels = {"geohash": int(args.geohash_level), "mgrs": int(args.mgrs_level)}
     cases: list[tuple[str, int]] = []
     for grid_type in _csv(args.grid_types):
         if grid_type not in levels:
-            raise ValueError("grid-types only supports s2 and tile_matrix for logical benchmark")
+            raise ValueError("grid-types only supports geohash and mgrs for logical benchmark")
         cases.append((grid_type, levels[grid_type]))
     if not cases:
         raise ValueError("grid-types must include at least one grid")

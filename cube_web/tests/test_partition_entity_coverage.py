@@ -7,9 +7,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from cube_web.routes.partition import create_partition_router
+from cube_web.schemas import PartitionDemoRequest
 from cube_web.services import partition_runners
+from cube_web.services.config_store import normalized_config
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore
 from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
 from cube_web.services.partition_workflow import PartitionWorkflowService
@@ -115,9 +118,30 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
         "minio_secret_key": "secret",
         "minio_bucket": "cube",
     }
-    if data_type == "product":
-        payload["time_granularity"] = "year"
     return payload
+
+
+def test_web_time_granularity_matches_frozen_sdk_contract():
+    assert PartitionDemoRequest(time_granularity="second").time_granularity == "second"
+    with pytest.raises(ValidationError):
+        PartitionDemoRequest(time_granularity="year")
+
+    config = normalized_config({"partition": {"optical": {"time_granularity": "second"}}})
+    assert config["partition"]["optical"]["time_granularity"] == "second"
+    with pytest.raises(ValueError, match="time_granularity"):
+        normalized_config({"partition": {"optical": {"time_granularity": "year"}}})
+
+
+def test_carbon_runner_rejects_annual_sdk_time_granularity(tmp_path: Path):
+    with pytest.raises(ValueError, match="'year' is not a valid TimeGranularity"):
+        partition_runners._run_carbon_partition_demo(
+            payload={
+                "input_dir": str(tmp_path),
+                "grid_type": "isea4h",
+                "grid_level": 5,
+                "time_granularity": "year",
+            }
+        )
 
 
 @pytest.mark.parametrize(
