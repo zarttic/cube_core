@@ -16,9 +16,14 @@ const open = computed({
 </script>
 
 <template>
-  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" :modal="false" @closed="$emit('closed')">
+  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" :modal="false" modal-class="detail-drawer-overlay" @closed="$emit('closed')">
     <div v-loading="loading">
       <slot />
     </div>
   </el-drawer>
 </template>
+
+<style>
+.detail-drawer-overlay { pointer-events: none; }
+.detail-drawer-overlay .el-drawer { pointer-events: auto; }
+</style>
