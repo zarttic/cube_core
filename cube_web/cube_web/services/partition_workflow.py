@@ -236,7 +236,7 @@ class PartitionWorkflowService:
             return self.partition_service.task_store.submit(
                 data_type,
                 "run",
-                lambda: self.run(task_id=task_id, request=request),
+                lambda: _require_completed_strict_run(self.run(task_id=task_id, request=request)),
                 task_id=task_id,
                 on_started=self.on_task_started,
                 on_succeeded=self.on_task_succeeded,
@@ -527,21 +527,15 @@ class PartitionWorkflowService:
 
     def retry_batch(self, batch_id: str, config_override: dict[str, Any] | None = None) -> PartitionTask:
         batch = self.get_batch(batch_id)
-        source_assets = self.store.list_assets(batch_id)
-        quality_asset_ids = _quality_warning_retry_asset_ids(
-            batch,
-            source_assets,
-            self.store.list_attempts(batch_id),
-        )
         return self.run_batch(
             batch_id,
             operation="manual_retry",
             config_override=config_override,
-            asset_ids=quality_asset_ids,
+            asset_ids=None,
             requested_by="operator",
             source_task_id=_text_or_none(batch.get("last_task_id")),
-            retry_strategy="quality_warning_assets" if quality_asset_ids else "full_batch",
-            failure_reason=_batch_failure_reason(batch),
+            retry_strategy="full_batch",
+            failure_reason=_text_or_none(batch.get("last_error")),
         )
 
     def retry_assets(self, asset_ids: list[str], config_override: dict[str, Any] | None = None) -> PartitionTask:
@@ -577,7 +571,7 @@ class PartitionWorkflowService:
             requested_by="operator",
             source_task_id=_text_or_none(first_batch.get("last_task_id")),
             retry_strategy="selected_assets",
-            failure_reason=_asset_failure_reason(source_assets, asset_ids) or _batch_failure_reason(first_batch),
+            failure_reason=_asset_failure_reason(source_assets, asset_ids) or _text_or_none(first_batch.get("last_error")),
         )
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
@@ -673,9 +667,7 @@ class PartitionWorkflowService:
         if assets:
             target_asset_ids = set(asset_ids) if asset_ids else None
             selected = [
-                _payload_asset_with_identity(asset)
-                for asset in assets
-                if target_asset_ids is None or asset["asset_id"] in target_asset_ids
+                _payload_asset_with_identity(asset) for asset in assets if target_asset_ids is None or asset["asset_id"] in target_asset_ids
             ]
             key = "selected_observations" if batch["data_type"] == "carbon" else "selected_assets"
             payload[key] = selected
@@ -880,7 +872,9 @@ class PartitionWorkflowService:
 
     def _reconcile_remote_attempt(self, task_id: str, attempt: dict[str, Any]) -> None:
         try:
-            client = _build_ray_job_client(self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}))
+            client = _build_ray_job_client(
+                self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {})
+            )
             status = _ray_job_status_text(client.get_job_status(task_id))
         except Exception as exc:
             if _is_missing_ray_job_error(exc):
@@ -934,7 +928,9 @@ class PartitionWorkflowService:
         if attempt is None or not self._attempt_uses_remote_ray(attempt):
             return
         try:
-            client = _build_ray_job_client(self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}))
+            client = _build_ray_job_client(
+                self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {})
+            )
             client.stop_job(task_id)
         except Exception:
             return
@@ -944,7 +940,21 @@ def classify_partition_error(error: str) -> str:
     normalized = error.lower()
     if any(token in normalized for token in ("not found", "no such file", "no such key", "missing", "does not exist", "source missing")):
         return "source_missing"
-    if any(token in normalized for token in ("timed out", "timeout", "temporarily", "temporary", "connection reset", "connection refused", "network", "503", "502", "504")):
+    if any(
+        token in normalized
+        for token in (
+            "timed out",
+            "timeout",
+            "temporarily",
+            "temporary",
+            "connection reset",
+            "connection refused",
+            "network",
+            "503",
+            "502",
+            "504",
+        )
+    ):
         return "transient"
     if any(token in normalized for token in ("invalid", "validation", "bad request", "unsupported", "must be", "required")):
         return "validation"
@@ -1064,9 +1074,7 @@ def _partition_slot_method(payload: dict[str, Any], batch: dict[str, Any]) -> st
     raw_runner_result = payload.get("runner_result")
     runner_result: dict[str, Any] = raw_runner_result if isinstance(raw_runner_result, dict) else {}
     return normalize_partition_method(
-        payload.get("partition_method")
-        or runner_result.get("partition_method")
-        or runner_result.get("partition_type"),
+        payload.get("partition_method") or runner_result.get("partition_method") or runner_result.get("partition_type"),
         grid_type=grid_type,
     )
 
@@ -1161,25 +1169,18 @@ def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, An
     requested_batch_rows = store.list_received_batches(batch_ids=batch_ids, source_system=source_system) if batch_ids else []
     matched_assets = store.list_received_assets(asset_ids=asset_ids, source_system=source_system) if asset_ids else []
     matched_observations = (
-        store.list_received_observations(observation_ids=observation_ids, source_system=source_system)
-        if observation_ids
-        else []
+        store.list_received_observations(observation_ids=observation_ids, source_system=source_system) if observation_ids else []
     )
-    updated_batches = store.list_received_batches(updated_since=updated_since_dt, source_system=source_system) if updated_since_dt is not None else []
+    updated_batches = (
+        store.list_received_batches(updated_since=updated_since_dt, source_system=source_system) if updated_since_dt is not None else []
+    )
 
     related_batch_ids = [
         *[str(row.get("batch_key") or "") for row in matched_assets],
         *[str(row.get("batch_key") or "") for row in matched_observations],
     ]
-    fetched_batch_map = {
-        str(row["batch_id"]): row
-        for row in [*requested_batch_rows, *updated_batches]
-    }
-    missing_related_batch_ids = [
-        batch_id
-        for batch_id in related_batch_ids
-        if batch_id and batch_id not in fetched_batch_map
-    ]
+    fetched_batch_map = {str(row["batch_id"]): row for row in [*requested_batch_rows, *updated_batches]}
+    missing_related_batch_ids = [batch_id for batch_id in related_batch_ids if batch_id and batch_id not in fetched_batch_map]
     if missing_related_batch_ids:
         for row in store.list_received_batches(batch_ids=missing_related_batch_ids, source_system=source_system):
             fetched_batch_map[str(row["batch_id"])] = row
@@ -1207,21 +1208,13 @@ def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, An
         members = members_by_batch.get(batch_id, [])
         batches.append(_reconcile_received_batch_row(batch, members, include_assets=include_assets, include_attempts=include_attempts))
 
-    matched_asset_ids = {
-        str(asset["asset_id"])
-        for asset in matched_assets
-        if asset.get("asset_id")
-    }
+    matched_asset_ids = {str(asset["asset_id"]) for asset in matched_assets if asset.get("asset_id")}
     matched_observation_ids = {
-        str(observation["observation_id"])
-        for observation in matched_observations
-        if observation.get("observation_id")
+        str(observation["observation_id"]) for observation in matched_observations if observation.get("observation_id")
     }
     missing_batch_ids = [batch_id for batch_id in batch_ids if batch_id not in set(known_batch_ids)]
     missing_asset_ids = [asset_id for asset_id in asset_ids if asset_id not in matched_asset_ids]
-    missing_observation_ids = [
-        observation_id for observation_id in observation_ids if observation_id not in matched_observation_ids
-    ]
+    missing_observation_ids = [observation_id for observation_id in observation_ids if observation_id not in matched_observation_ids]
     return {
         "source_system": source_system,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1357,9 +1350,6 @@ def _task_from_attempt(attempt: dict[str, Any], batch: dict[str, Any]) -> Partit
         result.setdefault("batch_name", batch.get("batch_name"))
         result["batch_status"] = batch.get("status")
         for key in (
-            "quality_status",
-            "quality_report_id",
-            "quality_failure_reason",
             "ingest_status",
             "ingest_job_id",
             "ingest_error",
@@ -1535,102 +1525,20 @@ def _max_auto_retries(batch: dict[str, Any]) -> int:
     return max(0, int(value))
 
 
-def _quality_warning_retry_asset_ids(
-    batch: dict[str, Any],
-    assets: list[dict[str, Any]],
-    attempts: list[dict[str, Any]],
-) -> list[str] | None:
-    if str(batch.get("quality_status") or "").strip().upper() != "WARN":
-        return None
-    report = _latest_quality_report(attempts)
-    warning_paths = _quality_warning_paths(report)
-    if not warning_paths:
-        return None
-    asset_ids = [
-        str(asset.get("asset_id") or "")
-        for asset in assets
-        if any(_asset_matches_warning_path(asset, warning_path) for warning_path in warning_paths)
-        and str(asset.get("asset_id") or "")
-    ]
-    return asset_ids or None
-
-
-def _latest_quality_report(attempts: list[dict[str, Any]]) -> dict[str, Any]:
-    for attempt in attempts:
-        result = attempt.get("runner_result")
-        if not isinstance(result, dict):
-            continue
-        report = result.get("quality_report")
-        if isinstance(report, dict):
-            return report
-    return {}
-
-
-def _quality_warning_paths(report: dict[str, Any]) -> set[str]:
-    checks = report.get("checks") if isinstance(report, dict) else None
-    if not isinstance(checks, list):
-        return set()
-    paths: set[str] = set()
-    for check in checks:
-        if not isinstance(check, dict) or str(check.get("status") or "").upper() != "WARN":
-            continue
-        metrics = check.get("metrics") or {}
-        if not isinstance(metrics, dict):
-            continue
-        for item in metrics.get("zero_assets") or []:
-            if isinstance(item, dict) and item.get("path"):
-                paths.add(str(item["path"]))
-        for item in metrics.get("duplicates") or []:
-            if isinstance(item, dict):
-                paths.update(str(path) for path in item.get("asset_paths") or [] if path)
-    return paths
-
-
-def _asset_matches_warning_path(asset: dict[str, Any], warning_path: str) -> bool:
-    source_uri = str(asset.get("source_uri") or "")
-    if not source_uri:
-        return False
-    warning = _path_like_parts(warning_path)
-    source = _path_like_parts(source_uri)
-    if source_uri == warning_path or source[-1:] == warning[-1:]:
-        return True
-    if len(source) >= 1 and len(warning) >= 1:
-        source_name = source[-1]
-        warning_name = warning[-1]
-        source_stem, source_suffix = _split_name(source_name)
-        warning_stem, warning_suffix = _split_name(warning_name)
-        if warning_stem == f"{source_stem}_cog" and warning_suffix.lower() == source_suffix.lower():
-            return True
-        if (
-            warning_suffix.lower() == source_suffix.lower()
-            and warning_stem.startswith(f"{source_stem}_")
-            and warning_stem.endswith("_cog")
-        ):
-            return True
-    return len(source) <= len(warning) and tuple(warning[-len(source) :]) == tuple(source)
-
-
-def _path_like_parts(value: str) -> tuple[str, ...]:
-    text = str(value or "").strip().replace("\\", "/")
-    if text.startswith("s3://"):
-        text = text[5:]
-    return tuple(part for part in text.split("/") if part)
-
-
-def _split_name(name: str) -> tuple[str, str]:
-    if "." not in name:
-        return name, ""
-    stem, suffix = name.rsplit(".", 1)
-    return stem, f".{suffix}"
-
-
 def _text_or_none(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
 
 
-def _batch_failure_reason(batch: dict[str, Any]) -> str | None:
-    return _text_or_none(batch.get("quality_failure_reason") or batch.get("last_error"))
+def _require_completed_strict_run(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("status") == "completed":
+        return result
+    messages = [
+        str(item.get("error", {}).get("message") or item.get("status") or "dataset execution failed")
+        for item in result.get("datasets", [])
+        if isinstance(item, dict)
+    ]
+    raise RuntimeError("; ".join(messages)[:2000] or "strict partition execution failed")
 
 
 def _asset_failure_reason(assets: list[dict[str, Any]], asset_ids: list[str]) -> str | None:

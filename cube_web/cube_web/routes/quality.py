@@ -1,262 +1,151 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
-from cube_web.schemas import (
-    QualityHistoryRequest,
-    QualityLatestRequest,
-    QualityReportRequest,
-    QualityRunRequest,
-    payload_from_model,
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+
+from cube_web.routes.auth import current_actor
+from cube_web.schemas import ManualQualityRunRequest
+from cube_web.services.quality_contracts import Page, QualityErrorFilter, page_offset, validate_sort
+from cube_web.services.quality_export import stream_quality_errors
+from cube_web.services.quality_repository import (
+    QualityRunNotFound,
+    count_quality_errors,
+    count_quality_results,
+    count_quality_runs,
+    get_quality_run,
+    list_quality_errors,
+    list_quality_results,
+    list_quality_runs,
+    require_open_gauss_domain_store,
 )
-from cube_web.services import quality_checks, quality_service
-from cube_web.services.quality_pdf import quality_report_pdf_response, quality_report_text_response
-from cube_web.services.quality_report_store import get_quality_report_store
+from cube_web.services.quality_run_service import request_manual_quality_run
 
 
 def create_quality_router() -> APIRouter:
     router = APIRouter(prefix="/quality", tags=["quality"])
 
-    @router.post("/optical/run")
-    def quality_optical_run(payload: QualityRunRequest) -> dict:
-        payload = payload_from_model(payload)
-        if not quality_checks.run_optical_quality_check:
-            raise HTTPException(status_code=500, detail="cube_split quality module is not available")
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
-        args = quality_service.quality_args(run_dir, payload)
+    @router.get("/records")
+    def list_records(
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        output_version: str | None = None,
+        data_type: str | None = None,
+        status: str | None = None,
+        trigger: str | None = None,
+        requested_by: str | None = None,
+        current_only: bool = False,
+        started_from: datetime | None = None,
+        started_to: datetime | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        sort_by: str = "generated_at",
+        sort_order: str = "desc",
+    ) -> dict:
         try:
-            report = quality_checks.run_optical_quality_check(args)
-            return get_quality_report_store().upsert_report("optical", run_dir, report)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            sort_by, sort_order = validate_sort(sort_by, sort_order, {"created_at", "completed_at", "generated_at", "quality_sequence", "status"})
+            with require_open_gauss_domain_store().transaction() as tx:
+                items = list_quality_runs(
+                    tx, keyword=keyword, dataset_id=dataset_id, output_version=output_version, data_type=data_type, status=status,
+                    trigger=trigger, requested_by=requested_by, current_only=current_only, started_from=started_from, started_to=started_to,
+                    limit=page_size, offset=page_offset(page, page_size), sort_by=sort_by, sort_order=sort_order,
+                )
+                total = count_quality_runs(
+                    tx, keyword=keyword, dataset_id=dataset_id, output_version=output_version, data_type=data_type, status=status,
+                    trigger=trigger, requested_by=requested_by, current_only=current_only, started_from=started_from, started_to=started_to,
+                )
+            return Page(items=tuple(items), total=total, page=page, page_size=page_size).model_dump(mode="json")
+        except ValueError as exc:
+            raise _invalid_sort(exc) from exc
 
-    @router.post("/optical/latest")
-    def quality_optical_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload_from_model(payload)
-        report = get_quality_report_store().latest_report("optical")
-        if report is None:
-            raise HTTPException(status_code=404, detail="No optical quality report found")
-        return report
-
-    @router.post("/optical/report")
-    def quality_optical_report(payload: QualityReportRequest) -> dict:
-        payload = payload_from_model(payload)
-        report_id = str(payload.get("report_id", "")).strip()
-        if not report_id:
-            raise HTTPException(status_code=422, detail="report_id is required")
-        report = get_quality_report_store().get_report("optical", report_id)
-        if report is None:
-            raise HTTPException(status_code=404, detail=f"Optical quality report not found: {report_id}")
-        return report
-
-    @router.post("/optical/report/pdf")
-    def quality_optical_report_pdf(payload: QualityReportRequest) -> Response:
-        report = quality_optical_report(payload)
-        return quality_report_pdf_response(report, data_type="optical")
-
-    @router.post("/optical/report/txt")
-    def quality_optical_report_txt(payload: QualityReportRequest) -> Response:
-        report = quality_optical_report(payload)
-        return quality_report_text_response(report, data_type="optical")
-
-    @router.post("/optical/history")
-    def quality_optical_history(payload: QualityHistoryRequest | None = None) -> dict:
-        return _quality_history("optical", payload_from_model(payload))
-
-    @router.post("/radar/run")
-    def quality_radar_run(payload: QualityRunRequest) -> dict:
-        payload = payload_from_model(payload)
-        if not quality_checks.run_radar_quality_check:
-            raise HTTPException(status_code=500, detail="cube_split radar quality module is not available")
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
-        args = quality_service.quality_args(run_dir, payload)
+    @router.get("/records/{quality_run_id}")
+    def get_record(quality_run_id: UUID) -> dict:
         try:
-            report = quality_checks.run_radar_quality_check(args)
-            return get_quality_report_store().upsert_report("radar", run_dir, report)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            with require_open_gauss_domain_store().transaction() as tx:
+                return get_quality_run(tx, quality_run_id=quality_run_id).model_dump(mode="json")
+        except QualityRunNotFound as exc:
+            raise _not_found(exc) from exc
 
-    @router.post("/radar/latest")
-    def quality_radar_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload_from_model(payload)
-        report = get_quality_report_store().latest_report("radar")
-        if report is None:
-            raise HTTPException(status_code=404, detail="No radar quality report found")
-        return report
-
-    @router.post("/radar/report")
-    def quality_radar_report(payload: QualityReportRequest) -> dict:
-        payload = payload_from_model(payload)
-        report_id = str(payload.get("report_id", "")).strip()
-        if not report_id:
-            raise HTTPException(status_code=422, detail="report_id is required")
-        report = get_quality_report_store().get_report("radar", report_id)
-        if report is None:
-            raise HTTPException(status_code=404, detail=f"Radar quality report not found: {report_id}")
-        return report
-
-    @router.post("/radar/report/pdf")
-    def quality_radar_report_pdf(payload: QualityReportRequest) -> Response:
-        report = quality_radar_report(payload)
-        return quality_report_pdf_response(report, data_type="radar")
-
-    @router.post("/radar/report/txt")
-    def quality_radar_report_txt(payload: QualityReportRequest) -> Response:
-        report = quality_radar_report(payload)
-        return quality_report_text_response(report, data_type="radar")
-
-    @router.post("/radar/history")
-    def quality_radar_history(payload: QualityHistoryRequest | None = None) -> dict:
-        return _quality_history("radar", payload_from_model(payload))
-
-    @router.post("/product/run")
-    def quality_product_run(payload: QualityRunRequest) -> dict:
-        payload = payload_from_model(payload)
-        if not quality_checks.run_product_quality_check:
-            raise HTTPException(status_code=500, detail="cube_split product quality module is not available")
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
-        args = quality_service.quality_args(run_dir, payload)
+    @router.get("/records/{quality_run_id}/results")
+    def list_results(
+        quality_run_id: UUID,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        sort_by: str = "rule_code",
+        sort_order: str = "asc",
+    ) -> dict:
         try:
-            report = quality_checks.run_product_quality_check(args)
-            return get_quality_report_store().upsert_report("product", run_dir, report)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            sort_by, sort_order = validate_sort(sort_by, sort_order, {"rule_code", "completed_at", "status"})
+            with require_open_gauss_domain_store().transaction() as tx:
+                get_quality_run(tx, quality_run_id=quality_run_id)
+                items = list_quality_results(tx, quality_run_id=quality_run_id, limit=page_size, offset=page_offset(page, page_size), sort_by=sort_by, sort_order=sort_order)
+                total = count_quality_results(tx, quality_run_id=quality_run_id)
+            return Page(items=tuple(items), total=total, page=page, page_size=page_size).model_dump(mode="json")
+        except QualityRunNotFound as exc:
+            raise _not_found(exc) from exc
+        except ValueError as exc:
+            raise _invalid_sort(exc) from exc
 
-    @router.post("/product/latest")
-    def quality_product_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload_from_model(payload)
-        report = get_quality_report_store().latest_report("product")
-        if report is None:
-            raise HTTPException(status_code=404, detail="No product quality report found")
-        return report
-
-    @router.post("/product/report")
-    def quality_product_report(payload: QualityReportRequest) -> dict:
-        payload = payload_from_model(payload)
-        report_id = str(payload.get("report_id", "")).strip()
-        if not report_id:
-            raise HTTPException(status_code=422, detail="report_id is required")
-        report = get_quality_report_store().get_report("product", report_id)
-        if report is None:
-            raise HTTPException(status_code=404, detail=f"Product quality report not found: {report_id}")
-        return report
-
-    @router.post("/product/report/pdf")
-    def quality_product_report_pdf(payload: QualityReportRequest) -> Response:
-        report = quality_product_report(payload)
-        return quality_report_pdf_response(report, data_type="product")
-
-    @router.post("/product/report/txt")
-    def quality_product_report_txt(payload: QualityReportRequest) -> Response:
-        report = quality_product_report(payload)
-        return quality_report_text_response(report, data_type="product")
-
-    @router.post("/product/history")
-    def quality_product_history(payload: QualityHistoryRequest | None = None) -> dict:
-        return _quality_history("product", payload_from_model(payload))
-
-    @router.post("/carbon/run")
-    def quality_carbon_run(payload: QualityRunRequest) -> dict:
-        payload = payload_from_model(payload)
-        if not quality_checks.run_carbon_quality_check:
-            raise HTTPException(status_code=500, detail="cube_split carbon quality module is not available")
-        run_dir_text = str(payload.get("run_dir", "")).strip()
-        if not run_dir_text:
-            raise HTTPException(status_code=422, detail="run_dir is required")
-        run_dir = str(quality_service.resolve_quality_run_dir(run_dir_text))
-        args = quality_service.quality_args(run_dir, payload)
+    @router.get("/records/{quality_run_id}/errors")
+    def list_errors(
+        quality_run_id: UUID,
+        rule_code: str | None = None,
+        error_code: str | None = None,
+        source_asset_id: str | None = None,
+        output_id: str | None = None,
+        field: str | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        sort_by: str = "created_at",
+        sort_order: str = "asc",
+    ) -> dict:
+        filters = QualityErrorFilter(rule_code=rule_code, error_code=error_code, source_asset_id=source_asset_id, output_id=output_id, field=field)
         try:
-            report = quality_checks.run_carbon_quality_check(args)
-            return get_quality_report_store().upsert_report("carbon", run_dir, report)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            sort_by, sort_order = validate_sort(sort_by, sort_order, {"created_at", "quality_error_id", "rule_code", "error_code"})
+            with require_open_gauss_domain_store().transaction() as tx:
+                get_quality_run(tx, quality_run_id=quality_run_id)
+                items = list_quality_errors(tx, quality_run_id=quality_run_id, filters=filters, limit=page_size, offset=page_offset(page, page_size), sort_by=sort_by, sort_order=sort_order)
+                total = count_quality_errors(tx, quality_run_id=quality_run_id, filters=filters)
+            return Page(items=tuple(items), total=total, page=page, page_size=page_size).model_dump(mode="json")
+        except QualityRunNotFound as exc:
+            raise _not_found(exc) from exc
+        except ValueError as exc:
+            raise _invalid_sort(exc) from exc
 
-    @router.post("/carbon/latest")
-    def quality_carbon_latest(payload: QualityLatestRequest | None = None) -> dict:
-        payload_from_model(payload)
-        report = get_quality_report_store().latest_report("carbon")
-        if report is None:
-            raise HTTPException(status_code=404, detail="No carbon quality report found")
-        return report
+    @router.get("/records/{quality_run_id}/errors/export")
+    def export_errors(
+        quality_run_id: UUID,
+        format: Literal["csv", "json"],
+        rule_code: str | None = None,
+        error_code: str | None = None,
+        source_asset_id: str | None = None,
+        output_id: str | None = None,
+        field: str | None = None,
+    ) -> StreamingResponse:
+        filters = QualityErrorFilter(rule_code=rule_code, error_code=error_code, source_asset_id=source_asset_id, output_id=output_id, field=field)
+        try:
+            stream, total, filename, media_type = stream_quality_errors(quality_run_id, filters, format)
+        except QualityRunNotFound as exc:
+            raise _not_found(exc) from exc
+        return StreamingResponse(
+            stream,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Export-Count": str(total)},
+        )
 
-    @router.post("/carbon/report")
-    def quality_carbon_report(payload: QualityReportRequest) -> dict:
-        payload = payload_from_model(payload)
-        report_id = str(payload.get("report_id", "")).strip()
-        if not report_id:
-            raise HTTPException(status_code=422, detail="report_id is required")
-        report = get_quality_report_store().get_report("carbon", report_id)
-        if report is None:
-            raise HTTPException(status_code=404, detail=f"Carbon quality report not found: {report_id}")
-        return report
-
-    @router.post("/carbon/report/pdf")
-    def quality_carbon_report_pdf(payload: QualityReportRequest) -> Response:
-        report = quality_carbon_report(payload)
-        return quality_report_pdf_response(report, data_type="carbon")
-
-    @router.post("/carbon/report/txt")
-    def quality_carbon_report_txt(payload: QualityReportRequest) -> Response:
-        report = quality_carbon_report(payload)
-        return quality_report_text_response(report, data_type="carbon")
-
-    @router.post("/carbon/history")
-    def quality_carbon_history(payload: QualityHistoryRequest | None = None) -> dict:
-        return _quality_history("carbon", payload_from_model(payload))
+    @router.post("/runs", status_code=202)
+    def create_manual_run(payload: ManualQualityRunRequest, request: Request) -> dict:
+        return request_manual_quality_run(payload.dataset_id, payload.output_version, current_actor(request)).model_dump(mode="json")
 
     return router
 
 
-def _quality_history(data_type: str, payload: dict) -> dict:
-    page = _history_page(payload)
-    page_size = _history_page_size(payload)
-    status = _optional_text(payload.get("status"))
-    keyword = _optional_text(payload.get("keyword"))
-    store = get_quality_report_store()
-    records = store.list_reports(
-        data_type,
-        limit=page_size,
-        offset=(page - 1) * page_size,
-        status=status,
-        keyword=keyword,
-    )
-    total = store.count_reports(data_type, status=status, keyword=keyword)
-    return {"records": records, "count": len(records), "total": total, "page": page, "page_size": page_size}
+def _not_found(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=404, detail={"code": "quality_run_not_found", "message": str(exc)})
 
 
-def _history_page(payload: dict) -> int:
-    try:
-        page = int(payload.get("page", 1) or 1)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="page must be an integer") from None
-    if page <= 0:
-        raise HTTPException(status_code=422, detail="page must be greater than 0")
-    return page
-
-
-def _history_page_size(payload: dict) -> int:
-    value = payload.get("page_size")
-    if value is None:
-        value = payload.get("limit", 20)
-    try:
-        page_size = int(value or 20)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="page_size must be an integer") from None
-    if page_size <= 0:
-        raise HTTPException(status_code=422, detail="page_size must be greater than 0")
-    return page_size
-
-
-def _optional_text(value: object) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+def _invalid_sort(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=422, detail={"code": "invalid_sort", "message": str(exc)})

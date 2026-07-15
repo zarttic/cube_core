@@ -4,6 +4,7 @@ export const portalHomeUrl = 'http://10.3.100.165:5176/#/home';
 
 const localNavPaths = {
   分析就绪数据剖分: '/partition',
+  质量运行记录: '/quality',
   全球离散格网模型与编码: '/encoding',
 };
 
@@ -11,6 +12,7 @@ const defaultNavItems = [
   { label: '首页', kind: 'external', url: portalHomeUrl },
   { label: 'ARD数据载入', kind: 'external', url: '/ard' },
   { label: '分析就绪数据剖分', kind: 'internal', path: '/partition' },
+  { label: '质量运行记录', kind: 'internal', path: '/quality' },
   { label: '剖分数据服务', kind: 'external', url: '/partition' },
   { label: '资源调度', kind: 'external', url: '/dispatch' },
   { label: '后台管理', kind: 'external', url: '/admin' },
@@ -21,6 +23,7 @@ const headerLabelOrder = [
   '首页',
   'ARD数据载入',
   '分析就绪数据剖分',
+  '质量运行记录',
   '剖分数据服务',
   '资源调度',
   '后台管理',
@@ -62,6 +65,6 @@ export function normalizePath(pathname) {
   if (pathname === '/encoding.html') return '/encoding';
   if (pathname === '/config' || pathname === '/config.html') return '/partition';
   if (pathname === '/门户首页.html') return '/';
-  if (pathname === '/' || pathname === '/partition' || pathname === '/encoding') return pathname;
+  if (pathname === '/' || pathname === '/partition' || pathname === '/quality' || pathname === '/encoding') return pathname;
   return '/partition';
 }

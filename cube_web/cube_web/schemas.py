@@ -82,30 +82,36 @@ class PartitionAssetRetryRequest(CubeWebModel):
     config_override: dict[str, Any] = Field(default_factory=dict)
 
 
-class QualityRunRequest(CubeWebModel):
-    run_dir: str = Field(min_length=1)
-    target_crs: str | None = "EPSG:4326"
+class ManualQualityRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    output_version: str | None = None
 
 
-class QualityLatestRequest(CubeWebModel):
-    pass
+class DatasetQualityRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output_version: str | None = None
 
 
-class QualityReportRequest(CubeWebModel):
-    report_id: str = Field(min_length=1)
+class WarnApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=2000)
 
 
-class QualityHistoryRequest(CubeWebModel):
-    limit: int | None = Field(default=None, ge=1)
-    page: int = Field(default=1, ge=1)
-    page_size: int | None = Field(default=None, ge=1)
-    keyword: str | None = None
-    status: str | None = None
+class PublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output_version: str | None = None
+    quality_run_id: str | None = None
 
 
-class QualityResponse(CubeWebModel):
-    status: str | None = None
-    run_dir: str | None = None
+class WithdrawPublicationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class SpatiotemporalQueryRequest(CubeWebModel):
@@ -125,20 +131,6 @@ class SpatiotemporalQueryRequest(CubeWebModel):
     def _validate_grid_level(self) -> "SpatiotemporalQueryRequest":
         validate_requested_grid_level(EncoderGridType(self.grid_type), self.grid_level)
         return self
-
-
-class OpticalIngestRequest(CubeWebModel):
-    batch_id: str | None = None
-    run_dir: str | None = None
-    report_id: str | None = None
-    dataset: str = "demo_optical"
-    sensor: str = "optical_mosaic"
-    asset_version: str | None = None
-    cube_version: str | None = None
-    quality_rule: Literal["best_quality_wins", "latest_wins"] = "best_quality_wins"
-    allow_failed_quality: bool = False
-    minio_upload_workers: int | None = Field(default=None, ge=1)
-    postgres_batch_size: int | None = Field(default=None, ge=1)
 
 
 class ConfigGetRequest(CubeWebModel):

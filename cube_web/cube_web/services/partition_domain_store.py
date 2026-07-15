@@ -787,7 +787,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         key_columns: tuple[str, ...],
     ) -> None:
         """OpenGauss-compatible idempotent insert for immutable M2 rows."""
-        jsonb_columns = {"attributes", "bbox", "counts", "payload"}
+        jsonb_columns = {"attributes", "bbox", "counts", "geometry", "payload"}
         timestamp_columns = {
             "acquisition_time",
             "time_start",
@@ -867,7 +867,13 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             "SELECT event_id FROM partition_domain_outbox WHERE dataset_id = %s AND output_version = %s AND event_type = 'output-version.completed'",
             (dataset_id, output_version),
         )
-        if output and output.get("status") == "completed" and dataset and dataset.get("current_output_version") == output_version and len(events) == 1:
+        if (
+            output
+            and output.get("status") == "completed"
+            and dataset
+            and dataset.get("current_output_version") == output_version
+            and len(events) == 1
+        ):
             return output
         return None
 
@@ -1141,10 +1147,25 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             dataset_id = str(_field(dataset, "dataset_id"))
             version = _output_version(dataset_id, task_id)
             self._merge_insert(
-                connection, table="partition_datasets",
-                columns=("dataset_id", "batch_id", "dataset_code", "dataset_title", "data_type", "product_type", "attributes",
-                         "grid_type", "requested_grid_level", "requested_grid_level_name", "partition_method", "cover_mode", "partition_status"),
-                key_columns=("dataset_id",), values=(
+                connection,
+                table="partition_datasets",
+                columns=(
+                    "dataset_id",
+                    "batch_id",
+                    "dataset_code",
+                    "dataset_title",
+                    "data_type",
+                    "product_type",
+                    "attributes",
+                    "grid_type",
+                    "requested_grid_level",
+                    "requested_grid_level_name",
+                    "partition_method",
+                    "cover_mode",
+                    "partition_status",
+                ),
+                key_columns=("dataset_id",),
+                values=(
                     dataset_id,
                     _field(request, "batch_id"),
                     _field(dataset, "dataset_code"),
@@ -1162,9 +1183,11 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             )
             for asset in _field(dataset, "assets", ()):
                 self._merge_insert(
-                    connection, table="partition_dataset_assets",
+                    connection,
+                    table="partition_dataset_assets",
                     columns=("dataset_id", "source_asset_id", "cog_uri", "checksum", "bbox", "crs", "time_start", "time_end", "attributes"),
-                    key_columns=("dataset_id", "source_asset_id"), values=(
+                    key_columns=("dataset_id", "source_asset_id"),
+                    values=(
                         dataset_id,
                         _field(asset, "source_asset_id"),
                         str(_field(asset, "cog_uri")),
@@ -1178,9 +1201,11 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 )
             for band in _field(dataset, "bands", ()):
                 self._merge_insert(
-                    connection, table="partition_dataset_bands",
+                    connection,
+                    table="partition_dataset_bands",
                     columns=("dataset_id", "source_asset_id", "band_code", "band_name", "band_type", "unit", "display_order", "attributes"),
-                    key_columns=("dataset_id", "source_asset_id", "band_code"), values=(
+                    key_columns=("dataset_id", "source_asset_id", "band_code"),
+                    values=(
                         dataset_id,
                         _field(band, "source_asset_id"),
                         _field(band, "band_code"),
@@ -1192,10 +1217,21 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                     ),
                 )
             self._merge_insert(
-                connection, table="partition_output_versions",
-                columns=("dataset_id", "output_version", "task_id", "grid_type", "requested_grid_level", "requested_grid_level_name",
-                         "partition_method", "status", "object_prefix"),
-                key_columns=("dataset_id", "output_version"), values=(
+                connection,
+                table="partition_output_versions",
+                columns=(
+                    "dataset_id",
+                    "output_version",
+                    "task_id",
+                    "grid_type",
+                    "requested_grid_level",
+                    "requested_grid_level_name",
+                    "partition_method",
+                    "status",
+                    "object_prefix",
+                ),
+                key_columns=("dataset_id", "output_version"),
+                values=(
                     dataset_id,
                     version,
                     task_id,
@@ -1218,14 +1254,13 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         with self.transaction() as connection:
             self._assert_live_schema(connection)
             self._execute(connection, "BEGIN")
-            datasets = self._fetchall(
-                connection, "SELECT * FROM partition_datasets WHERE dataset_id = %s FOR UPDATE", (dataset_id,)
-            )
+            datasets = self._fetchall(connection, "SELECT * FROM partition_datasets WHERE dataset_id = %s FOR UPDATE", (dataset_id,))
             if not datasets:
                 raise ValueError("dataset output has not been started")
             attempts = self._fetchall(
                 connection,
-                "SELECT * FROM partition_job_attempts WHERE task_id = %s AND status = 'running' AND batch_id = (SELECT batch_id FROM partition_datasets WHERE dataset_id = %s) FOR UPDATE",
+                "SELECT * FROM partition_job_attempts WHERE task_id = %s "
+                "AND batch_id = (SELECT batch_id FROM partition_datasets WHERE dataset_id = %s) FOR UPDATE",
                 (task_id, dataset_id),
             )
             if not attempts:
@@ -1252,7 +1287,10 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                     payload = _value(row)
                     values: tuple[Any, ...]
                     if noun == "grid_cells":
-                        columns = "output_id,dataset_id,output_version,grid_type,grid_level,grid_level_name,space_code,topology_code"
+                        columns = (
+                            "output_id,dataset_id,output_version,grid_type,grid_level,grid_level_name,space_code,topology_code,"
+                            "bbox,geometry,tile_count,index_count"
+                        )
                         values = (
                             payload.get("output_id"),
                             dataset_id,
@@ -1262,6 +1300,10 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                             str(payload.get("grid_level", _field(result, "requested_grid_level"))),
                             payload.get("space_code", ""),
                             payload.get("topology_code"),
+                            json.dumps(payload.get("bbox")),
+                            json.dumps(payload.get("geometry")),
+                            payload.get("tile_count", 0),
+                            payload.get("index_count", 0),
                         )
                     elif noun == "tiles":
                         columns = "output_id,dataset_id,output_version,source_asset_id,band_code,grid_type,grid_level,grid_level_name,space_code,topology_code,time_bucket,tile_uri,tile_kind,bbox,width,height,byte_size,checksum,status"
@@ -1310,8 +1352,11 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                             payload.get("value_ref_uri", payload.get("tile_uri", "s3://")),
                         )
                     self._merge_insert(
-                        connection, table=f"partition_{noun}", columns=tuple(columns.split(",")),
-                        values=values, key_columns=("output_id",),
+                        connection,
+                        table=f"partition_{noun}",
+                        columns=tuple(columns.split(",")),
+                        values=values,
+                        key_columns=("output_id",),
                     )
             counts = {
                 "tiles": len(_field(result, "tiles", ())),
@@ -1346,9 +1391,11 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             }
             event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"cube://partition/{dataset_id}/{version}"))
             self._merge_insert(
-                connection, table="partition_domain_outbox",
+                connection,
+                table="partition_domain_outbox",
                 columns=("event_id", "dataset_id", "output_version", "event_type", "payload"),
-                key_columns=("dataset_id", "output_version", "event_type"), values=(
+                key_columns=("dataset_id", "output_version", "event_type"),
+                values=(
                     event_id,
                     dataset_id,
                     version,

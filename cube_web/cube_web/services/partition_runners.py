@@ -13,7 +13,6 @@ from cube_split import runtime_config
 from grid_core.app.core.enums import GridType, TimeGranularity
 from grid_core.app.models.request import validate_requested_grid_level
 
-from cube_web.services import quality_checks
 from cube_web.services.config_store import optical_ingest_defaults, optical_partition_defaults
 from cube_web.services.partition_defaults import (
     DEFAULT_ISEA4H_GRID_LEVEL,
@@ -21,13 +20,15 @@ from cube_web.services.partition_defaults import (
     default_grid_level_from_assets,
     normalize_partition_method,
 )
-from cube_web.services.quality_report_store import get_quality_report_store
-from cube_web.services.quality_service import quality_args, repo_root
 
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 DEFAULT_ENTITY_TEST_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 PARTITION_GRID_TYPES = {"geohash", "mgrs", "isea4h"}
 PARTITION_METHODS = {"logical", "entity"}
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 def _new_run_dir(root_name: str, name: str) -> Path:
@@ -568,87 +569,15 @@ def _cancellation_check_from_payload(payload: dict | None) -> Any | None:
     return payload.get("_cancellation_check") or payload.get("cancellation_check")
 
 
-def _warn_checks_from_result(result: dict) -> list[dict]:
-    report = result.get("quality_report") if isinstance(result, dict) else None
-    if not isinstance(report, dict):
-        return []
-    checks = report.get("checks") or []
-    if not isinstance(checks, list):
-        return []
-    return [check for check in checks if isinstance(check, dict) and check.get("status") == "WARN"]
-
-
-def _warning_asset_paths(checks: list[dict]) -> set[str]:
-    paths: set[str] = set()
-    for check in checks:
-        metrics = check.get("metrics") or {}
-        if not isinstance(metrics, dict):
-            continue
-        for item in metrics.get("zero_assets") or []:
-            if isinstance(item, dict) and item.get("path"):
-                paths.add(str(item["path"]))
-        for item in metrics.get("duplicates") or []:
-            if isinstance(item, dict):
-                paths.update(str(path) for path in item.get("asset_paths") or [] if path)
-    return paths
-
-
-def _asset_matches_warning_path(asset: dict, warning_path: str) -> bool:
-    source_uri = str(asset.get("source_uri") or "")
-    if not source_uri:
-        return False
-    warning = Path(warning_path)
-    source = Path(source_uri)
-    if source_uri == warning_path or source.name == warning.name:
-        return True
-    if warning.suffix.lower() == source.suffix.lower() and warning.stem == f"{source.stem}_cog":
-        return True
-    if warning.suffix.lower() == source.suffix.lower() and warning.stem.startswith(f"{source.stem}_") and warning.stem.endswith("_cog"):
-        return True
-    warning_parts = warning.parts
-    source_parts = source.parts
-    return len(source_parts) <= len(warning_parts) and tuple(warning_parts[-len(source_parts) :]) == tuple(source_parts)
-
-
-def _retry_payload_for_warning_assets(payload: dict, warning_paths: set[str]) -> tuple[dict, int]:
-    selected_assets = payload.get("selected_assets") or []
-    if not warning_paths or not isinstance(selected_assets, list) or not selected_assets:
-        return dict(payload), 0
-    retry_assets = [
-        asset
-        for asset in selected_assets
-        if isinstance(asset, dict) and any(_asset_matches_warning_path(asset, warning_path) for warning_path in warning_paths)
-    ]
-    if not retry_assets:
-        return dict(payload), 0
-    retry_payload = dict(payload)
-    retry_payload["selected_assets"] = retry_assets
-    return retry_payload, len(retry_assets)
-
-
 def _run_optical_partition_retry(payload: dict | None = None) -> dict:
     payload = payload or {}
     request = payload.get("request") or {}
     if not isinstance(request, dict):
         raise ValueError("request must be an object")
-    last_result = payload.get("last_result") or {}
-    if not isinstance(last_result, dict):
-        raise ValueError("last_result must be an object")
-
     request_payload = request.get("payload") or {}
     if not isinstance(request_payload, dict):
         raise ValueError("request.payload must be an object")
-    warn_checks = _warn_checks_from_result(last_result)
-    warning_paths = _warning_asset_paths(warn_checks)
-    retry_payload, retried_asset_count = _retry_payload_for_warning_assets(request_payload, warning_paths)
-    result = _run_optical_partition_from_payload(retry_payload, mode="partition_retry")
-    result["retry"] = {
-        "strategy": "warning_assets" if retried_asset_count else "full_request",
-        "warning_check_names": [str(check.get("name")) for check in warn_checks],
-        "warning_asset_count": len(warning_paths),
-        "retried_asset_count": retried_asset_count,
-    }
-    return result
+    return _run_optical_partition_from_payload(request_payload, mode="partition_retry")
 
 
 def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
@@ -762,12 +691,6 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     response["partition_type"] = "entity"
     response["grid_type"] = grid_type
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
-    if quality_checks.run_optical_quality_check is not None:
-        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
-        quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
-        response["quality_status"] = quality_report.get("status")
-        response["quality_report"] = quality_report
-        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 
@@ -932,12 +855,6 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         "metadata_backend": str(payload.get("metadata_backend") or ("postgres" if mode == "partition_run" else "none")),
         "output_path": str(rows_path),
     }
-    if quality_checks.run_carbon_quality_check is not None:
-        quality_report = quality_checks.run_carbon_quality_check(quality_args(str(result["run_dir"]), {"target_crs": "EPSG:4326"}))
-        quality_report = get_quality_report_store().upsert_report("carbon", result["run_dir"], quality_report)
-        response["quality_status"] = quality_report.get("status")
-        response["quality_report"] = quality_report
-        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 
@@ -1062,12 +979,6 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["assets"] = _result_assets(payload, input_dir, data_type="product", suffixes={".tif", ".tiff"})
     result["selected_asset_count"] = len(payload.get("selected_assets") or [])
     result["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(result.get("ingest_enabled", False))
-    if quality_checks.run_product_quality_check is not None:
-        quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": "EPSG:4326"}))
-        quality_report = get_quality_report_store().upsert_report("product", result["run_dir"], quality_report)
-        result["quality_status"] = quality_report.get("status")
-        result["quality_report"] = quality_report
-        result["quality_report_id"] = quality_report.get("report_id")
     return result
 
 
@@ -1221,12 +1132,6 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     response["partition_type"] = "entity" if partition_method == "entity" else "logical"
     response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
-    if quality_checks.run_radar_quality_check is not None:
-        quality_report = quality_checks.run_radar_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
-        quality_report = get_quality_report_store().upsert_report("radar", run_dir, quality_report)
-        response["quality_status"] = quality_report.get("status")
-        response["quality_report"] = quality_report
-        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 
@@ -1370,12 +1275,6 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     response["partition_type"] = "entity" if partition_method == "entity" else "logical"
     response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
-    if quality_checks.run_optical_quality_check is not None:
-        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
-        quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
-        response["quality_status"] = quality_report.get("status")
-        response["quality_report"] = quality_report
-        response["quality_report_id"] = quality_report.get("report_id")
     return response
 
 

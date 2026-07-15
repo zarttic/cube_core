@@ -10,6 +10,14 @@
 
 ## Global Constraints
 
+> **Current publication contract (2026-07-15):** this repository has no
+> external publication gateway. M3 publication is the OpenGauss-backed
+> `active` state that makes an exact quality-authorized output queryable and
+> usable; withdrawal is the exact row's `withdrawn` state with retained
+> history. This supersedes gateway/reconciliation wording elsewhere in this
+> historical implementation plan. M5 verifies normalized API visibility and
+> exact database state, not an external gateway.
+
 - Milestone order is `M1 -> M2 -> M3 -> M4 -> M5`; M5 does not edit M1–M4 product behavior, production schemas, routes, services, jobs, SDK engines, or UI components.
 - A failed integrated contract becomes a reproducible `residuals.M1`, `residuals.M2`, `residuals.M3`, or `residuals.M4` record and blocks M5. Return it to its owner; do not repair it in M5.
 - M5-owned implementation is limited to scanner/tool tests, the M5 acceptance package/runner/tests, the mandatory M5 Playwright spec/config, current documentation, historical labels, and deterministic evidence.
@@ -23,7 +31,7 @@
 - The six scenarios are exactly: Geohash logical single dataset; MGRS cross-zone/boundary logical; low-resolution ISEA4H entity; one batch/two datasets with sibling partial failure; quality failure with complete errors and full/filtered CSV/JSON export equality; Pass/Warn policy followed by publish/withdraw reconciliation.
 - Publication-record lifecycle values are exactly `publishing|active|withdrawing|failed|withdrawn`; dataset-derived publication status values are exactly `unpublished|publishing|active|withdrawing|failed|withdrawn`. The value `published` is forbidden in production, current documentation, acceptance results, scanner allowlists, and evidence.
 - The frozen M3 real test is `cube_web/tests/real/test_m3_quality_publication_real.py`, marker `m3_real`, registration `m3_real: actual OpenGauss, MinIO, Ray dataset quality and publication acceptance`, and sole standard gate `cube_web/scripts/run_m3_quality_publication_gate.py`.
-- The canonical M3 command is `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_web/scripts/run_m3_quality_publication_gate.py`; it invokes exactly `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_web/tests/real/test_m3_quality_publication_real.py -v -m m3_real -rs` and fails on skip, deselection, missing infrastructure, invalid manifests, export mismatch, or publication-gateway failure.
+- The canonical M3 command is `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 cube_web/scripts/run_m3_quality_publication_gate.py`; it invokes exactly `PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_web/tests/real/test_m3_quality_publication_real.py -v -m m3_real -rs` and fails on skip, deselection, missing infrastructure, invalid manifests, export mismatch, or a mismatched exact OpenGauss publication transition.
 - Required M3 manifest variables are `CUBE_M3_REAL_INPUT_MANIFEST` and `CUBE_M3_REAL_DEFECT_MANIFEST`.
 - Scanner exclusions are explicit tooling/test exclusions; production and current documentation remain in scope. `docs/superpowers/` is excluded by repository-relative prefix because plans are non-normative implementation records.
 - Scanner allowlists are rule-specific and inventory-backed. An allowlisted path must be an explicit rejection test for that exact rule and must contain assertions rejecting the matched token; production paths can never be allowlisted.

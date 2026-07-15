@@ -98,9 +98,7 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
     suffix = "tif" if data_type == "product" else "dat"
     payload = {
         "input_dir": str(tmp_path / "missing"),
-        "selected_assets": [
-            _asset(f"s3://cube/cube/source/{data_type}/entity-{data_type}.{suffix}", f"entity-{data_type}", data_type)
-        ],
+        "selected_assets": [_asset(f"s3://cube/cube/source/{data_type}/entity-{data_type}.{suffix}", f"entity-{data_type}", data_type)],
         "grid_type": "isea4h",
         "partition_method": "entity",
         "grid_level": 2,
@@ -126,16 +124,34 @@ def test_web_time_granularity_matches_frozen_sdk_contract():
         "requested_grid_level": 5,
         "partition_method": "logical",
         "time_granularity": "second",
-        "datasets": [{
-            "dataset_id": "dataset-time", "dataset_code": "dataset-time", "dataset_title": "Dataset time",
-            "data_type": "optical",
-            "assets": [{
-                "source_asset_id": "asset-time", "cog_uri": "s3://cube/loader/time.tif", "checksum": "a" * 64,
-                "bbox": [100.0, 20.0, 101.0, 21.0], "crs": "EPSG:4326",
-                "time_start": "2026-05-30T00:00:00Z", "time_end": "2026-05-30T00:01:00Z",
-            }],
-            "bands": [{"source_asset_id": "asset-time", "band_code": "B01", "band_name": "Band 1", "band_type": "spectral", "display_order": 0}],
-        }],
+        "datasets": [
+            {
+                "dataset_id": "dataset-time",
+                "dataset_code": "dataset-time",
+                "dataset_title": "Dataset time",
+                "data_type": "optical",
+                "assets": [
+                    {
+                        "source_asset_id": "asset-time",
+                        "cog_uri": "s3://cube/loader/time.tif",
+                        "checksum": "a" * 64,
+                        "bbox": [100.0, 20.0, 101.0, 21.0],
+                        "crs": "EPSG:4326",
+                        "time_start": "2026-05-30T00:00:00Z",
+                        "time_end": "2026-05-30T00:01:00Z",
+                    }
+                ],
+                "bands": [
+                    {
+                        "source_asset_id": "asset-time",
+                        "band_code": "B01",
+                        "band_name": "Band 1",
+                        "band_type": "spectral",
+                        "display_order": 0,
+                    }
+                ],
+            }
+        ],
     }
     assert StrictPartitionRequest.model_validate(payload).time_granularity == "second"
     payload["time_granularity"] = "year"
@@ -204,7 +220,6 @@ def test_product_and_radar_run_payloads_dispatch_isea4h_to_entity_partition(
     monkeypatch.setattr("cube_split.jobs.entity_partition_job.run_entity_partition", fake_run_entity_partition)
     monkeypatch.setattr(logical_target, fail_logical_partition)
     monkeypatch.setattr(partition_runners, "optical_partition_defaults", lambda: {})
-    monkeypatch.setattr(f"cube_web.services.quality_checks.run_{data_type}_quality_check", None)
 
     result = getattr(partition_runners, runner_name)(_runtime_payload(data_type, tmp_path), mode="partition_run")
 
