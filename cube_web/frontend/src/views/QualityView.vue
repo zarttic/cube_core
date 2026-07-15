@@ -60,7 +60,9 @@ onUnmounted(() => store.dispose());
 
     <el-alert v-if="store.error" :title="store.error" type="error" :closable="false" show-icon />
     <AppTable :data="store.records" :loading="store.loading" row-key="quality_run_id" :page="store.pageState.page" :page-size="store.pageState.pageSize" :total="store.pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="openDetail">
-      <el-table-column prop="dataset_code" label="数据集" min-width="160" show-overflow-tooltip />
+      <el-table-column prop="dataset_code" label="数据集" min-width="160" show-overflow-tooltip>
+        <template #default="{ row }"><span :data-testid="`quality-row-${row.quality_run_id}`">{{ row.dataset_code }}</span></template>
+      </el-table-column>
       <el-table-column prop="output_version" label="输出版本" min-width="190" show-overflow-tooltip />
       <el-table-column prop="quality_sequence" label="序列" width="80" />
       <el-table-column prop="trigger" label="触发" width="90" />
@@ -69,7 +71,7 @@ onUnmounted(() => store.dispose());
       <el-table-column prop="warning_count" label="告警" width="80" />
       <el-table-column label="当前" width="80"><template #default="{ row }">{{ row.is_current ? '是' : '否' }}</template></el-table-column>
       <el-table-column prop="completed_at" label="完成时间" min-width="170" show-overflow-tooltip />
-      <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }"><el-button :data-testid="`quality-row-${row.quality_run_id}`" link type="primary" @click.stop="openDetail(row)">详情</el-button><el-button link type="primary" @click.stop="rerun(row)">重新质检</el-button></template></el-table-column>
+      <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }"><el-button link type="primary" @click.stop="openDetail(row)">详情</el-button><el-button link type="primary" @click.stop="rerun(row)">重新质检</el-button></template></el-table-column>
     </AppTable>
 
     <QualityDetailDrawer
