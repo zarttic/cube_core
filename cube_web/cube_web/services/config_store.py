@@ -196,7 +196,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     optical["target_crs"] = _text_value(optical.get("target_crs"), "target_crs")
     optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
-    optical["time_granularity"] = _choice(optical.get("time_granularity"), {"hour", "day", "month", "year"}, "time_granularity")
+    optical["time_granularity"] = _choice(optical.get("time_granularity"), {"second", "minute", "hour", "day", "month"}, "time_granularity")
     optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=0)
     optical["cog_workers"] = _int_value(optical.get("cog_workers"), "cog_workers", minimum=0)
     optical["cog_compress"] = _choice(optical.get("cog_compress"), {"LZW", "DEFLATE", "ZSTD", "NONE"}, "cog_compress")

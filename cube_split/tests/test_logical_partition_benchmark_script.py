@@ -32,9 +32,9 @@ def test_logical_benchmark_default_manifest_uses_shandong_minio_sources(tmp_path
 def test_logical_benchmark_case_matrix_is_limited_to_logical_grids():
     module = _load_script_module()
 
-    cases = module._grid_cases(Namespace(grid_types="geohash,mgrs", geohash_level=5, mgrs_level=2))
+    cases = module._grid_cases(Namespace(grid_types="geohash,mgrs", geohash_level=5, mgrs_level=3))
 
-    assert cases == [("geohash", 5), ("mgrs", 2)]
+    assert cases == [("geohash", 5), ("mgrs", 3)]
 
 
 def test_logical_benchmark_redacts_sensitive_cli_values():

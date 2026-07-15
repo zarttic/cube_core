@@ -195,10 +195,11 @@ onMounted(loadConfig);
                 </el-form-item>
                 <el-form-item label="时间粒度">
                   <el-select v-model="optical.time_granularity">
+                    <el-option label="秒" value="second" />
+                    <el-option label="分钟" value="minute" />
                     <el-option label="小时" value="hour" />
                     <el-option label="日" value="day" />
                     <el-option label="月" value="month" />
-                    <el-option label="年" value="year" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="单资产最大格网数">

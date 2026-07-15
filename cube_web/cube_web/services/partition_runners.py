@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from cube_split import runtime_config
-from grid_core.app.core.enums import GridType
+from grid_core.app.core.enums import GridType, TimeGranularity
 from grid_core.app.models.request import validate_requested_grid_level
 
 from cube_web.services import quality_checks
@@ -886,7 +886,7 @@ def _run_carbon_partition_demo(mode: str = "partition_demo", payload: dict | Non
         output_dir=str(output_dir),
         grid_type=grid_type,
         grid_level=grid_level,
-        time_granularity=str(payload.get("time_granularity") or "day"),
+        time_granularity=TimeGranularity(str(payload.get("time_granularity") or "day")).value,
         product_type=str(payload.get("product_type") or "xco2"),
         max_observations=_int_payload_value(payload, "max_observations", 0 if mode == "partition_run" else 1000),
         partition_chunk_size=_int_payload_value(payload, "partition_chunk_size", 250),

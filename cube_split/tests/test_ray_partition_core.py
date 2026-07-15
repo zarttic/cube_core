@@ -155,6 +155,33 @@ def test_logical_partition_uses_sdk_address_for_mgrs_st_code(tmp_path: Path):
     assert all(row["window_width"] > 0 and row["window_height"] > 0 for row in rows)
 
 
+def test_logical_partition_encodes_annual_buckets_with_day_st_codes(tmp_path: Path):
+    source = tmp_path / "product_2026.tif"
+    _write_tif(source)
+    tasks = build_grid_tasks_driver(
+        assets=[
+            AssetRecord(
+                scene_id="product_2026",
+                band="product_value",
+                path=str(source),
+                acq_time="2026-03-09T00:00:00Z",
+                bbox=[116.0, 39.92, 116.08, 40.0],
+            )
+        ],
+        grid_type="geohash",
+        grid_level=5,
+        cover_mode="intersect",
+        max_cells_per_asset=20000,
+    )
+
+    task_rows = _prepare_task_rows_for_partitioning(tasks, partition_prefix_len=5, time_granularity="year")
+    rows = _process_local_task_group(task_rows, "year", include_sample_mean=False)
+
+    assert rows
+    assert all(row["time_bucket"] == "2026" for row in rows)
+    assert all(row["st_code"].endswith(":20260309") for row in rows)
+
+
 def test_logical_partition_bounds_mgrs_windows_for_projected_raster(tmp_path: Path):
     source = tmp_path / "projected.tif"
     _write_projected_tif(source)

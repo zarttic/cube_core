@@ -777,6 +777,7 @@ def _prepare_task_rows_for_partitioning(
         "day": "%Y%m%d",
         "hour": "%Y%m%d%H",
         "minute": "%Y%m%d%H%M",
+        "second": "%Y%m%d%H%M%S",
     }[time_granularity]
 
     task_rows: list[dict] = []
@@ -786,6 +787,12 @@ def _prepare_task_rows_for_partitioning(
         row["time_bucket"] = datetime.fromisoformat(row["acq_time"].replace("Z", "+00:00")).strftime(time_format)
         task_rows.append(row)
     return task_rows
+
+
+def _st_time_granularity(time_granularity: str) -> str:
+    # Product rows retain annual business buckets, while the frozen SDK has no
+    # yearly ST code. Encode the acquisition day in the ST address instead.
+    return "day" if time_granularity == "year" else time_granularity
 
 
 def _cover_codes(
@@ -969,7 +976,7 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 st_code = sdk.generate_st_code(
                     address=address,
                     timestamp=acq_dt,
-                    time_granularity=time_granularity,
+                    time_granularity=_st_time_granularity(time_granularity),
                 ).st_code
                 st_cache[st_key] = st_code
 
