@@ -16,7 +16,7 @@ const open = computed({
 </script>
 
 <template>
-  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" @closed="$emit('closed')">
+  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" :modal="false" @closed="$emit('closed')">
     <div v-loading="loading">
       <slot />
     </div>

@@ -32,7 +32,6 @@ test('quality drawer discards stale detail response', async ({ page }) => {
   await page.goto('/quality');
   await page.getByTestId('quality-row-quality-run-a').click();
   await Promise.race([qualityRunARequested, page.waitForTimeout(5_000).then(() => { throw new Error('quality-run-a detail request did not start'); })]);
-  await page.getByTestId('quality-detail-close').click();
   await page.getByTestId('quality-row-quality-run-b').click();
   await expect(page.getByTestId('quality-detail-drawer')).toContainText('quality-run-b');
   await releaseQualityRunA();
