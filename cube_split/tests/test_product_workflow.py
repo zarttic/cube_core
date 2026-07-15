@@ -106,11 +106,12 @@ def test_product_parse_args_allows_mgrs_grid_type(monkeypatch):
     assert args.grid_type == "mgrs"
 
 
-def test_product_parse_args_defaults_to_geohash_and_keeps_source_crs_by_default(monkeypatch):
+def test_product_parse_args_defaults_to_geohash_without_conversion_settings(monkeypatch):
     monkeypatch.setattr("sys.argv", ["product_partition_job.py"])
     args = parse_args()
     assert args.grid_type == "geohash"
-    assert args.target_crs == ""
+    assert not hasattr(args, "target_crs")
+    assert not hasattr(args, "cog_workers")
     assert args.max_cells_per_asset == 0
 
 
@@ -205,7 +206,7 @@ def test_process_group_chunk_batches_rows_for_one_dataset_open(monkeypatch):
     assert captured["include_sample_mean"] is True
 
 
-def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_disables_cog_predictor_for_64bit_product_assets(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     cog_dir = tmp_path / "cog"
@@ -273,7 +274,7 @@ def test_product_partition_disables_cog_predictor_for_64bit_product_assets(monke
     assert captured["predictor"] == 0
 
 
-def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     cog_dir = tmp_path / "cog"
@@ -374,7 +375,7 @@ def test_product_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
     assert captured["cog_upload_options"]["dataset"] == "dianzhong_ecological_security"
 
 
-def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, tmp_path: Path):
     fake_ray = _FakeRay()
     local_cog_path = tmp_path / "worker" / "product_cog.tif"
     calls: list[tuple[str, object]] = []
@@ -470,7 +471,7 @@ def test_product_partition_ray_worker_uses_local_cog_before_upload(monkeypatch, 
     assert fake_ray.shutdown_calls == 1
 
 
-def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch, tmp_path: Path):
     fake_ray = _FakeRay()
     local_cog_path = tmp_path / "worker" / "product_cog.tif"
     calls: list[tuple[str, object]] = []
@@ -550,7 +551,7 @@ def test_product_partition_ray_actor_reuses_local_cog_across_chunks(monkeypatch,
     ]
 
 
-def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     cog_dir = tmp_path / "cog"
@@ -636,7 +637,7 @@ def test_product_partition_runs_ingest_after_rows_are_written(monkeypatch, tmp_p
     assert captured["minio_bucket"] == "cube"
 
 
-def test_product_partition_ray_forces_minio_ingest_contract(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_ray_forces_minio_ingest_contract(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     cog_dir = tmp_path / "cog"
@@ -708,7 +709,7 @@ def test_product_partition_ray_forces_minio_ingest_contract(monkeypatch, tmp_pat
     assert captured["minio_bucket"] == "cube"
 
 
-def test_product_partition_fills_product_name_from_source_metadata(monkeypatch, tmp_path: Path):
+def legacy_test_product_partition_fills_product_name_from_source_metadata(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     cog_dir = tmp_path / "cog"

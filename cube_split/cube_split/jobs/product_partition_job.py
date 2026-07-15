@@ -26,13 +26,9 @@ from cube_split.jobs.ray_partition_core import (
     _group_tasks_for_local_processing,
     _prepare_task_rows_for_partitioning,
     _process_local_task_group,
-    asset_record_to_dict,
     build_grid_tasks_driver,
     build_manifest,
-    cog_creation_options,
-    convert_assets_to_cog,
     create_unique_run_dir,
-    upload_source_assets_to_minio,
 )
 from cube_split.partition.product_products import parse_product_asset
 
@@ -55,15 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default="data/product", help="Input directory containing product TIF files")
     parser.add_argument("--manifest-path", default="", help="Optional selected product asset manifest")
     parser.add_argument("--output-dir", default="data/ray_output/product", help="Output directory")
-    parser.add_argument("--cog-input-dir", default="data/cog/product", help="Directory for standardized product COGs")
-    parser.add_argument("--target-crs", default="", help="Optional target CRS for standardized COG assets. Empty keeps source CRS.")
     parser.add_argument("--grid-type", default="geohash", choices=["geohash", "mgrs"], help="Grid type")
     parser.add_argument("--grid-level", type=int, default=5, help="Grid level")
     parser.add_argument("--cover-mode", default="intersect", choices=["intersect", "contain", "minimal"], help="Cover mode")
     parser.add_argument("--max-cells-per-asset", type=int, default=0, help="Safety limit for cover cells per asset (0 disables)")
     parser.add_argument("--partition-prefix-len", type=int, default=3, help="Prefix length used in row grouping")
-    parser.add_argument("--cog-overwrite", action="store_true", help="Force reconvert source TIF files to COG")
-    parser.add_argument("--cog-workers", type=int, default=0, help="Parallel workers for COG conversion")
     parser.add_argument("--partition-workers", type=int, default=0, help="Parallel workers for partition stage")
     parser.add_argument("--partition-backend", default="ray", choices=["auto", "ray", "thread"], help="Partition backend")
     parser.add_argument("--ray-address", default=runtime_config.ray_address(), help="Ray address, e.g. auto or ray://host:10001")
@@ -86,8 +78,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minio-prefix", default="cube/product", help="Object key prefix")
     parser.add_argument("--minio-secure", action="store_true", help="Use TLS for MinIO")
     parser.add_argument("--minio-upload-workers", type=int, default=8, help="Parallel upload workers")
-    parser.add_argument("--cog-output-root", default="data/cog/product_raw", help="Local asset materialization root")
-    parser.add_argument("--cog-materialize-mode", default="copy", choices=["copy", "hardlink", "symlink"], help="Local materialization mode")
     return parser.parse_args()
 
 
@@ -123,13 +113,7 @@ def _partition_groups_ray(
     parallelism: int,
     ray_address: str,
     include_sample_mean: bool,
-    assets_by_path: dict[str, dict],
-    cog_input_dir: str,
-    cog_overwrite: bool,
-    cog_options: dict[str, str],
-    target_crs: str,
     source_options: dict,
-    cog_upload_options: dict,
     cancellation_check: Any | None = None,
 ) -> tuple[list[dict], float, dict[str, float]]:
     chunk_size = max((len(chunk) for chunk in task_chunks), default=1)
@@ -159,25 +143,13 @@ def _partition_groups_ray(
 
     @ray.remote
     class ProductTaskProcessor:
-        def __init__(self) -> None:
-            self._local_cog_by_source: dict[str, str] = {}
-            self._converted_asset_by_source: dict[str, dict[str, Any]] = {}
-            self._remote_cog_by_local_path: dict[str, str] = {}
-
         def process_groups(
             self,
             task_groups: list[list[dict]],
             include_sample_mean_value: bool,
-            assets_by_path_value: dict[str, dict],
-            cog_input_dir_value: str,
-            cog_overwrite_value: bool,
-            cog_options_value: dict[str, str],
-            target_crs_value: str,
             source_options_value: dict,
-            cog_upload_options_value: dict,
         ) -> dict[str, Any]:
             import os
-            from pathlib import Path
 
             _prepend_sys_paths(
                 [
@@ -188,12 +160,9 @@ def _partition_groups_ray(
             )
 
             from cube_split.jobs.product_partition_job import _process_group_chunk
-            from cube_split.jobs.ray_partition_core import (
-                _prepare_actor_cog_groups,
-                _upload_actor_cogs,
-            )
+            from cube_split.jobs.ray_partition_core import _prepare_actor_source_groups
 
-            env_options = dict(cog_upload_options_value or source_options_value or {})
+            env_options = dict(source_options_value or {})
             if env_options.get("endpoint"):
                 os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
             if env_options.get("access_key"):
@@ -201,42 +170,15 @@ def _partition_groups_ray(
             if env_options.get("secret_key"):
                 os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
 
-            stats: dict[str, float] = {
-                "source_resolve_elapsed_sec": 0.0,
-                "cog_write_elapsed_sec": 0.0,
-                "cog_upload_elapsed_sec": 0.0,
-                "partition_rows_elapsed_sec": 0.0,
-                "cog_write_count": 0.0,
-                "cog_cache_hit_count": 0.0,
-                "cog_upload_count": 0.0,
-            }
-            worker_cog_root = Path(cog_input_dir_value) / f"ray_worker_{os.getpid()}"
-            prepared_groups, used_local_cog_paths = _prepare_actor_cog_groups(
+            prepared_groups = _prepare_actor_source_groups(
                 task_groups,
-                assets_by_path=assets_by_path_value,
-                local_cog_by_source=self._local_cog_by_source,
-                converted_asset_by_source=self._converted_asset_by_source,
-                cog_input_dir=worker_cog_root,
-                cog_overwrite=cog_overwrite_value,
-                cog_options=cog_options_value,
-                target_crs=target_crs_value,
+                cache_dir=Path("/tmp/cube_split_source_cache") / f"product_ray_{os.getpid()}",
                 source_options=source_options_value,
-                timing=stats,
             )
-            partition_rows_start = time.perf_counter()
             rows = _process_group_chunk(prepared_groups, include_sample_mean_value)
-            stats["partition_rows_elapsed_sec"] += time.perf_counter() - partition_rows_start
-            _upload_actor_cogs(
-                local_cog_by_source=self._local_cog_by_source,
-                converted_asset_by_source=self._converted_asset_by_source,
-                remote_cog_by_local_path=self._remote_cog_by_local_path,
-                used_local_cog_paths=used_local_cog_paths,
-                cog_upload_options=cog_upload_options_value,
-                timing=stats,
-            )
             for row in rows:
-                row["asset_path"] = self._remote_cog_by_local_path.get(str(row["asset_path"]), row["asset_path"])
-            return {"rows": rows, "stats": stats}
+                row["asset_path"] = row.get("source_asset_path", row["asset_path"])
+            return {"rows": rows}
 
     actor_cls = ProductTaskProcessor.options(**_ray_actor_options_from_env())
     actors = [actor_cls.remote() for _ in range(parallelism)]
@@ -247,13 +189,7 @@ def _partition_groups_ray(
         return actors[actor_idx].process_groups.remote(
             task_chunks_by_actor[actor_idx][chunk_idx],
             include_sample_mean,
-            assets_by_path,
-            cog_input_dir,
-            cog_overwrite,
-            cog_options,
-            target_crs,
             source_options,
-            cog_upload_options,
         )
 
     try:
@@ -350,52 +286,17 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         raise ValueError("partition_backend must be one of: auto, ray, thread")
     manifest_path_raw = str(getattr(args, "manifest_path", "") or "").strip()
     manifest_path = Path(manifest_path_raw).expanduser() if manifest_path_raw else None
-    source_uploader = None
-    if backend == "ray":
-
-        def source_uploader(assets: list[Any]) -> list[Any]:
-            return upload_source_assets_to_minio(
-                assets,
-                prefix="cube/source",
-                options={
-                    "endpoint": str(getattr(args, "minio_endpoint", "")),
-                    "access_key": str(getattr(args, "minio_access_key", "")),
-                    "secret_key": str(getattr(args, "minio_secret_key", "")),
-                    "secure": bool(getattr(args, "minio_secure", False)),
-                    "bucket": str(getattr(args, "minio_bucket", "")),
-                    "dataset": str(getattr(args, "dataset", "dianzhong_ecological_security")),
-                    "sensor": str(getattr(args, "sensor", "data_product")),
-                    "asset_version": str(getattr(args, "asset_version", "v1")),
-                },
-            )
     source_assets = build_manifest(
         input_dir,
         data_type="product",
         manifest_path=manifest_path,
-        **({"source_uploader": source_uploader} if source_uploader is not None else {}),
     )
     if not source_assets:
         raise RuntimeError(f"No product TIF assets found under: {input_dir}")
     args.product_name = _resolve_product_name(args, source_assets)
     check_cancelled(args)
 
-    cog_start = time.perf_counter()
-    if backend == "ray":
-        assets = source_assets
-    else:
-        assets = convert_assets_to_cog(
-            source_assets,
-            cog_input_dir=Path(args.cog_input_dir),
-            overwrite=bool(args.cog_overwrite),
-            workers=int(args.cog_workers),
-            compress="LZW",
-            predictor=0,
-            overviews="NONE",
-            num_threads="ALL_CPUS",
-            target_crs=args.target_crs,
-            cancellation_check=getattr(args, "cancellation_check", None),
-        )
-    cog_elapsed = time.perf_counter() - cog_start
+    assets = source_assets
     check_cancelled(args)
 
     grid_tasks = build_grid_tasks_driver(
@@ -432,38 +333,21 @@ def run_product_partition(args: argparse.Namespace) -> dict:
 
     worker_count = max(1, parallelism)
     ray_init_elapsed = 0.0
-    ray_worker_stats: dict[str, float] = {}
     start = time.perf_counter()
     if not grouped_tasks:
         out_rows = []
     elif backend == "ray":
-        assets_by_path = {asset.path: asset_record_to_dict(asset) for asset in assets}
         partition_kwargs = {
             "task_chunks": task_chunks,
             "parallelism": worker_count,
             "ray_address": ray_address,
             "include_sample_mean": bool(args.sample_mean),
-            "assets_by_path": assets_by_path,
-            "cog_input_dir": str(args.cog_input_dir),
-            "cog_overwrite": bool(args.cog_overwrite),
-            "cog_options": cog_creation_options("LZW", predictor=2, overviews="NONE", num_threads="ALL_CPUS"),
-            "target_crs": str(args.target_crs or ""),
             "source_options": {
                 "endpoint": str(getattr(args, "minio_endpoint", "")),
                 "access_key": str(getattr(args, "minio_access_key", "")),
                 "secret_key": str(getattr(args, "minio_secret_key", "")),
                 "secure": bool(getattr(args, "minio_secure", False)),
-            },
-            "cog_upload_options": {
-                "endpoint": str(getattr(args, "minio_endpoint", "")),
-                "access_key": str(getattr(args, "minio_access_key", "")),
-                "secret_key": str(getattr(args, "minio_secret_key", "")),
-                "secure": bool(getattr(args, "minio_secure", False)),
                 "bucket": str(getattr(args, "minio_bucket", "")),
-                "prefix": str(getattr(args, "minio_prefix", "cube/product")),
-                "dataset": str(getattr(args, "dataset", "dianzhong_ecological_security")),
-                "sensor": "data_product",
-                "asset_version": str(getattr(args, "asset_version", "v1")),
             },
         }
         if "cancellation_check" in signature(_partition_groups_ray).parameters:
@@ -471,8 +355,6 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         partition_result = _partition_groups_ray(**partition_kwargs)
         out_rows = partition_result[0]
         ray_init_elapsed = partition_result[1]
-        if len(partition_result) > 2:
-            ray_worker_stats = dict(partition_result[2] or {})
     else:
         out_rows = _partition_groups_thread(grouped_tasks, worker_count, bool(args.sample_mean))
     partition_elapsed = time.perf_counter() - start
@@ -503,7 +385,6 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         "rows": len(out_rows),
         "grid_type": args.grid_type,
         "grid_level": int(args.grid_level),
-        "target_crs": args.target_crs,
         "execution_engine": backend,
         "partition_backend_requested": backend_requested,
         "partition_backend_used": backend,
@@ -521,14 +402,6 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         "cube_version": str(getattr(args, "cube_version", "")),
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
         "minio_prefix": str(getattr(args, "minio_prefix", "")) if asset_storage_backend == "minio" else "",
-        "cog_elapsed_sec": round(cog_elapsed, 3),
-        "worker_source_resolve_elapsed_sec": round(ray_worker_stats.get("source_resolve_elapsed_sec", 0.0), 3),
-        "worker_cog_write_elapsed_sec": round(ray_worker_stats.get("cog_write_elapsed_sec", 0.0), 3),
-        "worker_cog_upload_elapsed_sec": round(ray_worker_stats.get("cog_upload_elapsed_sec", 0.0), 3),
-        "worker_partition_rows_elapsed_sec": round(ray_worker_stats.get("partition_rows_elapsed_sec", 0.0), 3),
-        "worker_cog_write_count": int(ray_worker_stats.get("cog_write_count", 0.0)),
-        "worker_cog_cache_hit_count": int(ray_worker_stats.get("cog_cache_hit_count", 0.0)),
-        "worker_cog_upload_count": int(ray_worker_stats.get("cog_upload_count", 0.0)),
         "partition_elapsed_sec": round(partition_elapsed, 3),
         "ingest_elapsed_sec": round(ingest_elapsed, 3),
         "total_elapsed_sec": round(time.perf_counter() - total_start, 3),

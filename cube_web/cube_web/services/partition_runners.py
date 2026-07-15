@@ -496,10 +496,6 @@ def _partition_grid_type(payload: dict, *, default: str = "geohash") -> str:
     return grid_type
 
 
-def _target_crs_for_grid(payload: dict, grid_type: str, *, explicit_payload: dict | None = None) -> str:
-    return str(payload.get("target_crs") or "EPSG:4326")
-
-
 def _max_cells_per_asset(payload: dict) -> int:
     return _int_payload_value(payload, "max_cells_per_asset", 0)
 
@@ -656,7 +652,7 @@ def _run_optical_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
-    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
+    from cube_split.jobs.entity_partition_job import run_entity_partition
 
     raw_payload = payload or {}
     grid_type = _partition_grid_type(raw_payload, default="isea4h")
@@ -707,30 +703,14 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
         fallback=default_grid_level,
     )
     grid_level = _requested_grid_level(raw_payload, grid_type, default_grid_level)
-    grid_level_mode = str(
-        raw_payload.get("grid_level_mode") or ("manual" if raw_payload.get("grid_level") is not None else "auto")
-    ).lower()
-    if grid_level_mode not in {"auto", "manual"}:
-        raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = None if grid_level_mode == "auto" else grid_level
-
     args = SimpleNamespace(
         input_dir=str(input_dir),
         manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
         product_family=str(payload.get("product_family") or "auto"),
         output_dir=str(output_root),
-        cog_input_dir=str(root / "cog"),
-        cog_overwrite=True,
-        cog_workers=_int_payload_value(payload, "cog_workers", 2),
-        cog_compress=str(payload.get("cog_compress") or "LZW"),
-        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
-        cog_level=_int_payload_value(payload, "cog_level", 0),
-        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
-        grid_level=entity_grid_level,
+        grid_level=grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
-        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_max_cells_per_asset(payload),
@@ -783,7 +763,7 @@ def _run_entity_partition_from_payload(payload: dict | None = None, mode: str = 
     response["grid_type"] = grid_type
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
-        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
         quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
         response["quality_status"] = quality_report.get("status")
         response["quality_report"] = quality_report
@@ -982,7 +962,7 @@ def _run_carbon_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_product_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
-    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
+    from cube_split.jobs.entity_partition_job import run_entity_partition
     from cube_split.jobs.product_partition_job import run_product_partition
 
     raw_payload = payload or {}
@@ -1026,30 +1006,15 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
         fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
     grid_level = _requested_grid_level(payload, grid_type, grid_level_default)
-    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
-    grid_level_mode = str(payload.get("grid_level_mode") or default_grid_level_mode).lower()
-    if grid_level_mode not in {"auto", "manual"}:
-        raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
-
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
         manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
         product_family=str(payload.get("product_family") or "product"),
         data_type="product",
         output_dir=str(root / "output"),
-        cog_input_dir=str(root / "cog"),
-        cog_overwrite=True,
-        cog_workers=_int_payload_value(payload, "cog_workers", 2),
-        cog_compress=str(payload.get("cog_compress") or "LZW"),
-        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
-        cog_level=_int_payload_value(payload, "cog_level", 0),
-        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
-        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
+        grid_level=grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
-        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "year"),
         max_cells_per_asset=_max_cells_per_asset(payload),
@@ -1098,7 +1063,7 @@ def _run_product_partition_demo(payload: dict | None = None, mode: str = "partit
     result["selected_asset_count"] = len(payload.get("selected_assets") or [])
     result["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(result.get("ingest_enabled", False))
     if quality_checks.run_product_quality_check is not None:
-        quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": args.target_crs}))
+        quality_report = quality_checks.run_product_quality_check(quality_args(str(result["run_dir"]), {"target_crs": "EPSG:4326"}))
         quality_report = get_quality_report_store().upsert_report("product", result["run_dir"], quality_report)
         result["quality_status"] = quality_report.get("status")
         result["quality_report"] = quality_report
@@ -1126,7 +1091,7 @@ def _run_product_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partition_demo") -> dict:
-    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
+    from cube_split.jobs.entity_partition_job import run_entity_partition
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
     raw_payload = payload or {}
@@ -1178,11 +1143,6 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         fallback=default_grid_level_for_partition(grid_type, partition_method),
     )
     grid_level = _requested_grid_level(raw_payload, grid_type, grid_level_default)
-    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
-    grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
-    if grid_level_mode not in {"auto", "manual"}:
-        raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
     partition_backend = str(payload.get("partition_backend") or "thread")
     ray_address = str(
         payload.get("ray_address") or (runtime_config.require_ray_address() if partition_backend in {"auto", "ray"} else "")
@@ -1198,18 +1158,9 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
         product_family=str(payload.get("product_family") or "sentinel1"),
         data_type="radar",
         output_dir=str(root / "output"),
-        cog_input_dir=str(root / "cog"),
-        cog_overwrite=True,
-        cog_workers=_int_payload_value(payload, "cog_workers", 2),
-        cog_compress=str(payload.get("cog_compress") or "LZW"),
-        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
-        cog_level=_int_payload_value(payload, "cog_level", 0),
-        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
-        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
+        grid_level=grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
-        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_max_cells_per_asset(payload),
@@ -1271,7 +1222,7 @@ def _run_radar_partition_demo(payload: dict | None = None, mode: str = "partitio
     response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_radar_quality_check is not None:
-        quality_report = quality_checks.run_radar_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = quality_checks.run_radar_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
         quality_report = get_quality_report_store().upsert_report("radar", run_dir, quality_report)
         response["quality_status"] = quality_report.get("status")
         response["quality_report"] = quality_report
@@ -1299,7 +1250,7 @@ def _run_radar_partition_retry(payload: dict | None = None) -> dict:
 
 
 def _run_optical_partition_from_payload(payload: dict | None = None, mode: str = "partition_demo") -> dict:
-    from cube_split.jobs.entity_partition_job import DEFAULT_TARGET_PIXELS_PER_HEX_EDGE, run_entity_partition
+    from cube_split.jobs.entity_partition_job import run_entity_partition
     from cube_split.jobs.ray_logical_partition_job import run_logical_partition
 
     raw_payload = payload or {}
@@ -1351,29 +1302,14 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
         fallback=grid_level_default,
     )
     grid_level = _requested_grid_level(raw_payload, grid_type, grid_level_default)
-    default_grid_level_mode = "manual" if raw_payload.get("grid_level") is not None else "auto"
-    grid_level_mode = str(raw_payload.get("grid_level_mode") or default_grid_level_mode).lower()
-    if grid_level_mode not in {"auto", "manual"}:
-        raise ValueError("grid_level_mode must be one of: auto, manual")
-    entity_grid_level = None if (partition_method == "entity" and grid_level_mode == "auto" and grid_type == "isea4h") else grid_level
-
     args = SimpleNamespace(
         input_dir=str(run_input_dir),
         manifest_path=(str(manifest_path.resolve()) if str(manifest_path) else ""),
         product_family=str(payload.get("product_family") or "auto"),
         output_dir=str(output_root),
-        cog_input_dir=str(root / "cog"),
-        cog_overwrite=True,
-        cog_workers=_int_payload_value(payload, "cog_workers", 2),
-        cog_compress=str(payload.get("cog_compress") or "LZW"),
-        cog_predictor=_int_payload_value(payload, "cog_predictor", 2),
-        cog_level=_int_payload_value(payload, "cog_level", 0),
-        cog_num_threads=str(payload.get("cog_num_threads") or "ALL_CPUS"),
-        target_crs=_target_crs_for_grid(payload, grid_type, explicit_payload=raw_payload),
         grid_type=grid_type,
-        grid_level=entity_grid_level if partition_method == "entity" else grid_level,
+        grid_level=grid_level,
         entity_clip_mode=str(payload.get("entity_clip_mode") or "exact"),
-        target_pixels_per_hex_edge=_int_payload_value(payload, "target_pixels_per_hex_edge", DEFAULT_TARGET_PIXELS_PER_HEX_EDGE),
         cover_mode=str(payload.get("cover_mode") or "intersect"),
         time_granularity=str(payload.get("time_granularity") or "day"),
         max_cells_per_asset=_max_cells_per_asset(payload),
@@ -1435,7 +1371,7 @@ def _run_optical_partition_from_payload(payload: dict | None = None, mode: str =
     response["grid_type"] = str(report.get("grid_type") or grid_type)
     response["ingest_enabled"] = mode != "partition_test_no_ingest" and bool(report.get("ingest_enabled", False))
     if quality_checks.run_optical_quality_check is not None:
-        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": args.target_crs}))
+        quality_report = quality_checks.run_optical_quality_check(quality_args(str(run_dir), {"target_crs": "EPSG:4326"}))
         quality_report = get_quality_report_store().upsert_report("optical", run_dir, quality_report)
         response["quality_status"] = quality_report.get("status")
         response["quality_report"] = quality_report

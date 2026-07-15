@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from cube_web.routes.partition import create_partition_router
-from cube_web.schemas import PartitionDemoRequest
 from cube_web.services import partition_runners
 from cube_web.services.config_store import normalized_config
+from cube_web.services.partition_contracts import StrictPartitionRequest
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore
 from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
 from cube_web.services.partition_workflow import PartitionWorkflowService
@@ -104,8 +104,6 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
         "grid_type": "isea4h",
         "partition_method": "entity",
         "grid_level": 2,
-        "grid_level_mode": "manual",
-        "target_pixels_per_hex_edge": 384,
         "max_cells_per_asset": 9,
         "ray_parallelism": 3,
         "partition_backend": "thread",
@@ -122,9 +120,27 @@ def _runtime_payload(data_type: str, tmp_path: Path) -> dict[str, Any]:
 
 
 def test_web_time_granularity_matches_frozen_sdk_contract():
-    assert PartitionDemoRequest(time_granularity="second").time_granularity == "second"
+    payload = {
+        "batch_id": "time-contract",
+        "grid_type": "geohash",
+        "requested_grid_level": 5,
+        "partition_method": "logical",
+        "time_granularity": "second",
+        "datasets": [{
+            "dataset_id": "dataset-time", "dataset_code": "dataset-time", "dataset_title": "Dataset time",
+            "data_type": "optical",
+            "assets": [{
+                "source_asset_id": "asset-time", "cog_uri": "s3://cube/loader/time.tif", "checksum": "a" * 64,
+                "bbox": [100.0, 20.0, 101.0, 21.0], "crs": "EPSG:4326",
+                "time_start": "2026-05-30T00:00:00Z", "time_end": "2026-05-30T00:01:00Z",
+            }],
+            "bands": [{"source_asset_id": "asset-time", "band_code": "B01", "band_name": "Band 1", "band_type": "spectral", "display_order": 0}],
+        }],
+    }
+    assert StrictPartitionRequest.model_validate(payload).time_granularity == "second"
+    payload["time_granularity"] = "year"
     with pytest.raises(ValidationError):
-        PartitionDemoRequest(time_granularity="year")
+        StrictPartitionRequest.model_validate(payload)
 
     config = normalized_config({"partition": {"optical": {"time_granularity": "second"}}})
     assert config["partition"]["optical"]["time_granularity"] == "second"
@@ -198,7 +214,7 @@ def test_product_and_radar_run_payloads_dispatch_isea4h_to_entity_partition(
     assert captured["data_type"] == data_type
     assert captured["grid_type"] == "isea4h"
     assert captured["grid_level"] == 2
-    assert captured["target_pixels_per_hex_edge"] == 384
+    assert "target_pixels_per_hex_edge" not in captured
     assert captured["max_cells_per_asset"] == 9
     assert captured["ray_parallelism"] == 3
     assert captured["partition_backend"] == "thread"

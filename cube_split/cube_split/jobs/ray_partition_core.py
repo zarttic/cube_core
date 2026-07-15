@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
-import tempfile
+import shutil
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import rasterio
 from grid_core.sdk import CubeEncoderSDK, GridAddress
 from pyproj import Transformer
-from rasterio.enums import Resampling
-from rasterio.shutil import copy as rio_copy
-from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 from cube_split.partition.optical_products import parse_optical_asset
@@ -95,33 +92,29 @@ def _minio_client(options: dict[str, Any] | None = None):
     )
 
 
-def _cache_path_for_uri(uri: str, cache_root: Path, suffix: str | None = None) -> Path:
-    _, key = _parse_s3_uri(uri)
-    digest = hashlib.sha1(uri.encode("utf-8")).hexdigest()[:16]
-    name = Path(key).name
-    if suffix is not None:
-        name = f"{Path(name).stem}{suffix}"
-    return cache_root / digest / name
-
-
-def _fallback_cache_root(cache_root: Path) -> Path:
-    uid = getattr(os, "getuid", lambda: 0)()
-    return Path(tempfile.gettempdir()) / f"{cache_root.name}_u{uid}"
-
-
-def _cache_target_for_uri(uri: str, cache_root: Path) -> Path:
-    target = _cache_path_for_uri(uri, cache_root)
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        fallback = _cache_path_for_uri(uri, _fallback_cache_root(cache_root))
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        return fallback
-    if os.access(target.parent, os.W_OK | os.X_OK):
+def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: str) -> Path:
+    """Cache one loader-owned COG locally without altering its content."""
+    parsed = urlparse(cog_uri)
+    if parsed.scheme != "s3" or parsed.netloc != bucket or not parsed.path.lstrip("/"):
+        raise ValueError(f"invalid source COG URI for bucket {bucket}: {cog_uri}")
+    key = unquote(parsed.path).lstrip("/")
+    target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
+    if target.exists():
         return target
-    fallback = _cache_path_for_uri(uri, _fallback_cache_root(cache_root))
-    fallback.parent.mkdir(parents=True, exist_ok=True)
-    return fallback
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(f"{target.suffix}.part")
+    try:
+        minio_client.fget_object(bucket, key, str(temporary))
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            raise
+        # Worker-local loader cache is disposable; reclaim a stale cache once.
+        temporary.unlink(missing_ok=True)
+        shutil.rmtree(cache_dir.parent, ignore_errors=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        minio_client.fget_object(bucket, key, str(temporary))
+    temporary.replace(target)
+    return target
 
 
 def _object_identity(stat: Any) -> str:
@@ -184,65 +177,6 @@ def create_unique_run_dir(output_dir: Path, *, prefix: str = "run") -> Path:
     return fallback
 
 
-def _download_s3_object(uri: str, cache_root: Path, options: dict[str, Any] | None = None) -> Path:
-    from minio.error import S3Error
-
-    bucket, key = _parse_s3_uri(uri)
-    client = _minio_client(options)
-    target = _cache_target_for_uri(uri, cache_root)
-    stat = client.stat_object(bucket, key)
-    identity = _object_identity(stat)
-    identity_state = _read_identity_sidecar(target)
-    if not target.exists() or target.stat().st_size != stat.size or identity_state.get("remote") != identity:
-        handle = tempfile.NamedTemporaryFile(prefix=f".{target.name}.", suffix=".part", dir=target.parent, delete=False)
-        tmp = Path(handle.name)
-        handle.close()
-        try:
-            client.fget_object(bucket, key, str(tmp))
-            tmp.replace(target)
-            _write_identity_sidecar(target, remote=identity)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
-
-    sidecar_keys = [f"{key}.aux.xml", f"{key}.ovr"]
-    if key.lower().endswith((".tif", ".tiff")):
-        sidecar_keys.append(f"{key.rsplit('.', 1)[0]}.tfw")
-    if key.lower().endswith(".dat"):
-        sidecar_keys.append(f"{key.rsplit('.', 1)[0]}.hdr")
-    for sidecar_key in sidecar_keys:
-        sidecar_target = target.parent / Path(sidecar_key).name
-        try:
-            sidecar_stat = client.stat_object(bucket, sidecar_key)
-        except S3Error as exc:
-            if exc.code in {"NoSuchKey", "NoSuchObject"}:
-                continue
-            raise
-        sidecar_identity = _object_identity(sidecar_stat)
-        sidecar_identity_state = _read_identity_sidecar(sidecar_target)
-        if (
-            not sidecar_target.exists()
-            or sidecar_target.stat().st_size != sidecar_stat.size
-            or sidecar_identity_state.get("remote") != sidecar_identity
-        ):
-            handle = tempfile.NamedTemporaryFile(
-                prefix=f".{sidecar_target.name}.",
-                suffix=".part",
-                dir=sidecar_target.parent,
-                delete=False,
-            )
-            tmp = Path(handle.name)
-            handle.close()
-            try:
-                client.fget_object(bucket, sidecar_key, str(tmp))
-                tmp.replace(sidecar_target)
-                _write_identity_sidecar(sidecar_target, remote=sidecar_identity)
-            finally:
-                if tmp.exists():
-                    tmp.unlink()
-    return target
-
-
 def resolve_asset_source_path(source_uri: str, options: dict[str, Any] | None = None) -> str:
     text = str(source_uri or "").strip()
     if not text:
@@ -256,106 +190,10 @@ def resolve_asset_source_path(source_uri: str, options: dict[str, Any] | None = 
             or "/tmp/cube_split_source_cache"
         )
     )
-    return str(_download_s3_object(text, cache_root, options).resolve())
-
-
-def _upload_file_to_minio(path: Path, key: str, options: dict[str, Any]) -> str:
-    from minio.error import S3Error
-
-    bucket = minio_settings(options).bucket
+    bucket = str(minio_settings(options).bucket)
     if not bucket:
-        raise ValueError("MinIO bucket is required")
-    client = _minio_client(options)
-    local_identity = _local_file_identity(path)
-    identity_state = _read_identity_sidecar(path)
-    try:
-        stat = client.stat_object(bucket, key)
-        remote_identity = _object_identity(stat)
-        if (
-            stat.size == path.stat().st_size
-            and identity_state.get("local") == local_identity
-            and identity_state.get("remote") == remote_identity
-        ):
-            return f"s3://{bucket}/{key}"
-    except S3Error as exc:
-        if exc.code not in {"NoSuchKey", "NoSuchObject"}:
-            raise
-    client.fput_object(bucket, key, str(path))
-    stat = client.stat_object(bucket, key)
-    _write_identity_sidecar(path, local=local_identity, remote=_object_identity(stat))
-    return f"s3://{bucket}/{key}"
-
-
-def upload_cog_to_minio(asset: AssetRecord, cog_path: Path, options: dict[str, Any] | None = None) -> str:
-    opts = dict(options or {})
-    prefix = str(opts.get("prefix") or opts.get("minio_prefix") or "cube/cog").strip("/")
-    dataset = str(opts.get("dataset") or "demo")
-    sensor = str(opts.get("sensor") or asset.sensor or "unknown")
-    version = str(opts.get("asset_version") or opts.get("version") or "v1")
-    date_path = datetime.fromisoformat(asset.acq_time.replace("Z", "+00:00")).strftime("%Y/%m/%d")
-    key = (
-        f"{prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
-        f"scene_id={asset.scene_id}/version={version}/{cog_path.name}"
-    )
-    return _upload_file_to_minio(cog_path, key, opts)
-
-
-def upload_source_assets_to_minio(
-    assets: list[AssetRecord],
-    *,
-    prefix: str,
-    options: dict[str, Any] | None = None,
-) -> list[AssetRecord]:
-    from minio.error import S3Error
-
-    if not assets:
-        return []
-
-    opts = dict(options or {})
-    source_prefix = str(prefix or opts.get("prefix") or opts.get("minio_prefix") or "cube/source").strip("/")
-    dataset = str(opts.get("dataset") or "demo")
-    sensor = str(opts.get("sensor") or "unknown")
-    version = str(opts.get("asset_version") or opts.get("version") or "v1")
-    bucket = str(minio_settings(opts).bucket)
-    if not bucket:
-        raise ValueError("MinIO bucket is required")
-    client = _minio_client(opts)
-    if not client.bucket_exists(bucket):
-        client.make_bucket(bucket)
-
-    uploaded: list[AssetRecord] = []
-    for asset in assets:
-        if _is_s3_uri(asset.path):
-            uploaded.append(asset)
-            continue
-        source_path = Path(asset.path)
-        if not source_path.exists():
-            raise FileNotFoundError(f"Asset file not found: {source_path}")
-        local_identity = _local_file_identity(source_path)
-        identity_state = _read_identity_sidecar(source_path)
-        date_path = datetime.fromisoformat(asset.acq_time.replace("Z", "+00:00")).strftime("%Y/%m/%d")
-        key = (
-            f"{source_prefix}/dataset={dataset}/sensor={sensor}/acq_date={date_path}/"
-            f"scene_id={asset.scene_id}/version={version}/{source_path.name}"
-        )
-        try:
-            stat = client.stat_object(bucket, key)
-            remote_identity = _object_identity(stat)
-            if (
-                stat.size == source_path.stat().st_size
-                and identity_state.get("local") == local_identity
-                and identity_state.get("remote") == remote_identity
-            ):
-                uploaded.append(replace(asset, path=f"s3://{bucket}/{key}"))
-                continue
-        except S3Error as exc:
-            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
-                raise
-        client.fput_object(bucket, key, str(source_path))
-        stat = client.stat_object(bucket, key)
-        _write_identity_sidecar(source_path, local=local_identity, remote=_object_identity(stat))
-        uploaded.append(replace(asset, path=f"s3://{bucket}/{key}"))
-    return uploaded
+        raise ValueError("MinIO bucket is required for loader COG cache")
+    return str(cache_source_cog(text, cache_root, _minio_client(options), bucket).resolve())
 
 
 def _load_manifest_records(manifest_path: Path, default_data_type: str) -> list[AssetRecord]:
@@ -448,7 +286,6 @@ def build_manifest(
     product_family: str = "auto",
     data_type: str = "optical",
     manifest_path: Path | None = None,
-    source_uploader: Any | None = None,
 ) -> list[AssetRecord]:
     if manifest_path is not None:
         return _load_manifest_records(manifest_path, default_data_type=data_type)
@@ -472,8 +309,6 @@ def build_manifest(
                 sensor=metadata.sensor,
             )
         )
-    if source_uploader is not None:
-        records = list(source_uploader(records))
     return records
 
 
@@ -490,240 +325,28 @@ def _manifest_resolution(row: dict[str, Any]) -> float | None:
     return None
 
 
-def convert_assets_to_cog(
-    assets: list[AssetRecord],
-    cog_input_dir: Path,
-    overwrite: bool = False,
-    workers: int = 0,
-    compress: str = "LZW",
-    predictor: int = 2,
-    level: int | None = None,
-    overviews: str = "NONE",
-    num_threads: str = "ALL_CPUS",
-    target_crs: str | None = None,
-    source_options: dict[str, Any] | None = None,
-    cancellation_check: Any | None = None,
-) -> list[AssetRecord]:
-    if not assets:
-        return []
-
-    cog_input_dir.mkdir(parents=True, exist_ok=True)
-    if workers < 0:
-        raise ValueError("workers must be >= 0")
-    worker_count = workers or min(len(assets), (os.cpu_count() or 1))
-    worker_count = max(1, worker_count)
-
-    creation_options = cog_creation_options(
-        compress=compress,
-        predictor=predictor,
-        level=level,
-        overviews=overviews,
-        num_threads=num_threads,
-    )
-
-    def convert_one(asset: AssetRecord) -> AssetRecord:
-        if cancellation_check is not None and cancellation_check():
-            from cube_split.jobs.cancellation import PartitionCancelledError
-
-            raise PartitionCancelledError("Partition task cancelled")
-        return convert_asset_to_cog(
-            asset,
-            cog_input_dir=cog_input_dir,
-            overwrite=overwrite,
-            creation_options=creation_options,
-            target_crs=target_crs,
-            source_options=source_options,
-        )
-
-    if worker_count == 1:
-        converted = []
-        for asset in assets:
-            if cancellation_check is not None and cancellation_check():
-                from cube_split.jobs.cancellation import PartitionCancelledError
-
-                raise PartitionCancelledError("Partition task cancelled")
-            converted.append(convert_one(asset))
-        return converted
-
-    with ThreadPoolExecutor(max_workers=worker_count) as pool:
-        converted = []
-        for item in pool.map(convert_one, assets):
-            if cancellation_check is not None and cancellation_check():
-                from cube_split.jobs.cancellation import PartitionCancelledError
-
-                raise PartitionCancelledError("Partition task cancelled")
-            converted.append(item)
-        return converted
-
-
-def cog_creation_options(
-    compress: str = "LZW",
-    predictor: int = 2,
-    level: int | None = None,
-    overviews: str = "NONE",
-    num_threads: str = "ALL_CPUS",
-) -> dict[str, str]:
-    compress_value = str(compress or "NONE").upper()
-    options: dict[str, str] = {
-        "COMPRESS": compress_value,
-        "OVERVIEWS": overviews,
-    }
-    if compress_value != "NONE" and predictor > 0:
-        options["PREDICTOR"] = str(predictor)
-    if compress_value != "NONE" and level is not None and level > 0:
-        options["LEVEL"] = str(level)
-    if num_threads:
-        options["NUM_THREADS"] = str(num_threads)
-    return options
-
-
-def asset_record_to_dict(asset: AssetRecord) -> dict[str, Any]:
-    return {
-        "scene_id": asset.scene_id,
-        "band": asset.band,
-        "path": asset.path,
-        "acq_time": asset.acq_time,
-        "product_family": asset.product_family,
-        "sensor": asset.sensor,
-        "bbox": asset.bbox,
-        "corners": asset.corners,
-        "resolution": asset.resolution,
-    }
-
-
-def asset_record_from_dict(row: dict[str, Any]) -> AssetRecord:
-    return AssetRecord(
-        scene_id=str(row["scene_id"]),
-        band=str(row["band"]),
-        path=str(row["path"]),
-        acq_time=str(row["acq_time"]),
-        product_family=str(row.get("product_family") or "unknown"),
-        sensor=str(row.get("sensor") or "unknown"),
-        bbox=row.get("bbox"),
-        corners=row.get("corners"),
-        resolution=(float(row["resolution"]) if row.get("resolution") is not None else None),
-    )
-
-
-def convert_asset_to_cog(
-    asset: AssetRecord,
-    cog_input_dir: Path,
-    overwrite: bool,
-    creation_options: dict[str, str],
-    target_crs: str | None = None,
-    source_options: dict[str, Any] | None = None,
-    timing: dict[str, float] | None = None,
-) -> AssetRecord:
-    cog_input_dir.mkdir(parents=True, exist_ok=True)
-    resolve_start = time.perf_counter()
-    local_source = Path(resolve_asset_source_path(asset.path, source_options))
-    if timing is not None:
-        timing["source_resolve_elapsed_sec"] = timing.get("source_resolve_elapsed_sec", 0.0) + (
-            time.perf_counter() - resolve_start
-        )
-    if _is_s3_uri(asset.path):
-        source_stem = Path(_parse_s3_uri(asset.path)[1]).stem
-        digest = hashlib.sha1(asset.path.encode("utf-8")).hexdigest()[:10]
-        dst = cog_input_dir / f"{source_stem}_{digest}_cog.tif"
-    else:
-        dst = cog_input_dir / f"{local_source.stem}_cog.tif"
-    if overwrite and dst.exists():
-        dst.unlink()
-    if not dst.exists():
-        write_start = time.perf_counter()
-        with rasterio.open(local_source) as ds:
-            if target_crs and (ds.crs is None or ds.crs.to_string().upper() != target_crs.upper()):
-                if ds.crs is None:
-                    raise ValueError(f"Cannot reproject asset without CRS: {asset.path}")
-                with WarpedVRT(ds, crs=target_crs, resampling=Resampling.nearest) as vrt:
-                    rio_copy(vrt, str(dst), driver="COG", **creation_options)
-            else:
-                rio_copy(ds, str(dst), driver="COG", **creation_options)
-        if timing is not None:
-            timing["cog_write_elapsed_sec"] = timing.get("cog_write_elapsed_sec", 0.0) + (
-                time.perf_counter() - write_start
-            )
-            timing["cog_write_count"] = timing.get("cog_write_count", 0.0) + 1.0
-    elif timing is not None:
-        timing["cog_cache_hit_count"] = timing.get("cog_cache_hit_count", 0.0) + 1.0
-    return AssetRecord(
-        scene_id=asset.scene_id,
-        band=asset.band,
-        path=str(dst.resolve()),
-        acq_time=asset.acq_time,
-        product_family=asset.product_family,
-        sensor=asset.sensor,
-        bbox=asset.bbox,
-        corners=asset.corners,
-        resolution=asset.resolution,
-    )
-
-
-def _prepare_actor_cog_groups(
+def _prepare_actor_source_groups(
     task_groups: list[list[dict]],
     *,
-    assets_by_path: dict[str, dict],
-    local_cog_by_source: dict[str, str],
-    converted_asset_by_source: dict[str, dict[str, Any]],
-    cog_input_dir: Path,
-    cog_overwrite: bool,
-    cog_options: dict[str, str],
-    target_crs: str,
+    cache_dir: Path,
     source_options: dict[str, Any],
-    timing: dict[str, float] | None = None,
-) -> tuple[list[list[dict]], set[str]]:
+) -> list[list[dict]]:
+    bucket = str(source_options.get("bucket") or "")
+    if not bucket:
+        raise ValueError("MinIO bucket is required for loader COG cache")
+    client = _minio_client(source_options)
+    local_paths: dict[str, str] = {}
     prepared_groups: list[list[dict]] = []
-    used_local_cog_paths: set[str] = set()
     for group in task_groups:
         if not group:
             continue
-        source_path = str(group[0]["asset_path"])
-        local_cog_path = local_cog_by_source.get(source_path)
-        if local_cog_path is None:
-            asset = asset_record_from_dict(assets_by_path[source_path])
-            converted = convert_asset_to_cog(
-                asset,
-                cog_input_dir=cog_input_dir,
-                overwrite=cog_overwrite,
-                creation_options=cog_options,
-                target_crs=target_crs or None,
-                source_options=source_options,
-                timing=timing,
-            )
-            local_cog_path = str(converted.path)
-            local_cog_by_source[source_path] = local_cog_path
-            converted_asset_by_source[source_path] = asset_record_to_dict(converted)
-        elif timing is not None:
-            timing["cog_cache_hit_count"] = timing.get("cog_cache_hit_count", 0.0) + 1.0
-        used_local_cog_paths.add(local_cog_path)
-        prepared_groups.append([{**row, "asset_path": local_cog_path} for row in group])
-    return prepared_groups, used_local_cog_paths
-
-
-def _upload_actor_cogs(
-    *,
-    local_cog_by_source: dict[str, str],
-    converted_asset_by_source: dict[str, dict[str, Any]],
-    remote_cog_by_local_path: dict[str, str],
-    used_local_cog_paths: set[str],
-    cog_upload_options: dict[str, Any],
-    timing: dict[str, float] | None = None,
-) -> None:
-    for source_path, local_cog_path in local_cog_by_source.items():
-        if local_cog_path not in used_local_cog_paths or local_cog_path in remote_cog_by_local_path:
-            continue
-        converted = asset_record_from_dict(converted_asset_by_source[source_path])
-        upload_start = time.perf_counter()
-        remote_cog_by_local_path[local_cog_path] = upload_cog_to_minio(
-            converted,
-            Path(local_cog_path),
-            cog_upload_options,
-        )
-        if timing is not None:
-            timing["cog_upload_elapsed_sec"] = timing.get("cog_upload_elapsed_sec", 0.0) + (
-                time.perf_counter() - upload_start
-            )
-            timing["cog_upload_count"] = timing.get("cog_upload_count", 0.0) + 1.0
+        source_uri = str(group[0]["asset_path"])
+        local_path = local_paths.get(source_uri)
+        if local_path is None:
+            local_path = str(cache_source_cog(source_uri, cache_dir, client, bucket))
+            local_paths[source_uri] = local_path
+        prepared_groups.append([{**row, "asset_path": local_path, "source_asset_path": source_uri} for row in group])
+    return prepared_groups
 
 
 def _dataset_bounds_wgs84(ds: rasterio.DatasetReader) -> tuple[float, float, float, float]:
