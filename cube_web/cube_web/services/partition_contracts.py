@@ -17,19 +17,22 @@ class StrictModel(BaseModel):
 
 class SourceAssetInput(StrictModel):
     source_asset_id: str = Field(min_length=1)
-    cog_uri: AnyUrl
+    cog_uri: AnyUrl | None = None
+    source_uri: AnyUrl | None = None
+    source_kind: Literal["cog", "raw"] = "cog"
+    source_format: Literal["cog", "netcdf", "hdf5"] = "cog"
     checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-    bbox: tuple[float, float, float, float]
-    crs: str = Field(min_length=1)
+    bbox: tuple[float, float, float, float] | None = None
+    crs: str | None = Field(default=None, min_length=1)
     time_start: str
     time_end: str
     attributes: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("cog_uri")
+    @field_validator("cog_uri", "source_uri")
     @classmethod
-    def require_s3_cog(cls, value: AnyUrl) -> AnyUrl:
-        if value.scheme != "s3":
-            raise ValueError("cog_uri must use s3://")
+    def require_s3_uri(cls, value: AnyUrl | None) -> AnyUrl | None:
+        if value is not None and value.scheme != "s3":
+            raise ValueError("source asset URIs must use s3://")
         return value
 
 
@@ -43,6 +46,21 @@ class BandInput(StrictModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+class DatasetPartitionConfig(StrictModel):
+    """Optional dataset overrides for a mixed normalized partition batch.
+
+    Missing fields inherit the batch-level strict request configuration.  The
+    resolved combination is validated by ``resolve_dataset_partition``.
+    """
+
+    grid_type: GridType | None = None
+    requested_grid_level: int | None = None
+    partition_method: PartitionMethod | None = None
+    cover_mode: Literal["intersect", "contain", "minimal"] | None = None
+    time_granularity: Literal["second", "minute", "hour", "day", "month"] | None = None
+    max_cells_per_asset: int | None = Field(default=None, ge=0)
+
+
 class DatasetInput(StrictModel):
     dataset_id: str = Field(min_length=1)
     dataset_code: str = Field(min_length=1)
@@ -52,6 +70,7 @@ class DatasetInput(StrictModel):
     assets: tuple[SourceAssetInput, ...] = Field(min_length=1)
     bands: tuple[BandInput, ...] = Field(min_length=1)
     attributes: dict[str, Any] = Field(default_factory=dict)
+    partition: DatasetPartitionConfig | None = None
 
     @model_validator(mode="after")
     def bands_reference_assets(self) -> "DatasetInput":
@@ -59,6 +78,23 @@ class DatasetInput(StrictModel):
         unknown = sorted({band.source_asset_id for band in self.bands} - asset_ids)
         if unknown:
             raise ValueError(f"bands reference unknown source assets: {unknown}")
+        for asset in self.assets:
+            if self.data_type == "carbon":
+                if asset.cog_uri is not None or asset.source_uri is None:
+                    raise ValueError("carbon assets require source_uri and must not use cog_uri")
+                if asset.source_kind != "raw" or asset.source_format not in {"netcdf", "hdf5"}:
+                    raise ValueError("carbon assets require source_kind=raw and source_format netcdf or hdf5")
+                suffix = asset.source_uri.path.lower()
+                allowed = {
+                    "netcdf": (".nc", ".nc4"),
+                    "hdf5": (".h5", ".hdf", ".hdf5"),
+                }[asset.source_format]
+                if not suffix.endswith(allowed):
+                    raise ValueError(f"carbon source_uri does not match source_format={asset.source_format}")
+            elif asset.source_kind != "cog" or asset.source_format != "cog" or asset.cog_uri is None or asset.source_uri is not None:
+                raise ValueError("non-carbon assets require cog_uri with source_format=cog")
+            elif asset.bbox is None or asset.crs is None:
+                raise ValueError("non-carbon COG assets require bbox and crs")
         return self
 
 
@@ -76,6 +112,8 @@ class StrictPartitionRequest(StrictModel):
     def validate_grid_contract(self) -> "StrictPartitionRequest":
         validate_requested_grid_level(EncoderGridType(self.grid_type), self.requested_grid_level)
         validate_partition_method(self.grid_type, self.partition_method)
+        for dataset in self.datasets:
+            resolve_dataset_partition(self, dataset)
         return self
 
 
@@ -123,6 +161,57 @@ def group_datasets(request: StrictPartitionRequest) -> dict[str, DatasetInput]:
             raise ValueError(f"duplicate dataset_id: {dataset.dataset_id}")
         grouped[dataset.dataset_id] = dataset
     return grouped
+
+
+def resolve_dataset_partition(
+    request: StrictPartitionRequest,
+    dataset: DatasetInput,
+) -> DatasetPartitionConfig:
+    """Resolve and validate a dataset's effective partition settings."""
+    override = dataset.partition
+    resolved = DatasetPartitionConfig(
+        grid_type=request.grid_type if override is None or override.grid_type is None else override.grid_type,
+        requested_grid_level=(
+            request.requested_grid_level
+            if override is None or override.requested_grid_level is None
+            else override.requested_grid_level
+        ),
+        partition_method=(
+            request.partition_method
+            if override is None or override.partition_method is None
+            else override.partition_method
+        ),
+        cover_mode=request.cover_mode if override is None or override.cover_mode is None else override.cover_mode,
+        time_granularity=(
+            request.time_granularity
+            if override is None or override.time_granularity is None
+            else override.time_granularity
+        ),
+        max_cells_per_asset=(
+            request.max_cells_per_asset
+            if override is None or override.max_cells_per_asset is None
+            else override.max_cells_per_asset
+        ),
+    )
+    validate_requested_grid_level(EncoderGridType(resolved.grid_type), resolved.requested_grid_level)
+    validate_partition_method(resolved.grid_type, resolved.partition_method)
+    return resolved
+
+
+def effective_dataset_request(request: StrictPartitionRequest, dataset: DatasetInput) -> StrictPartitionRequest:
+    """Return the already-validated strict request effective for one dataset."""
+    resolved = resolve_dataset_partition(request, dataset)
+    return request.model_copy(
+        update={
+            "grid_type": resolved.grid_type,
+            "requested_grid_level": resolved.requested_grid_level,
+            "partition_method": resolved.partition_method,
+            "cover_mode": resolved.cover_mode,
+            "time_granularity": resolved.time_granularity,
+            "max_cells_per_asset": resolved.max_cells_per_asset,
+            "datasets": (dataset,),
+        }
+    )
 
 
 def make_output_version(dataset_id: str, task_id: str) -> str:

@@ -20,7 +20,7 @@ function update(key, value) {
 
 <template>
   <section class="partition-section grid-parameters">
-    <div class="section-heading"><h2>格网参数</h2><span>剖分方式由格网类型自动确定</span></div>
+    <div class="section-heading"><h2>默认格网参数</h2><span>用于新选数据集；每个数据集可单独调整，剖分方式由格网类型自动确定</span></div>
     <el-form label-position="top" class="partition-form-grid">
       <el-form-item label="格网类型">
         <el-select data-testid="partition-grid-type" :model-value="modelValue.gridType" @update:model-value="update('gridType', $event)">

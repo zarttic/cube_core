@@ -2019,16 +2019,22 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 if not assets:
                     return
                 for asset in assets:
-                    cur.execute(
-                        """
-                        SELECT 1
-                        FROM partition_assets
-                        WHERE batch_id = %s
-                          AND (asset_id = %s OR source_uri = %s OR scene_id IS NOT DISTINCT FROM %s)
-                        LIMIT 1
-                        """,
-                        (batch_id, asset["asset_id"], asset["source_uri"], asset["scene_id"]),
-                    )
+                    if asset.get("dataset_id"):
+                        cur.execute(
+                            "SELECT 1 FROM partition_assets WHERE batch_id = %s AND asset_id = %s LIMIT 1",
+                            (batch_id, asset["asset_id"]),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT 1
+                            FROM partition_assets
+                            WHERE batch_id = %s
+                              AND (asset_id = %s OR source_uri = %s OR scene_id IS NOT DISTINCT FROM %s)
+                            LIMIT 1
+                            """,
+                            (batch_id, asset["asset_id"], asset["source_uri"], asset["scene_id"]),
+                        )
                     if cur.fetchone() is not None:
                         continue
                     cur.execute("SELECT batch_id FROM partition_assets WHERE asset_id = %s", (asset["asset_id"],))
@@ -2538,6 +2544,32 @@ def _assets_from_record(record: dict[str, Any]) -> list[dict[str, Any]]:
 def _runtime_assets_from_payload(record: dict[str, Any]) -> list[dict[str, Any]]:
     payload = record.get("normalized_payload") or {}
     data_type = str(record.get("data_type") or "optical")
+    datasets = payload.get("datasets")
+    if data_type == "mixed" and isinstance(datasets, list):
+        batch_id = str(record["batch_id"])
+        assets = []
+        for dataset_index, dataset in enumerate(datasets):
+            if not isinstance(dataset, dict):
+                continue
+            dataset_id = str(dataset.get("dataset_id") or dataset_index)
+            dataset_type = str(dataset.get("data_type") or "").strip().lower()
+            for asset_index, item in enumerate(dataset.get("assets") or []):
+                if not isinstance(item, dict):
+                    continue
+                source_uri = str(item.get("source_uri") or item.get("cog_uri") or f"{batch_id}:{dataset_id}:{asset_index}")
+                asset_id = normalized_dataset_asset_id(batch_id, dataset_id, source_uri, asset_index)
+                assets.append(
+                    {
+                        "asset_id": asset_id,
+                        "batch_id": batch_id,
+                        "dataset_id": dataset_id,
+                        "data_type": dataset_type,
+                        "scene_id": str(item.get("attributes", {}).get("scene_id") or dataset_id),
+                        "source_uri": source_uri,
+                        "asset_payload": copy.deepcopy(item),
+                    }
+                )
+        return assets
     items = payload.get("selected_observations") if data_type == "carbon" else payload.get("selected_assets")
     if not isinstance(items, list):
         return []
@@ -2575,11 +2607,14 @@ def _dedupe_asset_id_for_batch(asset: dict[str, Any], *, existing_batch_id: str 
 
 
 def _batch_has_matching_asset(assets: Any, batch_id: str, incoming: dict[str, Any]) -> bool:
+    normalized_dataset = bool(incoming.get("dataset_id"))
     for asset in assets:
         if asset.get("batch_id") != batch_id:
             continue
         if asset.get("asset_id") == incoming.get("asset_id"):
             return True
+        if normalized_dataset:
+            continue
         if asset.get("source_uri") == incoming.get("source_uri"):
             return True
         if incoming.get("scene_id") is not None and asset.get("scene_id") == incoming.get("scene_id"):
@@ -2875,6 +2910,12 @@ def _stable_asset_key(value: str, idx: int) -> str:
 
     digest = hashlib.sha1(f"{idx}:{value}".encode("utf-8")).hexdigest()[:16]
     return digest
+
+
+def normalized_dataset_asset_id(batch_id: str, dataset_id: str, source_uri: str, asset_index: int) -> str:
+    """Return the stable runtime asset identity used by normalized mixed batches."""
+    asset_key = _stable_asset_key(f"{dataset_id}:{source_uri}", asset_index)
+    return f"{batch_id}:{dataset_id}:{asset_key}"
 
 
 def _utc_now_iso() -> str:

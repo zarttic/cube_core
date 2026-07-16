@@ -19,6 +19,175 @@ def _time_bucket(value: str, granularity: str) -> str:
     return parsed.strftime(formats[granularity])
 
 
+def _geometry_bbox(geometry: dict[str, Any] | None) -> list[float] | None:
+    """Return a WGS84 bbox for a GeoJSON geometry returned by the encoder."""
+    if not geometry:
+        return None
+
+    coordinates = geometry.get("coordinates")
+    values: list[tuple[float, float]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, (list, tuple)) and len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
+            values.append((float(value[0]), float(value[1])))
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    visit(coordinates)
+    if not values:
+        return None
+    longitudes, latitudes = zip(*values)
+    return [min(longitudes), min(latitudes), max(longitudes), max(latitudes)]
+
+
+def _record_asset_cell(
+    cells: set[tuple[str, int, str | None]],
+    cell: tuple[str, int, str | None],
+    max_cells_per_asset: int,
+) -> None:
+    """Record one located raw observation cell under the strict per-asset cap."""
+    cells.add(cell)
+    if max_cells_per_asset and len(cells) > max_cells_per_asset:
+        raise RuntimeError(f"Cover cells exceed max limit: {len(cells)} > {max_cells_per_asset}")
+
+
+def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
+    """Run one carbon dataset from loader-owned NetCDF/HDF sources on Ray."""
+    import ray
+
+    @ray.remote
+    def execute(value: dict[str, Any]) -> dict[str, Any]:
+        from pathlib import Path
+
+        from cube_split import runtime_config as worker_runtime_config
+        from cube_split.jobs.ray_partition_core import cache_source_cog
+        from cube_split.partition.carbon import CarbonPartitionConfig, load_observations_from_file, partition_observation
+        from grid_core.sdk import CubeEncoderSDK
+        from minio import Minio
+
+        minio_settings = worker_runtime_config.minio_settings()
+        settings = {
+            "endpoint": minio_settings.endpoint,
+            "access_key": minio_settings.access_key,
+            "secret_key": minio_settings.secret_key,
+            "bucket": minio_settings.bucket,
+            "secure": minio_settings.secure,
+        }
+        client = Minio(
+            settings["endpoint"], access_key=settings["access_key"], secret_key=settings["secret_key"], secure=settings["secure"]
+        )
+        dataset = value["dataset"]
+        grid_type = value["grid_type"]
+        requested_grid_level = int(value["requested_grid_level"])
+        entity = grid_type == "isea4h"
+        product_type = str(dataset.get("product_type") or "xco2")
+        config = CarbonPartitionConfig(
+            grid_type=grid_type,
+            grid_level=requested_grid_level,
+            time_granularity=value["time_granularity"],
+            product_type=product_type,
+        )
+        sdk = CubeEncoderSDK()
+        cells: dict[tuple[str, int, str | None], dict[str, Any]] = {}
+        tiles: list[dict[str, Any]] = []
+        indexes: list[dict[str, Any]] = []
+
+        for asset in dataset["assets"]:
+            source_uri = str(asset["source_uri"])
+            parsed = urlparse(source_uri)
+            if parsed.scheme != "s3" or parsed.netloc != settings["bucket"]:
+                raise ValueError("normalized carbon source must be in the configured MinIO bucket")
+            source_format = str(asset["source_format"])
+            suffix = Path(parsed.path).suffix.lower()
+            allowed_suffixes = {"netcdf": {".nc", ".nc4"}, "hdf5": {".h5", ".hdf", ".hdf5"}}
+            if suffix not in allowed_suffixes.get(source_format, set()):
+                raise ValueError(f"carbon source suffix {suffix!r} does not match source_format={source_format!r}")
+            local_path = cache_source_cog(
+                source_uri, Path("/tmp/cube_split_source_cache") / "loader", client, settings["bucket"]
+            )
+            source_bytes = local_path.read_bytes()
+            actual_source_checksum = sha256(source_bytes).hexdigest()
+            if actual_source_checksum != asset["checksum"]:
+                raise ValueError("carbon source checksum does not match the strict loader contract")
+            observations = load_observations_from_file(local_path, product_type=product_type)
+            source_size = len(source_bytes)
+            bands = [band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
+            asset_cell_keys: set[tuple[str, int, str | None]] = set()
+            for ordinal, observation in enumerate(observations):
+                row = partition_observation(observation, config, sdk=sdk)
+                address = sdk.locate(
+                    grid_type=grid_type,
+                    requested_grid_level=requested_grid_level,
+                    point=[observation.lon, observation.lat],
+                )
+                geometry = sdk.code_to_geometry(address=address)
+                cell_key = (address.space_code, int(address.grid_level), address.topology_code)
+                _record_asset_cell(asset_cell_keys, cell_key, int(value["max_cells_per_asset"]))
+                cell_identity = OutputIdentity(
+                    dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"],
+                    band_code="_cell", grid_type=grid_type, grid_level=int(address.grid_level), space_code=address.space_code,
+                    topology_code=address.topology_code, time_bucket="_", window_identity="cell",
+                )
+                cells.setdefault(
+                    cell_key,
+                    {
+                        "output_id": make_output_id(cell_identity), "grid_type": grid_type, "grid_level": int(address.grid_level),
+                        "space_code": address.space_code, "topology_code": address.topology_code,
+                        "bbox": _geometry_bbox(geometry), "geometry": geometry,
+                    },
+                )
+                source_index = ordinal if observation.source_index is None else int(observation.source_index)
+                # Multiple observations can share a cell and time period.  The stable suffix preserves each raw observation.
+                observation_bucket = f"{row['time_bucket']}-{source_index:09d}"
+                for band in bands:
+                    identity = OutputIdentity(
+                        dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"],
+                        band_code=band["band_code"], grid_type=grid_type, grid_level=int(address.grid_level), space_code=address.space_code,
+                        topology_code=address.topology_code, time_bucket=observation_bucket,
+                        window_identity=f"observation:{observation.observation_id}:{source_index}",
+                    )
+                    output_id = make_output_id(identity)
+                    tiles.append(
+                        {
+                            "output_id": output_id, "source_asset_id": asset["source_asset_id"], "band_code": band["band_code"],
+                            "grid_type": grid_type, "grid_level": int(address.grid_level), "space_code": address.space_code,
+                            "topology_code": address.topology_code, "time_bucket": observation_bucket,
+                            # A raw observation source is never a generated entity tile.
+                            "tile_uri": source_uri, "tile_kind": "logical_reference",
+                            "bbox": _geometry_bbox(geometry), "byte_size": source_size, "checksum": actual_source_checksum,
+                        }
+                    )
+                    indexes.append(
+                        {
+                            "output_id": f"{output_id}-index", "tile_output_id": None,
+                            "source_asset_id": asset["source_asset_id"], "band_code": band["band_code"],
+                            "acquisition_time": row["acq_time"], "grid_type": grid_type, "grid_level": int(address.grid_level),
+                            "space_code": address.space_code, "topology_code": address.topology_code, "time_bucket": observation_bucket,
+                            "st_code": row["st_code"], "value_ref_uri": source_uri,
+                            "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None,
+                        }
+                    )
+        return {
+            "dataset_id": dataset["dataset_id"], "task_id": value["task_id"], "output_version": value["output_version"],
+            "grid_type": grid_type, "requested_grid_level": requested_grid_level,
+            "partition_method": "entity" if entity else "logical",
+            "object_prefix": f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/",
+            "tiles": tiles, "indexes": indexes, "grid_cells": list(cells.values()),
+        }
+
+    if not ray.is_initialized():
+        ray.init(
+            address=payload["ray_address"],
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            logging_level=40,
+            runtime_env=runtime_env,
+        )
+    return ray.get(execute.remote(payload))
+
+
 def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
     """Execute one normalized dataset on a configured Ray worker."""
     import ray
@@ -218,12 +387,12 @@ class NormalizedPartitionDatasetRunner:
             "CUBE_WEB_MINIO_BUCKET": minio.bucket,
         })
         ray_runtime_env["env_vars"] = env_vars
-        return _run_dataset_on_ray(
-            {
-                "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
-                "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
-                "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
-                "ray_address": runtime_config.require_ray_address(),
-            },
-            ray_runtime_env,
-        )
+        payload = {
+            "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
+            "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
+            "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
+            "ray_address": runtime_config.require_ray_address(),
+        }
+        if dataset.data_type == "carbon":
+            return _run_carbon_dataset_on_ray(payload, ray_runtime_env)
+        return _run_dataset_on_ray(payload, ray_runtime_env)

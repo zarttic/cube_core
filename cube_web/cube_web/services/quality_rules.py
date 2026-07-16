@@ -142,7 +142,11 @@ def _grid_method_agreement(context: RuleContext) -> Iterable[QualityFinding]:
         yield QualityFinding("missing_output_version", "quality target has no output version")
         return
     version = version_rows[0]
-    expected_kind = "entity_file" if version["partition_method"] == "entity" else "logical_reference"
+    # Carbon outputs reference immutable raw observation files; they never turn
+    # a NetCDF/HDF source into a generated entity raster.
+    expected_kind = "logical_reference" if context.data_type == "carbon" else (
+        "entity_file" if version["partition_method"] == "entity" else "logical_reference"
+    )
     for row in _rows(
         context,
         "SELECT output_id, grid_type, grid_level, tile_kind FROM partition_tiles WHERE dataset_id = %s AND output_version = %s",
@@ -217,22 +221,39 @@ def _time_bucket_consistency(context: RuleContext) -> Iterable[QualityFinding]:
 
 def _asset_readability(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
-        context, "SELECT source_asset_id, cog_uri, checksum FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)
+        context,
+        "SELECT source_asset_id, cog_uri, source_uri, source_format, checksum "
+        "FROM partition_dataset_assets WHERE dataset_id = %s",
+        (context.dataset_id,),
     ):
-        if not str(row["cog_uri"] or "").startswith("s3://"):
+        source_asset_id = row["source_asset_id"]
+        source_uri = str(row.get("source_uri") or "")
+        source_format = str(row.get("source_format") or "")
+        if context.data_type == "carbon":
+            allowed = {"netcdf": (".nc", ".nc4"), "hdf5": (".h5", ".hdf", ".hdf5")}
+            if source_format not in allowed or not source_uri.startswith("s3://") or not source_uri.lower().endswith(allowed.get(source_format, ())):
+                yield QualityFinding(
+                    "invalid_carbon_source",
+                    "carbon source must be an s3 NetCDF or HDF5 asset matching source_format",
+                    source_asset_id=source_asset_id,
+                    field="source_uri",
+                )
+        elif source_format != "cog" or not str(row.get("cog_uri") or "").startswith("s3://"):
             yield QualityFinding(
-                "invalid_cog_uri", "source asset must use an s3 COG URI", source_asset_id=row["source_asset_id"], field="cog_uri"
+                "invalid_cog_uri", "source asset must use an s3 COG URI", source_asset_id=source_asset_id, field="cog_uri"
             )
         if not re.fullmatch(r"[0-9a-f]{64}", str(row["checksum"] or "")):
             yield QualityFinding(
                 "invalid_checksum",
                 "source asset checksum must be a SHA-256 hex digest",
-                source_asset_id=row["source_asset_id"],
+                source_asset_id=source_asset_id,
                 field="checksum",
             )
 
 
 def _asset_crs(context: RuleContext) -> Iterable[QualityFinding]:
+    if context.data_type == "carbon":
+        return
     for row in _rows(context, "SELECT source_asset_id, crs FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)):
         if not str(row["crs"] or "").strip():
             yield QualityFinding("missing_crs", "source asset CRS is required", source_asset_id=row["source_asset_id"], field="crs")
@@ -263,8 +284,9 @@ def _metadata_completeness(context: RuleContext) -> Iterable[QualityFinding]:
         "SELECT source_asset_id, time_start, time_end, bbox, crs FROM partition_dataset_assets WHERE dataset_id = %s",
         (context.dataset_id,),
     ):
-        missing = [name for name in ("time_start", "time_end", "crs") if row[name] is None or not str(row[name]).strip()]
-        if row["bbox"] is None:
+        required = ("time_start", "time_end") if context.data_type == "carbon" else ("time_start", "time_end", "crs")
+        missing = [name for name in required if row[name] is None or not str(row[name]).strip()]
+        if context.data_type != "carbon" and row["bbox"] is None:
             missing.append("bbox")
         if missing:
             yield QualityFinding(

@@ -41,10 +41,11 @@ export async function installApiRoutes(page, { deferQualityRunA = false } = {}) 
       await page.route(`**/v1/partition/datasets/${id}/${detail}?**`, (route) => json(route, id === 'dataset-a' && detail === 'assets' ? datasetAssetsFixtureA : id === 'dataset-a' && detail === 'grid' ? datasetGridFixtureA : emptyPage));
     }
   }
-  await page.route('**/v1/partition/optical/tasks/run', async (route) => {
+  await page.route(/\/v1\/partition\/(?:tasks|(?:optical|radar|product|carbon)\/tasks)\/run$/, async (route) => {
     const body = route.request().postDataJSON();
     const valid = body?.batch_id && Array.isArray(body.datasets) && body.datasets[0]?.assets?.length && body.datasets[0]?.bands?.length
       && body.grid_type && body.requested_grid_level !== undefined && body.partition_method
+      && body.datasets.every((dataset) => dataset.partition?.grid_type && dataset.partition?.requested_grid_level !== undefined && dataset.partition?.partition_method)
       && !Object.hasOwn(body, 'dataset_ids') && !Object.hasOwn(body, 'grid_level_mode');
     await json(route, valid ? { task_id: 'task-fixture', status: 'queued', tile_count: 0, index_count: 0, grid_cell_count: 0 } : { detail: 'invalid request' }, valid ? 202 : 400);
   });

@@ -202,7 +202,7 @@ def _load_xco2_observations_from_file(
                     break
                 observations.append(_observation_from_mapping(dict(row), str(path), idx))
         return observations
-    if path.suffix.lower() in {".nc", ".nc4", ".h5", ".hdf"}:
+    if path.suffix.lower() in {".nc", ".nc4", ".h5", ".hdf", ".hdf5"}:
         return load_oco2_lite_observations(path, max_observations=max_observations)
     raise ValueError(f"Unsupported carbon observation input file: {path}")
 
@@ -671,13 +671,13 @@ def _iter_input_files(input_dir: Path) -> list[Path]:
         path
         for path in input_dir.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf"}
+        and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
         and path.name not in {"carbon_observation_rows.jsonl", "index_rows.jsonl"}
     )
 
 
 def _is_oco2_lite_netcdf_source(source_uri: str) -> bool:
-    return Path(str(source_uri).strip()).suffix.lower() in {".nc", ".nc4", ".h5", ".hdf"}
+    return Path(str(source_uri).strip()).suffix.lower() in {".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
 
 
 def _resolve_oco2_lite_source_path(source_uri: str) -> Path:

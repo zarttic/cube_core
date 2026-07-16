@@ -128,12 +128,21 @@ class FakeJobStore:
 class FakeRunner:
     def __init__(self) -> None:
         self.failed: set[str] = set()
+        self.calls: list[dict[str, Any]] = []
 
     def fail_dataset(self, dataset_id: str, error: Exception) -> None:
         self.failed.add(dataset_id)
         setattr(self, f"error_{dataset_id}", error)
 
     def run_dataset(self, *, dataset, task_id, output_version, grid_type, requested_grid_level, cover_mode):
+        self.calls.append(
+            {
+                "dataset_id": dataset.dataset_id,
+                "grid_type": grid_type,
+                "requested_grid_level": requested_grid_level,
+                "cover_mode": cover_mode,
+            }
+        )
         if dataset.dataset_id in self.failed:
             raise getattr(self, f"error_{dataset.dataset_id}")
         return {
@@ -142,7 +151,7 @@ class FakeRunner:
             "output_version": output_version,
             "grid_type": grid_type,
             "requested_grid_level": requested_grid_level,
-            "partition_method": "logical",
+            "partition_method": "entity" if grid_type == "isea4h" else "logical",
             "object_prefix": "",
             "tiles": [{"output_id": f"tile-{dataset.dataset_id}"}],
             "indexes": [{"output_id": f"index-{dataset.dataset_id}"}],
@@ -278,3 +287,120 @@ def test_submit_strict_returns_existing_task_after_cross_worker_attempt_conflict
     monkeypatch.setattr(workflow, "_active_task_for_batch", active_task_after_conflict)
 
     assert workflow.submit_strict("optical", _request()) is existing
+
+
+def test_submit_mixed_persists_effective_dataset_partitions_and_keeps_runner_local() -> None:
+    payload = _request().model_dump(mode="json")
+    payload["datasets"] = [
+        {**_dataset("dataset-optical", "optical"), "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"}},
+        {**_dataset("dataset-radar", "radar"), "partition": {"grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"}},
+    ]
+    payload["datasets"][1]["assets"][0]["cog_uri"] = payload["datasets"][0]["assets"][0]["cog_uri"]
+    request = StrictPartitionRequest.model_validate(payload)
+    store = InMemoryPartitionJobStore()
+    runner = FakeRunner()
+    workflow = _workflow(FakeDomainStore(), runner, store)
+
+    task = workflow.submit_mixed(request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        attempt = store.get_attempt(task.task_id)
+        if attempt and attempt["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+
+    attempt = store.get_attempt(task.task_id)
+    assert attempt is not None
+    assert attempt["status"] == "succeeded"
+    assert attempt["payload"]["strict_partition_request"] is True
+    assert attempt["payload"]["dataset_partitions"] == [
+        {"dataset_id": "dataset-optical", "data_type": "optical", "grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
+        {"dataset_id": "dataset-radar", "data_type": "radar", "grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"},
+    ]
+    assert {row["data_type"] for row in store.list_assets("batch-01")} == {"optical", "radar"}
+    assert [(call["dataset_id"], call["grid_type"], call["requested_grid_level"]) for call in runner.calls] == [
+        ("dataset-optical", "mgrs", 1),
+        ("dataset-radar", "isea4h", 1),
+    ]
+    store.supports_remote_jobs = True
+    workflow._payload_uses_remote_ray = lambda *_args: True
+    assert workflow._attempt_uses_remote_ray(attempt) is False
+
+    detail = workflow.get_batch("batch-01")
+    assert {(slot["dataset_id"], slot["grid_type"], slot["requested_grid_level"]) for slot in detail["partition_slots"]} == {
+        ("dataset-optical", "mgrs", 1),
+        ("dataset-radar", "isea4h", 1),
+    }
+
+
+def test_submit_mixed_rejects_homogeneous_and_completed_dataset_partition() -> None:
+    store = InMemoryPartitionJobStore()
+    workflow = _workflow(FakeDomainStore(), FakeRunner(), store)
+    with pytest.raises(Exception, match="at least two dataset data types"):
+        workflow.submit_mixed(_request())
+
+    payload = _request().model_dump(mode="json")
+    payload["datasets"].append({**_dataset("dataset-radar", "radar"), "partition": {"grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"}})
+    request = StrictPartitionRequest.model_validate(payload)
+    first = workflow.submit_mixed(request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        attempt = store.get_attempt(first.task_id)
+        if attempt and attempt["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+
+    with pytest.raises(Exception, match="already completed"):
+        workflow.submit_mixed(request)
+
+
+def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
+    payload = _request().model_dump(mode="json")
+    payload["datasets"] = [
+        {**_dataset("dataset-optical", "optical"), "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"}},
+        {**_dataset("dataset-radar", "radar"), "partition": {"grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"}},
+    ]
+    payload["datasets"][1]["assets"][0]["cog_uri"] = payload["datasets"][0]["assets"][0]["cog_uri"]
+    request = StrictPartitionRequest.model_validate(payload)
+    store = InMemoryPartitionJobStore()
+    runner = FakeRunner()
+    runner.fail_dataset("dataset-radar", RuntimeError("temporary radar failure"))
+    workflow = _workflow(FakeDomainStore(), runner, store)
+
+    first = workflow.submit_mixed(request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        attempt = store.get_attempt(first.task_id)
+        if attempt and attempt["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+
+    first_attempt = store.get_attempt(first.task_id)
+    assert first_attempt is not None
+    assert first_attempt["runner_result"]["status"] == "partial_failure"
+    assert {asset["data_type"]: asset["status"] for asset in store.list_assets("batch-01")} == {
+        "optical": "succeeded",
+        "radar": "manual_required",
+    }
+    assert {slot["dataset_id"]: slot["status"] for slot in workflow.get_batch("batch-01")["partition_slots"]} == {
+        "dataset-optical": "completed",
+        "dataset-radar": "failed",
+    }
+
+    runner.failed.clear()
+    second = workflow.submit_mixed(request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        attempt = store.get_attempt(second.task_id)
+        if attempt and attempt["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+
+    second_attempt = store.get_attempt(second.task_id)
+    assert second_attempt is not None
+    assert [item["dataset_id"] for item in second_attempt["payload"]["datasets"]] == ["dataset-radar"]
+    assert [call["dataset_id"] for call in runner.calls] == ["dataset-optical", "dataset-radar", "dataset-radar"]
+    assert {slot["dataset_id"]: slot["status"] for slot in workflow.get_batch("batch-01")["partition_slots"]} == {
+        "dataset-optical": "completed",
+        "dataset-radar": "completed",
+    }

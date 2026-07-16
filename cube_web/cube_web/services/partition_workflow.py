@@ -18,6 +18,7 @@ from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import (
     PartitionDatasetResult,
     StrictPartitionRequest,
+    effective_dataset_request,
     group_datasets,
     make_output_version,
 )
@@ -30,6 +31,7 @@ from cube_web.services.partition_job_store import (
     PartitionBatchNotRequeueableError,
     PartitionJobStore,
     get_partition_job_store,
+    normalized_dataset_asset_id,
 )
 from cube_web.services.partition_service import PartitionService, PartitionTask
 
@@ -98,9 +100,10 @@ class PartitionWorkflowService:
         results: list[dict[str, Any]] = []
         for dataset_id, dataset in datasets.items():
             output_version = make_output_version(dataset_id, task_id)
+            effective_request = effective_dataset_request(request, dataset)
             started = False
             try:
-                started_version = selected_domain_store.start_output(request, dataset, task_id)
+                started_version = selected_domain_store.start_output(effective_request, dataset, task_id)
                 started = True
                 if started_version != output_version:
                     raise ValueError("domain store returned a non-deterministic output version")
@@ -109,11 +112,11 @@ class PartitionWorkflowService:
                     dataset=dataset,
                     task_id=task_id,
                     output_version=output_version,
-                    grid_type=request.grid_type,
-                    requested_grid_level=request.requested_grid_level,
-                    cover_mode=request.cover_mode,
-                    max_cells_per_asset=request.max_cells_per_asset,
-                    time_granularity=request.time_granularity,
+                    grid_type=effective_request.grid_type,
+                    requested_grid_level=effective_request.requested_grid_level,
+                    cover_mode=effective_request.cover_mode,
+                    max_cells_per_asset=effective_request.max_cells_per_asset,
+                    time_granularity=effective_request.time_granularity,
                 )
                 if self.after_ray is not None:
                     self.after_ray()
@@ -173,11 +176,35 @@ class PartitionWorkflowService:
         """Queue a strict request whose worker commits through the M2 domain store."""
         if {dataset.data_type for dataset in request.datasets} != {data_type}:
             raise HTTPException(status_code=422, detail="path data_type must match every dataset data_type")
+        return self._submit_normalized(data_type, request, requested_by=requested_by)
+
+    def submit_mixed(
+        self,
+        request: StrictPartitionRequest,
+        *,
+        requested_by: str = "operator",
+    ) -> PartitionTask:
+        """Queue a normalized batch whose datasets may have different types."""
+        if len({dataset.data_type for dataset in request.datasets}) < 2:
+            raise HTTPException(status_code=422, detail="mixed partition batches require at least two dataset data types")
+        return self._submit_normalized("mixed", request, requested_by=requested_by)
+
+    def _submit_normalized(
+        self,
+        data_type: str,
+        request: StrictPartitionRequest,
+        *,
+        requested_by: str,
+    ) -> PartitionTask:
+        """Persist and queue a strict request under its batch-level data type."""
         if self.dataset_runner is None:
             raise RuntimeError("strict partition dataset runner is required")
+        group_datasets(request)
 
         with self._run_lock:
-            payload = request.model_dump(mode="json")
+            full_payload = request.model_dump(mode="json")
+            full_payload["strict_partition_request"] = True
+            full_payload["dataset_partitions"] = _dataset_partitions(request)
             batch = self.store.get_batch(request.batch_id)
             if batch is not None and str(batch.get("data_type") or "") != data_type:
                 raise HTTPException(status_code=422, detail=f"Partition batch {request.batch_id} is not a {data_type} batch")
@@ -186,7 +213,7 @@ class PartitionWorkflowService:
                     batch_id=request.batch_id,
                     batch_name=request.batch_id,
                     data_type=data_type,
-                    payload=payload,
+                    payload=full_payload,
                     max_auto_retries=0,
                 )
             else:
@@ -198,14 +225,25 @@ class PartitionWorkflowService:
                         batch_id=request.batch_id,
                         batch_name=str(batch.get("batch_name") or request.batch_id),
                         data_type=data_type,
-                        payload=payload,
+                        payload=full_payload,
                         max_auto_retries=0,
                     )
 
             active_task = self._active_task_for_batch(batch)
             if active_task is not None:
                 return active_task
-            self._ensure_slot_not_completed(request.batch_id, payload, batch=batch)
+            completed_keys = _completed_dataset_partition_keys(self.store.list_attempts(request.batch_id))
+            pending_datasets = tuple(
+                dataset
+                for dataset in request.datasets
+                if _dataset_partition_key(_dataset_partition_row(request, dataset)) not in completed_keys
+            )
+            if not pending_datasets:
+                raise HTTPException(status_code=409, detail=f"All requested partition dataset configurations already completed: {request.batch_id}")
+            execution_request = request.model_copy(update={"datasets": pending_datasets})
+            payload = execution_request.model_dump(mode="json")
+            payload["strict_partition_request"] = True
+            payload["dataset_partitions"] = _dataset_partitions(execution_request)
             task_id = f"partition-{uuid4().hex[:12]}"
             cancellation_state: dict[str, bool | float | None] = {"last_checked_at": None, "last_result": False}
 
@@ -236,7 +274,7 @@ class PartitionWorkflowService:
             return self.partition_service.task_store.submit(
                 data_type,
                 "run",
-                lambda: _require_completed_strict_run(self.run(task_id=task_id, request=request)),
+                lambda: _strict_task_result(self.run(task_id=task_id, request=execution_request), execution_request),
                 task_id=task_id,
                 on_started=self.on_task_started,
                 on_succeeded=self.on_task_succeeded,
@@ -744,6 +782,20 @@ class PartitionWorkflowService:
         if operation in {"retry", "auto_retry", "manual_retry", "manual_asset_retry"}:
             return
         current_batch = batch or self.get_batch(batch_id)
+        if payload.get("strict_partition_request"):
+            completed = _completed_dataset_partition_keys(self.store.list_attempts(batch_id))
+            requested = _dataset_partition_keys(payload.get("dataset_partitions"))
+            duplicate = sorted(completed & requested)
+            if duplicate:
+                dataset_id, grid_type, grid_level, partition_method = duplicate[0]
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Partition dataset configuration already completed: "
+                        f"{batch_id} {dataset_id} {grid_type} level={grid_level} {partition_method}"
+                    ),
+                )
+            return
         slot_key = _partition_slot_key(
             grid_type=_partition_slot_grid_type(payload, current_batch),
             partition_method=_partition_slot_method(payload, current_batch),
@@ -779,6 +831,8 @@ class PartitionWorkflowService:
     def _attempt_uses_remote_ray(self, attempt: dict[str, Any], batch: dict[str, Any] | None = None) -> bool:
         raw_payload = attempt.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        if payload.get("strict_partition_request"):
+            return False
         resolved_batch: dict[str, Any] = batch or self.store.get_batch(str(attempt.get("batch_id") or "")) or {}
         data_type = str(resolved_batch.get("data_type") or payload.get("data_type") or "").strip().lower()
         return self._payload_uses_remote_ray(data_type, payload)
@@ -1110,6 +1164,8 @@ def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, 
 
 
 def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if str(batch.get("data_type") or "").strip().lower() == "mixed":
+        return _mixed_partition_slots_for_batch(batch, attempts)
     slots: dict[tuple[str, str], dict[str, Any]] = {}
     for grid_type, partition_method in PARTITION_SLOT_MATRIX:
         grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
@@ -1150,6 +1206,127 @@ def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, A
         slot["latest_task_id"] = attempt.get("task_id")
         slot["finished_at"] = attempt.get("finished_at")
     return list(slots.values())
+
+
+def _mixed_partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload = batch.get("normalized_payload") if isinstance(batch.get("normalized_payload"), dict) else {}
+    slots: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    for partition in payload.get("dataset_partitions") or []:
+        if not isinstance(partition, dict):
+            continue
+        key = _dataset_partition_key(partition)
+        if key is None:
+            continue
+        dataset_id, grid_type, grid_level, partition_method = key
+        grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
+        slots[key] = {
+            "dataset_id": dataset_id,
+            "grid_type": grid_type,
+            "grid_label": grid_label,
+            "requested_grid_level": grid_level,
+            "partition_method": partition_method,
+            "method_label": method_label,
+            "status": "available",
+            "disabled": False,
+            "latest_task_id": None,
+            "finished_at": None,
+        }
+    for attempt in sorted(
+        [item for item in attempts if isinstance(item, dict)],
+        key=lambda item: (
+            _parse_slot_datetime(item.get("finished_at")),
+            _parse_slot_datetime(item.get("updated_at")),
+            _parse_slot_datetime(item.get("created_at")),
+        ),
+        reverse=True,
+    ):
+        attempt_payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
+        dataset_statuses = _dataset_result_statuses(attempt)
+        for partition in attempt_payload.get("dataset_partitions") or []:
+            key = _dataset_partition_key(partition)
+            slot = None if key is None else slots.get(key)
+            if slot is None or slot.get("latest_task_id") is not None:
+                continue
+            dataset_id = key[0]
+            result_status = dataset_statuses.get(dataset_id)
+            slot_status = _dataset_slot_status(result_status) if result_status is not None else _partition_slot_status(str(attempt.get("status") or ""))
+            slot["status"] = slot_status
+            slot["disabled"] = slot_status in {"completed", "queued", "running", "retrying"}
+            slot["latest_task_id"] = attempt.get("task_id")
+            slot["finished_at"] = attempt.get("finished_at")
+    return list(slots.values())
+
+
+def _dataset_partitions(request: StrictPartitionRequest) -> list[dict[str, Any]]:
+    return [_dataset_partition_row(request, dataset) for dataset in request.datasets]
+
+
+def _dataset_partition_row(request: StrictPartitionRequest, dataset: Any) -> dict[str, Any]:
+    effective = effective_dataset_request(request, dataset)
+    return {
+        "dataset_id": dataset.dataset_id,
+        "data_type": dataset.data_type,
+        "grid_type": effective.grid_type,
+        "requested_grid_level": effective.requested_grid_level,
+        "partition_method": effective.partition_method,
+    }
+
+
+def _dataset_partition_key(value: Any) -> tuple[str, str, int, str] | None:
+    if not isinstance(value, dict):
+        return None
+    dataset_id = str(value.get("dataset_id") or "").strip()
+    grid_type = str(value.get("grid_type") or "").strip().lower()
+    partition_method = str(value.get("partition_method") or "").strip().lower()
+    try:
+        grid_level = int(value.get("requested_grid_level"))
+    except (TypeError, ValueError):
+        return None
+    if not dataset_id or not grid_type or not partition_method:
+        return None
+    return dataset_id, grid_type, grid_level, partition_method
+
+
+def _dataset_partition_keys(value: Any) -> set[tuple[str, str, int, str]]:
+    if not isinstance(value, list):
+        return set()
+    return {key for item in value if (key := _dataset_partition_key(item)) is not None}
+
+
+def _completed_dataset_partition_keys(attempts: list[dict[str, Any]]) -> set[tuple[str, str, int, str]]:
+    completed: set[tuple[str, str, int, str]] = set()
+    for attempt in attempts:
+        payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
+        statuses = _dataset_result_statuses(attempt)
+        partitions = payload.get("dataset_partitions") if isinstance(payload.get("dataset_partitions"), list) else []
+        if statuses:
+            completed.update(
+                key
+                for partition in partitions
+                if (key := _dataset_partition_key(partition)) is not None and statuses.get(key[0]) == "completed"
+            )
+        elif str(attempt.get("status") or "") == "succeeded":
+            completed.update(_dataset_partition_keys(partitions))
+    return completed
+
+
+def _dataset_result_statuses(attempt: dict[str, Any]) -> dict[str, str]:
+    result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
+    datasets = result.get("datasets") if isinstance(result.get("datasets"), list) else []
+    return {
+        str(item.get("dataset_id")): str(item.get("status") or "")
+        for item in datasets
+        if isinstance(item, dict) and item.get("dataset_id")
+    }
+
+
+def _dataset_slot_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed":
+        return "completed"
+    if normalized in {"failed", "cancelled"}:
+        return normalized
+    return "available"
 
 
 def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1530,15 +1707,30 @@ def _text_or_none(value: Any) -> str | None:
     return text or None
 
 
-def _require_completed_strict_run(result: dict[str, Any]) -> dict[str, Any]:
-    if result.get("status") == "completed":
-        return result
-    messages = [
-        str(item.get("error", {}).get("message") or item.get("status") or "dataset execution failed")
+def _strict_task_result(result: dict[str, Any], request: StrictPartitionRequest) -> dict[str, Any]:
+    """Persist dataset outcomes so mixed retries can skip committed siblings."""
+    statuses = {
+        str(item.get("dataset_id")): item
         for item in result.get("datasets", [])
-        if isinstance(item, dict)
-    ]
-    raise RuntimeError("; ".join(messages)[:2000] or "strict partition execution failed")
+        if isinstance(item, dict) and item.get("dataset_id")
+    }
+    asset_results: list[dict[str, Any]] = []
+    for dataset in request.datasets:
+        outcome = statuses.get(dataset.dataset_id, {})
+        status = "succeeded" if outcome.get("status") == "completed" else str(outcome.get("status") or "failed")
+        error = outcome.get("error") if isinstance(outcome.get("error"), dict) else {}
+        for asset_index, asset in enumerate(dataset.assets):
+            source_uri = asset.source_uri or asset.cog_uri
+            source_text = None if source_uri is None else str(source_uri)
+            asset_results.append(
+                {
+                    "asset_id": normalized_dataset_asset_id(request.batch_id, dataset.dataset_id, source_text or "", asset_index),
+                    "source_uri": source_text,
+                    "status": status,
+                    "error_message": error.get("message"),
+                }
+            )
+    return {**result, "asset_results": asset_results}
 
 
 def _asset_failure_reason(assets: list[dict[str, Any]], asset_ids: list[str]) -> str | None:

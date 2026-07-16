@@ -6,6 +6,7 @@ import hmac
 import json
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -877,6 +878,9 @@ def _strict_task_route_client(scheduler: Mock) -> TestClient:
         def submit_strict(self, data_type, request, *, requested_by="operator"):
             return scheduler(data_type, request, requested_by=requested_by)
 
+        def submit_mixed(self, request, *, requested_by="operator"):
+            return scheduler("mixed", request, requested_by=requested_by)
+
     route_app = FastAPI()
     production = PartitionService({"optical": PartitionBackend(data_type="optical", run=lambda payload=None: {})})
     route_app.include_router(web_app.partition_route.create_partition_router(service=production, workflow=FakeWorkflow()))
@@ -976,6 +980,42 @@ def test_partition_tasks_run_schedules_exact_normalized_body() -> None:
 
     assert response.status_code == 202
     scheduler.assert_called_once_with("optical", StrictPartitionRequest.model_validate(payload), requested_by="operator")
+
+
+def test_mixed_partition_tasks_run_schedules_dataset_specific_grids() -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+    payload = normalized_task_run_request()
+    payload["datasets"][0]["partition"] = {
+        "grid_type": "mgrs",
+        "requested_grid_level": 1,
+        "partition_method": "logical",
+    }
+    radar = deepcopy(payload["datasets"][0])
+    radar.update({"dataset_id": "dataset-radar", "dataset_code": "DS-R", "data_type": "radar"})
+    radar["assets"][0]["source_asset_id"] = "asset-radar"
+    radar["bands"][0]["source_asset_id"] = "asset-radar"
+    radar["partition"] = {
+        "grid_type": "isea4h",
+        "requested_grid_level": 1,
+        "partition_method": "entity",
+    }
+    payload["datasets"].append(radar)
+
+    response = route_client.post("/partition/tasks/run", json=payload)
+
+    assert response.status_code == 202
+    scheduler.assert_called_once_with("mixed", StrictPartitionRequest.model_validate(payload), requested_by="operator")
+
+
+def test_mixed_partition_tasks_run_rejects_homogeneous_batch() -> None:
+    scheduler = Mock(side_effect=_scheduled_task)
+    route_client = _strict_task_route_client(scheduler)
+
+    response = route_client.post("/partition/tasks/run", json=normalized_task_run_request())
+
+    assert response.status_code == 422
+    scheduler.assert_not_called()
 
 
 def test_partition_services_split_production_and_legacy_registries():

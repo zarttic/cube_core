@@ -48,7 +48,12 @@ onMounted(() => {
       <p>选择完整数据集、原生格网和覆盖参数后提交生产剖分任务。</p>
     </header>
     <GridParameters v-model="formModel" :loading="store.loading.submit" @reset="reset" @submit="submit" @load-map="loadMap" />
-    <BatchAssetsPanel :model-value="store.form.datasets" @update:model-value="updateDatasets" />
+    <BatchAssetsPanel
+      :model-value="store.form.datasets"
+      :default-grid-type="store.form.gridType"
+      :default-requested-grid-level="Number(store.form.requestedGridLevel)"
+      @update:model-value="updateDatasets"
+    />
     <ExecutionResultPanel :result="store.result" :error="store.error" />
     <TaskQueuePanel
       :tasks="store.tasks"

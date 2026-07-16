@@ -7,6 +7,7 @@ from cube_web.services.partition_contracts import (
     OutputIdentity,
     StrictPartitionRequest,
     derive_partition_method,
+    effective_dataset_request,
     group_datasets,
     make_output_id,
     make_output_version,
@@ -79,11 +80,47 @@ def test_strict_request_uses_exact_m1_level_ranges(grid_type: str, minimum: int,
             StrictPartitionRequest.model_validate(payload)
 
 
-def test_carbon_uses_cog_dataset_input_not_observations() -> None:
+def test_carbon_uses_explicit_raw_dataset_source_not_observations() -> None:
     payload = normalized_request()
-    payload["datasets"][0]["data_type"] = "carbon"
-    assert StrictPartitionRequest.model_validate(payload).datasets[0].assets[0].cog_uri.scheme == "s3"
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.pop("bbox")
+    asset.pop("crs")
+    asset.update({"source_uri": "s3://cube/cube/source/carbon/oco2.nc4", "source_kind": "raw", "source_format": "netcdf"})
+    request = StrictPartitionRequest.model_validate(payload)
+    assert request.datasets[0].assets[0].source_uri is not None
+    assert request.datasets[0].assets[0].source_format == "netcdf"
+    assert request.datasets[0].assets[0].bbox is None
+    assert request.datasets[0].assets[0].crs is None
     payload["datasets"][0]["observations"] = [{"latitude": 20.0, "longitude": 100.0}]
+    with pytest.raises(ValidationError):
+        StrictPartitionRequest.model_validate(payload)
+
+
+def test_non_carbon_cog_still_requires_bbox_and_crs() -> None:
+    payload = normalized_request()
+    payload["datasets"][0]["assets"][0].pop("bbox")
+    with pytest.raises(ValidationError, match="require bbox and crs"):
+        StrictPartitionRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("source_format", "source_uri"),
+    [
+        ("cog", "s3://cube/cube/source/carbon/oco2.nc4"),
+        ("netcdf", "s3://cube/cube/source/carbon/oco2.hdf5"),
+        ("hdf5", "s3://cube/cube/source/carbon/oco2.nc4"),
+    ],
+)
+def test_carbon_raw_source_format_and_suffix_are_strict(source_format: str, source_uri: str) -> None:
+    payload = normalized_request()
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.update({"source_uri": source_uri, "source_format": source_format})
     with pytest.raises(ValidationError):
         StrictPartitionRequest.model_validate(payload)
 
@@ -94,7 +131,6 @@ def test_carbon_uses_cog_dataset_input_not_observations() -> None:
         ("request", "grid_level", 7),
         ("request", "cog_workers", 0),
         ("dataset", "selected_assets", []),
-        ("asset", "source_uri", "s3://cube/raw.tif"),
         ("asset", "band", "B04"),
         ("asset", "bands", ["B04"]),
         ("asset", "polarization", "VV"),
@@ -141,3 +177,25 @@ def test_partition_method_is_required_and_must_match_derived_value() -> None:
     mismatched["partition_method"] = "entity"
     with pytest.raises(ValidationError, match="must be logical"):
         StrictPartitionRequest.model_validate(mismatched)
+
+
+def test_dataset_partition_overrides_resolve_and_validate_independently() -> None:
+    payload = normalized_request()
+    payload["datasets"][0]["partition"] = {
+        "grid_type": "isea4h",
+        "requested_grid_level": 1,
+        "partition_method": "entity",
+        "max_cells_per_asset": 50,
+    }
+
+    request = StrictPartitionRequest.model_validate(payload)
+    effective = effective_dataset_request(request, request.datasets[0])
+
+    assert effective.grid_type == "isea4h"
+    assert effective.requested_grid_level == 1
+    assert effective.partition_method == "entity"
+    assert effective.max_cells_per_asset == 50
+
+    payload["datasets"][0]["partition"]["partition_method"] = "logical"
+    with pytest.raises(ValidationError, match="must be entity"):
+        StrictPartitionRequest.model_validate(payload)

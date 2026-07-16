@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 from cube_web.services.quality_contracts import QualityResult
-from cube_web.services.quality_rules import default_rule_registry, reduce_quality_status, snapshot_rules
+from cube_web.services.quality_rules import RuleContext, default_rule_registry, reduce_quality_status, snapshot_rules
 
 
 def _result(status: str) -> QualityResult:
@@ -54,3 +55,46 @@ def test_snapshot_contains_every_interpretive_field() -> None:
         "carbon_footprints",
     } <= {item.code for item in carbon}
     assert all(item.name and item.applicability and item.implementation_version for item in (*optical, *radar, *product, *carbon))
+
+
+class _AssetCursor:
+    description = tuple(SimpleNamespace(name=name) for name in ("source_asset_id", "cog_uri", "source_uri", "source_format", "checksum"))
+
+    def __init__(self, row: tuple[object, ...]) -> None:
+        self.row = row
+
+    def __enter__(self) -> "_AssetCursor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, _sql: str, _params: tuple[object, ...]) -> None:
+        return None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return [self.row]
+
+
+class _AssetRepository:
+    def __init__(self, row: tuple[object, ...]) -> None:
+        self.row = row
+
+    def cursor(self) -> _AssetCursor:
+        return _AssetCursor(self.row)
+
+
+def test_asset_readability_accepts_raw_carbon_and_keeps_cog_requirement_for_optical() -> None:
+    rule = default_rule_registry().get("asset_readability")
+    assert rule is not None
+    checksum = "a" * 64
+    raw_context = RuleContext(
+        dataset_id="carbon-a", output_version="v1", data_type="carbon", product_type="xco2",
+        repository=_AssetRepository(("raw-a", None, "s3://cube/cube/source/carbon/oco2.nc4", "netcdf", checksum)), object_reader=None,
+    )
+    assert list(rule.evaluate(raw_context)) == []
+    optical_context = RuleContext(
+        dataset_id="optical-a", output_version="v1", data_type="optical", product_type=None,
+        repository=_AssetRepository(("cog-a", None, "s3://cube/cube/source/optical/a.tif", "cog", checksum)), object_reader=None,
+    )
+    assert [finding.error_code for finding in rule.evaluate(optical_context)] == ["invalid_cog_uri"]

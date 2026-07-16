@@ -20,7 +20,7 @@ class XCO2ProductAdapter:
     aliases = ("xco2", "oco2_lite", "oco2", "tansat_xco2")
 
     def supports_file(self, path: Path) -> bool:
-        return path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf"}
+        return path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
 
     def load_observations(self, path: Path, max_observations: int | None = None) -> list[object]:
         from cube_split.partition.carbon import _load_xco2_observations_from_file

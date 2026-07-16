@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover
     )
 
 SortOrder = Literal["asc", "desc"]
-SCHEMA_VERSION = "2026-07-14-m2-v1"
+SCHEMA_VERSION = "2026-07-16-m2-mixed-carbon-v1"
 
 _DATASET_SORTS = {
     "updated_at": "updated_at",
@@ -64,6 +64,14 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
     return getattr(value, name, default)
+
+
+def _asset_source_uri(asset: Any) -> str:
+    """Return the canonical source URI for either a COG or raw carbon asset."""
+    source_uri = _field(asset, "source_uri") or _field(asset, "cog_uri")
+    if source_uri is None:
+        raise ValueError("source asset is missing its canonical source URI")
+    return str(source_uri)
 
 
 def _output_version(dataset_id: str, task_id: str) -> str:
@@ -303,7 +311,10 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
             self.assets[(dataset_id, aid)] = {
                 "dataset_id": dataset_id,
                 "source_asset_id": aid,
-                "cog_uri": str(_field(asset, "cog_uri")),
+                "cog_uri": None if _field(asset, "cog_uri") is None else str(_field(asset, "cog_uri")),
+                "source_uri": _asset_source_uri(asset),
+                "source_kind": str(_field(asset, "source_kind", "cog")),
+                "source_format": str(_field(asset, "source_format", "cog")),
                 "checksum": _field(asset, "checksum"),
                 "bbox": _value(_field(asset, "bbox")),
                 "crs": _field(asset, "crs"),
@@ -1185,12 +1196,18 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 self._merge_insert(
                     connection,
                     table="partition_dataset_assets",
-                    columns=("dataset_id", "source_asset_id", "cog_uri", "checksum", "bbox", "crs", "time_start", "time_end", "attributes"),
+                    columns=(
+                        "dataset_id", "source_asset_id", "cog_uri", "source_uri", "source_kind", "source_format", "checksum", "bbox", "crs",
+                        "time_start", "time_end", "attributes",
+                    ),
                     key_columns=("dataset_id", "source_asset_id"),
                     values=(
                         dataset_id,
                         _field(asset, "source_asset_id"),
-                        str(_field(asset, "cog_uri")),
+                        None if _field(asset, "cog_uri") is None else str(_field(asset, "cog_uri")),
+                        _asset_source_uri(asset),
+                        str(_field(asset, "source_kind", "cog")),
+                        str(_field(asset, "source_format", "cog")),
                         _field(asset, "checksum"),
                         json.dumps(_value(_field(asset, "bbox"))),
                         _field(asset, "crs"),

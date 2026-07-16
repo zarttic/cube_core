@@ -93,6 +93,12 @@ def create_partition_router(
             config_override=request.get("config_override") or {},
         ).to_dict()
 
+    @router.post("/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    def submit_mixed_partition_run(payload: StrictPartitionRequest) -> dict:
+        if len({dataset.data_type for dataset in payload.datasets}) < 2:
+            raise HTTPException(status_code=422, detail="mixed partition batches require at least two dataset data types")
+        return workflow_service.submit_mixed(payload).to_dict()
+
     @router.post("/{data_type}/demo", response_model=PartitionResult)
     def partition_demo(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.demo(data_type, payload_from_model(payload))

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-14-m2-v1"
+PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-16-m2-mixed-carbon-v1"
 NEW_DOMAIN_TABLES = {
     "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
     "partition_output_versions", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -73,11 +73,16 @@ def schema_statements() -> tuple[str, ...]:
         )""",
         """CREATE TABLE IF NOT EXISTS partition_dataset_assets (
           dataset_id TEXT NOT NULL REFERENCES partition_datasets(dataset_id) ON DELETE CASCADE,
-          source_asset_id TEXT NOT NULL, cog_uri TEXT NOT NULL CHECK (cog_uri LIKE 's3://%'),
+          source_asset_id TEXT NOT NULL, cog_uri TEXT CHECK (cog_uri LIKE 's3://%'),
+          source_uri TEXT NOT NULL CHECK (source_uri LIKE 's3://%'),
+          source_kind TEXT NOT NULL DEFAULT 'cog' CHECK (source_kind IN ('cog','raw')),
+          source_format TEXT NOT NULL DEFAULT 'cog' CHECK (source_format IN ('cog','netcdf','hdf5')),
           checksum CHAR(64) CHECK (checksum ~ '^[0-9a-f]{64}$'), bbox JSONB, crs TEXT,
           time_start TIMESTAMPTZ, time_end TIMESTAMPTZ, attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (dataset_id, source_asset_id),
-          CHECK (time_end IS NULL OR time_start IS NULL OR time_end >= time_start)
+          CHECK (time_end IS NULL OR time_start IS NULL OR time_end >= time_start),
+          CHECK ((source_kind = 'cog' AND source_format = 'cog' AND cog_uri IS NOT NULL) OR
+                 (source_kind = 'raw' AND source_format IN ('netcdf','hdf5')))
         )""",
         """CREATE TABLE IF NOT EXISTS partition_dataset_bands (
           dataset_id TEXT NOT NULL, source_asset_id TEXT NOT NULL, band_code TEXT NOT NULL,
@@ -87,6 +92,31 @@ def schema_statements() -> tuple[str, ...]:
           PRIMARY KEY (dataset_id, source_asset_id, band_code),
           FOREIGN KEY (dataset_id, source_asset_id) REFERENCES partition_dataset_assets(dataset_id, source_asset_id) ON DELETE CASCADE
         )""",
+        # Existing M2 databases stored every source in a non-null ``cog_uri``.
+        # Carbon observations retain their raw NetCDF/HDF source URI instead.
+        """ALTER TABLE partition_dataset_assets ADD COLUMN IF NOT EXISTS source_uri TEXT""",
+        """ALTER TABLE partition_dataset_assets ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'cog'""",
+        """ALTER TABLE partition_dataset_assets ADD COLUMN IF NOT EXISTS source_format TEXT NOT NULL DEFAULT 'cog'""",
+        """UPDATE partition_dataset_assets SET source_uri = cog_uri WHERE source_uri IS NULL AND cog_uri IS NOT NULL""",
+        """ALTER TABLE partition_dataset_assets ALTER COLUMN source_uri SET NOT NULL""",
+        """ALTER TABLE partition_dataset_assets ALTER COLUMN cog_uri DROP NOT NULL""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_uri_s3
+          CHECK (source_uri LIKE 's3://%');
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_format_check
+          CHECK (source_format IN ('cog','netcdf','hdf5'));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_kind_check
+          CHECK (source_kind IN ('cog','raw'));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_contract_check
+          CHECK ((source_kind = 'cog' AND source_format = 'cog' AND cog_uri IS NOT NULL) OR
+                 (source_kind = 'raw' AND source_format IN ('netcdf','hdf5')));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """CREATE TABLE IF NOT EXISTS partition_output_versions (
           dataset_id TEXT NOT NULL, output_version TEXT NOT NULL UNIQUE,
           task_id TEXT NOT NULL REFERENCES partition_job_attempts(task_id),
@@ -223,7 +253,7 @@ def schema_statements() -> tuple[str, ...]:
           DEFERRABLE INITIALLY DEFERRED;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """MERGE INTO partition_domain_schema_version target
-           USING (SELECT TRUE AS singleton, '2026-07-14-m2-v1' AS schema_version) source
+           USING (SELECT TRUE AS singleton, '2026-07-16-m2-mixed-carbon-v1' AS schema_version) source
            ON (target.singleton = source.singleton)
            WHEN MATCHED THEN UPDATE SET schema_version = source.schema_version, installed_at = now()
            WHEN NOT MATCHED THEN INSERT (singleton, schema_version) VALUES (source.singleton, source.schema_version)""",

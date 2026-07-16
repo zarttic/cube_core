@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cube_web.services.partition_domain_schema import PARTITION_DOMAIN_SCHEMA_VERSION
 from cube_web.services.partition_domain_store import (
     InMemoryPartitionDomainStore,
     OpenGaussPartitionDomainStore,
@@ -154,7 +155,7 @@ class _RecordingCursor:
 
     def __init__(self, connection: "_RecordingConnection") -> None:
         self.connection = connection
-        self.rows = [("2026-07-14-m2-v1",)]
+        self.rows = [(PARTITION_DOMAIN_SCHEMA_VERSION,)]
 
     def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
         self.connection.statements.append((sql, params))
@@ -262,7 +263,7 @@ class _CleanupCursor(_RecordingCursor):
         sql = self.connection.statements[-1][0]
         if sql.startswith("SELECT schema_version"):
             self.description = [("schema_version",)]
-            return [("2026-07-14-m2-v1",)]
+            return [(PARTITION_DOMAIN_SCHEMA_VERSION,)]
         if "FROM partition_output_versions" in sql:
             self.description = [
                 ("dataset_id",),
