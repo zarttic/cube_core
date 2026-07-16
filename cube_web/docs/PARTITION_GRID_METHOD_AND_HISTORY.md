@@ -1,5 +1,7 @@
 # 剖分格网与方式现状
 
+> Historical record — retained as dated evidence only; it is not the current production contract.
+
 更新时间：2026-07-13
 
 本文是当前实现的操作参考，不是下一轮 UI/状态机重构方案。历史需求和旧实现对照保留在 Git 历史中。

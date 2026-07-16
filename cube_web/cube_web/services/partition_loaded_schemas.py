@@ -215,7 +215,6 @@ def _raster_schema(
         "batch_name": batch_name,
         "grid_type": "geohash",
         "grid_level": DEFAULT_LOGICAL_GRID_LEVEL,
-        "grid_level_mode": "auto",
         "target_crs": "EPSG:4326",
         "selected_assets": copy.deepcopy(assets),
     }

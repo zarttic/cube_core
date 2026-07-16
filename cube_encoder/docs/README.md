@@ -16,7 +16,9 @@
 - 生产格网严格限定为三类：`geohash`、`mgrs`、`isea4h`；编码器为三者提供 locate、cover、topology 和 ST code 能力。
 - 派生剖分方式固定：`geohash`→logical、`mgrs`→logical、`isea4h`→entity；不由调用方选择。
 - `isea4h` 为纯 Python 实现，对齐 DGGRID v8.44；运行时不依赖 H3 或 DGGRID。
-- S2、Tile Matrix、Plane Grid、H3 已从编码器移除，不再是可用格网。
+- `isea4h` 的 `space_code` 为未补零十进制 DGGRID SEQNUM，`cell_count(r) = 10 * 4**r + 2`；请求使用 `requested_grid_level`，返回 cell 保留实际 `grid_level`。
+
+Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
 
 ## 运行版本
 

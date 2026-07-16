@@ -1,5 +1,7 @@
 # Partition Performance Validation Matrix
 
+> Historical record — retained as dated evidence only; it is not the current production contract.
+
 Baseline: `cb618e9`
 Branch: `perf/entity-coverage`
 Scope: converge entity-partition coverage outside the already-optimized optical single-grid path.

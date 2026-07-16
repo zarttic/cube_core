@@ -1,5 +1,7 @@
 # 实体剖分性能优化记录
 
+> Historical record — retained as dated evidence only; it is not the current production contract.
+
 更新时间：2026-07-05
 
 文档状态：历史性能记录。数字和分支名保留原样，不代表 2026-07-13 的生产契约；当前验收以 `docs/PRODUCTION_TEST_ACCEPTANCE.md` 为准。

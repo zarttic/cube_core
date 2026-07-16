@@ -1,5 +1,7 @@
 # Partition Optimization Real Data Test Report
 
+> Historical record — retained as dated evidence only; it is not the current production contract.
+
 测试时间：2026-07-05 11:15-11:22 CST；补充验证 12:02-12:04 CST
 
 测试分支：`perf/partition-optimization-integration`
