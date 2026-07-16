@@ -59,6 +59,7 @@ class DatasetPartitionConfig(StrictModel):
     cover_mode: Literal["intersect", "contain", "minimal"] | None = None
     time_granularity: Literal["second", "minute", "hour", "day", "month"] | None = None
     max_cells_per_asset: int | None = Field(default=None, ge=0)
+    max_observations: int | None = Field(default=None, ge=1)
 
 
 class DatasetInput(StrictModel):
@@ -95,6 +96,8 @@ class DatasetInput(StrictModel):
                 raise ValueError("non-carbon assets require cog_uri with source_format=cog")
             elif asset.bbox is None or asset.crs is None:
                 raise ValueError("non-carbon COG assets require bbox and crs")
+        if self.data_type != "carbon" and self.partition is not None and self.partition.max_observations is not None:
+            raise ValueError("max_observations is only valid for carbon datasets")
         return self
 
 
@@ -192,6 +195,7 @@ def resolve_dataset_partition(
             if override is None or override.max_cells_per_asset is None
             else override.max_cells_per_asset
         ),
+        max_observations=None if override is None else override.max_observations,
     )
     validate_requested_grid_level(EncoderGridType(resolved.grid_type), resolved.requested_grid_level)
     validate_partition_method(resolved.grid_type, resolved.partition_method)

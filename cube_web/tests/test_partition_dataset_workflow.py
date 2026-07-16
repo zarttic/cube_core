@@ -34,6 +34,7 @@ def _request_with_datasets(*dataset_ids: str) -> StrictPartitionRequest:
 
 
 def _dataset(dataset_id: str, data_type: str = "optical") -> dict[str, Any]:
+    carbon = data_type == "carbon"
     return {
         "dataset_id": dataset_id,
         "dataset_code": dataset_id.upper(),
@@ -42,7 +43,15 @@ def _dataset(dataset_id: str, data_type: str = "optical") -> dict[str, Any]:
         "assets": [
             {
                 "source_asset_id": f"asset-{dataset_id}",
-                "cog_uri": f"s3://cube/loader/{dataset_id}.tif",
+                **(
+                    {
+                        "source_uri": f"s3://cube/cube/source/carbon/{dataset_id}.nc4",
+                        "source_kind": "raw",
+                        "source_format": "netcdf",
+                    }
+                    if carbon
+                    else {"cog_uri": f"s3://cube/loader/{dataset_id}.tif"}
+                ),
                 "checksum": "a" * 64,
                 "bbox": [100.0, 20.0, 101.0, 21.0],
                 "crs": "EPSG:4326",
@@ -314,8 +323,8 @@ def test_submit_mixed_persists_effective_dataset_partitions_and_keeps_runner_loc
     assert attempt["status"] == "succeeded"
     assert attempt["payload"]["strict_partition_request"] is True
     assert attempt["payload"]["dataset_partitions"] == [
-        {"dataset_id": "dataset-optical", "data_type": "optical", "grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
-        {"dataset_id": "dataset-radar", "data_type": "radar", "grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"},
+        {"dataset_id": "dataset-optical", "data_type": "optical", "grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical", "max_observations": 0},
+        {"dataset_id": "dataset-radar", "data_type": "radar", "grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity", "max_observations": 0},
     ]
     assert {row["data_type"] for row in store.list_assets("batch-01")} == {"optical", "radar"}
     assert [(call["dataset_id"], call["grid_type"], call["requested_grid_level"]) for call in runner.calls] == [
@@ -404,3 +413,37 @@ def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
         "dataset-optical": "completed",
         "dataset-radar": "completed",
     }
+
+
+def test_bounded_carbon_smoke_does_not_block_different_observation_limit() -> None:
+    payload = _request().model_dump(mode="json")
+    payload["datasets"] = [
+        _dataset("dataset-optical", "optical"),
+        {
+            **_dataset("dataset-carbon", "carbon"),
+            "partition": {"grid_type": "geohash", "requested_grid_level": 7, "partition_method": "logical", "max_observations": 100},
+        },
+    ]
+    request = StrictPartitionRequest.model_validate(payload)
+    store = InMemoryPartitionJobStore()
+    runner = FakeRunner()
+    workflow = _workflow(FakeDomainStore(), runner, store)
+    first = workflow.submit_mixed(request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if store.get_attempt(first.task_id).get("status") == "succeeded":
+            break
+        time.sleep(0.01)
+
+    payload["datasets"][1]["partition"]["max_observations"] = 200
+    second_request = StrictPartitionRequest.model_validate(payload)
+    second = workflow.submit_mixed(second_request)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if store.get_attempt(second.task_id).get("status") == "succeeded":
+            break
+        time.sleep(0.01)
+
+    second_attempt = store.get_attempt(second.task_id)
+    assert [item["dataset_id"] for item in second_attempt["payload"]["datasets"]] == ["dataset-carbon"]
+    assert second_attempt["payload"]["dataset_partitions"][0]["max_observations"] == 200

@@ -53,6 +53,12 @@ def _record_asset_cell(
         raise RuntimeError(f"Cover cells exceed max limit: {len(cells)} > {max_cells_per_asset}")
 
 
+def _consume_observation_budget(remaining: int | None, consumed: int) -> int | None:
+    if remaining is None:
+        return None
+    return max(0, remaining - consumed)
+
+
 def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
     """Run one carbon dataset from loader-owned NetCDF/HDF sources on Ray."""
     import ray
@@ -94,7 +100,10 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
         tiles: list[dict[str, Any]] = []
         indexes: list[dict[str, Any]] = []
 
+        remaining_observations = value.get("max_observations")
         for asset in dataset["assets"]:
+            if remaining_observations == 0:
+                break
             source_uri = str(asset["source_uri"])
             parsed = urlparse(source_uri)
             if parsed.scheme != "s3" or parsed.netloc != settings["bucket"]:
@@ -111,7 +120,12 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
             actual_source_checksum = sha256(source_bytes).hexdigest()
             if actual_source_checksum != asset["checksum"]:
                 raise ValueError("carbon source checksum does not match the strict loader contract")
-            observations = load_observations_from_file(local_path, product_type=product_type)
+            observations = load_observations_from_file(
+                local_path,
+                max_observations=remaining_observations,
+                product_type=product_type,
+            )
+            remaining_observations = _consume_observation_budget(remaining_observations, len(observations))
             source_size = len(source_bytes)
             bands = [band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
             asset_cell_keys: set[tuple[str, int, str | None]] = set()
@@ -374,6 +388,7 @@ class NormalizedPartitionDatasetRunner:
         cover_mode: str,
         max_cells_per_asset: int = 0,
         time_granularity: str = "day",
+        max_observations: int | None = None,
     ) -> dict[str, Any]:
         minio = runtime_config.minio_settings()
         from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
@@ -391,6 +406,7 @@ class NormalizedPartitionDatasetRunner:
             "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
             "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
             "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
+            "max_observations": max_observations,
             "ray_address": runtime_config.require_ray_address(),
         }
         if dataset.data_type == "carbon":

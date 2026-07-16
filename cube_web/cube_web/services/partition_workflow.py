@@ -21,6 +21,7 @@ from cube_web.services.partition_contracts import (
     effective_dataset_request,
     group_datasets,
     make_output_version,
+    resolve_dataset_partition,
 )
 from cube_web.services.partition_defaults import normalize_partition_method
 from cube_web.services.partition_domain_store import get_partition_domain_store
@@ -101,6 +102,7 @@ class PartitionWorkflowService:
         for dataset_id, dataset in datasets.items():
             output_version = make_output_version(dataset_id, task_id)
             effective_request = effective_dataset_request(request, dataset)
+            effective_partition = resolve_dataset_partition(request, dataset)
             started = False
             try:
                 started_version = selected_domain_store.start_output(effective_request, dataset, task_id)
@@ -117,6 +119,7 @@ class PartitionWorkflowService:
                     cover_mode=effective_request.cover_mode,
                     max_cells_per_asset=effective_request.max_cells_per_asset,
                     time_granularity=effective_request.time_granularity,
+                    max_observations=effective_partition.max_observations,
                 )
                 if self.after_ray is not None:
                     self.after_ray()
@@ -787,12 +790,13 @@ class PartitionWorkflowService:
             requested = _dataset_partition_keys(payload.get("dataset_partitions"))
             duplicate = sorted(completed & requested)
             if duplicate:
-                dataset_id, grid_type, grid_level, partition_method = duplicate[0]
+                dataset_id, grid_type, grid_level, partition_method, max_observations = duplicate[0]
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         "Partition dataset configuration already completed: "
-                        f"{batch_id} {dataset_id} {grid_type} level={grid_level} {partition_method}"
+                        f"{batch_id} {dataset_id} {grid_type} level={grid_level} {partition_method} "
+                        f"max_observations={max_observations or 'unbounded'}"
                     ),
                 )
             return
@@ -1210,14 +1214,14 @@ def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, A
 
 def _mixed_partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     payload = batch.get("normalized_payload") if isinstance(batch.get("normalized_payload"), dict) else {}
-    slots: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    slots: dict[tuple[str, str, int, str, int], dict[str, Any]] = {}
     for partition in payload.get("dataset_partitions") or []:
         if not isinstance(partition, dict):
             continue
         key = _dataset_partition_key(partition)
         if key is None:
             continue
-        dataset_id, grid_type, grid_level, partition_method = key
+        dataset_id, grid_type, grid_level, partition_method, max_observations = key
         grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
         slots[key] = {
             "dataset_id": dataset_id,
@@ -1225,6 +1229,7 @@ def _mixed_partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[
             "grid_label": grid_label,
             "requested_grid_level": grid_level,
             "partition_method": partition_method,
+            "max_observations": max_observations or None,
             "method_label": method_label,
             "status": "available",
             "disabled": False,
@@ -1263,16 +1268,18 @@ def _dataset_partitions(request: StrictPartitionRequest) -> list[dict[str, Any]]
 
 def _dataset_partition_row(request: StrictPartitionRequest, dataset: Any) -> dict[str, Any]:
     effective = effective_dataset_request(request, dataset)
+    resolved = resolve_dataset_partition(request, dataset)
     return {
         "dataset_id": dataset.dataset_id,
         "data_type": dataset.data_type,
         "grid_type": effective.grid_type,
         "requested_grid_level": effective.requested_grid_level,
         "partition_method": effective.partition_method,
+        "max_observations": resolved.max_observations or 0,
     }
 
 
-def _dataset_partition_key(value: Any) -> tuple[str, str, int, str] | None:
+def _dataset_partition_key(value: Any) -> tuple[str, str, int, str, int] | None:
     if not isinstance(value, dict):
         return None
     dataset_id = str(value.get("dataset_id") or "").strip()
@@ -1280,21 +1287,22 @@ def _dataset_partition_key(value: Any) -> tuple[str, str, int, str] | None:
     partition_method = str(value.get("partition_method") or "").strip().lower()
     try:
         grid_level = int(value.get("requested_grid_level"))
+        max_observations = int(value.get("max_observations") or 0)
     except (TypeError, ValueError):
         return None
     if not dataset_id or not grid_type or not partition_method:
         return None
-    return dataset_id, grid_type, grid_level, partition_method
+    return dataset_id, grid_type, grid_level, partition_method, max_observations
 
 
-def _dataset_partition_keys(value: Any) -> set[tuple[str, str, int, str]]:
+def _dataset_partition_keys(value: Any) -> set[tuple[str, str, int, str, int]]:
     if not isinstance(value, list):
         return set()
     return {key for item in value if (key := _dataset_partition_key(item)) is not None}
 
 
-def _completed_dataset_partition_keys(attempts: list[dict[str, Any]]) -> set[tuple[str, str, int, str]]:
-    completed: set[tuple[str, str, int, str]] = set()
+def _completed_dataset_partition_keys(attempts: list[dict[str, Any]]) -> set[tuple[str, str, int, str, int]]:
+    completed: set[tuple[str, str, int, str, int]] = set()
     for attempt in attempts:
         payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
         statuses = _dataset_result_statuses(attempt)

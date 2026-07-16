@@ -11,6 +11,7 @@ from cube_web.services.partition_contracts import (
     group_datasets,
     make_output_id,
     make_output_version,
+    resolve_dataset_partition,
     validate_partition_method,
 )
 
@@ -198,4 +199,21 @@ def test_dataset_partition_overrides_resolve_and_validate_independently() -> Non
 
     payload["datasets"][0]["partition"]["partition_method"] = "logical"
     with pytest.raises(ValidationError, match="must be entity"):
+        StrictPartitionRequest.model_validate(payload)
+
+
+def test_max_observations_is_carbon_only_and_resolves_per_dataset() -> None:
+    payload = normalized_request()
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.update({"source_uri": "s3://cube/cube/source/carbon/oco2.nc4", "source_kind": "raw", "source_format": "netcdf"})
+    dataset["partition"] = {"max_observations": 100}
+    request = StrictPartitionRequest.model_validate(payload)
+    assert resolve_dataset_partition(request, request.datasets[0]).max_observations == 100
+
+    payload = normalized_request()
+    payload["datasets"][0]["partition"] = {"max_observations": 100}
+    with pytest.raises(ValidationError, match="only valid for carbon"):
         StrictPartitionRequest.model_validate(payload)
