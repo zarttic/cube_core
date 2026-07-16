@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "M5_GATE_STATUS": "PASS",
+  "recorded_at": "2026-07-16",
+  "integration": {
+    "baseline_commit": "ef5a53213e3a65bd28f8dc540bf4e2018dc5a9a9",
+    "m4_prerequisite_commit": "47c30d0",
+    "m2_mixed_dataset_commit": "d71cd0540bbb14e731fe31913742b6be014803df",
+    "m2_bounded_carbon_commit": "ef5a532"
+  },
+  "integration_order": [
+    {"owner": "m5/scanner-docs", "reviewed_commit": "fea45e38ceb9c6d5c25cf0ca1365c95d8294c693"},
+    {"owner": "m5/real-acceptance", "reviewed_commit": "4fedac79f8073e26b2cc20e9aff25711a33ff8b5"},
+    {"owner": "m5/browser", "reviewed_commit": "cf7ba870bb4c28351cee127952b832319c5e46f7"}
+  ],
+  "data_contract": {
+    "non_carbon": "COG",
+    "carbon": "native NetCDF/HDF5; no TIFF or COG conversion",
+    "mixed_batch": "each dataset selects its own effective grid configuration"
+  },
+  "gates": {
+    "L1": {
+      "status": "PASS",
+      "exit_codes": {"pytest": 0},
+      "counts": {"passed": 694, "skipped": 2, "deselected": 27, "failed": 0},
+      "summary": "All non-real cross-package tests passed; separately gated real markers were deselected.",
+      "sha256": "14aef0b6dd94bd0058eeeae1a041317acba91437570c0f80ed81f7fdebe8d551"
+    },
+    "m2_real": {
+      "status": "PASS",
+      "exit_codes": {"real_gate": 0},
+      "passed": 8,
+      "skipped": 0,
+      "summary": "Eight non-skipping M2 OpenGauss/MinIO/Ray scenarios passed.",
+      "sha256": "5d1884e909ca3142a314456b96061b649d42b5f7a9a3433674090fb6a93bfe1c"
+    },
+    "m3_real": {
+      "status": "PASS",
+      "exit_codes": {"real_gate": 0},
+      "passed": 2,
+      "skipped": 0,
+      "summary": "Two non-skipping M3 quality and publication scenarios passed.",
+      "sha256": "ccf228728f8ad3ce483bbcac4bc6e78421e9cbdaba3e93d4daa8b1d9439f3a2a"
+    },
+    "L4": {
+      "status": "PASS",
+      "exit_codes": {"real_gate": 0},
+      "counts": {"scenario": 6, "passed": 6, "failed": 0, "skipped": 0, "deselected": 0},
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "deselected": 0,
+      "summary": "Exactly six non-skipping M5 scenarios passed against OpenGauss, MinIO, and Ray.",
+      "sha256": "e11b70ea8f1f4f97ee9b669088949748e2b56b0b08f627da60649ee0209883c9",
+      "summary_sha256": "fdfd90744529b1cdaed3898946c38868eb8b1a6b0e536052d452b1d32cbf3d68"
+    },
+    "frontend": {
+      "status": "PASS",
+      "exit_codes": {"install": 0, "unit": 0, "build": 0, "headless_browser": 0},
+      "summary": "Frontend install, 26 unit tests, production build, and 3 headless browser tests passed.",
+      "sha256": "357f6617755d511528e9fd772d7c365830c0d920029b4319b8f910ad42a01d4b",
+      "unit_tests_passed": 26,
+      "build_exit_code": 0,
+      "headless_browser_tests_passed": 3
+    },
+    "cleanup_scanner": {
+      "status": "PASS",
+      "exit_codes": {"unit": 0, "repository_scan": 0},
+      "summary": "Cleanup scanner unit tests and repository scan passed with five rules and zero errors.",
+      "sha256": "8f1cce2194fe59ebbd84fa4dca5ac075e48d82221295e785faf9d2ab12062358",
+      "unit_tests_passed": 10,
+      "scanned_file_count": 284,
+      "rule_count": 5,
+      "error_count": 0,
+      "inventory_digest": "b7fdc4b887c916af47f11039b554cacc55d5a2a4840855e435c406e6ef9fcc11"
+    }
+  },
+  "m5_scenarios": [
+    {
+      "id": "geohash_logical_single_dataset",
+      "assertions": 8,
+      "grid_level": 3,
+      "counts": {"grid_cells": 25, "indexes": 25, "tiles": 25},
+      "output_digest": "ea1ef55f0c5ec2bcc1068eac907e27b37eebdff48b0cbfb4b590bac7897b7cfd"
+    },
+    {
+      "id": "mgrs_cross_zone_boundary_logical",
+      "assertions": 8,
+      "grid_level": 0,
+      "counts": {"grid_cells": 58, "indexes": 58, "tiles": 58},
+      "output_digest": "e81bb2120b1bc7b519ddeedd5889217a728ed901091aa966d9f32ff4f873c12b"
+    },
+    {
+      "id": "isea4h_low_resolution_entity",
+      "assertions": 10,
+      "grid_level": 1,
+      "counts": {"grid_cells": 3, "indexes": 3, "tiles": 3},
+      "output_digest": "68319d8d51b0fd8097c7b81f66c737be4113ccf3beff00d6e8eb1f57a7abe22d"
+    },
+    {
+      "id": "batch_two_datasets_sibling_partial_failure",
+      "assertions": 16,
+      "effective_grids": ["geohash", "isea4h"],
+      "successful_dataset_counts": [
+        {"grid": "geohash", "grid_cells": 25, "indexes": 25, "tiles": 25},
+        {"grid": "isea4h", "grid_cells": 3, "indexes": 3, "tiles": 3}
+      ],
+      "failed_sibling_persisted_rows": 0,
+      "output_digest": "5e126e176dd02efe2702c1091d0a514a0af6cc7b56826646da86bf172e5cc12e"
+    },
+    {
+      "id": "quality_fail_complete_exports",
+      "assertions": 17,
+      "counts": {"quality_errors": 3},
+      "source_contract": {"source_kind": "raw", "source_formats": ["netcdf"], "cog_uri": null, "tile_kind": "logical_reference"},
+      "json_csv_full_and_filtered_equal": true,
+      "output_digest": "70c1d3955a36c050e743ef3259d445262cf3bab15fc81d64d28da2f56e536f20"
+    },
+    {
+      "id": "pass_warn_publish_withdraw_reconciliation",
+      "assertions": 17,
+      "counts": {"publications": 2},
+      "lifecycle": ["active", "withdrawn"],
+      "forbidden_published_status_count": 0,
+      "output_digest": "49012c9cb70ee5c86f15fdb879829cda21eb10baf1f57c4bab09998663148641"
+    }
+  ],
+  "sources": [
+    {"uri": "s3://cube/<source:3f6cb8b89deee7ff>", "format": "netcdf", "conversion": "none"},
+    {"uri": "s3://cube/<source:861c1f2c477ba681>", "format": "cog", "conversion": "validated"}
+  ],
+  "publication_status_contract": {
+    "publication_record": ["publishing", "active", "withdrawing", "failed", "withdrawn"],
+    "dataset_derived": ["unpublished", "publishing", "active", "withdrawing", "failed", "withdrawn"],
+    "forbidden_published_count": 0
+  },
+  "residuals": {"M1": [], "M2": [], "M3": [], "M4": []},
+  "redaction": "Credentials, DSNs, local paths, raw object keys, task identifiers, and quality run identifiers are omitted."
+}
