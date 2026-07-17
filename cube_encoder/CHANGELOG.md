@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+### MGRS performance (measured 2026-07-17)
+
+- Batched projected-ring coordinate transforms and reused AOI longitude variants during cover traversal.
+- Added bounded caches for clipped MGRS cell geometry (8,192 entries) and decoded grid domains (32,768 entries).
+- On the current ARM64 development host, the Beijing precision-3 smoke case improved from `75.57 ms` to `20.35 ms` warm, while cache-cleared runs improved from `80.62 ms` to `63.58 ms`; all runs returned the same 110 standard MGRS cells. Baseline commit: `31e7146`.
+- Tightened the warm-path performance gates to `50 ms` for MGRS cover and `2.5 ms` for MGRS neighbors.
+
 ### Standard MGRS identity (2026-07-17)
 
 - MGRS locate、cover 和 topology 结果恢复为标准 `space_code` 身份，不再生成 `mgrs-topo-v1` 扩展码。

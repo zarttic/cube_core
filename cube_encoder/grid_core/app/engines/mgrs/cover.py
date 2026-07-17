@@ -43,6 +43,7 @@ def cover_geometry(
     aoi = to_shapely(geometry)
     if not aoi.is_valid:
         aoi = make_valid(aoi)
+    aoi_variants = wrapped_geometry_variants(aoi)
 
     selected: dict[str, tuple[GridAddress, CompactGridCell]] = {}
 
@@ -68,7 +69,6 @@ def cover_geometry(
             continue
 
         # Check intersection with AOI (handle antimeridian variants)
-        aoi_variants = wrapped_geometry_variants(aoi)
         intersects = any(clipped.intersects(v) for v in aoi_variants)
         if not intersects:
             continue

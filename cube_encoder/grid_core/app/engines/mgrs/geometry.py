@@ -1,6 +1,8 @@
 """Clipped MGRS cell geometry: project square → densify → inverse-project → clip to domain."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import mgrs as mgrs_lib
 from pyproj import Transformer
 from shapely.geometry import MultiPolygon, Polygon, box, mapping
@@ -48,11 +50,11 @@ def _projected_ring_to_wgs84(
     transformer: Transformer,
 ) -> list[tuple[float, float]]:
     """Convert a densified projected ring to WGS84 (lon, lat) tuples."""
-    wgs = []
-    for x, y in ring_xy:
-        lon, lat = transformer.transform(x, y)
-        wgs.append((lon, lat))
-    return wgs
+    if not ring_xy:
+        return []
+    xs, ys = zip(*ring_xy)
+    lons, lats = transformer.transform(xs, ys)
+    return list(zip(lons, lats))
 
 
 def _build_cell_projected_ring(
@@ -133,6 +135,7 @@ def _ups_raw_geometry(code: str, precision: int) -> Polygon:
     return poly
 
 
+@lru_cache(maxsize=8192)
 def cell_geometry_clipped(
     code: str, precision: int, domain: GridDomain
 ) -> Polygon | MultiPolygon:

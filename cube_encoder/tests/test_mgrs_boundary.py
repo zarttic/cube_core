@@ -8,11 +8,28 @@ from shapely.geometry import box, shape
 from shapely.strtree import STRtree
 
 from grid_core.app.engines.mgrs.domain import domain_for_point
+from grid_core.app.engines.mgrs.geometry import _projected_ring_to_wgs84
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
 # ---------------------------------------------------------------------------
 # Antimeridian
 # ---------------------------------------------------------------------------
+
+
+def test_projected_ring_transforms_all_vertices_in_one_batch() -> None:
+    class RecordingTransformer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def transform(self, xs, ys):
+            self.calls.append((tuple(xs), tuple(ys)))
+            return tuple(x + 0.5 for x in xs), tuple(y - 0.5 for y in ys)
+
+    transformer = RecordingTransformer()
+    result = _projected_ring_to_wgs84([(1.0, 2.0), (3.0, 4.0)], transformer)
+
+    assert result == [(1.5, 1.5), (3.5, 3.5)]
+    assert transformer.calls == [((1.0, 3.0), (2.0, 4.0))]
 
 
 def test_antimeridian_lon_180_maps_to_zone_1() -> None:

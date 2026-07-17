@@ -1,6 +1,8 @@
 """Cross-domain MGRS topology: neighbors, parent, children via geometry intersection."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import mgrs as mgrs_lib
 
 from grid_core.app.core.exceptions import ValidationError
@@ -252,6 +254,7 @@ def children_addresses(address: GridAddress, target_level: int) -> list[GridAddr
     return result
 
 
+@lru_cache(maxsize=32768)
 def _domain_for_address(code: str) -> GridDomain:
     """Derive the fixed UTM/UPS domain encoded by a standard MGRS code."""
     try:

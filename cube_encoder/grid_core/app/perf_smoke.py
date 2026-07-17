@@ -106,7 +106,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         PerfCase(
             name="mgrs_cover_intersect",
             iterations=500,
-            max_avg_ms=_env_float("PERF_MAX_MGRS_COVER_MS", 180.0),
+            max_avg_ms=_env_float("PERF_MAX_MGRS_COVER_MS", 50.0),
             func=lambda: grid_service.cover(
                 GridType.MGRS,
                 3,
@@ -120,7 +120,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         PerfCase(
             name="mgrs_cover_compact_intersect",
             iterations=500,
-            max_avg_ms=_env_float("PERF_MAX_MGRS_COMPACT_COVER_MS", 150.0),
+            max_avg_ms=_env_float("PERF_MAX_MGRS_COMPACT_COVER_MS", 50.0),
             func=lambda: grid_service.cover_compact(
                 GridType.MGRS,
                 3,
@@ -168,7 +168,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
         PerfCase(
             name="topology_neighbors_mgrs",
             iterations=3000,
-            max_avg_ms=_env_float("PERF_MAX_MGRS_NEIGHBORS_MS", 12.0),
+            max_avg_ms=_env_float("PERF_MAX_MGRS_NEIGHBORS_MS", 2.5),
             func=lambda: topology_service.neighbors(mgrs_address, k=1),
         ),
         PerfCase(
