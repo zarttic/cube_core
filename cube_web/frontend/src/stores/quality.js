@@ -44,6 +44,8 @@ export const useQualityStore = defineStore('quality', () => {
   const exportFilename = ref('');
   const exporting = ref(false);
   const rerunning = ref(false);
+  const ruleCatalog = ref(null);
+  const ruleCatalogLoading = ref(false);
   const listScope = createRequestScope();
   const detailScope = createRequestScope();
   const resultsScope = createRequestScope();
@@ -98,6 +100,18 @@ export const useQualityStore = defineStore('quality', () => {
       throw requestError;
     } finally {
       if (listScope.isCurrent(request.token)) loading.value = false;
+    }
+  }
+
+  async function loadRuleCatalog() {
+    if (ruleCatalog.value) return ruleCatalog.value;
+    ruleCatalogLoading.value = true;
+    try {
+      const response = await requestGet('/v1/quality/rules');
+      ruleCatalog.value = response;
+      return response;
+    } finally {
+      ruleCatalogLoading.value = false;
     }
   }
 
@@ -192,6 +206,18 @@ export const useQualityStore = defineStore('quality', () => {
     if (tab === 'errors') await loadErrors();
   }
 
+  function saveDownload(result, fallbackName) {
+    if (!result?.blob || typeof URL.createObjectURL !== 'function') return;
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(result.blob);
+    link.href = url;
+    link.download = result.filename || fallbackName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function exportErrors(format, filtered) {
     const qualityRunId = selectedQualityRunId.value;
     if (!qualityRunId) return null;
@@ -200,16 +226,19 @@ export const useQualityStore = defineStore('quality', () => {
       const query = pageQuery({ format, ...(filtered ? errorParameters(false) : {}) });
       const result = await download(`/v1/quality/records/${encodeURIComponent(qualityRunId)}/errors/export?${query}`);
       exportFilename.value = result?.filename || '';
-      if (result?.blob && typeof URL.createObjectURL === 'function') {
-        const link = document.createElement('a');
-        const url = URL.createObjectURL(result.blob);
-        link.href = url;
-        link.download = result.filename || `quality-errors.${format}`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-      }
+      saveDownload(result, `quality-errors.${format}`);
+      return result;
+    } finally {
+      exporting.value = false;
+    }
+  }
+
+  async function exportRunErrors(row, format = 'csv') {
+    if (!row?.quality_run_id) return null;
+    exporting.value = true;
+    try {
+      const result = await download(`/v1/quality/records/${encodeURIComponent(row.quality_run_id)}/errors/export?${pageQuery({ format })}`);
+      saveDownload(result, `${row.dataset_code || 'dataset'}-quality-errors.${format}`);
       return result;
     } finally {
       exporting.value = false;
@@ -258,12 +287,16 @@ export const useQualityStore = defineStore('quality', () => {
     exportFilename,
     exporting,
     rerunning,
+    ruleCatalog,
+    ruleCatalogLoading,
     loadList,
     openDetail,
     loadResults,
     loadErrors,
     setActiveTab,
     exportErrors,
+    exportRunErrors,
+    loadRuleCatalog,
     rerun,
     closeDetail,
     dispose,

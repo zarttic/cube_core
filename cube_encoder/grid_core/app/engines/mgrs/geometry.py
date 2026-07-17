@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import mgrs as mgrs_lib
 from pyproj import Transformer
-from shapely.geometry import MultiPolygon, Polygon, mapping
+from shapely.geometry import MultiPolygon, Polygon, box, mapping
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -16,6 +16,20 @@ _converter = mgrs_lib.MGRS()
 
 # Number of densification segments per projected edge (controls inverse-projection accuracy)
 _EDGE_SEGMENTS = 8
+_UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
+
+
+def _utm_band_polygon(code: str) -> Polygon:
+    """Return the standard MGRS Grid Zone Designator latitude band."""
+    canonical = code.replace(" ", "").upper()
+    zone_digits = 2 if len(canonical) > 1 and canonical[1].isdigit() else 1
+    try:
+        band_index = _UTM_BANDS.index(canonical[zone_digits])
+    except (IndexError, ValueError) as exc:
+        raise ValidationError(f"Cannot determine UTM latitude band from MGRS code: {code!r}") from exc
+    south = -80.0 + band_index * 8.0
+    north = 84.0 if canonical[zone_digits] == "X" else south + 8.0
+    return box(-180.0, south, 180.0, north)
 
 
 def _densify_projected_edge(
@@ -132,10 +146,11 @@ def cell_geometry_clipped(
         except Exception as exc:
             raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
         raw = _utm_raw_geometry(zone, hemisphere, easting, northing, precision)
+        valid_domain = domain_polygon(domain).intersection(_utm_band_polygon(code))
     else:
         raw = _ups_raw_geometry(code, precision)
+        valid_domain = domain_polygon(domain)
 
-    valid_domain = domain_polygon(domain)
     clipped = raw.intersection(valid_domain)
     if clipped.is_empty:
         raise ValidationError(
@@ -150,7 +165,7 @@ def cell_geometry_clipped(
     # GeometryCollection from edge-only intersections — extract polygonal parts
     polys = [
         g
-        for g in clipped.geoms
+        for g in getattr(clipped, "geoms", ())
         if isinstance(g, (Polygon, MultiPolygon)) and not g.is_empty
     ]
     if not polys:

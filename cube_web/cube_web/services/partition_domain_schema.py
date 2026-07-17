@@ -163,6 +163,7 @@ def schema_statements() -> tuple[str, ...]:
           grid_type TEXT NOT NULL, grid_level INT NOT NULL, grid_level_name TEXT NOT NULL, topology_code TEXT,
           space_code TEXT NOT NULL, st_code TEXT NOT NULL, window_col_off BIGINT, window_row_off BIGINT,
           window_width BIGINT, window_height BIGINT, value_ref_uri TEXT NOT NULL CHECK (value_ref_uri LIKE 's3://%'),
+          attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           FOREIGN KEY (dataset_id, output_version) REFERENCES partition_output_versions(dataset_id, output_version) ON DELETE CASCADE,
           FOREIGN KEY (tile_output_id) REFERENCES partition_tiles(output_id),
@@ -171,6 +172,7 @@ def schema_statements() -> tuple[str, ...]:
                  (window_col_off >= 0 AND window_row_off >= 0 AND window_width > 0 AND window_height > 0)),
           UNIQUE (dataset_id, output_version, source_asset_id, band_code, grid_type, grid_level, space_code, time_bucket, st_code)
         )""",
+        """ALTER TABLE partition_indexes ADD COLUMN IF NOT EXISTS attributes JSONB NOT NULL DEFAULT '{}'::jsonb""",
         """CREATE TABLE IF NOT EXISTS partition_quality_runs (
           quality_run_id UUID PRIMARY KEY, dataset_id TEXT NOT NULL, output_version TEXT NOT NULL,
           quality_sequence BIGINT NOT NULL CHECK (quality_sequence > 0), trigger TEXT NOT NULL CHECK (trigger IN ('automatic','manual')),

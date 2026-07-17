@@ -5,12 +5,8 @@ import mgrs as mgrs_lib
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
-from grid_core.app.engines.mgrs.address import (
-    build_topology_code,
-    canonicalize_mgrs,
-)
+from grid_core.app.engines.mgrs.address import canonicalize_mgrs
 from grid_core.app.engines.mgrs.cover import cover_geometry as _cover_geometry
-from grid_core.app.engines.mgrs.domain import domain_for_point
 from grid_core.app.engines.mgrs.geometry import (
     cell_bbox,
     cell_center,
@@ -34,7 +30,7 @@ _PRECISION_MAX = 5
 
 
 class MGRSEngine(BaseGridEngine):
-    """MGRS grid engine with full UTM/UPS support and topology codes.
+    """Standard MGRS grid engine with full UTM/UPS support.
 
     Grid level == MGRS numeric precision (0-5):
       0 = 100 km cell
@@ -63,13 +59,11 @@ class MGRSEngine(BaseGridEngine):
         except Exception as exc:
             raise ValidationError(f"Cannot encode ({lon}, {lat}) at precision {precision}") from exc
         canonical = canonicalize_mgrs(code)
-        domain = domain_for_point(lon, lat)
-        topo = build_topology_code(domain.token, precision, canonical)
         return GridAddress(
             grid_type=self.grid_type,
             grid_level=precision,
             space_code=canonical,
-            topology_code=topo,
+            topology_code=None,
         )
 
     # ------------------------------------------------------------------

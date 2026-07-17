@@ -8,13 +8,34 @@ export const datasetListFixture = {
 export const datasetDetailFixtureA = { ...datasetListFixture.items[0], current_output_version: 'v-a', grid_level_display_name: 'Geohash precision 6' };
 export const datasetDetailFixtureB = { ...datasetListFixture.items[1], current_output_version: 'v-b', grid_level_display_name: 'ISEA4H resolution 6' };
 export const datasetAssetsFixtureA = { items: [{ source_asset_id: 'asset-a', cog_uri: 's3://cube/source/a.tif', checksum: 'a'.repeat(64), crs: 'EPSG:4326' }], total: 1, page: 1, page_size: 20 };
-export const datasetGridFixtureA = { items: [{ output_id: 'cell-a', space_code: 'wx4g0e' }], total: 1, page: 1, page_size: 20 };
+export const datasetGridFixtureA = { items: [{ output_id: 'wx4g0e', space_code: 'wx4g0e' }], total: 1, page: 1, page_size: 20 };
 const emptyPage = { items: [], total: 0, page: 1, page_size: 20 };
+export const loadBatchFixture = {
+  load_batches: [{ load_batch_id: 'load-batch-a', batch_name: 'Batch A', status: 'succeeded', scene_count: 2, dataset_count: 1 }],
+};
+export const loadBatchScenesFixture = {
+  load_batch: loadBatchFixture.load_batches[0],
+  scene_count: 2,
+  datasets: [{
+    dataset_id: 'dataset-a', dataset_code: 'DS-A', dataset_title: 'Dataset A', data_type: 'optical', product_type: 'L2A',
+    scenes: [
+      { scene_id: 'scene-a', scene_key: 'Scene A', dataset_id: 'dataset-a', load_batch_id: 'load-batch-a', load_status: 'succeeded', source_asset_id: 'asset-a', bbox: [100, 20, 101, 21], crs: 'EPSG:4326', bands: [{ band_code: 'B04', band_name: '红光', band_type: 'spectral' }] },
+      { scene_id: 'scene-b', scene_key: 'Scene B', dataset_id: 'dataset-a', load_batch_id: 'load-batch-a', load_status: 'succeeded', source_asset_id: 'asset-b', bbox: [101, 20, 102, 21], crs: 'EPSG:4326', bands: [{ band_code: 'B08', band_name: '近红外', band_type: 'spectral' }] },
+    ],
+  }],
+};
+export const ingestRunsFixture = {
+  items: [{ ingest_run_id: 'ingest-run-a', partition_run_id: 'partition-run-a', dataset_id: 'dataset-a', dataset_code: 'DS-A', status: 'completed', scene_count: 1, completed_scene_count: 1, failed_scene_count: 0 }],
+  total: 1,
+  page: 1,
+  page_size: 20,
+  summary: { run_count: 1, scene_count: 1, completed_scene_count: 1, failed_scene_count: 0 },
+};
 
 export const qualityRecordsFixture = {
   items: [
-    { quality_run_id: 'quality-run-a', dataset_id: 'dataset-a', dataset_code: 'DS-A', output_version: 'v-a', status: 'pass', results_complete: true, quality_sequence: 1, is_current: true, error_count: 0, warning_count: 0, trigger: 'automatic' },
-    { quality_run_id: 'quality-run-b', dataset_id: 'dataset-b', dataset_code: 'DS-B', output_version: 'v-b', status: 'warn', results_complete: true, quality_sequence: 1, is_current: true, error_count: 1, warning_count: 1, trigger: 'automatic' },
+    { quality_run_id: 'quality-run-a', dataset_id: 'dataset-a', dataset_code: 'DS-A', batch_id: 'batch-a', data_type: 'optical', product_type: 'L2A', partition_status: 'completed', output_version: 'v-a', status: 'pass', results_complete: true, quality_sequence: 1, is_current: true, error_count: 0, warning_count: 0, trigger: 'automatic', completed_at: '2026-07-17T10:00:00+08:00' },
+    { quality_run_id: 'quality-run-b', dataset_id: 'dataset-b', dataset_code: 'DS-B', batch_id: 'batch-b', data_type: 'optical', product_type: 'L2A', partition_status: 'completed', output_version: 'v-b', status: 'warn', results_complete: true, quality_sequence: 1, is_current: true, error_count: 1, warning_count: 1, trigger: 'automatic', completed_at: '2026-07-17T10:05:00+08:00' },
   ], total: 2, page: 1, page_size: 20,
 };
 export const qualityDetailFixtureA = { ...qualityRecordsFixture.items[0], rule_set_version: 'rules-v1' };
@@ -33,6 +54,14 @@ export async function installApiRoutes(page, { deferQualityRunA = false } = {}) 
   const datasetDetail = (id) => id === 'dataset-a' ? datasetDetailFixtureA : datasetDetailFixtureB;
 
   await page.route('**/api/config', (route) => json(route, { auth_required: false, navigation: [] }));
+  await page.route('**/v1/datasets?**', (route) => json(route, { ...datasetListFixture, summary: { dataset_count: 2, scene_count: 2, ready_scene_count: 2, failed_scene_count: 0 } }));
+  await page.route('**/v1/datasets/dataset-a', (route) => json(route, datasetDetailFixtureA));
+  await page.route('**/v1/datasets/dataset-b', (route) => json(route, datasetDetailFixtureB));
+  for (const id of ['dataset-a', 'dataset-b']) {
+    for (const detail of ['scenes', 'assets', 'bands', 'outputs', 'grid', 'tiles', 'indexes', 'ingest-records', 'quality', 'publications', 'provenance']) {
+      await page.route(`**/v1/datasets/${id}/${detail}?**`, (route) => json(route, id === 'dataset-a' && detail === 'assets' ? datasetAssetsFixtureA : id === 'dataset-a' && detail === 'grid' ? datasetGridFixtureA : emptyPage));
+    }
+  }
   await page.route('**/v1/partition/datasets?**', (route) => json(route, datasetListFixture));
   await page.route('**/v1/partition/datasets/dataset-a', (route) => json(route, datasetDetailFixtureA));
   await page.route('**/v1/partition/datasets/dataset-b', (route) => json(route, datasetDetailFixtureB));
@@ -41,17 +70,27 @@ export async function installApiRoutes(page, { deferQualityRunA = false } = {}) 
       await page.route(`**/v1/partition/datasets/${id}/${detail}?**`, (route) => json(route, id === 'dataset-a' && detail === 'assets' ? datasetAssetsFixtureA : id === 'dataset-a' && detail === 'grid' ? datasetGridFixtureA : emptyPage));
     }
   }
-  await page.route(/\/v1\/partition\/(?:tasks|(?:optical|radar|product|carbon)\/tasks)\/run$/, async (route) => {
+  await page.route('**/v1/partition/runs', async (route) => {
     const body = route.request().postDataJSON();
-    const valid = body?.batch_id && Array.isArray(body.datasets) && body.datasets[0]?.assets?.length && body.datasets[0]?.bands?.length
-      && body.grid_type && body.requested_grid_level !== undefined && body.partition_method
+    const valid = body?.partition_run_id?.startsWith('partition-run-') && Array.isArray(body.source_batch_ids)
+      && body.source_batch_ids.includes('load-batch-a') && !body.source_batch_ids.includes(body.partition_run_id)
+      && Array.isArray(body.datasets) && body.datasets[0]?.scene_ids?.length
       && body.datasets.every((dataset) => dataset.partition?.grid_type && dataset.partition?.requested_grid_level !== undefined && dataset.partition?.partition_method)
-      && !Object.hasOwn(body, 'dataset_ids') && !Object.hasOwn(body, 'grid_level_mode');
-    await json(route, valid ? { task_id: 'task-fixture', status: 'queued', tile_count: 0, index_count: 0, grid_cell_count: 0 } : { detail: 'invalid request' }, valid ? 202 : 400);
+      && !Object.hasOwn(body, 'batch_id');
+    await json(route, valid ? { partition_run_id: body.partition_run_id, source_batch_ids: body.source_batch_ids, task_id: 'task-fixture', status: 'queued', data_type: 'optical', operation: 'run' } : { detail: 'invalid request' });
   });
-  await page.route('**/v1/partition/batches?**', (route) => json(route, { batches: [] }));
+  await page.route('**/v1/partition/load-batches/load-batch-a/scenes?**', (route) => json(route, loadBatchScenesFixture));
+  await page.route('**/v1/partition/load-batches?**', (route) => json(route, loadBatchFixture));
   await page.route('**/v1/partition/tasks?**', (route) => json(route, { tasks: [], total: 0, page: 1, page_size: 20 }));
+  await page.route('**/v1/ingest-runs?**', (route) => json(route, ingestRunsFixture));
   await page.route('**/v1/quality/records?**', (route) => json(route, qualityRecordsFixture));
+  await page.route('**/v1/quality/rules', (route) => json(route, {
+    rule_set_version: '2026.07.14-v1',
+    items: [
+      { code: 'asset_readability', name: '数据单元可读性', mandatory: true, applicability: { data_types: ['optical', 'radar', 'product', 'carbon'] }, implementation_version: '1.0.0' },
+      { code: 'metadata_completeness', name: '元数据完整性', mandatory: false, applicability: { data_types: ['optical', 'radar', 'product', 'carbon'] }, implementation_version: '1.0.0' },
+    ],
+  }));
   await page.route('**/v1/quality/records/quality-run-a', async (route) => {
     if (deferQualityRunA) {
       signalQualityRunA();

@@ -66,7 +66,21 @@ class PartitionWorkflowService:
         self.domain_store = domain_store
         self.dataset_runner = runner
         self.after_ray: Callable[[], None] | None = None
+        self.task_event_listeners: list[Callable[[str, str, dict[str, Any] | None], None]] = []
         self._run_lock = Lock()
+
+    def add_task_event_listener(self, listener: Callable[[str, str, dict[str, Any] | None], None]) -> None:
+        if listener not in self.task_event_listeners:
+            self.task_event_listeners.append(listener)
+
+    def _notify_task_event(self, task_id: str, status: str, result: dict[str, Any] | None = None) -> None:
+        for listener in tuple(self.task_event_listeners):
+            try:
+                listener(task_id, status, result)
+            except Exception:
+                # The legacy task store remains authoritative during the M6
+                # additive migration; projection failures are reconciliable.
+                continue
 
     @property
     def store(self) -> PartitionJobStore:
@@ -109,7 +123,7 @@ class PartitionWorkflowService:
                 started = True
                 if started_version != output_version:
                     raise ValueError("domain store returned a non-deterministic output version")
-                raw_result = _run_dataset_runner(
+                result, scene_outcomes = _run_dataset_by_scene(
                     selected_runner,
                     dataset=dataset,
                     task_id=task_id,
@@ -125,11 +139,15 @@ class PartitionWorkflowService:
                     self.after_ray()
                 if _is_cancelled(selected_job_store, task_id):
                     raise PartitionCancelledError("Partition task cancelled")
-                result = PartitionDatasetResult.model_validate(raw_result)
                 if result.dataset_id != dataset_id or result.output_version != output_version or result.task_id != task_id:
                     raise ValueError("dataset result identity does not match the active attempt")
                 committed = selected_domain_store.complete_output(result)
-                results.append(_completed_dataset_result(result, committed))
+                completed_result = _completed_dataset_result(result, committed)
+                if scene_outcomes is not None:
+                    completed_result["scenes"] = scene_outcomes
+                    if any(item["status"] != "completed" for item in scene_outcomes):
+                        completed_result["status"] = "partial_failure"
+                results.append(completed_result)
             except PartitionCancelledError:
                 if started:
                     selected_domain_store.fail_output(
@@ -148,20 +166,21 @@ class PartitionWorkflowService:
                         error_code="partition_execution_failed",
                         error_message=message,
                     )
-                results.append(
-                    {
+                failed_result = {
                         "dataset_id": dataset_id,
                         "output_version": output_version,
                         "status": "failed",
                         "error": {"code": "partition_execution_failed", "message": message},
                     }
-                )
+                if isinstance(exc, _ScenePartitionFailure):
+                    failed_result["scenes"] = exc.outcomes
+                results.append(failed_result)
 
         statuses = [str(item["status"]) for item in results]
         completed = statuses.count("completed")
         if completed == len(statuses):
             status = "completed"
-        elif completed:
+        elif completed or "partial_failure" in statuses:
             status = "partial_failure"
         elif statuses and all(value == "cancelled" for value in statuses):
             status = "cancelled"
@@ -641,6 +660,7 @@ class PartitionWorkflowService:
         attempt = self.store.get_attempt(task_id)
         if attempt is not None:
             self.store.start_attempt(task_id)
+        self._notify_task_event(task_id, "running")
 
     def on_task_succeeded(self, task_id: str, result: dict[str, Any]) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -668,13 +688,16 @@ class PartitionWorkflowService:
                     retry_strategy="retryable_assets",
                     failure_reason=_result_failure_reason(result, retryable_asset_ids),
                 )
+        self._notify_task_event(task_id, str(result.get("status") or "completed"), result)
 
     def on_task_failed(self, task_id: str, error: str) -> None:
         attempt = self.store.get_attempt(task_id)
         if attempt is None:
+            self._notify_task_event(task_id, "failed", {"error": error})
             return
         if "cancel" in error.lower():
             self.store.mark_cancelled(task_id)
+            self._notify_task_event(task_id, "cancelled", {"error": error})
             return
         batch = self.get_batch(attempt["batch_id"])
         max_auto_retries = _max_auto_retries(batch)
@@ -695,6 +718,7 @@ class PartitionWorkflowService:
                 retry_strategy="full_batch",
                 failure_reason=error,
             )
+        self._notify_task_event(task_id, "failed", {"error": error})
 
     def _payload_for_batch(
         self,
@@ -1725,17 +1749,26 @@ def _strict_task_result(result: dict[str, Any], request: StrictPartitionRequest)
     asset_results: list[dict[str, Any]] = []
     for dataset in request.datasets:
         outcome = statuses.get(dataset.dataset_id, {})
+        scene_statuses = {
+            str(item.get("scene_id")): item
+            for item in outcome.get("scenes", ())
+            if isinstance(item, dict) and item.get("scene_id")
+        }
         status = "succeeded" if outcome.get("status") == "completed" else str(outcome.get("status") or "failed")
         error = outcome.get("error") if isinstance(outcome.get("error"), dict) else {}
         for asset_index, asset in enumerate(dataset.assets):
+            scene_id = str((asset.attributes or {}).get("scene_id") or "")
+            scene_outcome = scene_statuses.get(scene_id, {})
+            asset_status = "succeeded" if scene_outcome.get("status") == "completed" else str(scene_outcome.get("status") or status)
+            scene_error = scene_outcome.get("error") if isinstance(scene_outcome.get("error"), dict) else error
             source_uri = asset.source_uri or asset.cog_uri
             source_text = None if source_uri is None else str(source_uri)
             asset_results.append(
                 {
                     "asset_id": normalized_dataset_asset_id(request.batch_id, dataset.dataset_id, source_text or "", asset_index),
                     "source_uri": source_text,
-                    "status": status,
-                    "error_message": error.get("message"),
+                    "status": asset_status,
+                    "error_message": scene_error.get("message"),
                 }
             )
     return {**result, "asset_results": asset_results}
@@ -1785,6 +1818,87 @@ def _manual_required_asset_result(result: dict[str, Any], asset_ids: set[str]) -
             if isinstance(item, dict) and _asset_result_id(item) in asset_ids and _asset_result_failed(item):
                 item["status"] = "manual_required"
     return next_result
+
+
+class _ScenePartitionFailure(RuntimeError):
+    def __init__(self, outcomes: list[dict[str, Any]]) -> None:
+        self.outcomes = outcomes
+        failures = [item.get("error", {}).get("message", "scene failed") for item in outcomes if item["status"] == "failed"]
+        super().__init__("; ".join(failures) or "all scenes failed")
+
+
+def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[PartitionDatasetResult, list[dict[str, Any]] | None]:
+    grouped: dict[str, list[Any]] = {}
+    for asset in dataset.assets:
+        scene_id = str((asset.attributes or {}).get("scene_id") or "").strip()
+        if not scene_id:
+            raw = _run_dataset_runner(runner, dataset=dataset, **kwargs)
+            return PartitionDatasetResult.model_validate(raw), None
+        grouped.setdefault(scene_id, []).append(asset)
+    if len(grouped) <= 1:
+        raw = _run_dataset_runner(runner, dataset=dataset, **kwargs)
+        return PartitionDatasetResult.model_validate(raw), None
+
+    results: list[PartitionDatasetResult] = []
+    outcomes: list[dict[str, Any]] = []
+    for scene_id, assets in grouped.items():
+        asset_ids = {asset.source_asset_id for asset in assets}
+        scene_dataset = dataset.model_copy(
+            update={
+                "assets": tuple(assets),
+                "bands": tuple(band for band in dataset.bands if band.source_asset_id in asset_ids),
+            }
+        )
+        try:
+            raw = _run_dataset_runner(runner, dataset=scene_dataset, **kwargs)
+            result = PartitionDatasetResult.model_validate(raw)
+            results.append(result)
+            outcomes.append({"scene_id": scene_id, "status": "completed"})
+        except Exception as exc:
+            outcomes.append(
+                {
+                    "scene_id": scene_id,
+                    "status": "failed",
+                    "error": {"code": "partition_execution_failed", "message": _safe_dataset_error(exc)},
+                }
+            )
+    if not results:
+        raise _ScenePartitionFailure(outcomes)
+    first = results[0]
+    combined = first.model_copy(
+        update={
+            "tiles": _merge_scene_rows(results, "tiles"),
+            "indexes": _merge_scene_rows(results, "indexes"),
+            "grid_cells": _merge_scene_rows(results, "grid_cells"),
+        }
+    )
+    return combined, outcomes
+
+
+def _merge_scene_rows(results: list[PartitionDatasetResult], field: str) -> tuple[dict[str, Any], ...]:
+    rows: dict[Any, dict[str, Any]] = {}
+    for result in results:
+        for row in getattr(result, field):
+            if field == "grid_cells":
+                identity = (
+                    row.get("grid_type"), int(row.get("grid_level") or 0),
+                    row.get("topology_code"), row.get("space_code"),
+                )
+                existing = rows.get(identity)
+                if existing is not None:
+                    comparable = {key: value for key, value in row.items() if key not in {"output_id", "tile_count", "index_count"}}
+                    prior = {key: value for key, value in existing.items() if key not in {"output_id", "tile_count", "index_count"}}
+                    if comparable != prior:
+                        raise ValueError(f"conflicting grid cell geometry across scenes: {identity}")
+                    existing["tile_count"] = int(existing.get("tile_count") or 0) + int(row.get("tile_count") or 0)
+                    existing["index_count"] = int(existing.get("index_count") or 0) + int(row.get("index_count") or 0)
+                    continue
+            else:
+                identity = str(row.get("output_id") or "")
+                if identity in rows and rows[identity] != row:
+                    raise ValueError(f"conflicting {field} output_id across scenes: {identity}")
+            rows[identity] = dict(row)
+    return tuple(rows.values())
 
 
 def _run_dataset_runner(runner: Any, **kwargs: Any) -> Any:

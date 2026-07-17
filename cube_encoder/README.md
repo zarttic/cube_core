@@ -1,6 +1,6 @@
 # cube_encoder
 
-更新时间：2026-07-14
+更新时间：2026-07-17
 
 `cube_encoder` 是 cube 项目的底层格网编码 SDK 与 API 提供方，负责离散格网编码、
 时空编码、拓扑元操作和统一能力输出。其他包应通过 `grid_core.sdk.CubeEncoderSDK`
@@ -11,7 +11,7 @@
 - 生产格网严格限定为三类：`geohash`（经纬度格网，logical）、`mgrs`（平面格网，logical）、`isea4h`（六边形格网，entity）。
 - 支持三类格网的点定位、几何覆盖、拓扑元操作和 ST code 生成/解析。
 - `isea4h` 为纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；运行时不依赖 H3 或 DGGRID，`space_code` 为 DGGRID `SEQNUM`（1 基十进制字符串）。
-- `mgrs` 结果同时携带标准 `space_code`（标准 UTM/UPS MGRS）与 `topology_code`（`mgrs-topo-v1:<domain>:<level>:<space_code>`）；`geohash`/`isea4h` 的 `topology_code` 为空。
+- `mgrs` 使用标准 UTM/UPS MGRS `space_code` 作为唯一格网身份，不生成扩展 `topology_code`；历史扩展码字段仅保留读取兼容。
 - 请求层级字段统一为 `requested_grid_level`；返回单元保留其实际 `grid_level`（含 `minimal` 覆盖的混合层级）。
 - 原生层级范围：Geohash `1..12`、MGRS 精度 `0..5`、ISEA4H 分辨率 `0..15`。
 - 支持时空编码生成、批量生成与解析；邻接、父级、子级、编码转几何、批量编码转几何。

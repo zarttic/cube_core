@@ -49,7 +49,8 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
 
 class PartitionSchemaImportRequest(CubeWebModel):
     schema_version: str | None = "1.0"
-    batch_id: str = Field(min_length=1)
+    batch_id: str | None = Field(default=None, min_length=1)
+    load_batch_id: str | None = Field(default=None, min_length=1)
     batch_name: str | None = None
     data_type: Literal["optical", "product", "carbon", "radar"] = "optical"
     source_system: str | None = None
@@ -61,6 +62,15 @@ class PartitionSchemaImportRequest(CubeWebModel):
     normalized_payload: dict[str, Any] | None = None
     priority: int = 0
     max_auto_retries: int = Field(default=1, ge=0)
+
+    @model_validator(mode="after")
+    def normalize_load_batch_id(self) -> "PartitionSchemaImportRequest":
+        load_batch_id = self.load_batch_id or self.batch_id
+        if not load_batch_id:
+            raise ValueError("load_batch_id is required")
+        if self.batch_id is None:
+            object.__setattr__(self, "batch_id", load_batch_id)
+        return self
 
 
 class PartitionSchemaReconcileRequest(CubeWebModel):

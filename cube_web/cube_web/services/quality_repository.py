@@ -25,6 +25,10 @@ from cube_web.services.quality_contracts import (
 PartitionDomainTransaction: TypeAlias = psycopg.Connection[Any]
 
 
+def _jsonb(value: Any) -> Jsonb:
+    return Jsonb(value, dumps=lambda item: json.dumps(item, ensure_ascii=False))
+
+
 class DatasetNotFound(LookupError):
     pass
 
@@ -293,7 +297,7 @@ def _allocate_quality_run(
                 trigger,
                 requested_by,
                 rule_set_version,
-                Jsonb(snapshot),
+                _jsonb(snapshot),
             ),
         )
         row = cur.fetchone()
@@ -474,7 +478,7 @@ def write_quality_error_batch(
             error.field,
             error.error_code,
             error.message,
-            Jsonb(error.context or {}),
+            _jsonb(error.context or {}),
             error.created_at,
         )
         for error in errors
@@ -518,7 +522,7 @@ def finish_quality_result(tx: PartitionDomainTransaction, *, result: QualityResu
                 result.finding_count,
                 result.error_count,
                 result.warning_count,
-                Jsonb(result.metrics),
+                _jsonb(result.metrics),
                 result.execution_error,
                 result.started_at,
                 result.completed_at,
@@ -542,7 +546,7 @@ def finish_quality_result(tx: PartitionDomainTransaction, *, result: QualityResu
                     result.finding_count,
                     result.error_count,
                     result.warning_count,
-                    Jsonb(result.metrics),
+                    _jsonb(result.metrics),
                     result.execution_error,
                     result.started_at,
                     result.completed_at,
@@ -659,7 +663,7 @@ def count_quality_results(tx: PartitionDomainTransaction, *, quality_run_id: UUI
 def get_quality_run(tx: PartitionDomainTransaction, *, quality_run_id: UUID) -> QualityRun:
     with tx.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT q.*, d.dataset_code, d.batch_id, d.data_type, d.product_type, d.partition_status, q.quality_run_id = d.current_quality_run_id AS is_current "
+    "SELECT q.*, d.dataset_code, d.batch_id, d.data_type, d.product_type, d.partition_status, q.quality_run_id = d.current_quality_run_id AS is_current "
             "FROM partition_quality_runs q JOIN partition_datasets d ON d.dataset_id = q.dataset_id "
             "WHERE q.quality_run_id = %s",
             (quality_run_id,),

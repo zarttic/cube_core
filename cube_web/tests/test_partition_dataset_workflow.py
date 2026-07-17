@@ -7,10 +7,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from cube_web.services.partition_contracts import StrictPartitionRequest, make_output_version
+from cube_web.services.partition_contracts import PartitionDatasetResult, StrictPartitionRequest, make_output_version
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, PartitionBatchAlreadyActiveError
 from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
-from cube_web.services.partition_workflow import PartitionWorkflowService
+from cube_web.services.partition_workflow import PartitionWorkflowService, _merge_scene_rows
 
 
 def _request() -> StrictPartitionRequest:
@@ -206,6 +206,70 @@ def test_batch_commits_successful_dataset_when_sibling_fails() -> None:
     assert domain_store.resolve_output_version("dataset-ok") == make_output_version("dataset-ok", "task-batch")
     with pytest.raises(KeyError):
         domain_store.resolve_output_version("dataset-fail")
+
+
+def test_same_dataset_tracks_scene_partial_failure_and_commits_successful_scene() -> None:
+    payload = _request().model_dump(mode="json")
+    first_asset = payload["datasets"][0]["assets"][0]
+    first_asset["attributes"] = {"scene_id": "scene-ok"}
+    second_asset = {**first_asset, "source_asset_id": "asset-scene-fail", "attributes": {"scene_id": "scene-fail"}}
+    payload["datasets"][0]["assets"] = [first_asset, second_asset]
+    payload["datasets"][0]["bands"].append(
+        {**payload["datasets"][0]["bands"][0], "source_asset_id": "asset-scene-fail"}
+    )
+    request = StrictPartitionRequest.model_validate(payload)
+
+    class SceneRunner(FakeRunner):
+        def run_dataset(self, *, dataset, task_id, output_version, grid_type, requested_grid_level, cover_mode):
+            asset = dataset.assets[0]
+            scene_id = asset.attributes["scene_id"]
+            if scene_id == "scene-fail":
+                raise RuntimeError("scene source unreadable")
+            result = super().run_dataset(
+                dataset=dataset,
+                task_id=task_id,
+                output_version=output_version,
+                grid_type=grid_type,
+                requested_grid_level=requested_grid_level,
+                cover_mode=cover_mode,
+            )
+            for noun in ("tiles", "indexes", "grid_cells"):
+                result[noun][0]["output_id"] += f"-{scene_id}"
+            return result
+
+    domain_store = FakeDomainStore()
+    result = _workflow(domain_store, SceneRunner(), FakeJobStore()).run(task_id="task-scenes", request=request)
+
+    assert result["status"] == "partial_failure"
+    assert result["datasets"][0]["status"] == "partial_failure"
+    assert result["datasets"][0]["scenes"] == [
+        {"scene_id": "scene-ok", "status": "completed"},
+        {
+            "scene_id": "scene-fail",
+            "status": "failed",
+            "error": {"code": "partition_execution_failed", "message": "scene source unreadable"},
+        },
+    ]
+    assert domain_store.resolve_output_version("dataset-ok") == make_output_version("dataset-ok", "task-scenes")
+
+
+def test_scene_grid_cells_merge_by_database_natural_key() -> None:
+    first = PartitionDatasetResult.model_validate(
+        {
+            "dataset_id": "dataset-a", "task_id": "task-a", "output_version": "v1",
+            "grid_type": "geohash", "requested_grid_level": 5, "partition_method": "logical",
+            "object_prefix": "", "tiles": [], "indexes": [],
+            "grid_cells": [{"output_id": "cell-scene-a", "grid_type": "geohash", "grid_level": 5, "space_code": "whrx4", "topology_code": "t", "bbox": [1, 2, 3, 4]}],
+        }
+    )
+    second = first.model_copy(
+        update={"grid_cells": ({**first.grid_cells[0], "output_id": "cell-scene-b"},)}
+    )
+
+    merged = _merge_scene_rows([first, second], "grid_cells")
+
+    assert len(merged) == 1
+    assert merged[0]["space_code"] == "whrx4"
 
 
 def test_cancel_after_ray_before_commit_cannot_switch_pointer() -> None:

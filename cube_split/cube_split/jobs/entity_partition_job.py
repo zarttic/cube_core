@@ -1037,7 +1037,6 @@ def _ensure_entity_tables_postgres(conn: Any) -> None:
             );
             """
         )
-    conn.commit()
 
 
 def _upsert_entity_tiles_postgres(
@@ -1252,6 +1251,7 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
         except Exception as exc:
             finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             conn.rollback()
+            _ensure_entity_tables_postgres(conn)
             _upsert_job_status_postgres(
                 conn,
                 run_id,

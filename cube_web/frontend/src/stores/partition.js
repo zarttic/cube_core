@@ -2,25 +2,26 @@ import { reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 
 import { requestGet, requestPost } from '@/api/client';
+import { m6Mode } from '@/config';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
-import { derivedPartitionMethod, gridDefinition } from '@/utils/grid';
+import { derivedPartitionMethod, gridDefinition, withFixedPartitionOptions } from '@/utils/grid';
 
 const initialForm = () => ({
-  batchId: '',
   datasets: [],
   gridType: 'geohash',
-  requestedGridLevel: 6,
-  coverMode: 'intersect',
-  timeGranularity: 'day',
-  maxCellsPerAsset: 0,
+  requestedGridLevel: 4,
 });
 
-const datasetFields = new Set(['dataset_id', 'dataset_code', 'dataset_title', 'data_type', 'product_type', 'assets', 'bands', 'attributes', 'partition']);
-const assetFields = new Set(['source_asset_id', 'cog_uri', 'source_uri', 'source_kind', 'source_format', 'checksum', 'bbox', 'crs', 'time_start', 'time_end', 'attributes']);
-const bandFields = new Set(['source_asset_id', 'band_code', 'band_name', 'band_type', 'unit', 'display_order', 'attributes']);
-const datasetPartitionFields = new Set(['grid_type', 'requested_grid_level', 'partition_method']);
-const forbiddenRequestFields = new Set(['dataset_ids', 'datasetIds', 'grid_level', 'grid_level_mode', 'selected_assets']);
+const partitionFields = new Set([
+  'grid_type',
+  'requested_grid_level',
+  'partition_method',
+  'cover_mode',
+  'time_granularity',
+  'max_cells_per_asset',
+  'max_observations',
+]);
 
 function invalidRequest(message) {
   const error = new Error(message);
@@ -28,50 +29,53 @@ function invalidRequest(message) {
   return error;
 }
 
-function validateDataset(dataset) {
-  if (!dataset || typeof dataset !== 'object') throw invalidRequest('存在无效的数据集。');
-  if (!String(dataset.dataset_id || '').trim() || !String(dataset.dataset_code || '').trim() || !String(dataset.dataset_title || '').trim()) {
-    throw invalidRequest('数据集必须包含完整标识与名称。');
-  }
-  if (!Array.isArray(dataset.assets) || !dataset.assets.length) throw invalidRequest('每个数据集至少需要一项资产。');
-  if (!Array.isArray(dataset.bands) || !dataset.bands.length) throw invalidRequest('每个数据集至少需要一个波段。');
-  if (Object.keys(dataset).some((key) => !datasetFields.has(key))) throw invalidRequest('数据集包含不允许的请求字段。');
-  if (!dataset.partition || typeof dataset.partition !== 'object' || Array.isArray(dataset.partition)
-    || Object.keys(dataset.partition).some((key) => !datasetPartitionFields.has(key))) {
+function validatePartition(partition) {
+  if (!partition || typeof partition !== 'object' || Array.isArray(partition)
+    || Object.keys(partition).some((key) => !partitionFields.has(key))) {
     throw invalidRequest('数据集格网参数无效。');
   }
-  const gridType = dataset.partition.grid_type;
-  const requestedGridLevel = Number(dataset.partition.requested_grid_level);
-  const definition = gridDefinition(gridType);
-  if (!definition || !Number.isInteger(requestedGridLevel)
-    || requestedGridLevel < definition.minLevel || requestedGridLevel > definition.maxLevel
-    || dataset.partition.partition_method !== derivedPartitionMethod(gridType)) {
+  const definition = gridDefinition(partition.grid_type);
+  const level = Number(partition.requested_grid_level);
+  if (!definition || !Number.isInteger(level) || level < definition.minLevel || level > definition.maxLevel
+    || partition.partition_method !== derivedPartitionMethod(partition.grid_type)) {
     throw invalidRequest('数据集格网层级或剖分方式无效。');
   }
-  if (dataset.assets.some((asset) => !asset || Object.keys(asset).some((key) => !assetFields.has(key)))) {
-    throw invalidRequest('资产包含不允许的请求字段。');
+  const maxCells = Number(partition.max_cells_per_asset ?? 0);
+  if (!Number.isInteger(maxCells) || maxCells < 0) {
+    throw invalidRequest('每数据单元最大格网单元数必须是非负整数。');
   }
-  for (const asset of dataset.assets) {
-    const sourceUri = String(asset.source_uri || '');
-    if (dataset.data_type === 'carbon') {
-      if (asset.cog_uri || asset.source_kind !== 'raw' || !sourceUri.startsWith('s3://') || !['netcdf', 'hdf5'].includes(asset.source_format)) {
-        throw invalidRequest('碳卫星资产必须使用 NetCDF/HDF5 原始 source_uri。');
-      }
-      const suffixes = asset.source_format === 'netcdf' ? ['.nc', '.nc4'] : ['.h5', '.hdf', '.hdf5'];
-      if (!suffixes.some((suffix) => sourceUri.toLowerCase().endsWith(suffix))) {
-        throw invalidRequest('碳卫星 source_uri 与 source_format 不匹配。');
-      }
-    } else if (!String(asset.cog_uri || '').startsWith('s3://') || asset.source_uri || asset.source_kind !== 'cog' || asset.source_format !== 'cog') {
-      throw invalidRequest('非碳卫星资产必须使用 COG cog_uri。');
-    }
+}
+
+function normalizeSceneBatchIds(scene) {
+  if (Array.isArray(scene?.eligible_source_batch_ids)) {
+    return [...new Set(scene.eligible_source_batch_ids.map((value) => String(value || '').trim()).filter(Boolean))];
   }
-  if (dataset.bands.some((band) => !band || Object.keys(band).some((key) => !bandFields.has(key)))) {
-    throw invalidRequest('波段包含不允许的请求字段。');
+  return [...new Set([
+    ...(Array.isArray(scene?.source_batch_ids) ? scene.source_batch_ids : []),
+    scene?.load_batch_id,
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function buildDatasetSelection(dataset) {
+  if (!String(dataset?.dataset_id || '').trim()) throw invalidRequest('数据集必须包含有效标识。');
+  if (!Array.isArray(dataset.scenes) || !dataset.scenes.length) throw invalidRequest('每个数据集至少选择一个数据单元。');
+  const partition = withFixedPartitionOptions(dataset.partition);
+  validatePartition(partition);
+  const sceneIds = dataset.scenes.map((scene) => String(scene?.scene_id || '').trim());
+  if (sceneIds.some((sceneId) => !sceneId) || new Set(sceneIds).size !== sceneIds.length) {
+    throw invalidRequest('数据集包含无效或重复的数据单元。');
   }
-  const assetIds = new Set(dataset.assets.map((asset) => asset?.source_asset_id));
-  if (assetIds.has(undefined) || dataset.bands.some((band) => !assetIds.has(band?.source_asset_id))) {
-    throw invalidRequest('波段必须关联到已选资产。');
-  }
+  return {
+    dataset_id: dataset.dataset_id,
+    scene_ids: sceneIds,
+    partition: Object.fromEntries(Object.entries(partition).filter(([key, value]) => partitionFields.has(key) && value != null)),
+  };
+}
+
+export function createPartitionRunId() {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `partition-run-${suffix}`;
 }
 
 export const usePartitionStore = defineStore('partition', () => {
@@ -92,35 +96,22 @@ export const usePartitionStore = defineStore('partition', () => {
     error.value = '';
   }
 
-  function buildRequest() {
-    if (Object.keys(form).some((key) => forbiddenRequestFields.has(key))) {
-      throw invalidRequest('请求包含已退役字段。');
-    }
-    const batchId = String(form.batchId || '').trim();
-    if (!batchId) throw invalidRequest('请输入批次 ID。');
-    if (!Array.isArray(form.datasets) || !form.datasets.length) throw invalidRequest('请选择至少一个完整数据集。');
-    form.datasets.forEach(validateDataset);
-    const dataTypes = [...new Set(form.datasets.map((dataset) => dataset.data_type))];
-    if (dataTypes.some((dataType) => !dataType)) throw invalidRequest('数据集必须包含数据类型。');
-    const definition = gridDefinition(form.gridType);
-    const requestedGridLevel = Number(form.requestedGridLevel);
-    if (!definition || !Number.isInteger(requestedGridLevel) || requestedGridLevel < definition.minLevel || requestedGridLevel > definition.maxLevel) {
-      throw invalidRequest('所选格网层级不在该格网支持范围内。');
-    }
-    const maxCellsPerAsset = Number(form.maxCellsPerAsset);
-    if (!Number.isInteger(maxCellsPerAsset) || maxCellsPerAsset < 0) throw invalidRequest('每资产最大格网单元数必须是非负整数。');
+  function buildRequest(partitionRunId) {
+    const runId = String(partitionRunId || '').trim();
+    if (!runId) throw invalidRequest('缺少剖分执行 ID。');
+    if (!Array.isArray(form.datasets) || !form.datasets.length) throw invalidRequest('请至少选择一个数据单元。');
+    const datasets = form.datasets.map(buildDatasetSelection);
+    const allSceneIds = datasets.flatMap((dataset) => dataset.scene_ids);
+    if (new Set(allSceneIds).size !== allSceneIds.length) throw invalidRequest('同一数据单元不能重复归入多个数据集。');
+    const sourceBatchIds = [...new Set(form.datasets.flatMap((dataset) => (
+      dataset.scenes.flatMap(normalizeSceneBatchIds)
+    )))];
+    if (!sourceBatchIds.length) throw invalidRequest('所选数据单元缺少来源载入批次。');
+    if (sourceBatchIds.includes(runId)) throw invalidRequest('剖分执行 ID 不能复用载入批次 ID。');
     return {
-      dataTypes,
-      body: {
-        batch_id: batchId,
-        datasets: form.datasets,
-        grid_type: form.gridType,
-        requested_grid_level: requestedGridLevel,
-        partition_method: derivedPartitionMethod(form.gridType),
-        cover_mode: form.coverMode,
-        time_granularity: form.timeGranularity,
-        max_cells_per_asset: maxCellsPerAsset,
-      },
+      partition_run_id: runId,
+      source_batch_ids: sourceBatchIds,
+      datasets,
     };
   }
 
@@ -128,11 +119,19 @@ export const usePartitionStore = defineStore('partition', () => {
     const request = batchScope.begin();
     loading.batches = true;
     try {
-      const response = await requestGet('/v1/partition/batches?include_succeeded=true&limit=100', { signal: request.signal });
-      if (batchScope.isCurrent(request.token)) batches.value = Array.isArray(response?.batches) ? response.batches : [];
+      if (!['m6-read', 'm6-primary'].includes(m6Mode())) {
+        batches.value = [];
+        return batches.value;
+      }
+      const response = await requestGet('/v1/partition/load-batches?limit=100&status=succeeded', { signal: request.signal });
+      if (batchScope.isCurrent(request.token)) {
+        batches.value = Array.isArray(response?.load_batches)
+          ? response.load_batches.filter((batch) => batch.status === 'succeeded')
+          : [];
+      }
       return batches.value;
     } catch (caught) {
-      if (batchScope.isCurrent(request.token) && caught?.name !== 'AbortError') error.value = caught.message || '加载批次失败。';
+      if (batchScope.isCurrent(request.token) && caught?.name !== 'AbortError') error.value = caught.message || '加载载入批次失败。';
       return [];
     } finally {
       if (batchScope.isCurrent(request.token)) loading.batches = false;
@@ -160,15 +159,14 @@ export const usePartitionStore = defineStore('partition', () => {
   }
 
   async function submit() {
-    const { body, dataTypes } = buildRequest();
+    if (m6Mode() !== 'm6-primary') throw invalidRequest('当前运行模式不允许提交 M6 剖分任务。');
+    const partitionRunId = createPartitionRunId();
+    const body = buildRequest(partitionRunId);
     const request = submitScope.begin();
     error.value = '';
     loading.submit = true;
     try {
-      const path = dataTypes.length > 1
-        ? '/v1/partition/tasks/run'
-        : `/v1/partition/${encodeURIComponent(dataTypes[0])}/tasks/run`;
-      const response = await requestPost(path, body, { signal: request.signal });
+      const response = await requestPost('/v1/partition/runs', body, { signal: request.signal });
       if (submitScope.isCurrent(request.token)) {
         result.value = response;
         await Promise.all([loadBatches(), loadTasks(1, taskPage.pageSize)]);

@@ -28,6 +28,7 @@ def test_domain_schema_contains_versioned_tables_and_m3_handoff() -> None:
     assert "uq_partition_publication_live_snapshot" in sql
     assert "source_uri text not null" in sql
     assert "source_format text not null default 'cog'" in sql
+    assert "alter table partition_indexes add column if not exists attributes jsonb" in sql
 
 
 def test_quality_handoff_has_required_columns_and_no_unpublished_row() -> None:

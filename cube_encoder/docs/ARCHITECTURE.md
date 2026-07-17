@@ -1,6 +1,6 @@
 # cube_encoder 架构说明
 
-更新时间：2026-07-14
+更新时间：2026-07-17
 适用范围：`cube_encoder`
 
 ## 1. 定位
@@ -24,7 +24,7 @@
 支持的格网体系（生产格网严格限定为三类）：
 
 - `geohash`（经纬度格网，logical）：定位、覆盖、拓扑和几何反算；`space_code` 为 base32 geohash，层级 `1..12`。
-- `mgrs`（平面格网，logical）：标准 UTM/UPS MGRS 定位、覆盖、拓扑和几何反算；结果同时携带标准 `space_code` 与 `topology_code`（`mgrs-topo-v1:<domain>:<level>:<space_code>`），精度 `0..5`。
+- `mgrs`（平面格网，logical）：标准 UTM/UPS MGRS 定位、覆盖、拓扑和几何反算；以标准 `space_code` 作为唯一格网身份，`topology_code` 为空，精度 `0..5`。
 - `isea4h`（六边形格网，entity）：纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；`space_code` 为 DGGRID `SEQNUM`，分辨率 `0..15`；运行时不依赖 H3 或 DGGRID，固定权威向量由 DGGRID 生成并提交为测试基线。
 
 Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
@@ -45,9 +45,9 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 - API 和 SDK 共享同一套服务层能力。
 - 引擎实现可替换，但输出模型保持稳定。
 - CRS 默认按 `EPSG:4326` 对外表达，特殊投影细节封装在引擎内部。
-- ISEA4H cover 使用按 resolution 缓存的精确单元空间索引，`intersect` 只保留正面积相交单元，`contain` 只保留被 AOI 完整覆盖的单元；`minimal` 可返回低层级单元。
+- ISEA4H cover 从 AOI 各连通分量定位局部格网，并沿六边拓扑遍历实际相交候选，不按目标层级枚举全球格网；候选上限按本次请求实际访问的格网计数。`intersect` 只保留正面积相交单元，`contain` 只保留被 AOI 完整覆盖的单元；`minimal` 可返回低层级单元。
 - `cover_mode=minimal` 允许返回低于请求层级的格网单元，用于减少复杂边界的冗余覆盖。
-- 请求层级字段统一为 `requested_grid_level`；返回单元保留实际 `grid_level`。拓扑与几何操作以 `GridAddress` 为入参，因为 ISEA4H 的 seqnum 只有连同分辨率才有意义，MGRS 拓扑结果需同时保留标准码与 `topology_code` 两个身份。
+- 请求层级字段统一为 `requested_grid_level`；返回单元保留实际 `grid_level`。拓扑与几何操作以 `GridAddress` 为入参，因为 ISEA4H 的 seqnum 只有连同分辨率才有意义；MGRS 使用标准 `space_code` 标识格网。
 - ISEA4H `space_code` 为未补零的十进制 DGGRID SEQNUM，且 `cell_count(r) = 10 * 4**r + 2`。`minimal` cover 可以返回不同于请求层级的 cell；运行时不依赖 H3 或 DGGRID。
 
 ## 4. 调用边界

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -326,10 +327,13 @@ def test_mgrs_cross_zone_boundary_logical(runtime: dict[str, Any], scenario_summ
             item = result["datasets"][0]
             facts = _output_facts(runtime["store"], item["dataset_id"], item["output_version"])
             indexes = runtime["store"].list_indexes(item["dataset_id"], item["output_version"], limit=200, offset=0, sort_by="output_id", sort_order="asc")
-            domains = {str(row["topology_code"]) for row in indexes}
-            actual_utm_domains = {value.split(":", 3)[1] for value in domains}
+            assert all(row["topology_code"] is None for row in indexes)
+            actual_utm_domains = {
+                f"utm-{re.match('[0-9]{1,2}', str(row['space_code'])).group()}n"
+                for row in indexes
+            }
             expected_domains = set(request.datasets[0].attributes["m5_expected_mgrs_domains"])
-            assert actual_utm_domains == expected_domains and all(value.startswith("mgrs-topo-v1:") for value in domains)
+            assert actual_utm_domains == expected_domains
             assert all(str(row["space_code"]).strip() for row in indexes)
             assert all(row["window_width"] > 0 and row["window_height"] > 0 for row in indexes)
             record.update({"result_levels": sorted({int(row["grid_level"]) for row in indexes}), "open_gauss_counts": facts, "assertion_count": 8, "output_digest": _digest(result)})

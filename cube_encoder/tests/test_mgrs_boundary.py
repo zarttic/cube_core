@@ -1,7 +1,11 @@
 """Tests for MGRS boundary conditions: antimeridian, UTM/UPS transitions, polar zones."""
 from __future__ import annotations
 
-from shapely.geometry import shape
+from itertools import combinations
+
+import pytest
+from shapely.geometry import box, shape
+from shapely.strtree import STRtree
 
 from grid_core.app.engines.mgrs.domain import domain_for_point
 from grid_core.app.engines.mgrs_engine import MGRSEngine
@@ -33,7 +37,7 @@ def test_antimeridian_polygon_cover_produces_valid_cells() -> None:
     cells = engine.cover_geometry(geometry, 0, "intersect")
     assert len(cells) > 0
     for cell in cells:
-        assert cell.topology_code is not None
+        assert cell.topology_code is None
         # Bbox width must be under 180 degrees
         assert cell.bbox[2] - cell.bbox[0] < 180.0
 
@@ -67,20 +71,19 @@ def test_lat_just_below_84_is_utm() -> None:
     assert domain.hemisphere == "n"
 
 
-def test_lat_84_locate_gives_ups_n_topology() -> None:
-    """Locating a point at lat=84 must produce a UPS-north topology code."""
+def test_lat_84_locate_returns_standard_mgrs_code() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, 84.0, 0)
-    assert address.topology_code is not None
-    assert "ups-n" in address.topology_code
+    assert address.space_code
+    assert address.topology_code is None
 
 
 def test_north_pole_locate() -> None:
     """The north pole (lat=90) must resolve to a valid UPS north cell."""
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, 90.0, 0)
-    assert address.topology_code is not None
-    assert "ups-n" in address.topology_code
+    assert address.space_code.startswith(("Y", "Z"))
+    assert address.topology_code is None
     geom = shape(engine.code_to_geometry(address))
     assert geom.is_valid
     assert not geom.is_empty
@@ -104,20 +107,19 @@ def test_lat_just_above_minus_80_is_utm() -> None:
     assert domain.hemisphere == "s"
 
 
-def test_lat_minus_80_locate_gives_ups_s_topology() -> None:
-    """Locating a point at lat=-80 must produce a UPS-south topology code."""
+def test_lat_minus_80_locate_returns_standard_mgrs_code() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, -80.0, 0)
-    assert address.topology_code is not None
-    assert "ups-s" in address.topology_code
+    assert address.space_code
+    assert address.topology_code is None
 
 
 def test_south_pole_locate() -> None:
     """The south pole (lat=-90) must resolve to a valid UPS south cell."""
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, -90.0, 0)
-    assert address.topology_code is not None
-    assert "ups-s" in address.topology_code
+    assert address.space_code.startswith(("A", "B"))
+    assert address.topology_code is None
     geom = shape(engine.code_to_geometry(address))
     assert geom.is_valid
     assert not geom.is_empty
@@ -154,12 +156,11 @@ def test_outside_svalbard_zone_standard() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-zone boundary topology consistency
+# Cross-zone standard MGRS consistency
 # ---------------------------------------------------------------------------
 
 
-def test_cells_near_zone_boundary_have_topology_codes() -> None:
-    """All cells near a UTM zone boundary must have topology codes."""
+def test_cells_near_zone_boundary_use_standard_codes() -> None:
     engine = MGRSEngine()
     geometry = {
         "type": "Polygon",
@@ -168,20 +169,52 @@ def test_cells_near_zone_boundary_have_topology_codes() -> None:
     cells = engine.cover_geometry(geometry, 1, "intersect")
     assert len(cells) > 0
     for cell in cells:
-        assert cell.topology_code is not None
+        assert cell.topology_code is None
         assert cell.grid_level == 1
 
 
-def test_topology_code_uniqueness_across_domain_boundaries() -> None:
-    """All topology codes in a cross-boundary cover must be unique."""
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        [[[5.9, 51.9], [6.1, 51.9], [6.1, 52.1], [5.9, 52.1], [5.9, 51.9]]],
+        [[[5.9, 55.9], [6.1, 55.9], [6.1, 56.1], [5.9, 56.1], [5.9, 55.9]]],
+    ],
+)
+def test_cross_domain_cover_has_unique_non_overlapping_cells(coordinates: list) -> None:
     engine = MGRSEngine()
     geometry = {
         "type": "Polygon",
-        "coordinates": [[[5.9, 51.9], [6.1, 51.9], [6.1, 52.1], [5.9, 52.1], [5.9, 51.9]]],
+        "coordinates": coordinates,
     }
     cells = engine.cover_geometry(geometry, 1, "intersect")
-    topo_codes = [c.topology_code for c in cells]
-    assert len(topo_codes) == len(set(topo_codes))
+    assert len({cell.space_code for cell in cells}) == len(cells)
+    geometries = [shape(cell.geometry) for cell in cells]
+    for left, right in combinations(geometries, 2):
+        assert left.intersection(right).area <= 1e-12
+
+
+def test_shandong_level1_cover_has_no_extended_or_overlapping_cells() -> None:
+    """Regression for the two-scene Shandong 10 km preview across zones 50/51."""
+    engine = MGRSEngine()
+    aoi = box(
+        114.75737732592705,
+        33.85704125649375,
+        122.77491413824946,
+        38.50352140009955,
+    )
+    cells = engine.cover_geometry(aoi.__geo_interface__, 1, "intersect")
+
+    assert len(cells) == 3919
+    assert len({cell.space_code for cell in cells}) == len(cells)
+    assert all(cell.topology_code is None for cell in cells)
+
+    geometries = [shape(cell.geometry) for cell in cells]
+    tree = STRtree(geometries)
+    for index, geometry in enumerate(geometries):
+        for candidate in tree.query(geometry):
+            candidate_index = int(candidate)
+            if candidate_index > index:
+                assert geometry.intersection(geometries[candidate_index]).area <= 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +249,7 @@ def test_cover_ups_north_polygon() -> None:
     cells = engine.cover_geometry(geometry, 0, "intersect")
     assert len(cells) > 0
     for cell in cells:
-        assert cell.topology_code is not None
+        assert cell.topology_code is None
 
 
 def test_cover_ups_south_polygon() -> None:
@@ -229,4 +262,4 @@ def test_cover_ups_south_polygon() -> None:
     cells = engine.cover_geometry(geometry, 0, "intersect")
     assert len(cells) > 0
     for cell in cells:
-        assert cell.topology_code is not None
+        assert cell.topology_code is None

@@ -79,7 +79,7 @@ class CoverRequest(BaseModel):
 # Address-based topology request models (M1 frozen contract).
 # Topology and geometry operations consume a GridAddress because an ISEA4H
 # sequence number is only meaningful with its resolution, and MGRS topology
-# results must retain both space_code and topology_code identities.
+# topology_code remains optional for compatibility with historical records.
 # ---------------------------------------------------------------------------
 
 

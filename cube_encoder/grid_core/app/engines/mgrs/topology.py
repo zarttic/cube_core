@@ -5,11 +5,12 @@ import mgrs as mgrs_lib
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs.address import (
-    build_topology_code,
     canonicalize_mgrs,
+    direct_child_space_codes,
+    parent_space_code,
     precision_from_code,
 )
-from grid_core.app.engines.mgrs.domain import GridDomain, domain_for_point
+from grid_core.app.engines.mgrs.domain import GridDomain
 from grid_core.app.engines.mgrs.geometry import (
     cell_geometry_clipped,
 )
@@ -23,12 +24,11 @@ def address_for_code(code: str, domain: GridDomain) -> GridAddress:
     """Build a GridAddress for a canonical MGRS code in the given domain."""
     canonical = canonicalize_mgrs(code)
     precision = precision_from_code(canonical)
-    topo = build_topology_code(domain.token, precision, canonical)
     return GridAddress(
         grid_type="mgrs",
         grid_level=precision,
         space_code=canonical,
-        topology_code=topo,
+        topology_code=None,
     )
 
 
@@ -81,10 +81,9 @@ def neighbors_for_address(address: GridAddress, k: int = 1) -> list[GridAddress]
             continue
 
         addr = address_for_code(cand_code, cand_domain)
-        if addr.topology_code and addr.topology_code not in results:
-            results[addr.topology_code] = addr
+        results.setdefault(addr.space_code, addr)
 
-    return sorted(results.values(), key=lambda a: a.topology_code or "")
+    return sorted(results.values(), key=lambda a: a.space_code)
 
 
 def _collect_utm_candidates(
@@ -219,8 +218,7 @@ def parent_address(address: GridAddress) -> GridAddress:
     precision = address.grid_level
     if precision <= 0:
         raise ValidationError("MGRS precision 0 has no parent")
-    code = address.space_code
-    parent_code = code[:-2]
+    parent_code = parent_space_code(address.space_code)
     domain = _domain_for_address(parent_code)
     return address_for_code(parent_code, domain)
 
@@ -241,17 +239,13 @@ def children_addresses(address: GridAddress, target_level: int) -> list[GridAddr
 
     codes = [address.space_code]
     for _ in range(target_level - current_level):
-        codes = [
-            f"{prefix}{e}{n}"
-            for prefix in codes
-            for e in range(10)
-            for n in range(10)
-        ]
+        codes = [child for prefix in codes for child in direct_child_space_codes(prefix)]
 
     result = []
     for code in codes:
         try:
             domain = _domain_for_address(code)
+            cell_geometry_clipped(code, target_level, domain)
             result.append(address_for_code(code, domain))
         except ValidationError:
             pass
@@ -259,23 +253,16 @@ def children_addresses(address: GridAddress, target_level: int) -> list[GridAddr
 
 
 def _domain_for_address(code: str) -> GridDomain:
-    """Derive the GridDomain for an MGRS code by decoding its center lat/lon."""
-    # Try UTM first
+    """Derive the fixed UTM/UPS domain encoded by a standard MGRS code."""
     try:
-        zone, hemisphere, easting, northing = _converter.MGRSToUTM(code)
-        precision = precision_from_code(code)
-        size_m = cell_size_metres(precision)
-        # Use center of cell for domain determination
-        domain = GridDomain(kind="utm", zone=zone, hemisphere=hemisphere.lower())  # type: ignore[arg-type]
-        transformer = projected_to_wgs84(domain)
-        lon, lat = transformer.transform(easting + size_m / 2, northing + size_m / 2)
-        return domain_for_point(lon, lat)
+        zone, hemisphere, _, _ = _converter.MGRSToUTM(code)
+        return GridDomain(kind="utm", zone=zone, hemisphere=hemisphere.lower())  # type: ignore[arg-type]
     except Exception:
         pass
 
-    # Try UPS
-    try:
-        lat, lon = _converter.toLatLon(code)
-        return domain_for_point(lon, lat)
-    except Exception as exc:
-        raise ValidationError(f"Cannot determine domain for MGRS code: {code!r}") from exc
+    first = canonicalize_mgrs(code)[0]
+    if first in {"Y", "Z"}:
+        return GridDomain(kind="ups", zone=None, hemisphere="n")
+    if first in {"A", "B"}:
+        return GridDomain(kind="ups", zone=None, hemisphere="s")
+    raise ValidationError(f"Cannot determine domain for MGRS code: {code!r}")

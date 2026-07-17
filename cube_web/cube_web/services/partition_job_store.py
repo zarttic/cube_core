@@ -596,7 +596,11 @@ class InMemoryPartitionJobStore(PartitionJobStore):
             self._apply_asset_results(attempt, result, now=now)
         else:
             self._set_assets_status(attempt, "succeeded", partitioned_at=now, last_error=None)
-        self._refresh_batch_from_assets(attempt["batch_id"], now=now)
+        self._refresh_batch_from_assets(
+            attempt["batch_id"],
+            now=now,
+            strict_outcome=_strict_partition_batch_outcome(attempt.get("payload"), result),
+        )
         self._refresh_ingest_readiness(attempt["batch_id"], result, now=now)
 
     def fail_attempt(
@@ -845,10 +849,22 @@ class InMemoryPartitionJobStore(PartitionJobStore):
                 "updated_at": now,
             }
 
-    def _refresh_batch_from_assets(self, batch_id: str, *, now: str) -> None:
+    def _refresh_batch_from_assets(
+        self,
+        batch_id: str,
+        *,
+        now: str,
+        strict_outcome: tuple[str, str | None] | None = None,
+    ) -> None:
         batch = self.batches[batch_id]
         assets = [asset for asset in self.assets.values() if asset["batch_id"] == batch_id]
         if not assets:
+            if strict_outcome is not None:
+                batch["status"], batch["last_error"] = strict_outcome
+                batch["partitioned_at"] = now if batch["status"] == "succeeded" else None
+                batch["manual_required_at"] = None
+                batch["updated_at"] = now
+                return
             if batch.get("data_type") == "carbon":
                 batch["status"] = "succeeded"
                 batch["last_error"] = None
@@ -1696,18 +1712,22 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'succeeded', runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
+                    "UPDATE partition_job_attempts SET status = 'succeeded', runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids, payload",
                     (self._jsonb(result), task_id),
                 )
                 row = cur.fetchone()
                 if row is None:
                     return
-                batch_id, asset_ids = row
+                batch_id, asset_ids, payload = row
                 if _asset_results(result):
                     self._apply_asset_results(cur, batch_id, asset_ids, result)
                 else:
                     self._update_assets(cur, batch_id, asset_ids, "succeeded", partitioned=True, last_error=None)
-                self._refresh_batch_from_assets(cur, batch_id)
+                self._refresh_batch_from_assets(
+                    cur,
+                    batch_id,
+                    strict_outcome=_strict_partition_batch_outcome(payload, result),
+                )
                 self._refresh_ingest_readiness(cur, batch_id, result)
             conn.commit()
 
@@ -2087,13 +2107,28 @@ class PostgresPartitionJobStore(PartitionJobStore):
                 params,
             )
 
-    def _refresh_batch_from_assets(self, cur, batch_id: str) -> None:
+    def _refresh_batch_from_assets(
+        self,
+        cur,
+        batch_id: str,
+        *,
+        strict_outcome: tuple[str, str | None] | None = None,
+    ) -> None:
         cur.execute("SELECT data_type FROM partition_batches WHERE batch_id = %s", (batch_id,))
         batch_row = cur.fetchone()
         data_type = None if batch_row is None else batch_row[0]
         cur.execute("SELECT status, last_error FROM partition_assets WHERE batch_id = %s", (batch_id,))
         rows = cur.fetchall()
         if not rows:
+            if strict_outcome is not None:
+                status, last_error = strict_outcome
+                cur.execute(
+                    "UPDATE partition_batches SET status = %s, last_error = %s, "
+                    "partitioned_at = CASE WHEN %s = 'succeeded' THEN now() ELSE NULL END, "
+                    "manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
+                    (status, last_error, status, batch_id),
+                )
+                return
             if data_type == "carbon":
                 cur.execute(
                     "UPDATE partition_batches SET status = 'succeeded', last_error = NULL, partitioned_at = now(), manual_required_at = NULL, updated_at = now() WHERE batch_id = %s",
@@ -2976,6 +3011,34 @@ def _summarize_asset_statuses(statuses: Any) -> str:
     return "pending"
 
 
+def _strict_partition_batch_outcome(
+    payload: Any,
+    result: dict[str, Any],
+) -> tuple[str, str | None] | None:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict) or not payload.get("strict_partition_request"):
+        return None
+    outcomes = [item for item in result.get("datasets", ()) if isinstance(item, dict)]
+    statuses = {str(item.get("status") or "failed").strip().lower() for item in outcomes}
+    if statuses and statuses <= {"completed"}:
+        return "succeeded", None
+    if "cancelled" in statuses and statuses <= {"completed", "cancelled"}:
+        return "cancelled", _first_dataset_error(outcomes)
+    return "failed", _first_dataset_error(outcomes)
+
+
+def _first_dataset_error(outcomes: list[dict[str, Any]]) -> str | None:
+    for item in outcomes:
+        error = item.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if item.get("error_message"):
+            return str(item["error_message"])
+    return None
 def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
     items = result.get("asset_results") if isinstance(result, dict) else None
     if items is None and isinstance(result, dict):

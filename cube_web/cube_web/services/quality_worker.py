@@ -8,6 +8,9 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from psycopg.rows import dict_row
 
 from cube_web.services.partition_domain_store import get_partition_domain_store
+from cube_web.services.m6_quality_ingest_bridge import create_ingest_runs_after_quality
+from cube_web.services.m6_ingest_worker import process_queued_ingest_scenes
+from cube_web.services.m6_runtime import m6_runtime_policy
 from cube_web.services.quality_contracts import QualityResult
 from cube_web.services.quality_repository import (
     ERROR_BATCH_SIZE,
@@ -24,6 +27,10 @@ from cube_web.services.quality_repository import (
 from cube_web.services.quality_rules import QualityFinding, RuleContext, default_rule_registry, reduce_quality_status, snapshot_rules
 
 logger = logging.getLogger(__name__)
+
+
+def _m6_auto_ingest_enabled() -> bool:
+    return m6_runtime_policy().mode == "m6-primary"
 
 
 def claim_quality_runs(tx, *, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[QualityLease]:
@@ -90,6 +97,12 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
             base_store.acknowledge_outbox(event["event_id"])
             allocated += int(created)
         except Exception as exc:
+            logger.exception(
+                "quality outbox dispatch failed for event_id=%s dataset_id=%s output_version=%s",
+                event.get("event_id"),
+                event.get("dataset_id"),
+                event.get("output_version"),
+            )
             base_store.retry_outbox(event["event_id"], str(exc)[:2000], available_at=(now + timedelta(seconds=30)).isoformat())
     return allocated
 
@@ -130,6 +143,7 @@ def execute_quality_run(lease: QualityLease) -> None:
             cur.execute("SELECT data_type, product_type FROM partition_datasets WHERE dataset_id = %s", (run.dataset_id,))
             dataset = cur.fetchone()
         results: list[QualityResult] = []
+        quality_completed = False
         try:
             registry = default_rule_registry()
             for snapshot in run.rule_snapshot:
@@ -188,17 +202,29 @@ def execute_quality_run(lease: QualityLease) -> None:
                 error_count=error_count,
                 warning_count=warning_count,
             )
-            complete_quality_run_if_current(
+            terminal_status = reduce_quality_status(results, None)
+            is_current = complete_quality_run_if_current(
                 tx,
                 quality_run_id=lease.quality_run_id,
-                terminal_status=reduce_quality_status(results, None),
+                terminal_status=terminal_status,
                 error_count=error_count,
                 warning_count=warning_count,
                 results_complete=True,
                 execution_error=None,
                 completed_at=datetime.now(UTC),
             )
+            quality_completed = True
+            if is_current and _m6_auto_ingest_enabled():
+                create_ingest_runs_after_quality(
+                    tx,
+                    quality_run_id=lease.quality_run_id,
+                    dataset_id=run.dataset_id,
+                    output_version=run.output_version,
+                    quality_status=terminal_status,
+                )
         except Exception as exc:
+            if quality_completed:
+                raise
             complete_quality_run_if_current(
                 tx,
                 quality_run_id=lease.quality_run_id,
@@ -225,6 +251,7 @@ class QualityRuntime:
         self._threads = [
             Thread(target=self._dispatch_loop, name="cube-web-quality-dispatch", daemon=True),
             Thread(target=self._execute_loop, name="cube-web-quality-execute", daemon=True),
+            Thread(target=self._ingest_loop, name="cube-web-m6-ingest", daemon=True),
         ]
         for thread in self._threads:
             thread.start()
@@ -255,4 +282,13 @@ class QualityRuntime:
                     execute_quality_run(lease)
             except Exception:
                 logger.exception("quality worker iteration failed")
+            self._stop.wait(self.poll_seconds)
+
+    def _ingest_loop(self) -> None:
+        while not self._stop.is_set():
+            if _m6_auto_ingest_enabled():
+                try:
+                    process_queued_ingest_scenes(limit=10)
+                except Exception:
+                    logger.exception("M6 ingest worker iteration failed")
             self._stop.wait(self.poll_seconds)

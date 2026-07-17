@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, RefreshLeft, Check, Connection, DataLine } from '@element-plus/icons-vue';
 
 import { apiPrefixes, requestJson } from '@/api/client';
+import { fixedPartitionOptions, gridDefinition, gridDefinitions } from '@/utils/grid';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -15,14 +16,8 @@ const config = ref(emptyConfig());
 const optical = computed(() => config.value.partition.optical);
 const ingest = computed(() => config.value.ingest.optical);
 const quality = computed(() => config.value.quality.optical);
-const gridTypeLabels = {
-  geohash: 'GeoHash格网',
-  mgrs: 'MGRS格网',
-  isea4h: '六边形格网',
-};
-
 function formatGridType(gridType) {
-  return gridTypeLabels[gridType] || gridType || '-';
+  return gridDefinition(gridType)?.label || gridType || '-';
 }
 
 function emptyConfig() {
@@ -71,7 +66,7 @@ function mergeConfig(nextConfig) {
   const defaults = emptyConfig();
   config.value = {
     partition: {
-      optical: { ...defaults.partition.optical, ...(nextConfig?.partition?.optical || {}) },
+      optical: { ...defaults.partition.optical, ...(nextConfig?.partition?.optical || {}), ...fixedPartitionOptions },
     },
     ingest: {
       optical: { ...defaults.ingest.optical, ...(nextConfig?.ingest?.optical || {}) },
@@ -168,9 +163,7 @@ onMounted(loadConfig);
               <div class="config-form-grid">
                 <el-form-item label="格网类型">
                   <el-select v-model="optical.grid_type">
-                    <el-option label="GeoHash格网" value="geohash" />
-                    <el-option label="MGRS格网" value="mgrs" />
-                    <el-option label="六边形格网" value="isea4h" />
+                    <el-option v-for="grid in gridDefinitions" :key="grid.value" :label="grid.label" :value="grid.value" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="格网层级">
@@ -181,24 +174,6 @@ onMounted(loadConfig);
                     <el-option label="EPSG:4326" value="EPSG:4326" />
                     <el-option label="EPSG:3857" value="EPSG:3857" />
                   </el-select>
-                </el-form-item>
-                <el-form-item label="覆盖模式">
-                  <el-select v-model="optical.cover_mode">
-                    <el-option label="相交" value="intersect" />
-                    <el-option label="包含" value="contain" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="时间粒度">
-                  <el-select v-model="optical.time_granularity">
-                    <el-option label="秒" value="second" />
-                    <el-option label="分钟" value="minute" />
-                    <el-option label="小时" value="hour" />
-                    <el-option label="日" value="day" />
-                    <el-option label="月" value="month" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="单资产最大格网数">
-                  <el-input-number v-model="optical.max_cells_per_asset" :min="0" :step="1000" />
                 </el-form-item>
               </div>
 

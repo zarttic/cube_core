@@ -12,7 +12,7 @@ class BaseGridEngine(ABC):
 
     All topology and geometry methods consume GridAddress objects so that:
     - ISEA4H sequence numbers are always paired with their resolution.
-    - MGRS topology results retain both space_code and topology_code identities.
+    - Standard grid identities are carried by space_code; topology_code is optional legacy data.
 
     Implementations raise NotImplementedError until replaced in Tasks 2-7.
     """

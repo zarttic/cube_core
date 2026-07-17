@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Literal
 
 from shapely.geometry import MultiPolygon, Polygon, box
+from shapely.ops import unary_union
 
 # -------------------------------------------------------------------------
 # Latitude thresholds (half-open boundary policy)
@@ -109,48 +110,27 @@ def domain_polygon(domain: GridDomain) -> Polygon | MultiPolygon:
     lat_south = UPS_SOUTH_LAT    # -80
     lat_north = UPS_NORTH_LAT    # 84
 
-    # Build longitude bounds for this zone, accounting for exceptions
-    lon_west, lon_east = _utm_zone_lon_bounds(zone, lat_south, lat_north)
+    lon_west = -180.0 + (zone - 1) * 6.0
+    domain_geometry = box(lon_west, lat_south, lon_west + 6.0, lat_north)
 
-    if lon_west < lon_east:
-        return box(lon_west, lat_south, lon_east, lat_north)
-
-    # Antimeridian-crossing zone (zone 1 spans 180°W to 6°W)
-    left = box(lon_west, lat_south, 180.0, lat_north)
-    right = box(-180.0, lat_south, lon_east, lat_north)
-    return MultiPolygon([left, right])
-
-
-def _utm_zone_lon_bounds(zone: int, lat_south: float, lat_north: float) -> tuple[float, float]:
-    """Return (lon_west, lon_east) for a UTM zone.
-
-    Uses the standard 6-degree formula and expands for exception zones.
-    The returned bounds may be approximate for exception zones; the actual
-    valid domain clips cells that fall outside the mgrs library's zone assignment.
-    """
-    # Standard bounds
-    lon_west_std = -180.0 + (zone - 1) * 6.0
-    lon_east_std = lon_west_std + 6.0
-
-    # For exception zones, expand bounds slightly to cover irregular areas
-    if zone == 32:
-        # Norway: extends from 3°E to 12°E at 56-64°N (extra 3° on each side vs standard 6-12°E)
-        return (3.0, 12.0)
-    if zone == 31:
-        # Svalbard: 0-9°E at 72-84°N, plus standard 0-6°E below 72°N
-        return (0.0, 9.0)
-    if zone == 33:
-        # Svalbard: 9-21°E at 72-84°N
-        return (9.0, 21.0)
-    if zone == 35:
-        # Svalbard: 21-33°E at 72-84°N
-        return (21.0, 33.0)
-    if zone == 37:
-        # Svalbard: 33-42°E at 72-84°N
-        return (33.0, 42.0)
-
-    return (lon_west_std, lon_east_std)
-
+    # Standard MGRS uses mutually exclusive Norway and Svalbard exceptions.
+    # Reassign only the documented latitude bands instead of widening a zone
+    # across the full UTM latitude range.
+    exceptions = (
+        (box(3.0, 56.0, 12.0, 64.0), 32),
+        (box(0.0, 72.0, 9.0, 84.0), 31),
+        (box(9.0, 72.0, 21.0, 84.0), 33),
+        (box(21.0, 72.0, 33.0, 84.0), 35),
+        (box(33.0, 72.0, 42.0, 84.0), 37),
+    )
+    additions = []
+    for exception_geometry, owner_zone in exceptions:
+        domain_geometry = domain_geometry.difference(exception_geometry)
+        if zone == owner_zone:
+            additions.append(exception_geometry)
+    if additions:
+        domain_geometry = unary_union([domain_geometry, *additions])
+    return domain_geometry
 
 def all_utm_domains() -> list[GridDomain]:
     """Return all 120 standard UTM domains (60 zones × north/south)."""

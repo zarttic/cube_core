@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from grid_core.sdk import CubeEncoderSDK, GridAddress
+
 from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import _local_file_identity, _object_identity, _read_identity_sidecar, _write_identity_sidecar
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
@@ -43,6 +45,7 @@ class CubeFactRecord:
     cell_min_lat: float
     cell_max_lon: float
     cell_max_lat: float
+    cell_geom_geojson: str
     value_ref_uri: str
     source_scene_count: int
     provenance_json: str
@@ -134,6 +137,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
           cell_min_lat REAL NOT NULL,
           cell_max_lon REAL NOT NULL,
           cell_max_lat REAL NOT NULL,
+          cell_geom TEXT,
           value_ref_uri TEXT NOT NULL,
           source_scene_count INTEGER NOT NULL,
           provenance_json TEXT NOT NULL,
@@ -159,6 +163,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(rs_cube_cell_fact)").fetchall()}
+    if "cell_geom" not in columns:
+        conn.execute("ALTER TABLE rs_cube_cell_fact ADD COLUMN cell_geom TEXT")
     conn.commit()
 
 
@@ -195,6 +202,7 @@ def ensure_tables_postgres(conn: Any) -> None:
               cell_min_lat DOUBLE PRECISION NOT NULL,
               cell_max_lon DOUBLE PRECISION NOT NULL,
               cell_max_lat DOUBLE PRECISION NOT NULL,
+              cell_geom geometry(Polygon, 4326),
               value_ref_uri TEXT NOT NULL,
               source_scene_count INTEGER NOT NULL,
               provenance_json JSONB NOT NULL,
@@ -204,6 +212,12 @@ def ensure_tables_postgres(conn: Any) -> None:
               ingest_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
               UNIQUE (grid_type, grid_level, space_code, time_bucket, band, cube_version)
             );
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE rs_cube_cell_fact
+            ADD COLUMN IF NOT EXISTS cell_geom geometry(Polygon, 4326);
             """
         )
         cur.execute(
@@ -433,6 +447,8 @@ def build_cube_fact_records(
     quality_rule: str,
     asset_uri_map: dict[str, str],
 ) -> list[CubeFactRecord]:
+    sdk = CubeEncoderSDK()
+    geometry_cache: dict[tuple[str, int, str, str | None], str] = {}
     grouped: dict[tuple[str, int, str, str, str], list[dict]] = {}
     for row in rows:
         key = (
@@ -453,6 +469,18 @@ def build_cube_fact_records(
             "rule": quality_rule,
         }
         winner_asset_uri = _asset_uri_for_path(asset_uri_map, winner["asset_path"])
+        geometry_key = (key[0], key[1], key[2], winner.get("topology_code"))
+        cell_geom_geojson = geometry_cache.get(geometry_key)
+        if cell_geom_geojson is None:
+            cell_geom_geojson = cell_geometry_geojson(
+                grid_type=key[0],
+                grid_level=key[1],
+                space_code=key[2],
+                topology_code=winner.get("topology_code"),
+                geometry=winner.get("cell_geom"),
+                sdk=sdk,
+            )
+            geometry_cache[geometry_key] = cell_geom_geojson
         facts.append(
             CubeFactRecord(
                 grid_type=key[0],
@@ -465,6 +493,7 @@ def build_cube_fact_records(
                 cell_min_lat=float(winner["cell_min_lat"]),
                 cell_max_lon=float(winner["cell_max_lon"]),
                 cell_max_lat=float(winner["cell_max_lat"]),
+                cell_geom_geojson=cell_geom_geojson,
                 value_ref_uri=_build_window_ref_uri(winner_asset_uri, winner),
                 source_scene_count=len({row["scene_id"] for row in candidates}),
                 provenance_json=json.dumps(provenance, ensure_ascii=False),
@@ -474,6 +503,55 @@ def build_cube_fact_records(
             )
         )
     return facts
+
+
+def cell_geometry_geojson(
+    *,
+    grid_type: str,
+    grid_level: int,
+    space_code: str,
+    topology_code: str | None = None,
+    geometry: dict[str, object] | None = None,
+    sdk: CubeEncoderSDK | None = None,
+) -> str:
+    """Return the SDK-computed WGS84 cell polygon as compact GeoJSON."""
+    normalized_type = str(grid_type or "").strip().lower()
+    expected_points = {"geohash": 5, "mgrs": 5, "isea4h": 7}
+    if normalized_type not in expected_points:
+        raise ValueError(f"cell_geom is unsupported for grid_type={grid_type!r}")
+
+    if geometry is None:
+        geometry = (sdk or CubeEncoderSDK()).code_to_geometry(
+            address=GridAddress(
+                grid_type=normalized_type,
+                grid_level=int(grid_level),
+                space_code=str(space_code),
+                topology_code=topology_code,
+            )
+        )
+    if geometry.get("type") != "Polygon":
+        raise ValueError(f"cell_geom must be a Polygon for {normalized_type}:{space_code}")
+    coordinates = geometry.get("coordinates")
+    if not isinstance(coordinates, (list, tuple)) or len(coordinates) != 1 or not isinstance(coordinates[0], (list, tuple)):
+        raise ValueError(f"cell_geom must contain one exterior ring for {normalized_type}:{space_code}")
+
+    ring = coordinates[0]
+    if normalized_type == "mgrs" and len(ring) != 5:
+        edge_count = len(ring) - 1
+        if edge_count <= 0 or edge_count % 4 != 0 or ring[0] != ring[-1]:
+            raise ValueError(f"MGRS SDK boundary cannot be reduced to four actual corners: {space_code}")
+        edge_size = edge_count // 4
+        ring = [ring[index * edge_size] for index in range(4)] + [ring[0]]
+
+    normalized_ring = [[float(point[0]), float(point[1])] for point in ring]
+    if len(normalized_ring) != expected_points[normalized_type] or normalized_ring[0] != normalized_ring[-1]:
+        raise ValueError(
+            f"invalid {normalized_type} cell boundary point count/closure for {space_code}: {len(normalized_ring)}"
+        )
+    if any(len(point) != 2 or not (-180.0 <= point[0] <= 180.0 and -90.0 <= point[1] <= 90.0) for point in normalized_ring):
+        raise ValueError(f"cell_geom coordinates must be WGS84 [longitude, latitude] for {space_code}")
+
+    return json.dumps({"type": "Polygon", "coordinates": [normalized_ring]}, ensure_ascii=False, separators=(",", ":"))
 
 
 def _asset_uri_for_path(asset_uri_map: dict[str, str], asset_path: str) -> str:
@@ -544,14 +622,15 @@ def upsert_cube_facts(conn: sqlite3.Connection, rows: list[CubeFactRecord]) -> N
         INSERT INTO rs_cube_cell_fact (
           grid_type, grid_level, space_code, time_bucket, band, st_code,
           cell_min_lon, cell_min_lat, cell_max_lon, cell_max_lat,
-          value_ref_uri, source_scene_count, provenance_json, quality_rule, cube_version, run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cell_geom, value_ref_uri, source_scene_count, provenance_json, quality_rule, cube_version, run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(grid_type, grid_level, space_code, time_bucket, band, cube_version) DO UPDATE SET
           st_code=excluded.st_code,
           cell_min_lon=excluded.cell_min_lon,
           cell_min_lat=excluded.cell_min_lat,
           cell_max_lon=excluded.cell_max_lon,
           cell_max_lat=excluded.cell_max_lat,
+          cell_geom=excluded.cell_geom,
           value_ref_uri=excluded.value_ref_uri,
           source_scene_count=excluded.source_scene_count,
           provenance_json=excluded.provenance_json,
@@ -571,6 +650,7 @@ def upsert_cube_facts(conn: sqlite3.Connection, rows: list[CubeFactRecord]) -> N
                 row.cell_min_lat,
                 row.cell_max_lon,
                 row.cell_max_lat,
+                row.cell_geom_geojson,
                 row.value_ref_uri,
                 row.source_scene_count,
                 row.provenance_json,
@@ -646,6 +726,7 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         "cell_min_lat",
         "cell_max_lon",
         "cell_max_lat",
+        "cell_geom_geojson",
         "value_ref_uri",
         "source_scene_count",
         "provenance_json",
@@ -664,6 +745,7 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         "double precision",
         "double precision",
         "double precision",
+        "text",
         "text",
         "int",
         "jsonb",
@@ -688,6 +770,7 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
           cell_min_lat = source.cell_min_lat,
           cell_max_lon = source.cell_max_lon,
           cell_max_lat = source.cell_max_lat,
+          cell_geom = ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326),
           value_ref_uri = source.value_ref_uri,
           source_scene_count = source.source_scene_count,
           provenance_json = source.provenance_json,
@@ -697,11 +780,12 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         WHEN NOT MATCHED THEN INSERT (
           grid_type, grid_level, space_code, time_bucket, band, st_code,
           cell_min_lon, cell_min_lat, cell_max_lon, cell_max_lat,
-          value_ref_uri, source_scene_count, provenance_json, quality_rule, cube_version, run_id
+          cell_geom, value_ref_uri, source_scene_count, provenance_json, quality_rule, cube_version, run_id
         ) VALUES (
           source.grid_type, source.grid_level, source.space_code, source.time_bucket, source.band, source.st_code,
           source.cell_min_lon, source.cell_min_lat, source.cell_max_lon, source.cell_max_lat,
-          source.value_ref_uri, source.source_scene_count, source.provenance_json, source.quality_rule, source.cube_version, source.run_id
+          ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326), source.value_ref_uri,
+          source.source_scene_count, source.provenance_json, source.quality_rule, source.cube_version, source.run_id
         )
     """
     values = [
@@ -716,6 +800,7 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
             row.cell_min_lat,
             row.cell_max_lon,
             row.cell_max_lat,
+            row.cell_geom_geojson,
             row.value_ref_uri,
             row.source_scene_count,
             row.provenance_json,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Literal
+from typing import Any, Literal
 
 from cube_split import runtime_config
 from fastapi import APIRouter, HTTPException, Query
@@ -79,6 +79,7 @@ def create_partition_router(
     service: PartitionService | None = None,
     workflow: PartitionWorkflowService | None = None,
     legacy_service: PartitionService | None = None,
+    scene_service: Any | None = None,
 ) -> APIRouter:
     service = service or partition_service
     legacy_service = legacy_service or legacy_partition_service
@@ -93,7 +94,7 @@ def create_partition_router(
             config_override=request.get("config_override") or {},
         ).to_dict()
 
-    @router.post("/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    @router.post("/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202, deprecated=True)
     def submit_mixed_partition_run(payload: StrictPartitionRequest) -> dict:
         if len({dataset.data_type for dataset in payload.datasets}) < 2:
             raise HTTPException(status_code=422, detail="mixed partition batches require at least two dataset data types")
@@ -119,7 +120,7 @@ def create_partition_router(
     def submit_partition_demo(data_type: str, payload: dict | None = None) -> dict:
         return legacy_service.submit(data_type, "demo", payload_from_model(payload)).to_dict()
 
-    @router.post("/{data_type}/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    @router.post("/{data_type}/tasks/run", response_model=PartitionTaskCreateResponse, status_code=202, deprecated=True)
     def submit_partition_run(
         data_type: Literal["optical", "radar", "product", "carbon"],
         payload: StrictPartitionRequest,
@@ -168,7 +169,8 @@ def create_partition_router(
 
     @router.post("/schemas/import")
     def import_partition_schema(payload: PartitionSchemaImportRequest) -> dict:
-        return workflow_service.import_schema(payload_from_model(payload))
+        request = payload_from_model(payload)
+        return import_partition_schema_payload(workflow_service, scene_service, request)
 
     @router.post("/schemas/reconcile")
     def reconcile_partition_schema(payload: PartitionSchemaReconcileRequest) -> dict:
@@ -204,7 +206,7 @@ def create_partition_router(
     def list_partition_attempts(batch_id: str) -> dict:
         return {"attempts": workflow_service.list_attempts(batch_id)}
 
-    @router.post("/batches/{batch_id}/run", response_model=PartitionTaskCreateResponse, status_code=202)
+    @router.post("/batches/{batch_id}/run", response_model=PartitionTaskCreateResponse, status_code=202, deprecated=True)
     def run_partition_batch(batch_id: str, payload: PartitionBatchRunRequest | None = None) -> dict:
         request = payload_from_model(payload)
         return workflow_service.run_batch(batch_id, config_override=request.get("config_override") or {}).to_dict()
@@ -231,3 +233,33 @@ def create_partition_router(
         return workflow_service.cancel_task(str(task_id))
 
     return router
+
+
+def import_partition_schema_payload(
+    workflow_service: PartitionWorkflowService,
+    scene_service: Any | None,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Route legacy and M6 loader manifests through explicit adapters."""
+    if request.get("datasets"):
+        if scene_service is None:
+            raise HTTPException(status_code=503, detail="M6 scene-domain import is not configured")
+        try:
+            scene_result = scene_service.import_load_schema(request)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {**scene_result, "status": "imported", "scene_domain": scene_result}
+
+    result = workflow_service.import_schema(request)
+    should_sync = scene_service is not None and scene_service.should_sync_import(workflow_service.store)
+    if should_sync:
+        try:
+            scene_result = scene_service.import_load_schema(request)
+        except Exception as exc:
+            scene_result = {
+                "status": "sync_failed",
+                "reconciliation_required": True,
+                "error_type": type(exc).__name__,
+            }
+        result = {**result, "scene_domain": scene_result}
+    return result

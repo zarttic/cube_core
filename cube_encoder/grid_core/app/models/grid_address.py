@@ -9,7 +9,7 @@ class GridAddress(BaseModel):
     - grid_type: one of "geohash", "mgrs", "isea4h"
     - grid_level: the actual level/resolution of this specific cell
     - space_code: standard publicly exchangeable code (Geohash base32, MGRS, ISEA4H SEQNUM)
-    - topology_code: project-stable topology identity (required for MGRS, None for others)
+    - topology_code: optional legacy extension; standard grid engines return None
     """
 
     grid_type: str

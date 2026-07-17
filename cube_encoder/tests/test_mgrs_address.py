@@ -1,10 +1,10 @@
-"""Tests for MGRS UTM/UPS addressing, domain assignment, and topology codes.
+"""Tests for standard MGRS UTM/UPS addressing and domain assignment.
 
 Covers:
 - UTM zones (standard, Norway exception, Svalbard exception)
 - UPS polar zones (north, south)
 - space_code canonical format (uppercase, no spaces, 2*level digits)
-- topology_code format and round-trip parsing
+- legacy topology_code parsing compatibility
 - Level 0-5 precision
 - Domain assignment boundaries
 - Antimeridian handling (lon=180 → utm-1)
@@ -16,6 +16,7 @@ import pytest
 from grid_core.app.engines.mgrs.address import (
     build_topology_code,
     canonicalize_mgrs,
+    parent_space_code,
     parse_topology_code,
     precision_from_code,
 )
@@ -37,7 +38,7 @@ def test_mgrs_precision_equals_grid_level() -> None:
     # Only trailing digits count toward precision
     from grid_core.app.engines.mgrs.address import suffix_digit_count
     assert suffix_digit_count(address.space_code) == 10
-    assert parse_topology_code(address.topology_code).level == 5
+    assert address.topology_code is None
 
 
 def test_mgrs_level_three_canonical_vector() -> None:
@@ -49,7 +50,7 @@ def test_mgrs_level_three_canonical_vector() -> None:
     # Exactly 6 trailing digits for precision 3
     assert address.space_code[-6:].isdigit()
     assert len(address.space_code[-6:]) == 6
-    assert address.topology_code == "mgrs-topo-v1:utm-31n:3:31UDQ482511"
+    assert address.topology_code is None
 
 
 def test_mgrs_level_zero_no_digits() -> None:
@@ -77,24 +78,19 @@ def test_all_levels_have_correct_digit_count(level: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_topology_code_format_utm() -> None:
-    """topology_code must be 'mgrs-topo-v1:utm-<zone><ns>:<level>:<space_code>'."""
+def test_standard_mgrs_does_not_emit_topology_code() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(2.2945, 48.8582, 3)
-    assert address.topology_code is not None
-    parsed = parse_topology_code(address.topology_code)
-    assert parsed.domain_token == "utm-31n"
-    assert parsed.level == 3
-    assert parsed.space_code == address.space_code
+    assert address.space_code == "31UDQ482119"
+    assert address.topology_code is None
 
 
-def test_topology_code_repeats_exact_space_code() -> None:
-    """topology_code must contain the exact canonical space_code at the end."""
+def test_standard_mgrs_levels_use_only_space_code() -> None:
     engine = MGRSEngine()
     for level in range(6):
         address = engine.locate_space_code(10.0, 52.0, level)
-        parsed = parse_topology_code(address.topology_code)
-        assert parsed.space_code == address.space_code
+        assert address.space_code
+        assert address.topology_code is None
 
 
 def test_topology_code_build_and_parse_roundtrip() -> None:
@@ -107,20 +103,18 @@ def test_topology_code_build_and_parse_roundtrip() -> None:
     assert parsed.space_code == code
 
 
-def test_topology_code_ups_north() -> None:
-    """UPS north cells must have 'ups-n' in topology_code."""
+def test_standard_ups_north_uses_only_space_code() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, 85.0, 0)
-    assert address.topology_code is not None
-    assert "ups-n" in address.topology_code
+    assert address.space_code.startswith(("Y", "Z"))
+    assert address.topology_code is None
 
 
-def test_topology_code_ups_south() -> None:
-    """UPS south cells must have 'ups-s' in topology_code."""
+def test_standard_ups_south_uses_only_space_code() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, -85.0, 0)
-    assert address.topology_code is not None
-    assert "ups-s" in address.topology_code
+    assert address.space_code.startswith(("A", "B"))
+    assert address.topology_code is None
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +194,7 @@ def test_locate_point_returns_gridcell_with_all_fields() -> None:
     assert cell.grid_type == "mgrs"
     assert cell.grid_level == 3
     assert cell.space_code
-    assert cell.topology_code
+    assert cell.topology_code is None
     assert len(cell.center) == 2
     assert len(cell.bbox) == 4
     assert cell.bbox[0] < cell.bbox[2]
@@ -222,14 +216,16 @@ def test_locate_point_beijing_level5() -> None:
 def test_ups_north_locate_level0() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, 88.0, 0)
-    assert "ups-n" in address.topology_code
+    assert address.space_code.startswith(("Y", "Z"))
+    assert address.topology_code is None
     assert address.grid_level == 0
 
 
 def test_ups_south_locate_level0() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(0.0, -88.0, 0)
-    assert "ups-s" in address.topology_code
+    assert address.space_code.startswith(("A", "B"))
+    assert address.topology_code is None
     assert address.grid_level == 0
 
 
@@ -273,7 +269,7 @@ def test_cover_intersect_returns_cells() -> None:
     cells = engine.cover_geometry(geometry, 2, "intersect")
     assert len(cells) > 0
     for cell in cells:
-        assert cell.topology_code is not None
+        assert cell.topology_code is None
         assert cell.grid_level == 2
 
 
@@ -307,7 +303,7 @@ def test_parent_decreases_precision() -> None:
     address = engine.locate_space_code(116.391, 39.907, 3)
     parent = engine.parent(address)
     assert parent.grid_level == 2
-    assert parent.space_code == address.space_code[:-2]
+    assert parent.space_code == "50SMK4717"
 
 
 def test_children_increases_precision() -> None:
@@ -317,7 +313,7 @@ def test_children_increases_precision() -> None:
     assert len(children) == 100
     for child in children:
         assert child.grid_level == 3
-        assert child.space_code.startswith(address.space_code)
+        assert parent_space_code(child.space_code) == address.space_code
 
 
 def test_parent_of_precision_zero_raises() -> None:
@@ -339,13 +335,13 @@ def test_neighbors_k1_non_empty() -> None:
     nbs = engine.neighbors(address, k=1)
     assert len(nbs) > 0
     for nb in nbs:
-        assert nb.topology_code is not None
-        assert nb.topology_code != address.topology_code
+        assert nb.space_code != address.space_code
+        assert nb.topology_code is None
 
 
-def test_neighbors_topology_codes_are_unique() -> None:
+def test_neighbor_space_codes_are_unique() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(116.391, 39.907, 3)
     nbs = engine.neighbors(address, k=1)
-    topo_set = {nb.topology_code for nb in nbs}
-    assert len(topo_set) == len(nbs)
+    space_codes = {nb.space_code for nb in nbs}
+    assert len(space_codes) == len(nbs)

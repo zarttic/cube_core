@@ -59,6 +59,21 @@ def _consume_observation_budget(remaining: int | None, consumed: int) -> int | N
     return max(0, remaining - consumed)
 
 
+def _carbon_index_attributes(row: dict[str, Any], *, source_index: int) -> dict[str, Any]:
+    return {
+        "satellite": row["satellite"],
+        "observation_id": row["observation_id"],
+        "xco2": row["xco2"],
+        "quality_flag": row["quality_flag"],
+        "center_lon": row["center_lon"],
+        "center_lat": row["center_lat"],
+        "footprint_geojson": row["footprint_geojson"],
+        "source_index": source_index,
+        "metadata_json": row["metadata_json"],
+        "product_type": row["product_type"],
+    }
+
+
 def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
     """Run one carbon dataset from loader-owned NetCDF/HDF sources on Ray."""
     import ray
@@ -181,6 +196,7 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
                             "space_code": address.space_code, "topology_code": address.topology_code, "time_bucket": observation_bucket,
                             "st_code": row["st_code"], "value_ref_uri": source_uri,
                             "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None,
+                            "attributes": _carbon_index_attributes(row, source_index=source_index),
                         }
                     )
         return {
@@ -285,10 +301,17 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                         band_code="_cell", grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code,
                         topology_code=cell.topology_code, time_bucket="_", window_identity="cell",
                     )
+                    address = GridAddress(
+                        grid_type=grid_type,
+                        grid_level=int(cell.grid_level),
+                        space_code=cell.space_code,
+                        topology_code=cell.topology_code,
+                    )
+                    cell_geometry = cell.geometry or sdk.code_to_geometry(address=address)
                     cells.setdefault(
                         cell_key,
                         {"output_id": make_output_id(cell_identity), "grid_type": grid_type, "grid_level": int(cell.grid_level),
-                         "space_code": cell.space_code, "topology_code": cell.topology_code, "bbox": cell.bbox, "geometry": cell.geometry},
+                         "space_code": cell.space_code, "topology_code": cell.topology_code, "bbox": cell.bbox, "geometry": cell_geometry},
                     )
                     for band in (band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]):
                         bucket = _time_bucket(asset["time_start"], value["time_granularity"])
@@ -311,15 +334,12 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                             "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
                             "time_bucket": bucket, "value_ref_uri": source_uri,
                         }
-                        address = GridAddress(grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code)
                         index["st_code"] = sdk.generate_st_code(
                             address=address, timestamp=datetime.fromisoformat(asset["time_start"].replace("Z", "+00:00")),
                             time_granularity=value["time_granularity"],
                         ).st_code
                         if entity:
-                            geometry = cell.geometry
-                            if geometry is None:
-                                geometry = sdk.code_to_geometry(address=address)
+                            geometry = cell_geometry
                             if source.crs and str(source.crs).upper() != "EPSG:4326":
                                 geometry = transform_geom("EPSG:4326", source.crs, geometry)
                             data, tile_transform = rasterio.mask.mask(source, [geometry], crop=True)

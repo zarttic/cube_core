@@ -146,7 +146,7 @@ def test_mgrs_parent_and_children_roundtrip():
     parent = engine.parent(address)
     children = engine.children(parent, target_grid_level=3)
 
-    assert parent.space_code == address.space_code[:-2]
+    assert parent.space_code == "50SMK4717"
     assert len(children) == 100
     assert address.space_code in {c.space_code for c in children}
 

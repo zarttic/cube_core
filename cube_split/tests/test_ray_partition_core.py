@@ -109,9 +109,11 @@ def test_build_grid_tasks_driver_uses_m1_geohash_cells_with_asset_bbox():
 
     assert tasks
     assert all(task["grid_level"] == 5 and task["topology_code"] is None for task in tasks)
+    assert all(task["cell_geom"]["type"] == "Polygon" for task in tasks)
+    assert all(task["cell_geom"]["coordinates"][0][0] == task["cell_geom"]["coordinates"][0][-1] for task in tasks)
 
 
-def test_build_grid_tasks_preserves_m1_mgrs_topology_code():
+def test_build_grid_tasks_uses_standard_mgrs_identity():
     tasks = build_grid_tasks_driver(
         [
             AssetRecord(
@@ -129,7 +131,7 @@ def test_build_grid_tasks_preserves_m1_mgrs_topology_code():
     )
 
     assert tasks
-    assert all(task["topology_code"] for task in tasks)
+    assert all(task["space_code"] and task["topology_code"] is None for task in tasks)
 
 
 def test_build_manifest_supports_sentinel2_optical_filenames(tmp_path: Path):

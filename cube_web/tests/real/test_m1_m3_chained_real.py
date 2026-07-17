@@ -125,7 +125,7 @@ def _verify_m1_three_grid_coverage(payload: bytes) -> None:
                 windows = 0
                 for cell in cells:
                     assert cell.grid_level <= level
-                    assert (cell.topology_code is not None) if grid_type == "mgrs" else cell.topology_code is None
+                    assert cell.topology_code is None
                     geometry = sdk.code_to_geometry(GridAddress(grid_type=cell.grid_type, grid_level=cell.grid_level, space_code=cell.space_code, topology_code=cell.topology_code))
                     overlap = shape(geometry).intersection(aoi)
                     if overlap.is_empty or overlap.area == 0:

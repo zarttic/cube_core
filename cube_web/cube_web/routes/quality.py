@@ -23,10 +23,28 @@ from cube_web.services.quality_repository import (
     require_open_gauss_domain_store,
 )
 from cube_web.services.quality_run_service import request_manual_quality_run
+from cube_web.services.quality_rules import DEFAULT_RULE_SET_VERSION, default_rule_registry
 
 
 def create_quality_router() -> APIRouter:
     router = APIRouter(prefix="/quality", tags=["quality"])
+
+    @router.get("/rules")
+    def list_rules() -> dict:
+        return {
+            "rule_set_version": DEFAULT_RULE_SET_VERSION,
+            "items": [
+                {
+                    "code": rule.code,
+                    "name": rule.name,
+                    "mandatory": rule.mandatory,
+                    "applicability": dict(rule.applicability),
+                    "parameters": dict(rule.parameters),
+                    "implementation_version": rule.implementation_version,
+                }
+                for rule in default_rule_registry().all()
+            ],
+        }
 
     @router.get("/records")
     def list_records(

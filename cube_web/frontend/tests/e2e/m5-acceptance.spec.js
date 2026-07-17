@@ -76,15 +76,18 @@ test('M5 checks frozen grid options, drawer reset, and complete quality exports'
   });
 
   await page.goto('/partition');
-  await page.getByTestId('partition-grid-type').click();
+  await page.getByRole('button', { name: /已载入光学遥感数据/ }).click();
+  const datasetDrawer = page.getByRole('dialog', { name: '光学遥感待剖分数据队列' });
+  await datasetDrawer.getByText('Batch A', { exact: true }).click();
+  await datasetDrawer.getByText('Scene A').click();
+  await datasetDrawer.getByTestId('dataset-grid-dataset-a').click();
   const gridOptions = page.locator('.el-select-dropdown:visible .el-select-dropdown__item');
-  await expect(gridOptions).toHaveText(['Geohash', '扩展 MGRS', 'ISEA4H']);
+  await expect(gridOptions).toHaveText(['经纬度格网', '平面格网', '六边形格网']);
+  await expect(datasetDrawer.getByTestId('dataset-grid-level-dataset-a').getByRole('combobox')).toBeDisabled();
 
-  await page.goto('/datasets');
+  await page.goto('/data-management');
   await page.getByTestId('dataset-row-dataset-a').click();
   await expect(page.getByTestId('dataset-detail-drawer')).toContainText(M4_HANDOFF.datasetATitle);
-  await page.getByTestId('dataset-detail-tab-assets').click();
-  await expect(page.getByTestId('dataset-detail-drawer')).toContainText('asset-a');
   await page.getByTestId('dataset-detail-tab-grid').click();
   await expect(page.getByTestId('dataset-detail-drawer')).toContainText('wx4g0e');
   await page.getByTestId('dataset-detail-close').click();

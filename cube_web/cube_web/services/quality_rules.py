@@ -9,6 +9,28 @@ from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, Ter
 
 DEFAULT_RULE_SET_VERSION = "2026.07.14-v1"
 
+RULE_NAMES = {
+    "index_schema": "索引结构完整性",
+    "output_count_consistency": "输出数量一致性",
+    "output_reference_integrity": "输出引用完整性",
+    "grid_method_agreement": "格网与剖分方式一致性",
+    "cell_bbox_validity": "格网边界有效性",
+    "time_bucket_consistency": "时间分桶一致性",
+    "asset_readability": "数据单元可读性",
+    "asset_crs": "数据单元坐标系",
+    "window_bounds": "像素窗口边界",
+    "pixel_sample": "像素抽样",
+    "metadata_completeness": "元数据完整性",
+    "declared_metadata_defects": "已声明元数据缺陷",
+    "product_year_consistency": "产品年份一致性",
+    "carbon_schema": "碳卫星数据结构",
+    "carbon_coordinates": "碳卫星坐标有效性",
+    "carbon_xco2_range": "XCO2 数值范围",
+    "carbon_quality_flags": "碳卫星质量标识",
+    "carbon_observation_duplicates": "碳卫星观测重复",
+    "carbon_footprints": "碳卫星观测足迹",
+}
+
 
 @dataclass(frozen=True)
 class RuleContext:
@@ -74,6 +96,9 @@ class RuleRegistry:
 
     def get(self, code: str) -> QualityRule | None:
         return self._rules.get(code)
+
+    def all(self) -> tuple[QualityRule, ...]:
+        return tuple(self._rules.values())
 
     def applicable(self, *, data_type: str, product_type: str | None) -> tuple[QualityRule, ...]:
         return tuple(rule for rule in self._rules.values() if rule.applies(data_type=data_type, product_type=product_type))
@@ -485,7 +510,7 @@ def default_rule_registry() -> RuleRegistry:
     rules = [
         RegisteredRule(
             code=code,
-            name=code.replace("_", " ").title(),
+            name=RULE_NAMES[code],
             applicability={"data_types": ["optical", "radar", "product", "carbon"]},
             mandatory=True,
             parameters={},
@@ -506,7 +531,7 @@ def default_rule_registry() -> RuleRegistry:
     rules.extend(
         RegisteredRule(
             code=code,
-            name=code.replace("_", " ").title(),
+            name=RULE_NAMES[code],
             applicability={"data_types": ["optical", "radar", "product", "carbon"]},
             mandatory=False,
             parameters={},
@@ -517,7 +542,7 @@ def default_rule_registry() -> RuleRegistry:
     rules.append(
         RegisteredRule(
             "product_year_consistency",
-            "Product year consistency",
+            RULE_NAMES["product_year_consistency"],
             {"data_types": ["product"]},
             True,
             {},
@@ -525,7 +550,7 @@ def default_rule_registry() -> RuleRegistry:
         )
     )
     rules.extend(
-        RegisteredRule(code, code.replace("_", " ").title(), {"data_types": ["carbon"]}, True, {}, evaluator=evaluators[code])
+        RegisteredRule(code, RULE_NAMES[code], {"data_types": ["carbon"]}, True, {}, evaluator=evaluators[code])
         for code in (
             "carbon_schema",
             "carbon_coordinates",

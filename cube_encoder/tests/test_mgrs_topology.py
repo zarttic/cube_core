@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from shapely.geometry import shape
 
+from grid_core.app.engines.mgrs.address import parent_space_code
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
 # ---------------------------------------------------------------------------
@@ -80,8 +81,7 @@ def test_center_is_inside_bbox() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cross_zone_neighbors_have_dual_identity() -> None:
-    """Neighbors across UTM zone boundaries must have both space_code and topology_code."""
+def test_cross_zone_neighbors_use_standard_space_code_identity() -> None:
     engine = MGRSEngine()
     # Near a zone boundary (lon≈6 is between zone 32 and standard zone for that lat)
     address = engine.locate_space_code(5.999999, 0.0, 2)
@@ -89,25 +89,23 @@ def test_cross_zone_neighbors_have_dual_identity() -> None:
     assert len(neighbors) > 0
     for nb in neighbors:
         assert nb.space_code
-        assert nb.topology_code
-        assert nb.topology_code != address.topology_code
+        assert nb.topology_code is None
+        assert nb.space_code != address.space_code
 
 
-def test_neighbors_topology_codes_are_unique() -> None:
-    """No two neighbors should share a topology_code."""
+def test_neighbor_space_codes_are_unique() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(10.0, 52.0, 2)
     neighbors = engine.neighbors(address, k=1)
-    topo_codes = [nb.topology_code for nb in neighbors]
-    assert len(topo_codes) == len(set(topo_codes))
+    space_codes = [nb.space_code for nb in neighbors]
+    assert len(space_codes) == len(set(space_codes))
 
 
 def test_neighbors_do_not_include_source() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(116.391, 39.907, 3)
     neighbors = engine.neighbors(address, k=1)
-    source_topo = address.topology_code
-    assert source_topo not in {nb.topology_code for nb in neighbors}
+    assert address.space_code not in {nb.space_code for nb in neighbors}
 
 
 def test_neighbors_k_invalid_raises() -> None:
@@ -128,21 +126,21 @@ def test_neighbor_count_is_not_necessarily_eight() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parent / children with topology codes
+# Parent / children with standard identities
 # ---------------------------------------------------------------------------
 
 
-def test_parent_returns_gridaddress_with_topology() -> None:
+def test_parent_returns_standard_mgrs_address() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(10.0, 52.0, 3)
     parent = engine.parent(address)
     assert parent.grid_type == "mgrs"
     assert parent.grid_level == 2
-    assert parent.topology_code is not None
-    assert "utm" in parent.topology_code or "ups" in parent.topology_code
+    assert parent.space_code == "32UNC6861"
+    assert parent.topology_code is None
 
 
-def test_children_return_gridaddresses_with_topology() -> None:
+def test_children_return_standard_mgrs_addresses() -> None:
     engine = MGRSEngine()
     address = engine.locate_space_code(10.0, 52.0, 2)
     children = engine.children(address, 3)
@@ -150,7 +148,20 @@ def test_children_return_gridaddresses_with_topology() -> None:
     for child in children:
         assert child.grid_type == "mgrs"
         assert child.grid_level == 3
-        assert child.topology_code is not None
+        assert parent_space_code(child.space_code) == address.space_code
+        assert child.topology_code is None
+
+
+def test_children_at_latitude_band_boundary_all_have_valid_geometry() -> None:
+    engine = MGRSEngine()
+    address = engine.locate_space_code(10.0, 47.99, 0)
+
+    children = engine.children(address, 1)
+
+    assert address.space_code == "32TNU"
+    assert 0 < len(children) < 100
+    assert all(child.topology_code is None for child in children)
+    assert all(shape(engine.code_to_geometry(child)).area > 0 for child in children)
 
 
 def test_children_target_level_must_be_greater() -> None:
@@ -169,7 +180,7 @@ def test_children_target_level_must_be_greater() -> None:
 
 
 def test_minimal_coarsening_preserves_domain_boundary() -> None:
-    """Minimal cover must not merge cells across different domain tokens."""
+    """Minimal cover keeps standard MGRS identities unique."""
     engine = MGRSEngine()
     # Small geometry that stays within one UTM zone
     geometry = {
@@ -177,10 +188,18 @@ def test_minimal_coarsening_preserves_domain_boundary() -> None:
         "coordinates": [[[10.0, 52.0], [10.1, 52.0], [10.1, 52.1], [10.0, 52.1], [10.0, 52.0]]],
     }
     cells = engine.cover_geometry(geometry, 0, "minimal")
-    if len(cells) > 1:
-        domain_tokens = {(c.topology_code or "").split(":")[1] for c in cells if c.topology_code}
-        # Each domain token should only appear as a coherent group
-        assert len(domain_tokens) >= 1
+    assert len({cell.space_code for cell in cells}) == len(cells)
+    assert all(cell.topology_code is None for cell in cells)
+
+
+def test_minimal_coarsens_complete_valid_child_set_at_band_boundary() -> None:
+    engine = MGRSEngine()
+    parent = engine.locate_space_code(10.0, 47.99, 0)
+    parent_geometry = engine.code_to_geometry(parent)
+
+    cells = engine.cover_geometry(parent_geometry, 1, "minimal")
+
+    assert any(cell.grid_level == 0 and cell.space_code == parent.space_code for cell in cells)
 
 
 # ---------------------------------------------------------------------------

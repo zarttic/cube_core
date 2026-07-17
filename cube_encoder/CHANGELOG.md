@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+### Standard MGRS identity (2026-07-17)
+
+- MGRS locate、cover 和 topology 结果恢复为标准 `space_code` 身份，不再生成 `mgrs-topo-v1` 扩展码。
+- MGRS UTM/UPS 所属域严格取自标准编码，并使用互斥的 Norway/Svalbard 特殊分区边界，修复跨区格网正面积重叠。
+- `topology_code` 模型和数据库字段继续保留，用于读取历史数据。
+
 ### M1 grid SDK breaking refactor (2026-07-14)
 
 - **BREAKING**: production `grid_type` reduced to exactly `geohash | mgrs | isea4h`; removed `s2`, `tile_matrix`, `plane_grid` engines and the `h3`/`s2sphere` dependencies.

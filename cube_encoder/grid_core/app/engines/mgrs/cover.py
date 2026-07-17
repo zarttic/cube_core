@@ -9,9 +9,7 @@ from shapely.validation import make_valid
 
 from grid_core.app.core.enums import CoverMode
 from grid_core.app.core.exceptions import ValidationError
-from grid_core.app.engines.mgrs.address import (
-    build_topology_code,
-)
+from grid_core.app.engines.mgrs.address import direct_child_space_codes, parent_space_code
 from grid_core.app.engines.mgrs.domain import (
     GridDomain,
 )
@@ -36,7 +34,7 @@ def cover_geometry(
 ) -> list[CompactGridCell]:
     """Cover a GeoJSON geometry at the given MGRS precision.
 
-    Returns CompactGridCell list with topology_code set.
+    Returns cells identified by their standard MGRS space_code.
     Raises ValidationError for unsupported modes or excessive output.
     """
     if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
@@ -101,7 +99,7 @@ def cover_geometry(
     if cover_mode == CoverMode.MINIMAL.value:
         selected = _coarsen_minimal(selected, aoi, precision)
 
-    return [cell for _, cell in sorted(selected.values(), key=lambda x: x[0].topology_code or "")]
+    return [cell for _, cell in sorted(selected.values(), key=lambda x: x[0].space_code)]
 
 
 def _add_cell(
@@ -111,23 +109,22 @@ def _add_cell(
     clipped: Polygon | MultiPolygon,
     selected: dict,
 ) -> None:
-    topo = build_topology_code(domain.token, precision, code)
-    if topo in selected:
+    if code in selected:
         return
     addr = GridAddress(
         grid_type="mgrs",
         grid_level=precision,
         space_code=code,
-        topology_code=topo,
+        topology_code=None,
     )
     compact = CompactGridCell(
         grid_type="mgrs",
         grid_level=precision,
         space_code=code,
-        topology_code=topo,
+        topology_code=None,
         bbox=cell_bbox(clipped),
     )
-    selected[topo] = (addr, compact)
+    selected[code] = (addr, compact)
 
 
 def _seed_codes(aoi: Polygon | MultiPolygon, precision: int) -> set[str]:
@@ -238,7 +235,7 @@ def _coarsen_minimal(
 ) -> dict:
     """Coarsen the selected set by replacing complete 100-child groups with their parent.
 
-    Only merges cells within the same domain (same domain token in topology_code).
+    Only merges cells within the same domain encoded by the standard MGRS code.
     """
     if precision == 0:
         return selected
@@ -247,25 +244,35 @@ def _coarsen_minimal(
     changed = True
     while changed:
         changed = False
-        grouped: dict[tuple[str, str], set[str]] = {}  # (domain_token, parent_code) -> set of topo keys
+        grouped: dict[tuple[str, str, int], set[str]] = {}
 
-        for topo_key, (addr, _) in out.items():
+        for cell_code, (addr, _) in out.items():
             if addr.grid_level <= 0:
                 continue
-            parent_code = addr.space_code[:-2]
-            domain_token = (addr.topology_code or "").split(":")[1] if addr.topology_code else ""
-            key = (domain_token, parent_code)
-            grouped.setdefault(key, set()).add(topo_key)
+            parent_code = parent_space_code(addr.space_code)
+            domain_token = _domain_for_address(addr.space_code).token
+            key = (domain_token, parent_code, addr.grid_level - 1)
+            grouped.setdefault(key, set()).add(cell_code)
 
-        for (domain_token, parent_code), topo_keys in grouped.items():
-            if len(topo_keys) != 100:
+        for (domain_token, parent_code, parent_level), child_codes in grouped.items():
+            valid_child_codes = set()
+            for candidate in direct_child_space_codes(parent_code):
+                try:
+                    candidate_domain = _domain_for_address(candidate)
+                    if candidate_domain.token != domain_token:
+                        continue
+                    cell_geometry_clipped(candidate, parent_level + 1, candidate_domain)
+                    valid_child_codes.add(candidate)
+                except ValidationError:
+                    continue
+            if child_codes != valid_child_codes:
                 continue
             # All 100 children in same domain → replace with parent
             try:
                 parent_domain = _domain_for_address(parent_code)
                 if parent_domain.token != domain_token:
                     continue
-                parent_clipped = cell_geometry_clipped(parent_code, precision - 1, parent_domain)
+                parent_clipped = cell_geometry_clipped(parent_code, parent_level, parent_domain)
             except ValidationError:
                 continue
 
@@ -276,9 +283,9 @@ def _coarsen_minimal(
                 continue
 
             # Replace children with parent
-            for topo_key in topo_keys:
-                del out[topo_key]
-            _add_cell(parent_code, precision - 1, parent_domain, parent_clipped, out)
+            for child_code in child_codes:
+                del out[child_code]
+            _add_cell(parent_code, parent_level, parent_domain, parent_clipped, out)
             changed = True
 
     return out

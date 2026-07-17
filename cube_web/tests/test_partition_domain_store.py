@@ -192,6 +192,67 @@ def test_opengauss_mutation_uses_schema_guard_and_transaction_order() -> None:
     assert version
 
 
+def test_opengauss_complete_accepts_strict_attempt_for_reused_dataset(monkeypatch) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    monkeypatch.setattr(store, "_assert_live_schema", lambda _connection: None)
+    monkeypatch.setattr(store, "_execute", lambda *_args, **_kwargs: None)
+
+    def fetchall(_connection, sql, _params=()):
+        if "FROM partition_datasets" in sql:
+            return [{"dataset_id": "dataset-a", "batch_id": "first-run"}]
+        if "FROM partition_job_attempts" in sql:
+            return [
+                {
+                    "task_id": "second-task",
+                    "batch_id": "second-run",
+                    "payload": {
+                        "strict_partition_request": True,
+                        "datasets": [{"dataset_id": "dataset-a"}],
+                    },
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(store, "_fetchall", fetchall)
+    result = _result("version-2")
+    result.task_id = "second-task"
+
+    with pytest.raises(ValueError, match="output version has not been started"):
+        store.complete_output(result)
+
+
+def test_opengauss_complete_persists_index_attributes_as_jsonb(monkeypatch) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    monkeypatch.setattr(store, "_assert_live_schema", lambda _connection: None)
+    inserted: list[dict[str, object]] = []
+
+    def fetchall(_connection, sql, _params=()):
+        if "FROM partition_datasets" in sql:
+            return [{"dataset_id": "dataset-a", "batch_id": "batch-a"}]
+        if "FROM partition_job_attempts" in sql:
+            return [{"task_id": "task-a", "batch_id": "batch-a", "payload": {}}]
+        if "FROM partition_output_versions" in sql:
+            return [{"task_id": "task-a", "status": "staging"}]
+        return []
+
+    def merge_insert(_connection, **kwargs):
+        inserted.append(kwargs)
+
+    monkeypatch.setattr(store, "_fetchall", fetchall)
+    monkeypatch.setattr(store, "_merge_insert", merge_insert)
+    result = _result("version-a")
+    attributes = {"satellite": "OCO2", "observation_id": "obs-1", "xco2": 410.25}
+    result.indexes[0]["attributes"] = attributes
+
+    store.complete_output(result)
+
+    index_insert = next(item for item in inserted if item["table"] == "partition_indexes")
+    index_values = dict(zip(index_insert["columns"], index_insert["values"]))
+    assert index_values["attributes"] == '{"satellite": "OCO2", "observation_id": "obs-1", "xco2": 410.25}'
+
+
 def test_opengauss_reads_are_parameterized_and_validate_bounds_before_sql() -> None:
     connection = _RecordingConnection()
     store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)

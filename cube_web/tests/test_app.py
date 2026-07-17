@@ -355,12 +355,15 @@ def runtime_environment(monkeypatch):
     web_app.partition_workflow_service._store = None
 
 
-def test_header_navigation_exposes_routed_dataset_and_quality_pages():
+def test_header_navigation_hides_management_entries_but_keeps_internal_routes():
     nav_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "data" / "navigation.js").read_text(encoding="utf-8")
     app_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+    router_source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "router" / "index.js").read_text(encoding="utf-8")
 
-    assert "{ label: '自动化质检', kind: 'internal', path: '/quality' }" in nav_source
-    assert "{ label: '数据集管理', kind: 'internal', path: '/datasets' }" in nav_source
+    assert "const hiddenNavLabels = new Set(['数据库入库管理', '数据管理与入库', '自动化质检', '系统配置']);" in nav_source
+    assert "{ path: '/quality', name: 'quality'" in router_source
+    assert "{ path: '/data-management', name: 'data-management'" in router_source
+    assert "path: '/datasets'" not in nav_source
     assert "{ label: '首页', kind: 'external', url: portalHomeUrl }" in nav_source
     assert "{ label: 'ARD数据载入', kind: 'external', url: '/ard' }" in nav_source
     assert "{ label: '分析就绪数据剖分', kind: 'internal', path: '/partition' }" in nav_source
@@ -418,11 +421,12 @@ def test_partition_view_uses_strict_partition_store_and_production_grid_controls
     assert "GridParameters" in source
     assert "BatchAssetsPanel" in source
     assert "TaskQueuePanel" in source
-    assert "const forbiddenRequestFields" in store_source
+    assert "const partitionFields" in store_source
     assert "requested_grid_level" in store_source
-    assert "partition_method: derivedPartitionMethod(form.gridType)" in store_source
-    assert "tasks/run" in store_source
-    assert "dataset_ids" in store_source
+    assert "scene_ids" in store_source
+    assert "source_batch_ids" in store_source
+    assert "'/v1/partition/runs'" in store_source
+    assert "tasks/run" not in store_source
     assert 'value="s2"' not in source
     assert 'value="tile_matrix"' not in source
     assert 'value="plane_grid"' not in source
@@ -460,13 +464,13 @@ def test_api_client_uses_request_timeout():
     assert "timeoutSignal()" in source
 
 
-def test_partition_view_does_not_keep_retired_map_preview_requests():
+def test_partition_view_uses_current_grid_cover_preview_without_retired_helpers():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "PartitionView.vue").read_text(encoding="utf-8")
 
     assert "normalizedCornersKey" not in source
     assert "uniqueGridCoverFootprints" not in source
-    assert "grid/cover" not in source
-    assert "格网预览将基于已选择的数据集" in source
+    assert "requestJson('/v1/grid/cover'" in source
+    assert "正在加载真实格网覆盖" in source
 
 
 def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():
@@ -487,14 +491,21 @@ def test_globe_map_allows_close_zoom_and_does_not_refocus_unchanged_layers():
 @pytest.mark.parametrize(
     ("resolution", "grid_type", "expected_level"),
     [
-        (5, "s2", 8),
-        ("9.9m", "tile_matrix", 8),
-        ("10m", "s2", 7),
-        (30, "tile_matrix", 7),
-        (31, "s2", 6),
-        (5, "isea4h", 6),
-        ("10m", "isea4h", 6),
-        (30, "isea4h", 6),
+        (5, "s2", 6),
+        ("9.9m", "tile_matrix", 6),
+        ("10m", "s2", 5),
+        (30, "tile_matrix", 5),
+        (31, "s2", 4),
+        (5, "mgrs", 1),
+        ("10m", "mgrs", 0),
+        (30, "mgrs", 0),
+        (31, "mgrs", 0),
+        (None, "mgrs", 1),
+        (5, "isea4h", 12),
+        ("10m", "isea4h", 11),
+        (30, "isea4h", 11),
+        (31, "isea4h", 8),
+        (None, "isea4h", 6),
     ],
 )
 def test_partition_resolution_grid_level_defaults(resolution, grid_type, expected_level):
@@ -528,9 +539,9 @@ def test_partition_schema_rejects_isea4h_logical_payload():
 def test_config_view_exposes_frozen_partition_grid_types_only():
     source = (web_app._repo_root() / "cube_web" / "frontend" / "src" / "views" / "ConfigView.vue").read_text(encoding="utf-8")
 
-    assert '<el-option label="GeoHash格网" value="geohash" />' in source
-    assert '<el-option label="MGRS格网" value="mgrs" />' in source
-    assert '<el-option label="六边形格网" value="isea4h" />' in source
+    assert 'v-for="grid in gridDefinitions"' in source
+    assert ":label=\"grid.label\"" in source
+    assert ":value=\"grid.value\"" in source
     assert 'value="s2"' not in source
     assert 'value="tile_matrix"' not in source
     assert 'value="plane_grid"' not in source
@@ -609,8 +620,9 @@ def test_auth_config_exposes_subsystem_client(monkeypatch):
         "client_id": "system_ard",
         "redirect_uri": "http://web.example.test/callback",
         "main_system_url": "http://portal.example.test",
-        "auth_required": False,
-        "navigation": [
+            "auth_required": False,
+            "m6_mode": "legacy",
+            "navigation": [
             {"label": "首页", "kind": "external", "url": "http://portal.example.test/#/home"},
             {"label": "ARD数据载入", "kind": "external", "url": "http://portal.example.test/ard"},
             {"label": "剖分数据服务", "kind": "external", "url": "http://portal.example.test/#/partition"},
@@ -1760,7 +1772,7 @@ def test_optical_partition_runner_infers_grid_level_from_selected_asset_resoluti
     )
 
     assert captured["grid_type"] == "geohash"
-    assert captured["grid_level"] == 7
+    assert captured["grid_level"] == 5
 
 
 def test_optical_partition_runner_allows_remote_selected_assets_without_existing_input_dir(monkeypatch, tmp_path):
@@ -2030,7 +2042,7 @@ def test_optical_partition_test_runner_passes_none_for_auto_isea4h_level(monkeyp
         mode="partition_test_no_ingest",
     )
 
-    assert captured["grid_level"] == 6
+    assert captured["grid_level"] == 11
 
 
 def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(monkeypatch, tmp_path):
@@ -2069,7 +2081,7 @@ def test_entity_partition_runner_uses_entity_job_and_disables_ingest_for_test(mo
     assert result["partition_type"] == "entity"
     assert result["output_path"].endswith("entity_index_rows.jsonl")
     assert result["ingest_enabled"] is False
-    assert captured["grid_level"] == 6
+    assert captured["grid_level"] == 11
     assert captured["partition_backend"] == "ray"
     assert captured["ray_address"] == "10.3.100.182:6379"
     assert captured["metadata_backend"] == "postgres"
@@ -2187,6 +2199,35 @@ def test_partition_task_detail_reads_persisted_attempt_without_memory_task():
     assert task["result"]["rows"] == 3
     assert isinstance(task["created_at"], float)
     assert isinstance(task["updated_at"], float)
+
+
+def test_strict_attempt_without_legacy_assets_uses_dataset_outcome_for_batch_status():
+    store = InMemoryPartitionJobStore()
+    store.ensure_runtime_batch(
+        batch_id="partition-run-m6-no-assets",
+        batch_name="M6 strict run without legacy assets",
+        data_type="product",
+        payload={"strict_partition_request": True, "datasets": [{"dataset_id": "dataset-m6"}]},
+    )
+    store.create_attempt(
+        task_id="partition-m6-no-assets",
+        batch_id="partition-run-m6-no-assets",
+        operation="auto_run",
+        payload={"strict_partition_request": True, "datasets": [{"dataset_id": "dataset-m6"}]},
+    )
+
+    store.succeed_attempt(
+        "partition-m6-no-assets",
+        {
+            "status": "completed",
+            "datasets": [{"dataset_id": "dataset-m6", "status": "completed"}],
+        },
+    )
+
+    batch = store.get_batch("partition-run-m6-no-assets")
+    assert batch is not None
+    assert batch["status"] == "succeeded"
+    assert batch["last_error"] is None
 
 
 def test_partition_task_cancel_uses_persisted_attempt_when_memory_task_missing():
@@ -3700,14 +3741,14 @@ def test_partition_schema_import_infers_non_carbon_grid_level_from_resolution():
     assert radar_resp.status_code == 200
     assert product_resp.status_code == 200
     assert carbon_resp.status_code == 200
-    assert optical_resp.json()["normalized_payload"]["grid_level"] == 7
-    assert radar_resp.json()["normalized_payload"]["grid_level"] == 7
-    assert product_resp.json()["normalized_payload"]["grid_level"] == 7
+    assert optical_resp.json()["normalized_payload"]["grid_level"] == 5
+    assert radar_resp.json()["normalized_payload"]["grid_level"] == 5
+    assert product_resp.json()["normalized_payload"]["grid_level"] == 5
     assert "grid_level_mode" not in optical_resp.json()["normalized_payload"]
     assert "grid_level" not in carbon_resp.json()["normalized_payload"]
 
 
-def test_partition_schema_import_defaults_isea4h_grid_level_to_6():
+def test_partition_schema_import_infers_isea4h_grid_level_from_resolution():
     resp = client.post(
         "/v1/partition/schemas/import",
         json={
@@ -3725,7 +3766,7 @@ def test_partition_schema_import_defaults_isea4h_grid_level_to_6():
     )
 
     assert resp.status_code == 200
-    assert resp.json()["normalized_payload"]["grid_level"] == 6
+    assert resp.json()["normalized_payload"]["grid_level"] == 11
     assert "grid_level_mode" not in resp.json()["normalized_payload"]
 
 
@@ -5599,7 +5640,7 @@ def test_radar_partition_test_runner_uses_selected_assets(monkeypatch, tmp_path)
     assert result["assets"][0]["scene_id"] == "SCHEMA_RADAR_SCENE"
     assert captured["data_type"] == "radar"
     assert captured["product_family"] == "sentinel1"
-    assert captured["grid_level"] == 7
+    assert captured["grid_level"] == 5
     assert captured["partition_backend"] == "thread"
     assert captured["metadata_backend"] == "none"
     assert captured["asset_storage_backend"] == "local"

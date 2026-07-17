@@ -1,6 +1,6 @@
 # cube_web 文档
 
-更新时间：2026-07-13
+更新时间：2026-07-17
 
 当前运行基线：
 
@@ -19,6 +19,12 @@
   optical 预入库/确认入库按钮与现行状态机不一致的事实，以及后续调整建议。
 - [PARTITION_GRID_METHOD_AND_HISTORY.md](PARTITION_GRID_METHOD_AND_HISTORY.md)：当前格网/剖分方式矩阵、多槽位状态和后续重构边界。
 - [PARTITION_TEST_CLEANUP_GUIDE.md](PARTITION_TEST_CLEANUP_GUIDE.md)：测试环境清理和批次状态重置指南，执行前必须确认目标 OpenGauss schema 和 MinIO bucket。
+- [M6_SCENE_DOMAIN_OPERATIONS.md](M6_SCENE_DOMAIN_OPERATIONS.md)：M6 Dataset/Scene/LoadBatch
+  关系、additive 迁移、运行时切换、回滚和 API 交接说明。
+- [M6_MOCK_ACCEPTANCE.md](M6_MOCK_ACCEPTANCE.md)：基于真实 MinIO source 元数据构造的
+  四类数据与全状态 Mock 集成验收。
+- [QUALITY_RULE_CATALOG.md](QUALITY_RULE_CATALOG.md)：当前质检规则集的必选/可选属性和产品适用范围。
+- [BAND_PRESENTATION_CONTRACT.md](BAND_PRESENTATION_CONTRACT.md)：剖分数据单元的波段命名、类型、筛选和展示契约。
 
 ## 1. 定位
 
@@ -91,6 +97,14 @@ npm run build
 
 ### 4.2 剖分接口
 
+M6 `m6-read`/`m6-primary` 接口：
+
+- `GET /v1/partition/load-batches`
+- `GET /v1/partition/load-batches/{load_batch_id}/scenes`
+- `POST /v1/partition/runs`（仅 `m6-primary`）
+- `GET /v1/datasets`
+- `GET /v1/ingest-runs`
+
 - `POST /v1/partition/{data_type}/run`
 - `POST /v1/partition/{data_type}/demo`（兼容旧演示客户端）
 - `POST /v1/partition/{data_type}/retry`
@@ -128,28 +142,16 @@ npm run build
 
 ### 4.3 质检接口
 
-- `POST /v1/quality/optical/run`
-- `POST /v1/quality/optical/latest`
-- `POST /v1/quality/optical/report`
-- `POST /v1/quality/optical/report/pdf`
-- `POST /v1/quality/optical/report/txt`
-- `POST /v1/quality/optical/history`
-- `POST /v1/quality/carbon/run`
-- `POST /v1/quality/carbon/latest`
-- `POST /v1/quality/carbon/report`
-- `POST /v1/quality/carbon/report/pdf`
-- `POST /v1/quality/carbon/report/txt`
-- `POST /v1/quality/carbon/history`
-- `POST /v1/quality/product/run`
-- `POST /v1/quality/product/latest`
-- `POST /v1/quality/product/report`
-- `POST /v1/quality/product/report/pdf`
-- `POST /v1/quality/product/report/txt`
-- `POST /v1/quality/product/history`
+- `GET /v1/quality/records`
+- `GET /v1/quality/records/{quality_run_id}`
+- `GET /v1/quality/records/{quality_run_id}/results`
+- `GET /v1/quality/records/{quality_run_id}/errors`
+- `GET /v1/quality/records/{quality_run_id}/errors/export`
+- `GET /v1/quality/rules`
+- `POST /v1/quality/runs`
 
-`run` 会先解析允许范围内的 `run_dir`，调用 `cube_split.quality` 生成报告，然后写入
-OpenGauss `quality_reports`。`latest`、`history`、`report`、`pdf` 和 `txt` 都从
-`quality_reports` 读取，不再通过扫描 `cube_split/data/ray_output/*/run_*` 组织历史列表。
+错误导出接口流式返回完整 CSV 或 JSON，不使用页面的 `page`/`page_size`。
+规则必选/可选属性和产品适用范围见 `QUALITY_RULE_CATALOG.md`。
 
 ## 5. 前端服务
 
@@ -169,12 +171,13 @@ OpenGauss `quality_reports`。`latest`、`history`、`report`、`pdf` 和 `txt` 
 
 | 格网 | 逻辑剖分 | 实体剖分 | 说明 |
 | --- | --- | --- | --- |
-| `tile_matrix`（经纬度格网） | 支持 | 支持 | encoder-backed |
-| `s2`（四边形格网） | 支持 | 支持 | encoder-backed |
-| `isea4h`（六边形格网） | 支持 | 支持 | encoder-backed |
-| `plane_grid`（平面格网） | 实验性支持 | 不支持 | 保留源 CRS 的资产局部窗口 |
+| `geohash` | 支持 | 不支持 | 当前 Web/strict runner 合同 |
+| `mgrs`（标准 MGRS） | 支持 | 不支持 | 当前 Web/strict runner 合同 |
+| `isea4h`（六边形格网） | 支持 | 支持 | 当前实体剖分格网 |
 
-`mgrs` 仍保留在 encoder SDK 中，但不再显示于 Web 生产剖分页面。当前 UI/批次槽位仍可能展示 `plane_grid + entity`，地图预览也会走通用 cover；这些已知偏差留待下一轮整体改造，不应作为已支持契约验收。
+本表记录当前分支实际的 Web `GridType` 与 `ray_partition_core` 合同。SDK 中存在的
+`s2`、`tile_matrix` 和 `plane_grid` 尚未接入这条生产 strict runner 链路，不能只在前端
+暴露后直接提交。
 
 ## 6. 测试
 

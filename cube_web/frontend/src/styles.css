@@ -3371,6 +3371,53 @@ section {
     overflow-wrap: anywhere;
 }
 
+.legacy-module-page {
+    min-height: calc(100vh - 240px);
+    padding: 20px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+}
+
+.partition-data-list {
+    min-width: 0;
+}
+
+.partition-drawer-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.partition-drawer-heading h3 {
+    margin: 0;
+    color: var(--dark);
+    font-size: 15px;
+}
+
+.partition-drawer-heading span,
+.partition-data-list .partition-hint {
+    color: var(--gray);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.legacy-execution-result {
+    display: grid;
+    gap: 8px;
+}
+
+.legacy-execution-result .el-alert {
+    margin-bottom: 6px;
+}
+
+.workspace-result .partition-context-item {
+    cursor: default;
+}
+
 .el-drawer__header {
     margin-bottom: 0;
     padding: 18px 22px;
@@ -3638,7 +3685,21 @@ section {
 .map-actions {
     display: inline-flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
+}
+
+.grid-legend-tag .el-tag__content {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.grid-legend-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    border-radius: 50%;
 }
 
 .asset-source,

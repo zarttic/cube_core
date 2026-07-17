@@ -19,7 +19,6 @@ import {
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   TileMapServiceImageryProvider,
-  UrlTemplateImageryProvider,
   VerticalOrigin,
   Viewer,
 } from 'cesium';
@@ -41,7 +40,6 @@ const emit = defineEmits(['point-selected', 'circle-drawn']);
 const EARTH_KM = 6371;
 const DEFAULT_PREVIEW_IMAGERY_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer';
 const PREVIEW_IMAGERY_URL = (import.meta.env.VITE_GLOBE_IMAGERY_URL || DEFAULT_PREVIEW_IMAGERY_URL).trim();
-const OSM_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const MIN_3D_ZOOM_DISTANCE = 5000;
 const MAX_ZOOM_DISTANCE = 32000000;
 
@@ -57,6 +55,17 @@ let drawStart = null;
 let draftCircle = null;
 let pointerDown = null;
 let lastFocusSignature = '';
+let previewLayer = null;
+let lifecycleGeneration = 0;
+let imageryGeneration = 0;
+
+function viewerIsCurrent(candidate, generation) {
+  return generation === lifecycleGeneration && candidate && candidate === viewer && !candidate.isDestroyed();
+}
+
+function destroyUnusedLayer(layer) {
+  if (layer && typeof layer.isDestroyed === 'function' && !layer.isDestroyed()) layer.destroy();
+}
 
 function toRad(value) {
   return CesiumMath.toRadians(Number(value));
@@ -470,20 +479,18 @@ async function createPreviewBaseLayer() {
   }
 }
 
-function createOsmBaseLayer() {
-  return new ImageryLayer(new UrlTemplateImageryProvider({
-    url: OSM_TILE_URL,
-    subdomains: ['a', 'b', 'c'],
-    maximumLevel: 18,
-    credit: 'OpenStreetMap contributors',
-    enablePickFeatures: false,
-  }));
-}
-
 function replaceBaseLayer(layer) {
   if (!viewer || !layer) return;
   viewer.imageryLayers.removeAll(true);
+  previewLayer = null;
   viewer.imageryLayers.add(layer, 0);
+}
+
+function installPreviewLayer(layer) {
+  if (!viewer || !layer) return;
+  if (previewLayer && viewer.imageryLayers.contains(previewLayer)) viewer.imageryLayers.remove(previewLayer, true);
+  previewLayer = layer;
+  viewer.imageryLayers.add(layer);
 }
 
 async function setMapMode(mode) {
@@ -494,29 +501,34 @@ async function setMapMode(mode) {
   pointerDown = null;
   lastFocusSignature = '';
   setCameraInteraction(true);
+  const requestGeneration = ++imageryGeneration;
 
   if (!viewer || useFallback.value) return;
   if (mode === '2d') {
-    replaceBaseLayer(createOsmBaseLayer());
+    replaceBaseLayer(createNaturalEarthLayer());
     viewer.scene.morphTo2D(0);
   } else {
-    replaceBaseLayer(await createPreviewBaseLayer());
+    const layer = await createPreviewBaseLayer();
+    if (requestGeneration !== imageryGeneration || mapMode.value !== '3d' || !viewer || viewer.isDestroyed()) {
+      destroyUnusedLayer(layer);
+      return;
+    }
+    installPreviewLayer(layer);
     viewer.scene.morphTo3D(0);
   }
   renderLayers();
 }
 
-async function initViewer() {
+async function initViewer(generation) {
   if (!canCreateWebglContext()) {
     useFallback.value = true;
     return;
   }
 
   try {
-    const baseLayer = await createPreviewBaseLayer();
     viewer = new Viewer(mapEl.value, {
       animation: false,
-      baseLayer,
+      baseLayer: createNaturalEarthLayer(),
       baseLayerPicker: false,
       fullscreenButton: false,
       geocoder: false,
@@ -540,9 +552,22 @@ async function initViewer() {
   viewer.scene.screenSpaceCameraController.maximumZoomDistance = MAX_ZOOM_DISTANCE;
 
   overlaySource = new CustomDataSource('cube-map-overlays');
-  await viewer.dataSources.add(overlaySource);
+  const currentViewer = viewer;
+  await currentViewer.dataSources.add(overlaySource);
+  if (!viewerIsCurrent(currentViewer, generation)) return;
   setupInteractions();
   renderLayers();
+
+  const requestGeneration = ++imageryGeneration;
+  createPreviewBaseLayer().then((layer) => {
+    if (!viewerIsCurrent(currentViewer, generation) || requestGeneration !== imageryGeneration || mapMode.value !== '3d') {
+      destroyUnusedLayer(layer);
+      return;
+    }
+    installPreviewLayer(layer);
+  }).catch((error) => {
+    console.warn('Preview imagery replacement failed; keeping NaturalEarthII.', error);
+  });
 }
 
 function handleFallbackPointerDown(event) {
@@ -593,7 +618,8 @@ function handleFallbackPointerLeave() {
 }
 
 onMounted(() => {
-  initViewer();
+  const generation = ++lifecycleGeneration;
+  initViewer(generation);
 });
 
 watch(() => props.markers, () => renderLayers(), { deep: true });
@@ -613,10 +639,13 @@ watch(() => props.interactionMode, () => {
 });
 
 onBeforeUnmount(() => {
+  lifecycleGeneration += 1;
+  imageryGeneration += 1;
   handler?.destroy();
   handler = null;
   viewer?.destroy();
   viewer = null;
+  previewLayer = null;
 });
 </script>
 

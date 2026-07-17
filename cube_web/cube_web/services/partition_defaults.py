@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from typing import Any
 
 DEFAULT_LOGICAL_GRID_LEVEL = 5
+DEFAULT_GEOHASH_GRID_LEVEL = 4
+DEFAULT_MGRS_GRID_LEVEL = 1
 DEFAULT_ISEA4H_GRID_LEVEL = 6
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
 
@@ -33,7 +35,14 @@ def normalize_partition_method(partition_method: Any, *, grid_type: str | None =
 
 
 def default_grid_level_for_grid_type(grid_type: str | None) -> int:
-    return DEFAULT_ISEA4H_GRID_LEVEL if str(grid_type or "").lower() == "isea4h" else DEFAULT_LOGICAL_GRID_LEVEL
+    normalized = str(grid_type or "").lower()
+    if normalized == "isea4h":
+        return DEFAULT_ISEA4H_GRID_LEVEL
+    if normalized == "mgrs":
+        return DEFAULT_MGRS_GRID_LEVEL
+    if normalized == "geohash":
+        return DEFAULT_GEOHASH_GRID_LEVEL
+    return DEFAULT_LOGICAL_GRID_LEVEL
 
 
 def default_grid_level_for_partition(
@@ -54,18 +63,27 @@ def default_grid_level_for_resolution(
     fallback: int | None = None,
 ) -> int:
     method = normalize_partition_method(partition_method, grid_type=grid_type)
-    if method == "entity":
-        return fallback if fallback is not None else DEFAULT_ENTITY_GRID_LEVEL
-    if str(grid_type or "").lower() == "mgrs":
-        return fallback if fallback is not None else default_grid_level_for_grid_type(grid_type)
     parsed = _parse_resolution(resolution)
     if parsed is None:
         return fallback if fallback is not None else default_grid_level_for_partition(grid_type, method)
-    if parsed < 10:
+    normalized_grid_type = str(grid_type or "").lower()
+    if normalized_grid_type == "isea4h":
+        if parsed < 10:
+            return 12
+        if parsed <= 30:
+            return 11
         return 8
+    if method == "entity":
+        return fallback if fallback is not None else DEFAULT_ENTITY_GRID_LEVEL
+    if normalized_grid_type == "mgrs":
+        if parsed < 10:
+            return 1
+        return 0
+    if parsed < 10:
+        return 6
     if parsed <= 30:
-        return 7
-    return 6
+        return 5
+    return 4
 
 
 def default_grid_level_from_assets(
@@ -75,21 +93,31 @@ def default_grid_level_from_assets(
     partition_method: Any = None,
     fallback: int | None = None,
 ) -> int:
-    resolutions: list[float] = [
-        resolution
-        for asset in assets or []
-        if isinstance(asset, dict)
-        for resolution in [_asset_resolution(asset)]
-        if resolution is not None
-    ]
-    if not resolutions:
+    resolution = finest_resolution_from_assets(assets)
+    if resolution is None:
         return fallback if fallback is not None else default_grid_level_for_partition(grid_type, partition_method)
     return default_grid_level_for_resolution(
-        min(resolutions),
+        resolution,
         grid_type=grid_type,
         partition_method=partition_method,
         fallback=fallback,
     )
+
+
+def finest_resolution_from_assets(assets: Iterable[Any] | None) -> float | None:
+    resolutions: list[float] = []
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        resolution = _asset_resolution(asset)
+        if resolution is not None:
+            resolutions.append(resolution)
+        attributes = asset.get("attributes")
+        if isinstance(attributes, dict):
+            resolution = _asset_resolution(attributes)
+            if resolution is not None:
+                resolutions.append(resolution)
+    return min(resolutions) if resolutions else None
 
 
 def apply_resolution_grid_defaults(

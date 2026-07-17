@@ -6,6 +6,8 @@ No H3 or DGGRID imports at runtime.
 from __future__ import annotations
 
 import time
+from collections import deque
+from collections.abc import Iterator
 
 from shapely import affinity
 from shapely.geometry import Polygon, box, mapping
@@ -34,7 +36,6 @@ _MAX_CANDIDATE_CELLS = 500_000
 _MAX_OUTPUT_CELLS = 100_000
 _MAX_COVER_SECONDS = 30.0
 _GRID_TYPE = "isea4h"
-_COVER_INDEX_CACHE: dict[int, tuple[object, list[object]]] = {}
 _WGS84_BOUNDS = box(-180.0, -90.0, 180.0, 90.0)
 
 
@@ -205,10 +206,7 @@ class ISEA4HEngine(BaseGridEngine):
     def _cover_cells(self, geometry: dict, res: int, cover_mode: str) -> list[tuple[int, int]]:
         """Return an exact positive-area cover while preserving cell levels."""
         try:
-            from shapely import affinity
             from shapely.geometry import shape as shapely_shape
-            from shapely.ops import unary_union
-            from shapely.strtree import STRtree
         except ImportError:
             raise ValidationError("shapely is required for ISEA4H cover")
 
@@ -218,119 +216,107 @@ class ISEA4HEngine(BaseGridEngine):
         target = _to_wgs84_shape(target)
         if target.is_empty:
             return []
+
         def longitude_variants(value: object) -> tuple[object, ...]:
             return tuple(affinity.translate(value, xoff=360.0 * offset) for offset in range(-2, 3))
 
-        target_variants = (target,)
-        target_query_variants = longitude_variants(target)
-        min_lon, min_lat, max_lon, max_lat = target.bounds
-        is_global_target = min_lon <= -180.0 and min_lat <= -90.0 and max_lon >= 180.0 and max_lat >= 90.0
-        if cell_count(res) > _MAX_CANDIDATE_CELLS:
-            raise ValidationError(
-                f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
-                f"limit={_MAX_CANDIDATE_CELLS}, observed={cell_count(res)}"
-            )
-        deadline = time.monotonic() + _MAX_COVER_SECONDS
-        output: list[tuple[int, int]] = []
+        is_global_target = _WGS84_BOUNDS.difference(target).area <= 1e-12
+        if cover_mode == CoverMode.MINIMAL.value and is_global_target:
+            return [(seqnum, 0) for seqnum in range(1, cell_count(0) + 1)]
 
-        def index_for(level: int) -> tuple[object, list[object]]:
-            cached = _COVER_INDEX_CACHE.get(level)
+        deadline = time.monotonic() + _MAX_COVER_SECONDS
+        visited_count = 0
+        shape_cache: dict[tuple[int, int], object] = {}
+
+        def cached_cell_shape(seqnum: int, level: int):
+            key = (seqnum, level)
+            cached = shape_cache.get(key)
             if cached is None:
-                cells: list[object] = []
-                for seqnum in range(1, cell_count(level) + 1):
-                    if time.monotonic() > deadline:
-                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-                    # A full WGS84 polygon is expensive to construct for every
-                    # cell at high resolutions. Use cached envelopes to narrow
-                    # candidates, then build exact geometry only for matches.
-                    cells.append(box(*_cell_bbox(seqnum, level)))
-                cached = (STRtree(cells), cells)
-                _COVER_INDEX_CACHE[level] = cached
+                cached = _cell_shape(seqnum, level)
+                shape_cache[key] = cached
             return cached
 
-        def candidate_indexes_for(index: object) -> set[int]:
-            return {
-                int(candidate_index)
-                for target_variant in target_query_variants
-                for candidate_index in index.query(target_variant)
-            }
+        def component_seeds(search_target: object, level: int) -> set[int]:
+            pending = [search_target]
+            seeds: set[int] = set()
+            while pending:
+                component = pending.pop()
+                if component.is_empty:
+                    continue
+                if component.geom_type in {"Polygon", "LineString", "Point"}:
+                    point = component.representative_point()
+                    quad, i, j = locate_cell(point.x, point.y, level)
+                    seeds.add(q2di_to_seqnum(quad, i, j, level))
+                    continue
+                pending.extend(component.geoms)
+            return seeds
+
+        def intersects_area(cell: object, search_variants: tuple[object, ...]) -> bool:
+            return any(
+                cell_variant.intersection(search_variant).area > 0.0
+                for cell_variant in longitude_variants(cell)
+                for search_variant in search_variants
+            )
+
+        def intersecting_cells(search_target: object, level: int) -> Iterator[tuple[int, object]]:
+            nonlocal visited_count
+            seeds = component_seeds(search_target, level)
+            queue = deque(seeds)
+            for seed in seeds:
+                queue.extend(cell_neighbors(seed, level))
+            search_variants = longitude_variants(search_target)
+            visited: set[int] = set()
+            while queue:
+                seqnum = queue.popleft()
+                if seqnum in visited:
+                    continue
+                visited.add(seqnum)
+                visited_count += 1
+                if visited_count > _MAX_CANDIDATE_CELLS:
+                    raise ValidationError(
+                        f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
+                        f"limit={_MAX_CANDIDATE_CELLS}, observed={visited_count}"
+                    )
+                if time.monotonic() > deadline:
+                    raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
+                cell = cached_cell_shape(seqnum, level)
+                if not intersects_area(cell, search_variants):
+                    continue
+                queue.extend(cell_neighbors(seqnum, level))
+                yield seqnum, cell
 
         def covers_area(container: object, contained: object) -> bool:
             return contained.difference(container).area <= 1e-12
 
-        index, _ = index_for(res)
-        candidate_indexes = candidate_indexes_for(index)
-        if cover_mode == CoverMode.MINIMAL.value and is_global_target:
-            return [(seqnum, 0) for seqnum in range(1, cell_count(0) + 1)]
+        output: list[tuple[int, int]] = []
 
-        selected_parents: list[tuple[int, int, object]] = []
-        selected_by_target_variant: list[list[object]] = [[] for _ in target_variants]
-        if cover_mode == CoverMode.MINIMAL.value:
-            for current_res in range(res):
-                parent_index, _ = index_for(current_res)
-                for candidate_index in sorted(candidate_indexes_for(parent_index)):
-                    if time.monotonic() > deadline:
-                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-                    parent = _cell_shape(candidate_index + 1, current_res)
-                    parent_variants = longitude_variants(parent)
-                    covered_variants = [
-                        (target_index, parent_variant)
-                        for target_index, target_variant in enumerate(target_variants)
-                        for parent_variant in parent_variants
-                        if covers_area(target_variant, parent_variant)
-                    ]
-                    if not covered_variants:
-                        continue
-                    if any(
-                        covers_area(unary_union(selected_by_target_variant[target_index]), parent_variant)
-                        for target_index, parent_variant in covered_variants
-                        if selected_by_target_variant[target_index]
-                    ):
-                        continue
-                    selected_parents.append((candidate_index + 1, current_res, parent))
-                    for target_index, parent_variant in covered_variants:
-                        selected_by_target_variant[target_index].append(parent_variant)
-
-        remaining_by_target_variant = [
-            target_variant.difference(unary_union(selected_by_target_variant[target_index]))
-            if selected_by_target_variant[target_index]
-            else target_variant
-            for target_index, target_variant in enumerate(target_variants)
-        ]
-
-        for candidate_index in sorted(candidate_indexes):
-            if time.monotonic() > deadline:
-                raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
-            cell = _cell_shape(candidate_index + 1, res)
-            cell_variants = longitude_variants(cell)
-            intersects = any(
-                cell_variant.intersection(target_variant).area > 0.0
-                for cell_variant in cell_variants
-                for target_variant in target_variants
-            )
-            if not intersects:
-                continue
-            contained = is_global_target or any(
-                covers_area(target_variant, cell_variant)
-                for cell_variant in cell_variants
-                for target_variant in target_variants
-            )
-            covered_by_parent = False
-            if cover_mode == CoverMode.MINIMAL.value and selected_parents:
-                covered_by_parent = not any(
-                    cell_variant.intersection(remaining).area > 1e-12
-                    for cell_variant in cell_variants
-                    for remaining in remaining_by_target_variant
-                )
-            if (cover_mode != CoverMode.CONTAIN.value or contained) and not covered_by_parent:
-                output.append((candidate_index + 1, res))
+        def append_output(seqnum: int, level: int) -> None:
+            output.append((seqnum, level))
             if len(output) > _MAX_OUTPUT_CELLS:
                 raise ValidationError(
                     f"ISEA4H cover exceeded MAX_OUTPUT_CELLS: "
                     f"limit={_MAX_OUTPUT_CELLS}, observed={len(output)}"
                 )
 
-        output.extend((seqnum, current_res) for seqnum, current_res, _ in selected_parents)
+        remaining = target
+        if cover_mode == CoverMode.MINIMAL.value:
+            for current_res in range(res):
+                selected_shapes: list[object] = []
+                for seqnum, cell in intersecting_cells(remaining, current_res):
+                    if covers_area(remaining, cell):
+                        append_output(seqnum, current_res)
+                        selected_shapes.append(cell)
+                if selected_shapes:
+                    remaining = make_valid(remaining.difference(unary_union(selected_shapes)))
+                    if remaining.is_empty or remaining.area <= 1e-12:
+                        remaining = Polygon()
+                        break
+
+        if not remaining.is_empty:
+            for seqnum, cell in intersecting_cells(remaining, res):
+                if cover_mode != CoverMode.CONTAIN.value or covers_area(target, cell):
+                    append_output(seqnum, res)
+
         return sorted(output, key=lambda cell: (cell[1], cell[0]))
 
     # ------------------------------------------------------------------

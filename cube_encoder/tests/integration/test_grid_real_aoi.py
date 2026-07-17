@@ -48,7 +48,7 @@ def test_three_grids_cover_real_raster_with_positive_windows() -> None:
             windows = 0
             for cell in cells:
                 assert cell.grid_level <= requested_grid_level
-                assert (cell.topology_code is not None) if grid_type == "mgrs" else cell.topology_code is None
+                assert cell.topology_code is None
                 geometry = sdk.code_to_geometry(
                     GridAddress(
                         grid_type=cell.grid_type,

@@ -1276,11 +1276,22 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 raise ValueError("dataset output has not been started")
             attempts = self._fetchall(
                 connection,
-                "SELECT * FROM partition_job_attempts WHERE task_id = %s "
-                "AND batch_id = (SELECT batch_id FROM partition_datasets WHERE dataset_id = %s) FOR UPDATE",
-                (task_id, dataset_id),
+                "SELECT * FROM partition_job_attempts WHERE task_id = %s FOR UPDATE",
+                (task_id,),
             )
-            if not attempts:
+            attempt = attempts[0] if attempts else None
+            attempt_payload = _value(attempt.get("payload")) if attempt else {}
+            strict_dataset_ids = {
+                str(item.get("dataset_id"))
+                for item in attempt_payload.get("datasets", ())
+                if isinstance(item, dict) and item.get("dataset_id")
+            } if isinstance(attempt_payload, dict) and attempt_payload.get("strict_partition_request") else set()
+            legacy_batch_matches = bool(
+                attempt
+                and not strict_dataset_ids
+                and str(attempt.get("batch_id") or "") == str(datasets[0].get("batch_id") or "")
+            )
+            if not attempt or (dataset_id not in strict_dataset_ids and not legacy_batch_matches):
                 raise RuntimeError("partition attempt is not active for this dataset")
             outputs = self._fetchall(
                 connection,
@@ -1346,7 +1357,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                             payload.get("status", "ready"),
                         )
                     else:
-                        columns = "output_id,dataset_id,output_version,tile_output_id,source_asset_id,band_code,acquisition_time,time_bucket,grid_type,grid_level,grid_level_name,topology_code,space_code,st_code,window_col_off,window_row_off,window_width,window_height,value_ref_uri"
+                        columns = "output_id,dataset_id,output_version,tile_output_id,source_asset_id,band_code,acquisition_time,time_bucket,grid_type,grid_level,grid_level_name,topology_code,space_code,st_code,window_col_off,window_row_off,window_width,window_height,value_ref_uri,attributes"
                         values = (
                             payload.get("output_id"),
                             dataset_id,
@@ -1367,6 +1378,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                             payload.get("window_width"),
                             payload.get("window_height"),
                             payload.get("value_ref_uri", payload.get("tile_uri", "s3://")),
+                            json.dumps(payload.get("attributes", {})),
                         )
                     self._merge_insert(
                         connection,

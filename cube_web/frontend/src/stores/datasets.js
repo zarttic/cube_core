@@ -1,12 +1,16 @@
 import { computed, reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 
+import { requestGet, requestJson, requestPost } from '@/api/client';
 import { pageQuery, normalizePageResponse } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
-import { requestGet } from '@/api/client';
+import { m6ReadsEnabled, m6WritesEnabled } from '@/config';
 
-const detailTabs = ['overview', 'assets', 'bands', 'tiles', 'indexes', 'grid', 'quality', 'publications'];
-const paginatedTabs = ['assets', 'bands', 'tiles', 'indexes', 'grid', 'quality', 'publications'];
+const detailTabs = [
+  'overview', 'scenes', 'bands', 'outputs', 'grid', 'tiles', 'indexes',
+  'ingest-records', 'quality', 'publications', 'provenance',
+];
+const paginatedTabs = detailTabs.filter((tab) => tab !== 'overview');
 
 function emptyDetail() {
   return Object.fromEntries(detailTabs.map((tab) => [tab, null]));
@@ -18,29 +22,20 @@ function emptyTabPages() {
 
 export const useDatasetsStore = defineStore('datasets', () => {
   const filters = reactive({
-    keyword: '',
-    dataType: '',
-    productType: '',
-    batchId: '',
-    gridType: '',
-    partitionStatus: '',
-    qualityStatus: '',
-    publishStatus: '',
-    timeStart: '',
-    timeEnd: '',
-    sortBy: 'updated_at',
-    sortOrder: 'desc',
+    keyword: '', dataType: '', productType: '', ingestStatus: '', qualityStatus: '',
+    publishStatus: '', archived: '', timeStart: '', timeEnd: '', sortBy: 'updated_at', sortOrder: 'desc',
   });
   const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
   const records = ref([]);
+  const summary = ref({ dataset_count: 0, scene_count: 0, ready_scene_count: 0, failed_scene_count: 0 });
   const loading = ref(false);
   const error = ref('');
+  const actionLoading = ref(false);
   const selectedDatasetId = ref('');
   const detailVisible = ref(false);
   const detailLoading = ref(false);
   const detail = ref(emptyDetail());
   const activeTab = ref('overview');
-  const selectedRows = ref([]);
   const tabPages = reactive(emptyTabPages());
   const listScope = createRequestScope();
   const detailScope = createRequestScope();
@@ -51,20 +46,11 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   function listParameters() {
     return {
-      keyword: filters.keyword.trim(),
-      data_type: filters.dataType,
-      product_type: filters.productType,
-      batch_id: filters.batchId.trim(),
-      grid_type: filters.gridType,
-      partition_status: filters.partitionStatus,
-      quality_status: filters.qualityStatus,
-      publish_status: filters.publishStatus,
-      time_start: filters.timeStart,
-      time_end: filters.timeEnd,
-      page: pageState.page,
-      page_size: pageState.pageSize,
-      sort_by: filters.sortBy,
-      sort_order: filters.sortOrder,
+      keyword: filters.keyword.trim(), data_type: filters.dataType, product_type: filters.productType,
+      ingest_status: filters.ingestStatus, quality_status: filters.qualityStatus,
+      publish_status: filters.publishStatus, archived: filters.archived,
+      time_start: filters.timeStart, time_end: filters.timeEnd,
+      page: pageState.page, page_size: pageState.pageSize, sort_by: filters.sortBy, sort_order: filters.sortOrder,
     };
   }
 
@@ -73,13 +59,17 @@ export const useDatasetsStore = defineStore('datasets', () => {
     loading.value = true;
     error.value = '';
     try {
-      const response = await requestGet(`/v1/partition/datasets?${pageQuery(listParameters())}`, { signal: request.signal });
+      if (!m6ReadsEnabled()) {
+        records.value = [];
+        Object.assign(pageState, { page: 1, total: 0 });
+        return;
+      }
+      const response = await requestGet(`/v1/datasets?${pageQuery(listParameters())}`, { signal: request.signal });
       if (!listScope.isCurrent(request.token)) return;
       const page = normalizePageResponse(response, pageState.page, pageState.pageSize);
       records.value = page.items;
-      pageState.total = page.total;
-      pageState.page = page.page;
-      pageState.pageSize = page.pageSize;
+      summary.value = response.summary || summary.value;
+      Object.assign(pageState, { total: page.total, page: page.page, pageSize: page.pageSize });
       if (!records.value.length && pageState.total > 0 && pageState.page > 1) {
         pageState.page = Math.max(1, Math.ceil(pageState.total / pageState.pageSize));
         await loadList();
@@ -101,7 +91,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
     detailVisible.value = Boolean(nextDatasetId);
     activeTab.value = 'overview';
     detail.value = emptyDetail();
-    selectedRows.value = [];
     Object.assign(tabPages, emptyTabPages());
   }
 
@@ -113,7 +102,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
     detailLoading.value = true;
     error.value = '';
     try {
-      const overview = await requestGet(`/v1/partition/datasets/${encodeURIComponent(datasetId)}`, { signal: request.signal });
+      const overview = await requestGet(`/v1/datasets/${encodeURIComponent(datasetId)}`, { signal: request.signal });
       if (selectedDatasetId.value !== datasetId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
       detail.value.overview = overview;
     } catch (requestError) {
@@ -121,9 +110,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
       error.value = requestError.message || '数据集详情加载失败';
       throw requestError;
     } finally {
-      if (selectedDatasetId.value === datasetId && generation === detailGeneration && detailScope.isCurrent(request.token)) {
-        detailLoading.value = false;
-      }
+      if (selectedDatasetId.value === datasetId && generation === detailGeneration && detailScope.isCurrent(request.token)) detailLoading.value = false;
     }
   }
 
@@ -135,10 +122,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
     const page = tabPages[tab];
     try {
       const query = pageQuery({ page: page.page, page_size: page.pageSize });
-      const response = await requestGet(
-        `/v1/partition/datasets/${encodeURIComponent(datasetId)}/${tab}?${query}`,
-        { signal: request.signal },
-      );
+      const response = await requestGet(`/v1/datasets/${encodeURIComponent(datasetId)}/${tab}?${query}`, { signal: request.signal });
       if (selectedDatasetId.value !== datasetId || generation !== detailGeneration || !tabScopes[tab].isCurrent(request.token)) return;
       const normalized = normalizePageResponse(response, page.page, page.pageSize);
       detail.value[tab] = normalized;
@@ -152,7 +136,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   async function setActiveTab(tab) {
     activeTab.value = tab;
-    selectedRows.value = [];
     await loadDetailTab(tab);
   }
 
@@ -164,9 +147,64 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   async function setTabPageSize(tab, pageSize) {
     if (!tabPages[tab]) return;
-    tabPages[tab].pageSize = pageSize;
-    tabPages[tab].page = 1;
+    Object.assign(tabPages[tab], { pageSize, page: 1 });
     await loadDetailTab(tab);
+  }
+
+  async function runAction(path, payload = {}, method = 'POST', refreshTab = '') {
+    if (!selectedDatasetId.value) return;
+    if (!m6WritesEnabled()) throw new Error('当前运行模式只允许查看 Dataset。');
+    actionLoading.value = true;
+    error.value = '';
+    try {
+      const response = method === 'PATCH'
+        ? await requestJson(path, payload, { method: 'PATCH' })
+        : await requestPost(path, payload);
+      await openDetail(selectedDatasetId.value);
+      if (refreshTab) {
+        activeTab.value = refreshTab;
+        await loadDetailTab(refreshTab);
+      }
+      await loadList();
+      return response;
+    } catch (requestError) {
+      error.value = requestError.message || '数据集操作失败';
+      throw requestError;
+    } finally {
+      actionLoading.value = false;
+    }
+  }
+
+  function updateMetadata(payload) {
+    const id = encodeURIComponent(selectedDatasetId.value);
+    return runAction(`/v1/datasets/${id}`, payload, 'PATCH');
+  }
+
+  function reassignScene(sceneId, targetDatasetId, reason) {
+    const id = encodeURIComponent(selectedDatasetId.value);
+    return runAction(`/v1/datasets/${id}/scenes/${encodeURIComponent(sceneId)}/reassign`, {
+      target_dataset_id: targetDatasetId, reason,
+    }, 'POST', 'scenes');
+  }
+
+  function rerunQuality() {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/quality-runs`, {}, 'POST', 'quality');
+  }
+
+  function retrySceneIngest(sceneId) {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/scenes/${encodeURIComponent(sceneId)}/ingest-retry`, {}, 'POST', 'ingest-records');
+  }
+
+  function publish() {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publish`, {}, 'POST', 'publications');
+  }
+
+  function withdraw(publicationId) {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publications/${encodeURIComponent(publicationId)}/withdraw`, {}, 'POST', 'publications');
+  }
+
+  function archive(reason) {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/archive`, { reason }, 'POST');
   }
 
   function closeDetail() {
@@ -180,26 +218,9 @@ export const useDatasetsStore = defineStore('datasets', () => {
   }
 
   return {
-    filters,
-    pageState,
-    records,
-    loading,
-    error,
-    selectedDatasetId,
-    selectedDataset,
-    detailVisible,
-    detailLoading,
-    detail,
-    activeTab,
-    selectedRows,
-    tabPages,
-    loadList,
-    openDetail,
-    loadDetailTab,
-    setActiveTab,
-    setTabPage,
-    setTabPageSize,
-    closeDetail,
-    dispose,
+    filters, pageState, records, summary, loading, error, actionLoading, selectedDatasetId, selectedDataset,
+    detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
+    setActiveTab, setTabPage, setTabPageSize, updateMetadata, reassignScene, rerunQuality,
+    retrySceneIngest, publish, withdraw, archive, closeDetail, dispose,
   };
 });

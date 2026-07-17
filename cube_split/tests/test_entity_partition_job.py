@@ -11,6 +11,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 import cube_split.jobs.entity_partition_job as entity_partition_job
+from cube_split.ingest import ray_ingest_job
 from cube_split.jobs.entity_partition_job import run_entity_partition
 
 
@@ -1137,6 +1138,71 @@ def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_p
     assert captured[0].attributes["cube.scene_id"] == "scene-a"
     assert captured[0].attributes["cube.space_code"] == "86283082fffffff"
     assert captured[0].attributes["cube.target_table"] == "rs_entity_tile_asset"
+
+
+def test_write_entity_metadata_failure_recreates_job_table_after_rollback(monkeypatch, tmp_path: Path):
+    events = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def rollback(self):
+            events.append("rollback")
+
+        def commit(self):
+            events.append("commit")
+
+    class FakePsycopg:
+        @staticmethod
+        def connect(_dsn, client_encoding="UTF8"):
+            _ = client_encoding
+            return FakeConnection()
+
+    monkeypatch.setitem(sys.modules, "psycopg", FakePsycopg)
+    monkeypatch.setattr(
+        entity_partition_job,
+        "_ensure_entity_tables_postgres",
+        lambda _conn: events.append("ensure"),
+    )
+    monkeypatch.setattr(
+        ray_ingest_job,
+        "_upsert_job_status_postgres",
+        lambda _conn, _job_id, status, *_args, **_kwargs: events.append(f"job:{status}"),
+    )
+
+    def fail_tiles(*_args, **_kwargs):
+        events.append("tiles")
+        raise RuntimeError("tile write failed")
+
+    monkeypatch.setattr(entity_partition_job, "_upsert_entity_tiles_postgres", fail_tiles)
+
+    with pytest.raises(RuntimeError, match="tile write failed"):
+        entity_partition_job._write_entity_metadata_postgres(
+            [{}],
+            SimpleNamespace(
+                postgres_dsn="postgresql://example",
+                dataset="demo_optical",
+                sensor="optical_mosaic",
+                asset_version="v1",
+                job_id="entity-job-failure",
+                asset_storage_backend="minio",
+            ),
+            tmp_path / "run_failure",
+        )
+
+    assert events == [
+        "ensure",
+        "job:running",
+        "tiles",
+        "rollback",
+        "ensure",
+        "job:failed",
+        "commit",
+    ]
 
 
 def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path):

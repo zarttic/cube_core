@@ -40,4 +40,18 @@ describe('quality store', () => {
     expect(download.mock.calls[1][0]).toContain('rule_code=asset_readability');
     expect(download.mock.calls[1][0]).not.toMatch(/(?:\?|&)page=|(?:\?|&)page_size=/);
   });
+
+  it('loads the rule catalog once and exports a record without page filters', async () => {
+    setActivePinia(createPinia());
+    const store = useQualityStore();
+    const pending = store.loadRuleCatalog();
+    deferred.at(-1)({ rule_set_version: 'rules-v1', items: [{ code: 'asset_readability', mandatory: true }] });
+    await pending;
+    await store.loadRuleCatalog();
+    await store.exportRunErrors({ quality_run_id: 'quality-run-a', dataset_code: 'DS-A' }, 'csv');
+
+    const { download, requestGet } = await import('@/api/client');
+    expect(requestGet.mock.calls.filter(([url]) => url === '/v1/quality/rules')).toHaveLength(1);
+    expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-a/errors/export?format=csv');
+  });
 });

@@ -460,6 +460,7 @@ def build_grid_tasks_driver(
 
     sdk = CubeEncoderSDK()
     bbox_cache: dict[str, list[float]] = {}
+    geometry_cache: dict[str, dict[str, object]] = {}
     scene_cover_cache: dict[tuple[str, float, float, float, float], list[tuple[GridAddress, list[float]]]] = {}
     tasks: list[dict] = []
 
@@ -493,6 +494,11 @@ def build_grid_tasks_driver(
             )
 
         for cell, cb in cells:
+            cache_key = cell.topology_code or f"{cell.grid_type}:{cell.grid_level}:{cell.space_code}"
+            cell_geom = geometry_cache.get(cache_key)
+            if cell_geom is None:
+                cell_geom = sdk.code_to_geometry(address=cell)
+                geometry_cache[cache_key] = cell_geom
             tasks.append(
                 {
                     "scene_id": asset.scene_id,
@@ -507,6 +513,7 @@ def build_grid_tasks_driver(
                     "cell_min_lat": float(cb[1]),
                     "cell_max_lon": float(cb[2]),
                     "cell_max_lat": float(cb[3]),
+                    "cell_geom": cell_geom,
                     "cover_mode": cover_mode,
                     "resolution": asset.resolution,
                 }
@@ -654,6 +661,7 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
                 "cell_min_lat": float(row.cell_min_lat),
                 "cell_max_lon": float(row.cell_max_lon),
                 "cell_max_lat": float(row.cell_max_lat),
+                "cell_geom": getattr(row, "cell_geom", None),
                 "window_col_off": int(win.col_off),
                 "window_row_off": int(win.row_off),
                 "window_width": int(win.width),

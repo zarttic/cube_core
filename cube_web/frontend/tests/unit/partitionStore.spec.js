@@ -3,87 +3,140 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/api/client', () => ({ requestGet: vi.fn(), requestPost: vi.fn() }));
 
-import { requestPost } from '@/api/client';
+import { requestGet, requestPost } from '@/api/client';
 import { usePartitionStore } from '@/stores/partition';
 
-function dataset(dataType = 'optical') {
-  const carbon = dataType === 'carbon';
+function scene(sceneId, batchIds) {
+  return { scene_id: sceneId, source_batch_ids: batchIds, bbox: [100, 20, 101, 21] };
+}
+
+function dataset(datasetId, scenes, gridType = 'geohash', level = 4) {
   return {
-    dataset_id: 'dataset-1', dataset_code: 'DS-1', dataset_title: 'Dataset 1', data_type: dataType, product_type: 'L2A',
-    assets: [{
-      source_asset_id: 'asset-1',
-      ...(carbon
-        ? { source_uri: 's3://cube/cube/source/carbon/observation.nc4', source_kind: 'raw', source_format: 'netcdf' }
-        : { cog_uri: 's3://cube/loader/dataset-1/asset-1.tif', source_kind: 'cog', source_format: 'cog' }),
-      checksum: 'a'.repeat(64), bbox: [100, 20, 101, 21], crs: 'EPSG:4326', time_start: '2026-07-01T00:00:00Z', time_end: '2026-07-01T00:05:00Z', attributes: {},
-    }],
-    bands: [{ source_asset_id: 'asset-1', band_code: 'B04', band_name: 'Red', band_type: 'spectral', unit: null, display_order: 4, attributes: {} }], attributes: {},
-    partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
+    dataset_id: datasetId,
+    dataset_code: datasetId.toUpperCase(),
+    dataset_title: datasetId,
+    data_type: gridType === 'isea4h' ? 'carbon' : 'optical',
+    scenes,
+    partition: {
+      grid_type: gridType,
+      requested_grid_level: level,
+      partition_method: gridType === 'isea4h' ? 'entity' : 'logical',
+      cover_mode: 'intersect',
+      time_granularity: 'day',
+      max_cells_per_asset: 0,
+    },
   };
 }
 
-describe('partition store', () => {
+describe('partition store M6 scene request', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
-    requestPost.mockReset();
-    requestPost.mockResolvedValue({ task_id: 'task-1', status: 'queued' });
+    requestGet.mockReset().mockResolvedValue({ tasks: [], total: 0, page: 1, page_size: 20, load_batches: [] });
+    requestPost.mockReset().mockResolvedValue({ partition_run_id: 'server-run', task_id: 'task-1', status: 'queued' });
   });
 
-  it('submits a mixed batch to the generic M2 route with dataset partition overrides', async () => {
+  it('submits one M6 run for multiple datasets and source load batches', async () => {
     const store = usePartitionStore();
-    store.form.batchId = 'batch-frontend-001';
-    store.form.gridType = 'isea4h';
-    store.form.requestedGridLevel = 6;
     store.form.datasets = [
-      { ...dataset('optical'), partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' } },
-      { ...dataset('carbon'), dataset_id: 'dataset-2', dataset_code: 'DS-2', partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'entity' } },
+      dataset('dataset-optical', [scene('scene-shared', ['load-a', 'load-b']), scene('scene-a', ['load-a'])]),
+      dataset('dataset-carbon', [scene('scene-carbon', ['load-b'])], 'isea4h', 4),
     ];
+
     await store.submit();
-    expect(requestPost).toHaveBeenCalledWith('/v1/partition/tasks/run', expect.objectContaining({
-      batch_id: 'batch-frontend-001', datasets: store.form.datasets, grid_type: 'isea4h', requested_grid_level: 6,
-      partition_method: 'entity', cover_mode: 'intersect', time_granularity: 'day', max_cells_per_asset: 0,
-    }), expect.any(Object));
-    const body = requestPost.mock.calls[0][1];
-    expect(Object.keys(body).sort()).toEqual(['batch_id', 'cover_mode', 'datasets', 'grid_type', 'max_cells_per_asset', 'partition_method', 'requested_grid_level', 'time_granularity']);
-    expect(body.datasets.map((item) => item.partition)).toEqual([
-      { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
-      { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'entity' },
+
+    expect(requestPost).toHaveBeenCalledOnce();
+    const [path, body] = requestPost.mock.calls[0];
+    expect(path).toBe('/v1/partition/runs');
+    expect(body.partition_run_id).toMatch(/^partition-run-/);
+    expect(body.source_batch_ids).toEqual(['load-a', 'load-b']);
+    expect(body.source_batch_ids).not.toContain(body.partition_run_id);
+    expect(body.datasets).toEqual([
+      {
+        dataset_id: 'dataset-optical',
+        scene_ids: ['scene-shared', 'scene-a'],
+        partition: expect.objectContaining({ grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' }),
+      },
+      {
+        dataset_id: 'dataset-carbon',
+        scene_ids: ['scene-carbon'],
+        partition: expect.objectContaining({ grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'entity' }),
+      },
     ]);
-    expect(body.datasets[1].assets[0]).toMatchObject({ source_uri: 's3://cube/cube/source/carbon/observation.nc4', source_kind: 'raw', source_format: 'netcdf' });
-    expect(body.datasets[1].assets[0]).not.toHaveProperty('cog_uri');
-    expect(body).not.toHaveProperty('dataset_ids');
-    expect(body).not.toHaveProperty('grid_level');
-    expect(body).not.toHaveProperty('grid_level_mode');
+    expect(JSON.stringify(body)).not.toContain('/tasks/run');
+    expect(body).not.toHaveProperty('batch_id');
+    expect(body.datasets[0]).not.toHaveProperty('assets');
   });
 
-  it('keeps homogeneous batches on the typed strict endpoint', async () => {
+  it('keeps execution identity separate from a load batch identity', () => {
     const store = usePartitionStore();
-    store.form.batchId = 'batch-optical-001';
-    store.form.datasets = [dataset('optical')];
+    store.form.datasets = [dataset('dataset-a', [scene('scene-a', ['load-a'])])];
 
-    await store.submit();
+    expect(() => store.buildRequest('load-a')).toThrow(/不能复用载入批次/);
+    expect(store.buildRequest('partition-run-explicit')).toMatchObject({
+      partition_run_id: 'partition-run-explicit',
+      source_batch_ids: ['load-a'],
+    });
+  });
 
-    expect(requestPost).toHaveBeenCalledWith(
-      '/v1/partition/optical/tasks/run',
-      expect.objectContaining({ batch_id: 'batch-optical-001' }),
-      expect.any(Object),
-    );
+  it('deduplicates source batches retained by the same scene', () => {
+    const store = usePartitionStore();
+    store.form.datasets = [dataset('dataset-a', [scene('scene-a', ['load-a', 'load-b', 'load-a'])])];
+
+    expect(store.buildRequest('partition-run-a')).toMatchObject({
+      source_batch_ids: ['load-a', 'load-b'],
+      datasets: [{ dataset_id: 'dataset-a', scene_ids: ['scene-a'] }],
+    });
+  });
+
+  it('overrides legacy per-dataset cover, time and cell-limit values', () => {
+    const store = usePartitionStore();
+    const selected = dataset('dataset-a', [scene('scene-a', ['load-a'])]);
+    selected.partition = {
+      ...selected.partition,
+      cover_mode: 'minimal',
+      time_granularity: 'month',
+      max_cells_per_asset: 99,
+    };
+    store.form.datasets = [selected];
+
+    expect(store.buildRequest('partition-run-fixed').datasets[0].partition).toMatchObject({
+      cover_mode: 'intersect',
+      time_granularity: 'day',
+      max_cells_per_asset: 0,
+    });
   });
 
   it.each([
-    ['empty batch', (form) => { form.batchId = ' '; }],
-    ['empty assets', (form) => { form.datasets = [{ ...dataset(), assets: [] }]; }],
-    ['empty bands', (form) => { form.datasets = [{ ...dataset(), bands: [] }]; }],
-    ['invalid grid level', (form) => { form.requestedGridLevel = 99; }],
-    ['invalid dataset partition', (form) => { form.datasets = [{ ...dataset(), partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'logical' } }]; }],
-    ['carbon COG asset', (form) => { form.datasets = [dataset('carbon'), { ...dataset('carbon'), assets: [{ ...dataset('carbon').assets[0], source_uri: undefined, cog_uri: 's3://cube/source/carbon/converted.tif' }] }]; }],
-    ['retired request field', (form) => { form.grid_level_mode = 'legacy'; }],
-  ])('rejects %s before the request', (_name, mutate) => {
+    ['no scenes', [dataset('dataset-a', [])], /至少选择一个数据单元/],
+    ['no source batch', [dataset('dataset-a', [scene('scene-a', [])])], /来源载入批次/],
+    ['invalid grid level', [dataset('dataset-a', [scene('scene-a', ['load-a'])], 'geohash', 99)], /层级/],
+    ['invalid partition method', [{ ...dataset('dataset-a', [scene('scene-a', ['load-a'])]), partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'logical' } }], /剖分方式/],
+  ])('rejects %s before submission', (_name, datasets, message) => {
     const store = usePartitionStore();
-    store.form.batchId = 'batch-frontend-001';
-    store.form.datasets = [dataset()];
-    mutate(store.form);
-    expect(() => store.buildRequest()).toThrow(/批次|资产|波段|层级|剖分方式|已退役/);
+    store.form.datasets = datasets;
+    expect(() => store.buildRequest('partition-run-invalid')).toThrow(message);
     expect(requestPost).not.toHaveBeenCalled();
+  });
+
+  it('rejects one scene selected under two datasets', () => {
+    const store = usePartitionStore();
+    store.form.datasets = [
+      dataset('dataset-a', [scene('scene-shared', ['load-a'])]),
+      dataset('dataset-b', [scene('scene-shared', ['load-a'])]),
+    ];
+    expect(() => store.buildRequest('partition-run-invalid')).toThrow(/不能重复归入/);
+  });
+
+  it('loads server-generated batch identities from the M6 endpoint', async () => {
+    requestGet.mockResolvedValueOnce({
+      load_batches: [
+        { load_batch_id: 'load-a', status: 'succeeded' },
+        { load_batch_id: 'load-pending', status: 'pending' },
+      ],
+    });
+    const store = usePartitionStore();
+    await store.loadBatches();
+    expect(requestGet).toHaveBeenCalledWith('/v1/partition/load-batches?limit=100&status=succeeded', expect.any(Object));
+    expect(store.batches).toEqual([{ load_batch_id: 'load-a', status: 'succeeded' }]);
   });
 });

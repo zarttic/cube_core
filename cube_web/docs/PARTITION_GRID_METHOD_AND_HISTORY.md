@@ -40,6 +40,7 @@
 
 - 逻辑方式默认 `grid_level=5`，可按分辨率自动推导。
 - 实体方式默认 `grid_level=6`；`isea4h` 可继续使用目标像素边长推导。
+- 生产 Web 剖分请求固定使用 `cover_mode=intersect`、`time_granularity=day` 和 `max_cells_per_asset=0`，页面不提供这三项的编辑控件；后端保留字段用于旧客户端兼容以及 smoke、调试和故障复现。
 - `max_cells_per_asset=0` 表示不设上限；smoke、调试和故障复现应显式设置正数。
 - `plane_grid` 必须使用空 `target_crs`，否则 runner 拒绝请求并保留源影像 CRS。
 

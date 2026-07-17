@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from cube_web.services.partition_defaults import DEFAULT_LOGICAL_GRID_LEVEL
+from cube_web.services.partition_defaults import DEFAULT_GEOHASH_GRID_LEVEL
 
 MINIO_SOURCE_PREFIX = "s3://cube/cube/source"
 OPTICAL_SOURCE_PREFIX = f"{MINIO_SOURCE_PREFIX}/optocal"
@@ -214,7 +214,7 @@ def _raster_schema(
         "batch_id": batch_id,
         "batch_name": batch_name,
         "grid_type": "geohash",
-        "grid_level": DEFAULT_LOGICAL_GRID_LEVEL,
+        "grid_level": DEFAULT_GEOHASH_GRID_LEVEL,
         "target_crs": "EPSG:4326",
         "selected_assets": copy.deepcopy(assets),
     }

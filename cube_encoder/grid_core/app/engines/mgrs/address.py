@@ -51,6 +51,34 @@ def precision_from_code(code: str) -> int:
     return p
 
 
+def parent_space_code(code: str) -> str:
+    """Return the standard MGRS parent by removing one easting and northing digit."""
+    canonical = canonicalize_mgrs(code)
+    precision = precision_from_code(canonical)
+    if precision == 0:
+        raise ValidationError("MGRS precision 0 has no parent")
+    base = canonical[: -2 * precision]
+    digits = canonical[-2 * precision :]
+    east, north = digits[:precision], digits[precision:]
+    return f"{base}{east[:-1]}{north[:-1]}"
+
+
+def direct_child_space_codes(code: str) -> list[str]:
+    """Return the 100 syntactic direct children of a standard MGRS code."""
+    canonical = canonicalize_mgrs(code)
+    precision = precision_from_code(canonical)
+    if precision >= 5:
+        raise ValidationError("MGRS precision 5 has no children")
+    base = canonical if precision == 0 else canonical[: -2 * precision]
+    digits = "" if precision == 0 else canonical[-2 * precision :]
+    east, north = digits[:precision], digits[precision:]
+    return [
+        f"{base}{east}{e}{north}{n}"
+        for e in range(10)
+        for n in range(10)
+    ]
+
+
 @dataclass(frozen=True)
 class ParsedTopologyCode:
     domain_token: str

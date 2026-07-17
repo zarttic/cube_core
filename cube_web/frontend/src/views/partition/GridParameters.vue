@@ -1,62 +1,65 @@
 <script setup>
-import { computed } from 'vue';
-
-import { derivedPartitionMethod, gridDefinition, gridDefinitions, nativeLevelLabel } from '@/utils/grid';
-
-const props = defineProps({ modelValue: { type: Object, required: true }, loading: Boolean });
-const emit = defineEmits(['update:modelValue', 'reset', 'submit', 'load-map']);
-
-const definition = computed(() => gridDefinition(props.modelValue.gridType));
-const levels = computed(() => {
-  if (!definition.value) return [];
-  return Array.from({ length: definition.value.maxLevel - definition.value.minLevel + 1 }, (_, index) => definition.value.minLevel + index);
+defineProps({
+  modelValue: { type: Object, required: true },
+  loading: Boolean,
+  submitDisabled: Boolean,
+  dataTypeLabel: { type: String, default: '' },
+  selectedCount: { type: Number, default: 0 },
+  selectedDatasetCount: { type: Number, default: 0 },
+  sourceBatchIds: { type: Array, default: () => [] },
 });
-const partitionMethod = computed(() => derivedPartitionMethod(props.modelValue.gridType));
-
-function update(key, value) {
-  emit('update:modelValue', { ...props.modelValue, [key]: value });
-}
+defineEmits(['reset', 'submit', 'open-datasets']);
 </script>
 
 <template>
-  <section class="partition-section grid-parameters">
-    <div class="section-heading"><h2>默认格网参数</h2><span>用于新选数据集；每个数据集可单独调整，剖分方式由格网类型自动确定</span></div>
-    <el-form label-position="top" class="partition-form-grid">
-      <el-form-item label="格网类型">
-        <el-select data-testid="partition-grid-type" :model-value="modelValue.gridType" @update:model-value="update('gridType', $event)">
-          <el-option v-for="grid in gridDefinitions" :key="grid.value" :label="grid.label" :value="grid.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="原生层级">
-        <el-select :model-value="Number(modelValue.requestedGridLevel)" @update:model-value="update('requestedGridLevel', Number($event))">
-          <el-option v-for="level in levels" :key="level" :label="nativeLevelLabel(modelValue.gridType, level)" :value="level" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="剖分方式">
-        <div class="readonly-method">{{ partitionMethod === 'entity' ? '实体剖分' : '逻辑剖分' }}</div>
-      </el-form-item>
-      <el-form-item label="覆盖方式">
-        <el-select :model-value="modelValue.coverMode" @update:model-value="update('coverMode', $event)">
-          <el-option label="相交" value="intersect" /><el-option label="包含" value="contain" /><el-option label="最小覆盖" value="minimal" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="时间粒度">
-        <el-select :model-value="modelValue.timeGranularity" @update:model-value="update('timeGranularity', $event)">
-          <el-option label="秒" value="second" /><el-option label="分钟" value="minute" /><el-option label="小时" value="hour" /><el-option label="天" value="day" /><el-option label="月" value="month" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="每资产最大格网单元数">
-        <el-input-number :model-value="Number(modelValue.maxCellsPerAsset)" :min="0" :precision="0" @update:model-value="update('maxCellsPerAsset', Number($event || 0))" />
-      </el-form-item>
-    </el-form>
-    <div class="partition-actions">
-      <el-button @click="$emit('load-map')">加载格网预览</el-button>
+  <section class="config-panel">
+    <h3>{{ dataTypeLabel === '光学遥感' ? '数据配置' : '参数配置' }}</h3>
+    <div class="form-group">
+      <label>待剖分数据队列</label>
+      <div class="task-note">
+        <span>任务备注：请在 ARD数据载入 子系统中完成数据接入与登记后，待剖分数据将自动出现在此队列中。</span>
+      </div>
+      <div class="data-queue-panel">
+        <button type="button" class="queue-header queue-drawer-toggle" @click="$emit('open-datasets')">
+          <span class="queue-title">已载入{{ dataTypeLabel }}数据</span>
+          <span class="queue-header-meta">
+            <span class="queue-open-text">打开列表</span>
+          </span>
+        </button>
+        <div class="queue-selected-summary">
+          当前选择：{{ selectedDatasetCount }} 个数据集 · {{ selectedCount }} 个数据单元
+        </div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>来源载入批次</label>
+      <div class="source-batch-summary" data-testid="selected-load-batches">
+        <div class="source-batch-summary-head"><strong>{{ sourceBatchIds.length ? sourceBatchIds.length + ' 个批次' : '未关联批次' }}</strong></div>
+        <div v-if="sourceBatchIds.length" class="source-batch-tags">
+          <el-tooltip v-for="batchId in sourceBatchIds" :key="batchId" :content="batchId" placement="top" :show-after="300">
+            <el-tag class="source-batch-tag" size="small" effect="plain" tabindex="0">
+              <span class="source-batch-id">{{ batchId }}</span>
+            </el-tag>
+          </el-tooltip>
+        </div>
+        <span v-else>选择待剖分数据单元后自动关联</span>
+      </div>
+    </div>
+    <div class="form-group action-buttons">
       <el-button @click="$emit('reset')">重置</el-button>
-      <el-button type="primary" :loading="loading" @click="$emit('submit')">提交剖分</el-button>
+      <el-button type="primary" :loading="loading" :disabled="submitDisabled" @click="$emit('submit')">提交剖分</el-button>
     </div>
   </section>
 </template>
 
 <style scoped>
-.readonly-method { min-height: 32px; display: flex; align-items: center; padding: 0 11px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-light); color: var(--el-text-color-regular); }
+.source-batch-summary { display: grid; gap: 8px; padding: 10px 11px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-light); }
+.source-batch-summary-head { display: flex; align-items: center; justify-content: space-between; color: var(--el-text-color-primary); font-size: 12px; }
+.source-batch-summary > span { color: var(--el-text-color-secondary); font-size: 12px; }
+.source-batch-tags { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; overflow: hidden; }
+.source-batch-tags :deep(.source-batch-tag) { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
+.source-batch-tags :deep(.source-batch-tag .el-tag__content) { display: block; flex: 1 1 auto; max-width: 100%; min-width: 0; overflow: hidden; }
+.source-batch-id { display: block; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-buttons { flex-wrap: nowrap; }
+.action-buttons :deep(.el-button) { flex: 1 1 50%; min-width: 0; }
 </style>
