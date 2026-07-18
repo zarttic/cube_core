@@ -45,7 +45,7 @@ __all__ = [
     "GridCell",
     "CompactGridCell",
     "STCode",
-    # Level range utilities (re-exported for M2)
+    # Public level-range utilities.
     "LEVEL_RANGES",
     "validate_requested_grid_level",
     # Request models

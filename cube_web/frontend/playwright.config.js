@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
 const devServerPort = Number(process.env.PLAYWRIGHT_DEV_SERVER_PORT || '50040');
+const includeRealSystem = process.env.PLAYWRIGHT_REAL_SYSTEM === '1';
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -20,13 +21,14 @@ export default defineConfig({
   },
   projects: [
     {
-      name: 'm4-e2e',
-      testIgnore: /m5-acceptance\.spec\.js/,
+      name: 'app-e2e',
+      testIgnore: /(ui-workflows|real-system)\.spec\.js/,
     },
     {
-      name: 'm5-acceptance',
-      testMatch: /m5-acceptance\.spec\.js/,
+      name: 'ui-workflows',
+      testMatch: /ui-workflows\.spec\.js/,
     },
+    ...(includeRealSystem ? [{ name: 'real-system', testMatch: /real-system\.spec\.js/ }] : []),
   ],
   webServer: [
     {

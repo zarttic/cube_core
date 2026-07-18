@@ -881,7 +881,7 @@ def _upload_entity_tiles_to_minio(rows: list[dict[str, Any]], args: argparse.Nam
 
 def _entity_tile_object_key(row: dict[str, Any], source_path: Path, args: argparse.Namespace) -> str:
     prefix = str(getattr(args, "minio_prefix", "cube/entity") or "cube/entity").strip("/")
-    dataset = _safe_name(str(getattr(args, "dataset", "demo_optical") or "demo_optical"))
+    dataset = _safe_name(str(getattr(args, "dataset", "optical_default") or "optical_default"))
     sensor = _safe_name(str(getattr(args, "sensor", "optical_mosaic") or "optical_mosaic"))
     version = _safe_name(str(getattr(args, "asset_version", getattr(args, "tile_version", "v1")) or "v1"))
     scene_id = _safe_name(str(row.get("scene_id") or "unknown_scene"))
@@ -920,7 +920,7 @@ def _rows_with_asset_uris(
 
 def _entity_tile_upload_options(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "dataset": str(getattr(args, "dataset", "demo_optical")),
+        "dataset": str(getattr(args, "dataset", "optical_default")),
         "sensor": str(getattr(args, "sensor", "optical_mosaic")),
         "asset_version": str(getattr(args, "asset_version", "v1")),
         "minio_endpoint": str(getattr(args, "minio_endpoint", "")),
@@ -1204,7 +1204,7 @@ def _write_entity_metadata_postgres(rows: list[dict[str, Any]], args: argparse.N
     if not dsn:
         raise ValueError("postgres_dsn is required when metadata_backend=postgres")
 
-    dataset = str(getattr(args, "dataset", "demo_optical"))
+    dataset = str(getattr(args, "dataset", "optical_default"))
     sensor = str(getattr(args, "sensor", "optical_mosaic"))
     tile_version = str(getattr(args, "asset_version", getattr(args, "tile_version", "v1")))
     run_id = str(getattr(args, "job_id", "")) or run_dir.name
@@ -1470,7 +1470,7 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
         "metadata_backend": metadata_backend,
         "uploaded_tile_count": uploaded_tile_count,
         "metadata_rows": metadata_rows,
-        "dataset": str(getattr(args, "dataset", "demo_optical")),
+        "dataset": str(getattr(args, "dataset", "optical_default")),
         "sensor": str(getattr(args, "sensor", "optical_mosaic")),
         "asset_version": str(getattr(args, "asset_version", getattr(args, "tile_version", "v1"))),
         "minio_bucket": str(getattr(args, "minio_bucket", "")) if asset_storage_backend == "minio" else "",
@@ -1500,7 +1500,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--partition-backend", default="ray", choices=["auto", "ray", "thread", "local", "process"])
     parser.add_argument("--job-id", default="")
-    parser.add_argument("--dataset", default="demo_optical")
+    parser.add_argument("--dataset", default="optical_default")
     parser.add_argument("--sensor", default="optical_mosaic")
     parser.add_argument("--asset-version", default="v1")
     parser.add_argument("--metadata-backend", default="postgres", choices=["none", "local", "postgres"])

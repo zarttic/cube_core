@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview or reset the M2 partition domain with explicit development guards."""
+"""Preview or reset the partition domain with explicit development guards."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from typing import Any
 from cube_split import runtime_config
 
 from cube_web.services.partition_domain_schema import (
-    LEGACY_ALLOWLIST,
     NEW_DOMAIN_OBJECTS,
     NEW_DOMAIN_TABLES,
+    TASK_SCHEDULER_TABLES,
     apply_schema,
     inventory_partition_objects,
 )
@@ -22,7 +22,7 @@ DROP_ORDER = (
     "partition_domain_outbox", "partition_quality_warn_approvals", "partition_publications",
     "partition_quality_errors", "partition_quality_results", "partition_quality_runs", "partition_indexes",
     "partition_tiles", "partition_grid_cells", "partition_output_versions", "partition_dataset_bands",
-    "partition_dataset_assets", "partition_datasets", "quality_reports", "partition_job_attempts",
+    "partition_dataset_assets", "partition_datasets", "partition_job_attempts",
     "partition_assets", "partition_batches",
 )
 
@@ -53,7 +53,7 @@ def validate_reset_guards(connection: Any, database_name: str, dangerous: bool, 
 def build_reset_plan(connection: Any) -> ResetPlan:
     inventory = inventory_partition_objects(connection)
     objects = tuple(sorted(inventory.objects, key=lambda row: (row[0], row[1], row[2] or "", row[3])))
-    known = NEW_DOMAIN_TABLES | NEW_DOMAIN_OBJECTS | LEGACY_ALLOWLIST
+    known = NEW_DOMAIN_TABLES | NEW_DOMAIN_OBJECTS | TASK_SCHEDULER_TABLES
     # Indexes, constraints and owned sequences disappear with their known
     # table.  Independently named relation-like objects must still block reset.
     dependent_kinds = {"i", "S"}
@@ -82,7 +82,7 @@ def _connect() -> Any:
 
 
 def _bootstrap_scheduling(connection: Any) -> None:
-    """Recreate the three legacy scheduler tables after an approved full reset."""
+    """Recreate the three task scheduler tables after an approved full reset."""
     statements = (
         """CREATE TABLE partition_batches (
           batch_id TEXT PRIMARY KEY, batch_name TEXT NOT NULL, data_type TEXT NOT NULL, source_system TEXT,

@@ -7,7 +7,7 @@ function count(value, keys) {
 </script>
 
 <template>
-  <div v-if="result || error" class="legacy-execution-result">
+  <div v-if="result || error" class="execution-result">
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <template v-if="result">
       <div class="quality-section-title">剖分结果</div>

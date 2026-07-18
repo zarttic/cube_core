@@ -1,4 +1,4 @@
-"""CubeEncoderSDK: the frozen M1 SDK facade for CubeEncoder capabilities.
+"""CubeEncoderSDK: the stable public facade for CubeEncoder capabilities.
 
 Method signatures are final and consumed by cube_split and cube_web.
 Internally this delegates to the same GridService / TopologyService /
@@ -22,7 +22,7 @@ from grid_core.app.services.topology_service import TopologyService
 class CubeEncoderSDK:
     """Typed SDK facade over grid/topology/ST-code capabilities.
 
-    All signatures are frozen by M1 contract.  Callers (cube_split, cube_web)
+    All signatures follow the published SDK contract. Callers (cube_split, cube_web)
     depend on these exact parameter names; do not rename them.
 
     ``codes_to_geometries`` keys its result by

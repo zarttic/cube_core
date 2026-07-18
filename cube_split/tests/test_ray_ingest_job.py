@@ -5,8 +5,10 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+from grid_core.sdk import CubeEncoderSDK, GridAddress
+from shapely.geometry import shape
+
 import cube_split.ingest.ray_ingest_job as ray_ingest_job
-from grid_core.sdk import CubeEncoderSDK
 from cube_split.ingest.ray_ingest_job import (
     CubeFactRecord,
     RawAssetRecord,
@@ -145,6 +147,44 @@ def test_cell_geometry_uses_sdk_boundaries_for_all_production_grids():
         assert ring[0] == ring[-1]
         assert all(-180 <= lon <= 180 and -90 <= lat <= 90 for lon, lat in ring)
         assert len({tuple(point) for point in ring[:-1]}) == expected_points - 1
+
+
+def test_mgrs_cell_geometry_reduces_latitude_band_clipped_boundary_to_four_corners():
+    geometry = json.loads(
+        cell_geometry_geojson(
+            grid_type="mgrs",
+            grid_level=2,
+            space_code="50SMK1428",
+        )
+    )
+
+    ring = geometry["coordinates"][0]
+    assert len(ring) == 5
+    assert ring[0] == ring[-1]
+    assert len({tuple(point) for point in ring[:-1]}) == 4
+
+
+def test_mgrs_cell_geometry_preserves_non_quadrilateral_boundary_cells():
+    sdk = CubeEncoderSDK()
+    cases = (("01CDM42", 1), ("02VLH1210", 2))
+    for space_code, grid_level in cases:
+        address = GridAddress(grid_type="mgrs", grid_level=grid_level, space_code=space_code)
+        expected = sdk.code_to_geometry(address=address)
+        actual = json.loads(
+            cell_geometry_geojson(
+                grid_type="mgrs",
+                grid_level=grid_level,
+                space_code=space_code,
+                geometry=expected,
+            )
+        )
+
+        ring = actual["coordinates"][0]
+        assert len(ring) >= 4
+        assert ring[0] == ring[-1]
+        expected_shape = shape(expected)
+        relative_error = shape(actual).symmetric_difference(expected_shape).area / expected_shape.area
+        assert relative_error <= 1e-6
 
 
 def test_isea4h_cell_geometry_is_actual_hexagon_not_bbox():

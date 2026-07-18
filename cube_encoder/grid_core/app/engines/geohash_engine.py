@@ -1,4 +1,4 @@
-"""Pure-Python Geohash engine implementing the M1 grid SDK contract.
+"""Pure-Python Geohash engine implementing the production grid SDK contract.
 
 Geohash encodes a WGS84 (lon, lat) point to a base32 string of length 1..12.
 Each character encodes 5 bits; longitude and latitude bits alternate starting
@@ -385,7 +385,7 @@ def _cells_for_bbox(
 
 
 class GeohashEngine(BaseGridEngine):
-    """Standard Geohash grid engine for the M1 SDK contract.
+    """Standard Geohash grid engine for the production SDK contract.
 
     - grid_type: "geohash"
     - grid_level == len(space_code), range 1..12

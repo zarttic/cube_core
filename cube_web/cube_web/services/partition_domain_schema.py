@@ -1,8 +1,7 @@
-"""Canonical M2 partition-domain DDL and catalog inspection helpers.
+"""Canonical production partition-domain DDL and catalog inspection helpers.
 
-The legacy scheduling tables are intentionally retained.  This module owns only
-the versioned dataset/result domain added by M2 and can therefore be applied to
-an existing loader database without destructive migration behaviour.
+The task scheduling tables are owned separately.  This module owns only
+the versioned dataset, partition result, quality, and publication domain.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-16-m2-mixed-carbon-v1"
+PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-18-partition-domain-v1"
 NEW_DOMAIN_TABLES = {
     "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
     "partition_output_versions", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -23,7 +22,7 @@ NEW_DOMAIN_OBJECTS = NEW_DOMAIN_TABLES | {
     "uq_partition_publication_live_snapshot", "idx_partition_publication_claim",
     "idx_partition_publication_dataset_latest", "idx_partition_domain_outbox_claim",
 }
-LEGACY_ALLOWLIST = {"quality_reports", "partition_batches", "partition_assets", "partition_job_attempts"}
+TASK_SCHEDULER_TABLES = {"partition_batches", "partition_assets", "partition_job_attempts"}
 
 
 @dataclass(frozen=True)
@@ -49,7 +48,7 @@ class PartitionObjectInventory:
 
 
 def schema_statements() -> tuple[str, ...]:
-    """Return ordered, executable, additive DDL for the M2 domain."""
+    """Return ordered, executable DDL for the production partition domain."""
     return (
         """CREATE TABLE IF NOT EXISTS partition_datasets (
           dataset_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES partition_batches(batch_id),
@@ -92,7 +91,7 @@ def schema_statements() -> tuple[str, ...]:
           PRIMARY KEY (dataset_id, source_asset_id, band_code),
           FOREIGN KEY (dataset_id, source_asset_id) REFERENCES partition_dataset_assets(dataset_id, source_asset_id) ON DELETE CASCADE
         )""",
-        # Existing M2 databases stored every source in a non-null ``cog_uri``.
+        # Carbon assets preserve a raw source URI while raster products use COG.
         # Carbon observations retain their raw NetCDF/HDF source URI instead.
         """ALTER TABLE partition_dataset_assets ADD COLUMN IF NOT EXISTS source_uri TEXT""",
         """ALTER TABLE partition_dataset_assets ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'cog'""",
@@ -255,7 +254,7 @@ def schema_statements() -> tuple[str, ...]:
           DEFERRABLE INITIALLY DEFERRED;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """MERGE INTO partition_domain_schema_version target
-           USING (SELECT TRUE AS singleton, '2026-07-16-m2-mixed-carbon-v1' AS schema_version) source
+           USING (SELECT TRUE AS singleton, '2026-07-18-partition-domain-v1' AS schema_version) source
            ON (target.singleton = source.singleton)
            WHEN MATCHED THEN UPDATE SET schema_version = source.schema_version, installed_at = now()
            WHEN NOT MATCHED THEN INSERT (singleton, schema_version) VALUES (source.singleton, source.schema_version)""",

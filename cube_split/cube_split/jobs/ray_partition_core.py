@@ -680,5 +680,16 @@ def process_partition(rows: Iterator[Any], time_granularity: str, include_sample
 def _process_local_task_group(rows: list[dict], time_granularity: str, include_sample_mean: bool = True) -> list[dict]:
     if not rows:
         return []
+    source_paths = {
+        str(row["asset_path"]): str(row["source_asset_path"])
+        for row in rows
+        if row.get("source_asset_path")
+    }
     task_rows = [SimpleNamespace(**row) for row in rows]
-    return list(process_partition(iter(task_rows), time_granularity, include_sample_mean=include_sample_mean))
+    results = list(process_partition(iter(task_rows), time_granularity, include_sample_mean=include_sample_mean))
+    for result in results:
+        source_path = source_paths.get(str(result.get("asset_path") or ""))
+        if source_path:
+            result["asset_path"] = source_path
+            result["source_asset_path"] = source_path
+    return results

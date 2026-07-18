@@ -68,10 +68,6 @@ def ray_address() -> str:
     return env_text("CUBE_WEB_RAY_ADDRESS") or env_text("RAY_ADDRESS") or DEFAULT_RAY_ADDRESS
 
 
-def load_demo_partition_schemas() -> bool:
-    return bool_option(env_text("CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS"), False)
-
-
 def require_postgres_dsn() -> str:
     value = postgres_dsn()
     if not value:
@@ -129,7 +125,7 @@ def auth_settings() -> AuthSettings:
         authorize_path=env_text("CUBE_WEB_AUTH_AUTHORIZE_PATH") or DEFAULT_AUTH_AUTHORIZE_PATH,
         token_path=env_text("CUBE_WEB_AUTH_TOKEN_PATH") or DEFAULT_AUTH_TOKEN_PATH,
         logout_path=env_text("CUBE_WEB_AUTH_LOGOUT_PATH") or DEFAULT_AUTH_LOGOUT_PATH,
-        required=bool_option(env_text("CUBE_WEB_AUTH_REQUIRED"), False),
+        required=bool_option(env_text("CUBE_WEB_AUTH_REQUIRED") or None, True),
     )
 
 

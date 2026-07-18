@@ -1,4 +1,4 @@
-"""Contract tests for the M1 frozen grid SDK contract.
+"""Contract tests for the stable public grid SDK contract.
 
 These tests define the breaking contract boundaries for Task 1.
 They must fail before implementation and pass after.
@@ -44,7 +44,7 @@ def test_grid_cell_carries_result_level_and_dual_mgrs_identity() -> None:
         (GridType.ISEA4H, (0, 15)),
     ],
 )
-def test_validate_requested_grid_level_exports_exact_m2_ranges(
+def test_validate_requested_grid_level_exports_exact_production_ranges(
     grid_type: GridType, accepted: tuple[int, int]
 ) -> None:
     minimum, maximum = accepted

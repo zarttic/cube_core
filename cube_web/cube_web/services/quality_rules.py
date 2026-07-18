@@ -4,10 +4,13 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlparse
+
+from pyproj import CRS
 
 from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, TerminalQualityStatus
 
-DEFAULT_RULE_SET_VERSION = "2026.07.14-v1"
+DEFAULT_RULE_SET_VERSION = "2026.07.17-v3"
 
 RULE_NAMES = {
     "index_schema": "索引结构完整性",
@@ -20,8 +23,12 @@ RULE_NAMES = {
     "asset_crs": "数据单元坐标系",
     "window_bounds": "像素窗口边界",
     "pixel_sample": "像素抽样",
+    "optical_band_contract": "光学波段规范",
+    "radar_band_contract": "雷达极化通道规范",
+    "product_band_contract": "信息产品变量规范",
     "metadata_completeness": "元数据完整性",
     "declared_metadata_defects": "已声明元数据缺陷",
+    "declared_metadata_warnings": "已声明元数据警告",
     "product_year_consistency": "产品年份一致性",
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
@@ -248,40 +255,195 @@ def _asset_readability(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
         "SELECT source_asset_id, cog_uri, source_uri, source_format, checksum "
-        "FROM partition_dataset_assets WHERE dataset_id = %s",
-        (context.dataset_id,),
+        "FROM partition_dataset_assets a WHERE dataset_id = %s AND EXISTS ("
+        "SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
     ):
         source_asset_id = row["source_asset_id"]
         source_uri = str(row.get("source_uri") or "")
         source_format = str(row.get("source_format") or "")
+        object_uri = source_uri if context.data_type == "carbon" else str(row.get("cog_uri") or source_uri)
+        source_contract_valid = True
         if context.data_type == "carbon":
             allowed = {"netcdf": (".nc", ".nc4"), "hdf5": (".h5", ".hdf", ".hdf5")}
-            if source_format not in allowed or not source_uri.startswith("s3://") or not source_uri.lower().endswith(allowed.get(source_format, ())):
+            if (
+                source_format not in allowed
+                or not _is_supported_object_uri(source_uri)
+                or not source_uri.lower().endswith(allowed.get(source_format, ()))
+            ):
+                source_contract_valid = False
                 yield QualityFinding(
                     "invalid_carbon_source",
-                    "carbon source must be an s3 NetCDF or HDF5 asset matching source_format",
+                    "carbon source must be an s3 NetCDF/HDF5 asset matching source_format",
                     source_asset_id=source_asset_id,
                     field="source_uri",
                 )
-        elif source_format != "cog" or not str(row.get("cog_uri") or "").startswith("s3://"):
+        elif source_format != "cog" or not _is_supported_object_uri(object_uri):
+            source_contract_valid = False
             yield QualityFinding(
-                "invalid_cog_uri", "source asset must use an s3 COG URI", source_asset_id=source_asset_id, field="cog_uri"
+                "invalid_cog_uri",
+                "source asset must use an s3 COG URI",
+                source_asset_id=source_asset_id,
+                field="cog_uri",
             )
-        if not re.fullmatch(r"[0-9a-f]{64}", str(row["checksum"] or "")):
+        checksum = str(row["checksum"] or "")
+        checksum_valid = re.fullmatch(r"[0-9a-f]{64}", checksum) is not None
+        if not checksum_valid:
             yield QualityFinding(
                 "invalid_checksum",
                 "source asset checksum must be a SHA-256 hex digest",
                 source_asset_id=source_asset_id,
                 field="checksum",
             )
+        if source_contract_valid and checksum_valid:
+            if context.object_reader is None:
+                yield QualityFinding(
+                    "object_reader_unavailable",
+                    "quality object reader is unavailable",
+                    source_asset_id=source_asset_id,
+                    field="source_uri",
+                )
+                continue
+            try:
+                context.object_reader.inspect(object_uri, source_format, expected_checksum=checksum)
+            except Exception as exc:
+                yield QualityFinding(
+                    "source_object_unreadable",
+                    "source object does not exist or cannot be opened",
+                    source_asset_id=source_asset_id,
+                    field="source_uri",
+                    context={"reason": type(exc).__name__},
+                )
+
+
+def _is_supported_object_uri(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text)
+    return parsed.scheme == "s3" and bool(parsed.netloc and parsed.path.strip("/"))
 
 
 def _asset_crs(context: RuleContext) -> Iterable[QualityFinding]:
     if context.data_type == "carbon":
         return
-    for row in _rows(context, "SELECT source_asset_id, crs FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)):
-        if not str(row["crs"] or "").strip():
+    for row in _rows(
+        context,
+        "SELECT source_asset_id, cog_uri, source_format, crs, checksum FROM partition_dataset_assets a "
+        "WHERE dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
+    ):
+        value = str(row["crs"] or "").strip()
+        if not value:
             yield QualityFinding("missing_crs", "source asset CRS is required", source_asset_id=row["source_asset_id"], field="crs")
+            continue
+        try:
+            declared_crs = CRS.from_user_input(value)
+        except Exception:
+            yield QualityFinding(
+                "invalid_crs",
+                "source asset CRS is not a valid coordinate reference system",
+                source_asset_id=row["source_asset_id"],
+                field="crs",
+            )
+            continue
+        if context.object_reader is None or row["source_format"] != "cog" or not row["cog_uri"]:
+            continue
+        try:
+            inspection = context.object_reader.inspect(
+                str(row["cog_uri"]),
+                "cog",
+                expected_checksum=str(row["checksum"]),
+            )
+            actual_crs = CRS.from_user_input(inspection.crs) if inspection.crs else None
+        except Exception:
+            # Object and raster readability belong to asset_readability.
+            continue
+        if actual_crs is not None and not declared_crs.equals(actual_crs):
+            yield QualityFinding(
+                "crs_metadata_mismatch",
+                "declared CRS does not match the source raster CRS",
+                source_asset_id=row["source_asset_id"],
+                field="crs",
+                context={"declared": declared_crs.to_string(), "actual": actual_crs.to_string()},
+            )
+
+
+def _pixel_sample(context: RuleContext) -> Iterable[QualityFinding]:
+    if context.object_reader is None:
+        yield QualityFinding("object_reader_unavailable", "quality object reader is unavailable", field="source_uri")
+        return
+    for row in _rows(
+        context,
+        "SELECT source_asset_id, cog_uri, source_format, checksum FROM partition_dataset_assets a "
+        "WHERE dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
+    ):
+        if row["source_format"] != "cog" or not row["cog_uri"]:
+            continue
+        try:
+            inspection = context.object_reader.inspect(
+                str(row["cog_uri"]),
+                "cog",
+                sample_pixels=True,
+                expected_checksum=str(row["checksum"]),
+            )
+        except Exception:
+            # The mandatory readability rule owns missing/unreadable object errors.
+            continue
+        if not inspection.valid_pixels:
+            yield QualityFinding(
+                "no_valid_sample_pixels",
+                "deterministic raster sample contains no valid pixels",
+                source_asset_id=row["source_asset_id"],
+                field="pixels",
+            )
+        elif not inspection.nonzero_pixels:
+            yield QualityFinding(
+                "zero_sample_pixels",
+                "deterministic raster sample contains only zero-valued pixels",
+                source_asset_id=row["source_asset_id"],
+                field="pixels",
+                context={"sample_pixels": inspection.sample_pixels, "valid_pixels": inspection.valid_pixels},
+            )
+
+
+def _band_contract(context: RuleContext, expected_type: str) -> Iterable[QualityFinding]:
+    for row in _rows(
+        context,
+        "SELECT a.source_asset_id, b.band_code, b.band_type FROM partition_dataset_assets a "
+        "LEFT JOIN partition_dataset_bands b ON b.dataset_id = a.dataset_id AND b.source_asset_id = a.source_asset_id "
+        "WHERE a.dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id) "
+        "ORDER BY a.source_asset_id, b.display_order, b.band_code",
+    ):
+        if not str(row["band_code"] or "").strip():
+            yield QualityFinding(
+                "missing_band_metadata",
+                "source asset has no normalized band metadata",
+                source_asset_id=row["source_asset_id"],
+                field="band_code",
+            )
+        elif row["band_type"] != expected_type:
+            yield QualityFinding(
+                "invalid_band_type",
+                f"band_type must be {expected_type} for {context.data_type} data",
+                source_asset_id=row["source_asset_id"],
+                field="band_type",
+                context={"band_code": row["band_code"], "actual": row["band_type"], "expected": expected_type},
+            )
+
+
+def _optical_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
+    return _band_contract(context, "spectral")
+
+
+def _radar_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
+    return _band_contract(context, "polarization")
+
+
+def _product_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
+    return _band_contract(context, "variable")
 
 
 def _window_bounds(context: RuleContext) -> Iterable[QualityFinding]:
@@ -306,8 +468,9 @@ def _window_bounds(context: RuleContext) -> Iterable[QualityFinding]:
 def _metadata_completeness(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
-        "SELECT source_asset_id, time_start, time_end, bbox, crs FROM partition_dataset_assets WHERE dataset_id = %s",
-        (context.dataset_id,),
+        "SELECT source_asset_id, time_start, time_end, bbox, crs FROM partition_dataset_assets a "
+        "WHERE dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
     ):
         required = ("time_start", "time_end") if context.data_type == "carbon" else ("time_start", "time_end", "crs")
         missing = [name for name in required if row[name] is None or not str(row[name]).strip()]
@@ -322,9 +485,14 @@ def _metadata_completeness(context: RuleContext) -> Iterable[QualityFinding]:
             )
 
 
-def _declared_metadata_defects(context: RuleContext) -> Iterable[QualityFinding]:
+def _declared_metadata_findings(context: RuleContext, *, warning: bool) -> Iterable[QualityFinding]:
     """Persist deterministic loader-declared metadata findings without truncation."""
-    for row in _rows(context, "SELECT source_asset_id, attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)):
+    for row in _rows(
+        context,
+        "SELECT source_asset_id, attributes FROM partition_dataset_assets a WHERE dataset_id = %s AND EXISTS ("
+        "SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
+    ):
         attributes = row["attributes"] or {}
         if isinstance(attributes, str):
             import json
@@ -332,6 +500,10 @@ def _declared_metadata_defects(context: RuleContext) -> Iterable[QualityFinding]
             attributes = json.loads(attributes)
         for item in attributes.get("quality_metadata_defects", []):
             if not isinstance(item, dict):
+                continue
+            severity = str(item.get("severity") or "error").strip().lower()
+            is_warning = severity in {"warn", "warning"}
+            if is_warning != warning:
                 continue
             yield QualityFinding(
                 str(item.get("error_code") or "declared_metadata_defect"),
@@ -342,9 +514,20 @@ def _declared_metadata_defects(context: RuleContext) -> Iterable[QualityFinding]
             )
 
 
+def _declared_metadata_defects(context: RuleContext) -> Iterable[QualityFinding]:
+    return _declared_metadata_findings(context, warning=False)
+
+
+def _declared_metadata_warnings(context: RuleContext) -> Iterable[QualityFinding]:
+    return _declared_metadata_findings(context, warning=True)
+
+
 def _product_year_consistency(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
-        context, "SELECT source_asset_id, time_start, attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)
+        context,
+        "SELECT source_asset_id, time_start, attributes FROM partition_dataset_assets a WHERE a.dataset_id = %s "
+        "AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
     ):
         attributes = row["attributes"] or {}
         if isinstance(attributes, str):
@@ -367,18 +550,18 @@ def _product_year_consistency(context: RuleContext) -> Iterable[QualityFinding]:
 
 def _carbon_schema(context: RuleContext) -> Iterable[QualityFinding]:
     required = {"observation_id", "lon", "lat", "xco2", "quality_flag"}
-    for row in _rows(
-        context, "SELECT source_asset_id, attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)
-    ):
-        attributes = row["attributes"] or {}
-        if isinstance(attributes, str):
-            import json
-
-            attributes = json.loads(attributes)
+    rows = _carbon_index_rows(context)
+    if not rows:
+        yield QualityFinding("missing_carbon_indexes", "carbon output has no observation indexes")
+        return
+    for row, attributes in rows:
         missing = sorted(required - set(attributes))
         if missing:
             yield QualityFinding(
-                "missing_carbon_fields", f"missing carbon fields: {', '.join(missing)}", source_asset_id=row["source_asset_id"]
+                "missing_carbon_fields",
+                f"missing carbon fields: {', '.join(missing)}",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
             )
 
 
@@ -398,42 +581,33 @@ def _carbon_quality_flags(context: RuleContext) -> Iterable[QualityFinding]:
 
 
 def _carbon_observation_duplicates(context: RuleContext) -> Iterable[QualityFinding]:
-    for row in _rows(context, "SELECT attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)):
-        attributes = row["attributes"] or {}
-        if isinstance(attributes, str):
-            import json
-
-            attributes = json.loads(attributes)
-        observations = attributes.get("observations", [])
-        identifiers = [item.get("observation_id") for item in observations if isinstance(item, dict)]
-        if len(identifiers) != len(set(identifiers)):
-            yield QualityFinding("duplicate_observation_id", "carbon observations contain duplicate observation IDs")
+    seen: set[str] = set()
+    for row, attributes in _carbon_index_rows(context):
+        identifier = str(attributes.get("observation_id") or "").strip()
+        if identifier and identifier in seen:
+            yield QualityFinding(
+                "duplicate_observation_id",
+                "carbon observations contain duplicate observation IDs",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
+            )
+        seen.add(identifier)
 
 
 def _carbon_footprints(context: RuleContext) -> Iterable[QualityFinding]:
-    for row in _rows(
-        context, "SELECT source_asset_id, attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)
-    ):
-        attributes = row["attributes"] or {}
-        if isinstance(attributes, str):
-            import json
-
-            attributes = json.loads(attributes)
+    for row, attributes in _carbon_index_rows(context):
         if attributes.get("footprint") is None:
             yield QualityFinding(
-                "missing_footprint", "carbon asset has no footprint", source_asset_id=row["source_asset_id"], field="footprint"
+                "missing_footprint",
+                "carbon observation has no footprint",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
+                field="footprint",
             )
 
 
 def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityFinding]:
-    for row in _rows(
-        context, "SELECT source_asset_id, attributes FROM partition_dataset_assets WHERE dataset_id = %s", (context.dataset_id,)
-    ):
-        attributes = row["attributes"] or {}
-        if isinstance(attributes, str):
-            import json
-
-            attributes = json.loads(attributes)
+    for row, attributes in _carbon_index_rows(context):
         try:
             lon, lat = float(attributes["lon"]), float(attributes["lat"])
             xco2 = float(attributes["xco2"])
@@ -441,12 +615,52 @@ def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityF
             continue
         if kind == "carbon_coordinates" and not (-180 <= lon <= 180 and -90 <= lat <= 90):
             yield QualityFinding(
-                "invalid_coordinates", "carbon coordinates are outside WGS84 bounds", source_asset_id=row["source_asset_id"]
+                "invalid_coordinates",
+                "carbon coordinates are outside WGS84 bounds",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
             )
         elif kind == "carbon_xco2_range" and not (0 < xco2 < 1000):
-            yield QualityFinding("xco2_out_of_range", "xco2 must be between 0 and 1000 ppm", source_asset_id=row["source_asset_id"])
-        elif kind == "carbon_quality_flags" and not str(attributes.get("quality_flag") or "").strip():
-            yield QualityFinding("missing_quality_flag", "carbon quality_flag is required", source_asset_id=row["source_asset_id"])
+            yield QualityFinding(
+                "xco2_out_of_range",
+                "xco2 must be between 0 and 1000 ppm",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
+            )
+        elif kind == "carbon_quality_flags" and (
+            attributes.get("quality_flag") is None or not str(attributes["quality_flag"]).strip()
+        ):
+            yield QualityFinding(
+                "missing_quality_flag",
+                "carbon quality_flag is required",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
+            )
+
+
+def _carbon_index_rows(context: RuleContext) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    rows = _rows(
+        context,
+        "SELECT output_id, source_asset_id, attributes FROM partition_indexes "
+        "WHERE dataset_id = %s AND output_version = %s ORDER BY output_id",
+        (context.dataset_id, context.output_version),
+    )
+    normalized = []
+    for row in rows:
+        attributes = row["attributes"] or {}
+        if isinstance(attributes, str):
+            import json
+
+            attributes = json.loads(attributes)
+        attributes = dict(attributes)
+        if "lon" not in attributes and "center_lon" in attributes:
+            attributes["lon"] = attributes["center_lon"]
+        if "lat" not in attributes and "center_lat" in attributes:
+            attributes["lat"] = attributes["center_lat"]
+        if "footprint" not in attributes and "footprint_geojson" in attributes:
+            attributes["footprint"] = attributes["footprint_geojson"]
+        normalized.append((row, attributes))
+    return normalized
 
 
 def _output_count_consistency(context: RuleContext) -> Iterable[QualityFinding]:
@@ -483,7 +697,6 @@ def default_rule_registry() -> RuleRegistry:
         "cell_bbox_validity",
         "time_bucket_consistency",
         "asset_readability",
-        "asset_crs",
         "window_bounds",
     )
     evaluators = {
@@ -496,9 +709,13 @@ def default_rule_registry() -> RuleRegistry:
         "asset_readability": _asset_readability,
         "asset_crs": _asset_crs,
         "window_bounds": _window_bounds,
-        "pixel_sample": lambda _: (),
+        "pixel_sample": _pixel_sample,
+        "optical_band_contract": _optical_band_contract,
+        "radar_band_contract": _radar_band_contract,
+        "product_band_contract": _product_band_contract,
         "metadata_completeness": _metadata_completeness,
         "declared_metadata_defects": _declared_metadata_defects,
+        "declared_metadata_warnings": _declared_metadata_warnings,
         "product_year_consistency": _product_year_consistency,
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
@@ -528,16 +745,70 @@ def default_rule_registry() -> RuleRegistry:
         )
         for rule in rules
     ]
-    rules.extend(
+    rules.append(
         RegisteredRule(
-            code=code,
-            name=RULE_NAMES[code],
+            code="metadata_completeness",
+            name=RULE_NAMES["metadata_completeness"],
             applicability={"data_types": ["optical", "radar", "product", "carbon"]},
             mandatory=False,
             parameters={},
+            evaluator=evaluators["metadata_completeness"],
+        )
+    )
+    rules.append(
+        RegisteredRule(
+            code="declared_metadata_defects",
+            name=RULE_NAMES["declared_metadata_defects"],
+            applicability={"data_types": ["optical", "radar", "product", "carbon"]},
+            mandatory=True,
+            parameters={},
+            evaluator=evaluators["declared_metadata_defects"],
+        )
+    )
+    rules.append(
+        RegisteredRule(
+            code="declared_metadata_warnings",
+            name=RULE_NAMES["declared_metadata_warnings"],
+            applicability={"data_types": ["optical", "radar", "product", "carbon"]},
+            mandatory=False,
+            parameters={},
+            evaluator=evaluators["declared_metadata_warnings"],
+        )
+    )
+    rules.append(
+        RegisteredRule(
+            "asset_crs",
+            RULE_NAMES["asset_crs"],
+            {"data_types": ["optical", "radar", "product"]},
+            True,
+            {"parser": "pyproj"},
+            evaluator=evaluators["asset_crs"],
+        )
+    )
+    rules.append(
+        RegisteredRule(
+            "pixel_sample",
+            RULE_NAMES["pixel_sample"],
+            {"data_types": ["optical", "radar", "product"]},
+            False,
+            {"band": 1, "sample_shape": [128, 128]},
+            evaluator=evaluators["pixel_sample"],
+        )
+    )
+    rules.extend(
+        RegisteredRule(
+            code,
+            RULE_NAMES[code],
+            {"data_types": [data_type]},
+            True,
+            {"expected_band_type": band_type},
             evaluator=evaluators[code],
         )
-        for code in ("pixel_sample", "metadata_completeness", "declared_metadata_defects")
+        for code, data_type, band_type in (
+            ("optical_band_contract", "optical", "spectral"),
+            ("radar_band_contract", "radar", "polarization"),
+            ("product_band_contract", "product", "variable"),
+        )
     )
     rules.append(
         RegisteredRule(

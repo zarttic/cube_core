@@ -23,5 +23,7 @@ def test_rule_catalog_exposes_requirement_and_product_applicability() -> None:
     assert body["rule_set_version"]
     assert rules["asset_readability"]["mandatory"] is True
     assert rules["metadata_completeness"]["mandatory"] is False
+    assert rules["declared_metadata_defects"]["mandatory"] is True
+    assert rules["declared_metadata_warnings"]["mandatory"] is False
     assert rules["product_year_consistency"]["applicability"]["data_types"] == ["product"]
     assert rules["carbon_schema"]["applicability"]["data_types"] == ["carbon"]

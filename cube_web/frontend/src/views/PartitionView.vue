@@ -4,7 +4,6 @@ import { ElMessage } from 'element-plus';
 import { RefreshLeft } from '@element-plus/icons-vue';
 
 import { requestJson } from '@/api/client';
-import { m6Mode } from '@/config';
 import { usePartitionStore } from '@/stores/partition';
 import { derivedPartitionMethod, gridDefinition, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 import DataManagementView from '@/views/DataManagementView.vue';
@@ -33,12 +32,13 @@ const store = usePartitionStore();
 const activeModule = ref('optical');
 const datasetDrawerVisible = ref(false);
 const gridPreviewLoading = ref(false);
-const gridGeometries = ref([]);
-const gridPreviewLimited = ref(false);
+const gridGeometriesByModule = ref({});
+const gridPreviewMetaByModule = ref({});
 const resultsByModule = ref({});
 const errorsByModule = ref({});
 let gridPreviewGeneration = 0;
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
+const MAX_RENDERED_GRID_CELLS = 2000;
 const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [value, {
   gridType: value === 'carbon' ? 'isea4h' : 'geohash',
   requestedGridLevel: value === 'carbon' ? 5 : 4,
@@ -111,7 +111,7 @@ function bboxGeometry(bbox) {
   };
 }
 
-const selectedGeometries = computed(() => activeDatasets.value.flatMap((dataset, datasetIndex) => (
+const selectedGeometries = computed(() => store.form.datasets.flatMap((dataset, datasetIndex) => (
   (dataset.assets || []).map((asset, assetIndex) => {
     const geometry = bboxGeometry(asset.bbox);
     if (!geometry) return null;
@@ -124,10 +124,13 @@ const selectedGeometries = computed(() => activeDatasets.value.flatMap((dataset,
     };
   }).filter(Boolean)
 )));
+const activeGridGeometries = computed(() => gridGeometriesByModule.value[activeModule.value] || []);
+const gridGeometries = computed(() => Object.values(gridGeometriesByModule.value).flat());
+const gridPreviewLimited = computed(() => Boolean(gridPreviewMetaByModule.value[activeModule.value]?.limited));
 const mapGeometries = computed(() => [...selectedGeometries.value, ...gridGeometries.value]);
 const activeGridLegends = computed(() => {
   const legends = new Map();
-  activeDatasets.value.forEach((dataset) => {
+  store.form.datasets.forEach((dataset) => {
     const partition = dataset.partition;
     if (!partition?.grid_type) return;
     const key = `${partition.grid_type}:${partition.requested_grid_level}`;
@@ -142,8 +145,10 @@ const activeGridLegends = computed(() => {
 const mapHint = computed(() => {
   if (!activeDatasets.value.length) return '从' + (activeProduct.value?.label || '') + '待剖分队列选择数据后可预览范围';
   if (gridPreviewLoading.value) return '正在加载真实格网覆盖';
-  if (gridGeometries.value.length) {
-    return '已加载 ' + gridGeometries.value.length + ' 个格网单元'
+  if (activeGridGeometries.value.length) {
+    const total = gridPreviewMetaByModule.value[activeModule.value]?.total || activeGridGeometries.value.length;
+    return '已加载 ' + activeGridGeometries.value.length + ' 个格网单元'
+      + (total > activeGridGeometries.value.length ? `（共 ${total} 个）` : '')
       + (gridPreviewLimited.value ? '（仅预览前 30 个数据单元范围）' : '');
   }
   return '已显示 ' + selectedGeometries.value.length + ' 个数据单元范围';
@@ -160,13 +165,15 @@ const activeResult = computed(() => resultsByModule.value[activeModule.value] ||
 const activeError = computed(() => errorsByModule.value[activeModule.value] || '');
 
 function selectModule(moduleName) {
-  gridPreviewGeneration += 1;
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
   gridPreviewLoading.value = false;
-  gridGeometries.value = [];
-  gridPreviewLimited.value = false;
   if (moduleName === 'tasks') store.loadTasks(1, store.taskPage.pageSize);
+}
+
+function setModuleGridPreview(moduleName, geometries, meta = {}) {
+  gridGeometriesByModule.value = { ...gridGeometriesByModule.value, [moduleName]: geometries };
+  gridPreviewMetaByModule.value = { ...gridPreviewMetaByModule.value, [moduleName]: meta };
 }
 
 async function submit() {
@@ -193,8 +200,7 @@ function reset() {
   resultsByModule.value[currentType] = null;
   errorsByModule.value[currentType] = '';
   gridPreviewGeneration += 1;
-  gridGeometries.value = [];
-  gridPreviewLimited.value = false;
+  setModuleGridPreview(currentType, []);
 }
 
 async function loadGridPreview(partition, bbox) {
@@ -221,6 +227,7 @@ async function loadMap() {
   }
 
   const generation = ++gridPreviewGeneration;
+  const moduleName = activeModule.value;
   const requests = new Map();
   activeDatasets.value.forEach((dataset) => {
     const partition = dataset.partition || {
@@ -236,8 +243,7 @@ async function loadMap() {
   });
 
   gridPreviewLoading.value = true;
-  gridGeometries.value = [];
-  gridPreviewLimited.value = false;
+  setModuleGridPreview(moduleName, []);
   try {
     const previewRequests = [...requests.values()].slice(0, 30);
     const settled = await Promise.allSettled(previewRequests.map(({ partition, bbox }) => loadGridPreview(partition, bbox)));
@@ -245,12 +251,18 @@ async function loadMap() {
     const successful = settled.filter((item) => item.status === 'fulfilled').map((item) => item.value);
     const failures = settled.filter((item) => item.status === 'rejected');
     if (!successful.length && failures.length) throw failures[0].reason;
-    const unique = new Map();
-    successful.flat().forEach((cell) => {
+    const cells = successful.flat();
+    const stride = Math.max(1, Math.ceil(cells.length / MAX_RENDERED_GRID_CELLS));
+    const uniqueKeys = new Set();
+    const rendered = new Map();
+    cells.forEach((cell) => {
       const geometry = cell.geometry || bboxGeometry(cell.bbox);
       if (!geometry || !cell.space_code) return;
       const key = [cell.preview_grid_type, cell.grid_level, cell.space_code].join(':');
-      unique.set(key, {
+      if (uniqueKeys.has(key)) return;
+      uniqueKeys.add(key);
+      if ((uniqueKeys.size - 1) % stride !== 0 || rendered.size >= MAX_RENDERED_GRID_CELLS) return;
+      rendered.set(key, {
         geometry,
         label: cell.space_code,
         color: gridPreviewColors[cell.preview_grid_type] || '#7c3aed',
@@ -259,13 +271,13 @@ async function loadMap() {
         weight: 1.5,
       });
     });
-    gridGeometries.value = [...unique.values()];
-    const limited = requests.size > previewRequests.length;
-    gridPreviewLimited.value = limited;
+    const geometries = [...rendered.values()];
+    const limited = requests.size > previewRequests.length || uniqueKeys.size > geometries.length;
+    setModuleGridPreview(moduleName, geometries, { limited, total: uniqueKeys.size });
     if (failures.length) {
-      ElMessage.warning(`已加载 ${gridGeometries.value.length} 个格网单元，${failures.length} 个范围加载失败。`);
+      ElMessage.warning(`已加载 ${geometries.length} 个格网单元，${failures.length} 个范围加载失败。`);
     } else {
-      ElMessage.success('已加载 ' + gridGeometries.value.length + ' 个格网单元' + (limited ? '（预览前 30 个数据单元范围）' : '') + '。');
+      ElMessage.success('已加载 ' + geometries.length + ' 个格网单元' + (limited ? `（总计 ${uniqueKeys.size} 个）` : '') + '。');
     }
   } catch (error) {
     if (generation !== gridPreviewGeneration) return;
@@ -278,8 +290,7 @@ async function loadMap() {
 function resetGridPreview() {
   gridPreviewGeneration += 1;
   gridPreviewLoading.value = false;
-  gridGeometries.value = [];
-  gridPreviewLimited.value = false;
+  setModuleGridPreview(activeModule.value, []);
 }
 
 function updateDatasets(datasets) {
@@ -297,8 +308,7 @@ function updateDatasets(datasets) {
     };
   }
   gridPreviewGeneration += 1;
-  gridGeometries.value = [];
-  gridPreviewLimited.value = false;
+  setModuleGridPreview(activeModule.value, []);
 }
 
 onMounted(() => {
@@ -347,11 +357,11 @@ onMounted(() => {
             />
           </div>
 
-          <div v-else-if="activeModule === 'quality'" class="legacy-module-page">
+          <div v-else-if="activeModule === 'quality'" class="module-page">
             <QualityView embedded />
           </div>
 
-          <div v-else-if="activeModule === 'ingest'" class="legacy-module-page">
+          <div v-else-if="activeModule === 'ingest'" class="module-page">
             <DataManagementView embedded />
           </div>
 
@@ -360,7 +370,6 @@ onMounted(() => {
             <GridParameters
               v-model="formModel"
               :loading="store.loading.submit"
-              :submit-disabled="m6Mode() !== 'm6-primary'"
               :data-type-label="activeProduct.label"
               :selected-count="activeSceneCount"
               :selected-dataset-count="activeDatasets.length"
@@ -381,7 +390,7 @@ onMounted(() => {
                         <span class="grid-legend-dot" :style="{ backgroundColor: legend.color }" />{{ legend.label }}
                       </el-tag>
                       <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">加载格网</el-button>
-                      <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!gridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
+                      <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
                     </div>
                   </div>
                   <span class="map-hint">{{ mapHint }}</span>

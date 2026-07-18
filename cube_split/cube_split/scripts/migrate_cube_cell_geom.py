@@ -9,7 +9,6 @@ from grid_core.sdk import CubeEncoderSDK
 from cube_split.ingest.ray_ingest_job import cell_geometry_geojson
 from cube_split.runtime_config import postgres_dsn
 
-
 ALTER_SQL = """
 ALTER TABLE rs_cube_cell_fact
 ADD COLUMN IF NOT EXISTS cell_geom geometry(Polygon, 4326);
@@ -81,12 +80,9 @@ def validate(conn: Any) -> dict[str, int]:
                   AND (GeometryType(cell_geom) <> 'POLYGON' OR ST_SRID(cell_geom) <> 4326 OR NOT ST_IsValid(cell_geom))
                 THEN 1 ELSE 0 END),
               SUM(CASE WHEN cell_geom IS NOT NULL
-                  AND ST_NPoints(ST_ExteriorRing(cell_geom)) <> CASE grid_type
-                    WHEN 'geohash' THEN 5
-                    WHEN 'mgrs' THEN 5
-                    WHEN 'isea4h' THEN 7
-                    ELSE ST_NPoints(ST_ExteriorRing(cell_geom))
-                  END
+                  AND ((grid_type = 'geohash' AND ST_NPoints(ST_ExteriorRing(cell_geom)) <> 5)
+                    OR (grid_type = 'mgrs' AND ST_NPoints(ST_ExteriorRing(cell_geom)) < 4)
+                    OR (grid_type = 'isea4h' AND ST_NPoints(ST_ExteriorRing(cell_geom)) <> 7))
                 THEN 1 ELSE 0 END)
             FROM rs_cube_cell_fact
             WHERE grid_type IN ('geohash', 'mgrs', 'isea4h')

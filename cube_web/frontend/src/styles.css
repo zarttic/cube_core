@@ -3371,7 +3371,7 @@ section {
     overflow-wrap: anywhere;
 }
 
-.legacy-module-page {
+.module-page {
     min-height: calc(100vh - 240px);
     padding: 20px;
     background: white;
@@ -3405,12 +3405,12 @@ section {
     line-height: 1.5;
 }
 
-.legacy-execution-result {
+.execution-result {
     display: grid;
     gap: 8px;
 }
 
-.legacy-execution-result .el-alert {
+.execution-result .el-alert {
     margin-bottom: 6px;
 }
 

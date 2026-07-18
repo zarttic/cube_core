@@ -1,6 +1,6 @@
 # cube_core
 
-更新时间：2026-07-13
+更新时间：2026-07-17
 
 本仓库是 Python monorepo，覆盖格网编码、遥感数据剖分、入库/回读、质检和 Web 管理入口。
 
@@ -39,6 +39,8 @@
 | `cube_split/docs/README.md` | 剖分、入库、质检、AOI 工作流 |
 | `cube_web/docs/README.md` | Web API、前端、任务编排 |
 
-当前格网选择：编码器完整拓扑格网为 `s2`、`mgrs`、`tile_matrix`、`isea4h`；Web 生产页面不暴露已废弃的 `mgrs`。`plane_grid` 是源 CRS 保留型逻辑窗口模式，当前不是通用 locate/cover/topology 引擎。
+当前生产格网严格限定为三类：经纬度格网 `geohash`、平面格网 `mgrs`、六边形格网
+`isea4h`。`geohash`、`mgrs` 固定使用逻辑剖分，`isea4h` 固定使用实体剖分；Web、
+剖分作业和编码 SDK 使用同一契约。`s2`、`tile_matrix`、`plane_grid` 不属于当前生产入口。
 
 `cube_encoder` 只负责格网能力，其他包必须通过 SDK 使用，不重复实现格网逻辑。

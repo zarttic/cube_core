@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg.rows import dict_row
 
+from cube_web.services.ingest_worker import process_queued_ingest_scenes
 from cube_web.services.partition_domain_store import get_partition_domain_store
-from cube_web.services.m6_quality_ingest_bridge import create_ingest_runs_after_quality
-from cube_web.services.m6_ingest_worker import process_queued_ingest_scenes
-from cube_web.services.m6_runtime import m6_runtime_policy
 from cube_web.services.quality_contracts import QualityResult
+from cube_web.services.quality_ingest_bridge import create_ingest_runs_after_quality
+from cube_web.services.quality_object_reader import quality_object_reader
 from cube_web.services.quality_repository import (
     ERROR_BATCH_SIZE,
     NewQualityError,
@@ -24,13 +25,23 @@ from cube_web.services.quality_repository import (
     start_quality_run,
     write_quality_error_batch,
 )
-from cube_web.services.quality_rules import QualityFinding, RuleContext, default_rule_registry, reduce_quality_status, snapshot_rules
+from cube_web.services.quality_rules import (
+    DEFAULT_RULE_SET_VERSION,
+    QualityFinding,
+    RuleContext,
+    default_rule_registry,
+    reduce_quality_status,
+    snapshot_rules,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _m6_auto_ingest_enabled() -> bool:
-    return m6_runtime_policy().mode == "m6-primary"
+def _safe_execution_error(exc: Exception, prefix: str) -> str:
+    exception_type = type(exc).__name__
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", exception_type) is None:
+        exception_type = "Exception"
+    return f"{prefix} ({exception_type})"
 
 
 def claim_quality_runs(tx, *, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[QualityLease]:
@@ -91,7 +102,7 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                     trigger_event_id=UUID(str(event["event_id"])),
                     trigger="automatic",
                     requested_by="system:partition-outbox",
-                    rule_set_version="2026.07.14-v1",
+                    rule_set_version=DEFAULT_RULE_SET_VERSION,
                     rule_snapshot=snapshots,
                 )
             base_store.acknowledge_outbox(event["event_id"])
@@ -103,7 +114,11 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                 event.get("dataset_id"),
                 event.get("output_version"),
             )
-            base_store.retry_outbox(event["event_id"], str(exc)[:2000], available_at=(now + timedelta(seconds=30)).isoformat())
+            base_store.retry_outbox(
+                event["event_id"],
+                _safe_execution_error(exc, "quality outbox dispatch failed"),
+                available_at=(now + timedelta(seconds=30)).isoformat(),
+            )
     return allocated
 
 
@@ -146,6 +161,7 @@ def execute_quality_run(lease: QualityLease) -> None:
         quality_completed = False
         try:
             registry = default_rule_registry()
+            object_reader = quality_object_reader()
             for snapshot in run.rule_snapshot:
                 rule = registry.get(snapshot.code)
                 if rule is None or rule.implementation_version != snapshot.implementation_version:
@@ -154,7 +170,14 @@ def execute_quality_run(lease: QualityLease) -> None:
                 try:
                     findings = tuple(
                         rule.evaluate(
-                            RuleContext(run.dataset_id, run.output_version, dataset["data_type"], dataset.get("product_type"), tx, None)
+                            RuleContext(
+                                run.dataset_id,
+                                run.output_version,
+                                dataset["data_type"],
+                                dataset.get("product_type"),
+                                tx,
+                                object_reader,
+                            )
                         )
                     )
                     _write_findings(tx, lease=lease, rule_code=snapshot.code, findings=findings)
@@ -174,7 +197,7 @@ def execute_quality_run(lease: QualityLease) -> None:
                                 error_count=0,
                                 warning_count=0,
                                 metrics={},
-                                execution_error=str(exc)[:2000],
+                                execution_error=_safe_execution_error(exc, "quality rule execution failed"),
                                 started_at=started,
                                 completed_at=datetime.now(UTC),
                             ),
@@ -214,7 +237,7 @@ def execute_quality_run(lease: QualityLease) -> None:
                 completed_at=datetime.now(UTC),
             )
             quality_completed = True
-            if is_current and _m6_auto_ingest_enabled():
+            if is_current:
                 create_ingest_runs_after_quality(
                     tx,
                     quality_run_id=lease.quality_run_id,
@@ -232,7 +255,7 @@ def execute_quality_run(lease: QualityLease) -> None:
                 error_count=sum(r.error_count for r in results),
                 warning_count=sum(r.warning_count for r in results),
                 results_complete=False,
-                execution_error=str(exc)[:2000],
+                execution_error=_safe_execution_error(exc, "quality run execution failed"),
                 completed_at=datetime.now(UTC),
             )
 
@@ -251,7 +274,7 @@ class QualityRuntime:
         self._threads = [
             Thread(target=self._dispatch_loop, name="cube-web-quality-dispatch", daemon=True),
             Thread(target=self._execute_loop, name="cube-web-quality-execute", daemon=True),
-            Thread(target=self._ingest_loop, name="cube-web-m6-ingest", daemon=True),
+            Thread(target=self._ingest_loop, name="cube-web-ingest", daemon=True),
         ]
         for thread in self._threads:
             thread.start()
@@ -286,9 +309,8 @@ class QualityRuntime:
 
     def _ingest_loop(self) -> None:
         while not self._stop.is_set():
-            if _m6_auto_ingest_enabled():
-                try:
-                    process_queued_ingest_scenes(limit=10)
-                except Exception:
-                    logger.exception("M6 ingest worker iteration failed")
+            try:
+                process_queued_ingest_scenes(limit=10)
+            except Exception:
+                logger.exception("ingest worker iteration failed")
             self._stop.wait(self.poll_seconds)

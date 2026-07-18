@@ -42,7 +42,7 @@ def test_mgrs_precision_equals_grid_level() -> None:
 
 
 def test_mgrs_level_three_canonical_vector() -> None:
-    """Canonical level-3 M2 identity vector: lon=2.2888, lat=49.2105 → '31UDQ482511'."""
+    """Canonical level-3 identity vector: lon=2.2888, lat=49.2105 -> '31UDQ482511'."""
     engine = MGRSEngine()
     # Use the exact center of 31UDQ482511 (from mgrs.toLatLon)
     address = engine.locate_space_code(2.28878903, 49.21050080, 3)

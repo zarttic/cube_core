@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { Collection, FolderOpened, Picture, Search, Unlock } from '@element-plus/icons-vue';
 
 import { requestGet } from '@/api/client';
-import { m6Mode } from '@/config';
 import { bandDisplayLabel, dataUnitTypeLabel, sceneBands, sceneMatchesBand } from '@/utils/bands';
 import { derivedPartitionMethod, gridDefinition, gridDefinitions, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 
@@ -86,11 +85,6 @@ async function loadAvailable() {
   loading.value = true;
   error.value = '';
   try {
-    if (!['m6-read', 'm6-primary'].includes(m6Mode())) {
-      availableBatches.value = [];
-      error.value = '当前运行模式使用旧版剖分链路，Scene 批次只读功能未启用。';
-      return;
-    }
     const query = new URLSearchParams({ limit: '100', status: 'succeeded' });
     if (props.dataTypeFilter) query.set('data_type', props.dataTypeFilter);
     const response = await requestGet(`/v1/partition/load-batches?${query.toString()}`);
@@ -410,7 +404,7 @@ onBeforeUnmount(() => {
                     <strong>{{ scene.scene_key || scene.scene_id }}</strong>
                     <small>{{ dataUnitTypeLabel(dataset.data_type) }} · {{ scene.acquisition_time || '采集时间未登记' }}</small>
                     <span v-if="bandsFor(scene, dataset.data_type).length" class="scene-band-list">
-                      <span v-for="band in bandsFor(scene, dataset.data_type)" :key="`${band.band_code}-${band.display_order}`" class="scene-band-chip">{{ bandDisplayLabel(band) }}</span>
+                      <span v-for="(band, bandIndex) in bandsFor(scene, dataset.data_type)" :key="`${scene.scene_id}-${band.band_code || 'invalid'}-${band.display_order}-${bandIndex}`" class="scene-band-chip">{{ bandDisplayLabel(band) }}</span>
                     </span>
                     <small v-else class="band-missing">波段信息未登记</small>
                   </span>

@@ -4,7 +4,6 @@ import { Refresh, Search } from '@element-plus/icons-vue';
 
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
-import { m6WritesEnabled } from '@/config';
 import { useDatasetsStore } from '@/stores/datasets';
 import DatasetDetailDrawer from '@/views/datasets/DatasetDetailDrawer.vue';
 
@@ -104,7 +103,6 @@ onUnmounted(() => store.dispose());
       :detail="store.detail"
       :loading="store.detailLoading"
       :action-loading="store.actionLoading"
-      :write-enabled="m6WritesEnabled()"
       :active-tab="store.activeTab"
       :tab-pages="store.tabPages"
       @close="store.closeDetail"

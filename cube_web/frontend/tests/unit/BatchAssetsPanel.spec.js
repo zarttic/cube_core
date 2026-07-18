@@ -85,7 +85,7 @@ beforeEach(() => {
 });
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
 
-describe('BatchAssetsPanel M6 scene selection', () => {
+describe('BatchAssetsPanel scene selection', () => {
   it('loads multiple batches and groups a single batch containing multiple datasets', async () => {
     const wrapper = mountPanel();
     await flushPromises();
@@ -171,7 +171,7 @@ describe('BatchAssetsPanel M6 scene selection', () => {
     });
   });
 
-  it('falls back to 10 km MGRS when legacy data has no resolution', async () => {
+  it('falls back to 10 km MGRS when source data has no resolution', async () => {
     requestGet.mockImplementation((url) => {
       if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
       const response = responseFor('load-a');

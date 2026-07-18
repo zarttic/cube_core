@@ -4,25 +4,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from threading import Lock
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable
 from uuid import uuid4
 
 from cube_web.services.http_errors import HTTPException
 
-PartitionRunner = Callable[[Optional[dict]], dict]
 TaskHook = Callable[[str], None]
 TaskResultHook = Callable[[str, dict], None]
 TaskErrorHook = Callable[[str, str], None]
-
-
-@dataclass(frozen=True)
-class PartitionBackend:
-    data_type: str
-    run: Optional[PartitionRunner] = None
-    demo: Optional[PartitionRunner] = None
-    retry: Optional[PartitionRunner] = None
-    test: Optional[PartitionRunner] = None
-    implemented: bool = True
 
 
 @dataclass
@@ -33,8 +22,8 @@ class PartitionTask:
     operation: str
     created_at: float
     updated_at: float
-    result: Optional[dict] = None
-    error: Optional[str] = None
+    result: dict | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,7 +31,7 @@ class PartitionTask:
 
 class PartitionTaskStore:
     def __init__(self, max_workers: int = 4) -> None:
-        self._tasks: Dict[str, PartitionTask] = {}
+        self._tasks: dict[str, PartitionTask] = {}
         self._lock = Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cube-web-partition")
 
@@ -71,11 +60,11 @@ class PartitionTaskStore:
         self._executor.submit(self._run, task.task_id, runner, on_started, on_succeeded, on_failed, cancellation_check)
         return task
 
-    def get(self, task_id: str) -> Optional[PartitionTask]:
+    def get(self, task_id: str) -> PartitionTask | None:
         with self._lock:
             return self._tasks.get(task_id)
 
-    def cancel(self, task_id: str) -> Optional[PartitionTask]:
+    def cancel(self, task_id: str) -> PartitionTask | None:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
@@ -103,62 +92,52 @@ class PartitionTaskStore:
             task.updated_at = time.time()
             return True
 
+    def _cancel_task(self, task_id: str, on_failed: TaskErrorHook | None) -> None:
+        self._set_task(task_id, status="cancelled", error="Partition task cancelled")
+        if on_failed is not None:
+            on_failed(task_id, "Partition task cancelled")
+
     def _run(
         self,
         task_id: str,
         runner: Callable[[], dict],
-        on_started: TaskHook | None = None,
-        on_succeeded: TaskResultHook | None = None,
-        on_failed: TaskErrorHook | None = None,
-        cancellation_check: Callable[[], bool] | None = None,
+        on_started: TaskHook | None,
+        on_succeeded: TaskResultHook | None,
+        on_failed: TaskErrorHook | None,
+        cancellation_check: Callable[[], bool] | None,
     ) -> None:
         task = self.get(task_id)
         if task is not None and (task.status == "cancelled" or (cancellation_check is not None and cancellation_check())):
-            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
-            if on_failed is not None:
-                on_failed(task_id, "Partition task cancelled")
+            self._cancel_task(task_id, on_failed)
             return
         if not self._start_task(task_id):
             task = self.get(task_id)
-            if task is not None and task.status == "cancelled":
-                if on_failed is not None:
-                    on_failed(task_id, "Partition task cancelled")
-                return
-        task = self.get(task_id)
-        if task is not None and task.status == "cancel_requested":
-            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
-            if on_failed is not None:
+            if task is not None and task.status == "cancelled" and on_failed is not None:
                 on_failed(task_id, "Partition task cancelled")
             return
+        task = self.get(task_id)
+        if task is not None and task.status == "cancel_requested":
+            self._cancel_task(task_id, on_failed)
+            return
         if cancellation_check is not None and cancellation_check():
-            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
-            if on_failed is not None:
-                on_failed(task_id, "Partition task cancelled")
+            self._cancel_task(task_id, on_failed)
             return
         if on_started is not None:
             on_started(task_id)
         if cancellation_check is not None and cancellation_check():
-            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
-            if on_failed is not None:
-                on_failed(task_id, "Partition task cancelled")
+            self._cancel_task(task_id, on_failed)
             return
         try:
             result = runner()
         except Exception as exc:  # pragma: no cover - covered through public task status.
-            if exc.__class__.__name__ == "PartitionCancelledError":
-                self._set_task(task_id, status="cancelled", error=str(exc))
-                if on_failed is not None:
-                    on_failed(task_id, str(exc))
-                return
-            self._set_task(task_id, status="failed", error=str(exc))
+            status = "cancelled" if exc.__class__.__name__ == "PartitionCancelledError" else "failed"
+            self._set_task(task_id, status=status, error=str(exc))
             if on_failed is not None:
                 on_failed(task_id, str(exc))
             return
         task = self.get(task_id)
         if task is not None and (task.status == "cancel_requested" or (cancellation_check is not None and cancellation_check())):
-            self._set_task(task_id, status="cancelled", error="Partition task cancelled")
-            if on_failed is not None:
-                on_failed(task_id, "Partition task cancelled")
+            self._cancel_task(task_id, on_failed)
             return
         self._set_task(task_id, status="completed", result=result)
         if on_succeeded is not None:
@@ -166,52 +145,8 @@ class PartitionTaskStore:
 
 
 class PartitionService:
-    def __init__(self, registry: Dict[str, PartitionBackend], task_store: Optional[PartitionTaskStore] = None) -> None:
-        self.registry = registry
+    def __init__(self, task_store: PartitionTaskStore | None = None) -> None:
         self.task_store = task_store or PartitionTaskStore()
-
-    def run(self, data_type: str, payload: Optional[dict] = None) -> dict:
-        return self._run(data_type, "run", payload)
-
-    def demo(self, data_type: str, payload: Optional[dict] = None) -> dict:
-        return self._run(data_type, "demo", payload)
-
-    def retry(self, data_type: str, payload: Optional[dict] = None) -> dict:
-        return self._run(data_type, "retry", payload)
-
-    def test(self, data_type: str, payload: Optional[dict] = None) -> dict:
-        return self._run(data_type, "test", payload)
-
-    def submit(
-        self,
-        data_type: str,
-        operation: str,
-        payload: Optional[dict] = None,
-        task_id: str | None = None,
-        on_started: TaskHook | None = None,
-        on_succeeded: TaskResultHook | None = None,
-        on_failed: TaskErrorHook | None = None,
-        cancellation_check: Callable[[], bool] | None = None,
-    ) -> PartitionTask:
-        backend, runner = self._resolve(data_type, operation)
-        return self.task_store.submit(
-            backend.data_type,
-            operation,
-            lambda: runner(
-                {
-                    **(payload or {}),
-                    "_cancellation_check": cancellation_check,
-                    "cancellation_check": cancellation_check,
-                }
-                if cancellation_check is not None
-                else payload
-            ),
-            task_id=task_id,
-            on_started=on_started,
-            on_succeeded=on_succeeded,
-            on_failed=on_failed,
-            cancellation_check=cancellation_check,
-        )
 
     def get_task(self, task_id: str) -> PartitionTask:
         task = self.task_store.get(task_id)
@@ -224,162 +159,3 @@ class PartitionService:
         if task is None:
             raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
         return task
-
-    def _run(self, data_type: str, operation: str, payload: Optional[dict]) -> dict:
-        _, runner = self._resolve(data_type, operation)
-        try:
-            return runner(payload)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    def _resolve(self, data_type: str, operation: str) -> Tuple[PartitionBackend, PartitionRunner]:
-        backend = self.registry.get(data_type)
-        if backend is None:
-            raise HTTPException(status_code=404, detail=f"Unknown partition data_type: {data_type}")
-        if not backend.implemented:
-            raise HTTPException(status_code=501, detail=f"{data_type.title()} partition {operation} is not implemented")
-        runner = getattr(backend, operation, None)
-        if runner is None:
-            raise HTTPException(status_code=404, detail=f"Partition {operation} is not available for {data_type}")
-        return backend, runner
-
-
-def build_partition_registry(
-    *,
-    optical_demo: PartitionRunner,
-    optical_test: PartitionRunner,
-    optical_retry: PartitionRunner,
-    carbon_demo: PartitionRunner,
-    carbon_test: PartitionRunner,
-    carbon_retry: PartitionRunner,
-    product_demo: PartitionRunner,
-    product_test: PartitionRunner,
-    product_retry: PartitionRunner,
-    radar_demo: PartitionRunner,
-    radar_test: PartitionRunner,
-    radar_retry: PartitionRunner,
-    entity_demo: PartitionRunner,
-    entity_test: PartitionRunner,
-    entity_retry: PartitionRunner,
-) -> Dict[str, PartitionBackend]:
-    registry = build_production_partition_registry(
-        optical_run=optical_demo,
-        carbon_run=carbon_demo,
-        product_run=product_demo,
-        radar_run=radar_demo,
-        entity_run=entity_demo,
-    )
-    legacy = build_legacy_partition_registry(
-        optical_demo=optical_demo,
-        optical_test=optical_test,
-        optical_retry=optical_retry,
-        carbon_demo=carbon_demo,
-        carbon_test=carbon_test,
-        carbon_retry=carbon_retry,
-        product_demo=product_demo,
-        product_test=product_test,
-        product_retry=product_retry,
-        radar_demo=radar_demo,
-        radar_test=radar_test,
-        radar_retry=radar_retry,
-        entity_demo=entity_demo,
-        entity_test=entity_test,
-        entity_retry=entity_retry,
-    )
-    return {
-        data_type: PartitionBackend(
-            data_type=backend.data_type,
-            run=backend.run,
-            demo=legacy[data_type].demo,
-            test=legacy[data_type].test,
-            retry=legacy[data_type].retry,
-            implemented=backend.implemented,
-        )
-        for data_type, backend in registry.items()
-    }
-
-
-def build_production_partition_registry(
-    *,
-    optical_run: PartitionRunner,
-    carbon_run: PartitionRunner,
-    product_run: PartitionRunner,
-    radar_run: PartitionRunner,
-    entity_run: PartitionRunner,
-) -> Dict[str, PartitionBackend]:
-    return {
-        "optical": PartitionBackend(
-            data_type="optical",
-            run=optical_run,
-        ),
-        "carbon": PartitionBackend(
-            data_type="carbon",
-            run=carbon_run,
-        ),
-        "product": PartitionBackend(
-            data_type="product",
-            run=product_run,
-        ),
-        "radar": PartitionBackend(
-            data_type="radar",
-            run=radar_run,
-        ),
-        "entity": PartitionBackend(
-            data_type="entity",
-            run=entity_run,
-        ),
-    }
-
-
-def build_legacy_partition_registry(
-    *,
-    optical_demo: PartitionRunner,
-    optical_test: PartitionRunner,
-    optical_retry: PartitionRunner,
-    carbon_demo: PartitionRunner,
-    carbon_test: PartitionRunner,
-    carbon_retry: PartitionRunner,
-    product_demo: PartitionRunner,
-    product_test: PartitionRunner,
-    product_retry: PartitionRunner,
-    radar_demo: PartitionRunner,
-    radar_test: PartitionRunner,
-    radar_retry: PartitionRunner,
-    entity_demo: PartitionRunner,
-    entity_test: PartitionRunner,
-    entity_retry: PartitionRunner,
-) -> Dict[str, PartitionBackend]:
-    return {
-        "optical": PartitionBackend(
-            data_type="optical",
-            demo=optical_demo,
-            test=optical_test,
-            retry=optical_retry,
-        ),
-        "carbon": PartitionBackend(
-            data_type="carbon",
-            demo=carbon_demo,
-            test=carbon_test,
-            retry=carbon_retry,
-        ),
-        "product": PartitionBackend(
-            data_type="product",
-            demo=product_demo,
-            test=product_test,
-            retry=product_retry,
-        ),
-        "radar": PartitionBackend(
-            data_type="radar",
-            demo=radar_demo,
-            test=radar_test,
-            retry=radar_retry,
-        ),
-        "entity": PartitionBackend(
-            data_type="entity",
-            demo=entity_demo,
-            test=entity_test,
-            retry=entity_retry,
-        ),
-    }

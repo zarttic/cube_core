@@ -4,7 +4,6 @@ import { defineStore } from 'pinia';
 import { requestGet, requestPost } from '@/api/client';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
-import { m6ReadsEnabled, m6WritesEnabled } from '@/config';
 
 export const useIngestRunsStore = defineStore('ingest-runs', () => {
   const filters = reactive({ keyword: '', datasetId: '', status: '', sortBy: 'created_at', sortOrder: 'desc' });
@@ -27,11 +26,6 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
     loading.value = true;
     error.value = '';
     try {
-      if (!m6ReadsEnabled()) {
-        records.value = [];
-        Object.assign(pageState, { page: 1, total: 0 });
-        return;
-      }
       const query = pageQuery({
         keyword: filters.keyword.trim(), dataset_id: filters.datasetId.trim(), status: filters.status,
         page: pageState.page, page_size: pageState.pageSize, sort_by: filters.sortBy, sort_order: filters.sortOrder,
@@ -86,7 +80,6 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
   async function runAction(action, payload = {}) {
     const runId = selectedRunId.value;
     if (!runId) return;
-    if (!m6WritesEnabled()) throw new Error('当前运行模式只允许查看入库运行。');
     actionLoading.value = true;
     error.value = '';
     try {

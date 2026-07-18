@@ -7,7 +7,6 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from cube_web.services import auth_service, runtime_config
-from cube_web.services.m6_runtime import m6_runtime_policy
 
 PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
 
@@ -43,7 +42,6 @@ def create_auth_router() -> APIRouter:
             "redirect_uri": settings.redirect_uri,
             "main_system_url": portal.main_system_url or settings.main_system_url,
             "auth_required": settings.required,
-            "m6_mode": m6_runtime_policy().mode,
             "navigation": _navigation_items(),
         }
 

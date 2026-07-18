@@ -12,7 +12,10 @@
 `cube_encoder` 是 SDK 提供方。其他包必须通过 `grid_core.sdk.CubeEncoderSDK`
 或 Web SDK backend 使用 encoder 能力，不允许复制格网逻辑。
 
-当前格网契约：`cube_encoder` 完整支持 `s2`、`mgrs`、`tile_matrix`、`isea4h` 的定位、覆盖、拓扑和编码；`plane_grid` 当前只提供 source-plane ST code 校验与 `cube_split` 的逻辑窗口剖分，不是 encoder 的通用 locate/cover/topology 引擎。Web 生产页面不再暴露 `mgrs`，普通逻辑格网使用 `s2`、`tile_matrix`，源 CRS 保留型逻辑剖分使用 `plane_grid`，实体剖分使用 `s2`、`tile_matrix` 或 `isea4h`。
+当前生产格网契约严格限定为 `geohash`、`mgrs`、`isea4h`。三者均由
+`cube_encoder` 提供定位、覆盖、拓扑和编码能力；`geohash`、`mgrs` 固定使用逻辑剖分，
+`isea4h` 固定使用实体剖分。Web、`cube_split` 和 SDK 不得暴露或接受
+`s2`、`tile_matrix`、`plane_grid` 等历史格网作为生产入口。
 
 ## 构建、测试与开发命令
 
@@ -79,8 +82,7 @@ cd cube_web/frontend && npm run build
 `master`/`main` 保持为生产开发基线。生产代码负责可复用剖分执行链路、托管批次流程、
 重试/取消/质检行为、运行时配置和测试。
 
-- 生产剖分操作和 API 命名使用 `run`。已有 `demo` endpoint 只作为旧客户端兼容别名保留；
-  不新增提交 `demo` operation 的生产调用点。
+- 生产剖分操作和 API 命名统一使用 `run`，不保留 `demo` 生产 endpoint。
 - 内置演示剖分批次必须运行时显式启用。生产启动不得自动 seed 演示批次，除非明确设置
   `CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1`。
 - 演示专用文档、本地 `.cube_web.env` 示例、seed 数据 manifest、冒烟编排和汇报脚本只放在
@@ -177,7 +179,7 @@ CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 配置页面必须展示 OpenGauss/PostgreSQL 兼容 DSN、Ray 和 MinIO 的运行时启动信息，但不得把这些值写回
 `cube_web_configs`。
 
-当 `CUBE_WEB_AUTH_REQUIRED=1` 时，`/v1/partition/schemas/import` 是载入系统使用的公开导入入口；其余 `/v1/*` 默认要求 Bearer Token。前端非管理员只保留公共编码入口，直接访问剖分页面会回到门户首页；这不是后端业务授权的替代品。
+鉴权默认开启。`/v1/partition/schemas/import` 是载入系统使用的公开导入入口；其余 `/v1/*` 默认要求 Bearer Token。只有受控本地测试才可显式设置 `CUBE_WEB_AUTH_REQUIRED=0`。前端非管理员只保留公共编码入口，直接访问剖分页面会回到门户首页；这不是后端业务授权的替代品。
 
 OpenGauss 连接变量名仍使用历史兼容名 `CUBE_WEB_POSTGRES_DSN`，代码通过 PostgreSQL
 兼容协议和 `psycopg` 连接 OpenGauss。文档和交接说明中应称 OpenGauss，不要把运行库误写成
@@ -305,13 +307,15 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 - Ray runtime env 会排除 `cube_split/data/**`，不要依赖 runtime package 携带大影像数据。
 - Ray task payload 不得携带 MinIO access key 或 secret key。通过 Ray `runtime_env.env_vars`
   从 worker 运行时环境传入；任务参数只保留业务数据和不敏感的对象定位信息。
-- 普通光学逻辑剖分（`s2`/`tile_matrix`）、源 CRS 保留型逻辑剖分（`plane_grid`，当前仅逻辑方式）和实体剖分（`s2`/`tile_matrix`/`isea4h`）都不能让 driver 先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
+- 普通光学逻辑剖分（`geohash`/`mgrs`）和实体剖分（`isea4h`）都不能让 driver
+  先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
 - Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
 - 源对象下载缓存必须按 URI 的稳定哈希隔离并校验预期 SHA-256；解析 `s3://` 路径时先
   URL decode，避免中文对象键被二次编码。发生 `ENOSPC` 时只清理该 worker 的
   `/tmp/cube_split_source_cache` 后重试一次，绝不能递归清理通用 `/tmp` 或其他任务目录。
 - `s3://` 输出做质检时也要先解析到节点本地缓存后再用 rasterio 打开，不能用 `Path.exists()` 直接判断 MinIO URL。
-  - 碳卫星 `run` 任务可以使用 `input_dir` 或 `source_uri`/`selected_observations[].source_uri`；`run` 模式会执行入库，`demo` 兼容入口不得声称或触发入库。
-  - 前端不单独暴露“实体剖分”模块；除“碳卫星”外，光学遥感、雷达遥感和信息产品页面都可通过剖分格网选择 `s2`、`tile_matrix` 或 `isea4h`，实体默认 `grid_level=6`。普通逻辑剖分默认层级仍为 5；`plane_grid` 逻辑剖分默认保留源 CRS。`max_cells_per_asset=0` 表示不设上限，smoke/调试任务应显式设置小的正数。
-  - `plane_grid` 当前按每个源资产的像素窗口生成 `<crs>/<level>/<col>/<row>` 形式的源平面编码；跨场景唯一性、WGS84 bbox 质检和地图预览仍属于后续重构范围，不得把该模式当作全局拓扑格网使用。
+  - 碳卫星 `run` 任务使用 Scene 资产中的 `source_uri`，保留 NetCDF/HDF5 原始数据，不转换为 COG。
+  - 前端不单独暴露“实体剖分”模块；光学遥感、雷达遥感和信息产品页面通过格网
+    类型选择 `geohash`、`mgrs` 或 `isea4h`，剖分方式由格网类型派生，不允许用户混选。
+    `max_cells_per_asset=0` 表示不设上限，smoke/调试任务应显式设置小的正数。
   - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。

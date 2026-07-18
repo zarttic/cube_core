@@ -4,7 +4,6 @@ import { Refresh, Search } from '@element-plus/icons-vue';
 
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
-import { m6WritesEnabled } from '@/config';
 import { useIngestRunsStore } from '@/stores/ingestRuns';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 
@@ -43,7 +42,7 @@ onUnmounted(() => store.dispose());
       <el-table-column prop="created_at" label="创建时间" min-width="170" />
       <el-table-column label="操作" width="80" fixed="right"><template #default="{ row }"><el-button :data-testid="`ingest-row-${row.ingest_run_id}`" link type="primary" @click.stop="store.openDetail(row.ingest_run_id).catch(() => {})">详情</el-button></template></el-table-column>
     </AppTable>
-    <IngestRunDetailDrawer :visible="store.detailVisible" :run-id="store.selectedRunId" :detail="store.detail" :loading="store.detailLoading" :action-loading="store.actionLoading" :write-enabled="m6WritesEnabled()" @close="store.closeDetail" @retry-scenes="(sceneIds) => store.retryFailedScenes(sceneIds).catch(() => {})" @cancel="(reason) => store.cancelRun(reason).catch(() => {})" />
+    <IngestRunDetailDrawer :visible="store.detailVisible" :run-id="store.selectedRunId" :detail="store.detail" :loading="store.detailLoading" :action-loading="store.actionLoading" @close="store.closeDetail" @retry-scenes="(sceneIds) => store.retryFailedScenes(sceneIds).catch(() => {})" @cancel="(reason) => store.cancelRun(reason).catch(() => {})" />
   </section>
 </template>
 

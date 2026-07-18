@@ -28,7 +28,7 @@ describe('datasets store', () => {
     expect(store.detail.overview.dataset_title).toBe('B');
   });
 
-  it('uses scene-level M6 dataset filters without a load-batch ownership filter', async () => {
+  it('uses scene-level dataset filters without a load-batch ownership filter', async () => {
     setActivePinia(createPinia());
     const store = useDatasetsStore();
     store.filters.dataType = 'optical';

@@ -1,6 +1,6 @@
 # cube_split
 
-更新时间：2026-07-13
+更新时间：2026-07-17
 
 `cube_split` 负责剖分、入库、质检和 AOI 回读。它不实现格网算法，而是通过
 `grid_core.sdk.CubeEncoderSDK` 使用 `cube_encoder` 能力。
@@ -15,7 +15,7 @@
 
 ## 常用命令
 
-运行光学逻辑剖分（默认 `s2`）：
+运行光学逻辑剖分（默认 `geohash`）：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
@@ -24,18 +24,18 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition
   --output-dir data/ray_output/logical_partition
 ```
 
-源 CRS 保留型平面窗口剖分：
+运行标准 MGRS 平面格网逻辑剖分：
 
 ```bash
 PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.ray_logical_partition_job \
   --input-dir data/optocal \
   --manifest-path data/optocal/manifest.jsonl \
-  --grid-type plane_grid \
-  --target-crs "" \
+  --grid-type mgrs \
+  --grid-level 1 \
   --max-cells-per-asset 50
 ```
 
-`plane_grid` 只适合逻辑窗口输出，不支持实体瓦片，也不能当作 encoder 的全球拓扑格网。
+`max-cells-per-asset=0` 表示不限制格网数量；smoke 和调试命令应使用小的正数。
 
 运行产品剖分：
 

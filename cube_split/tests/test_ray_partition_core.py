@@ -9,6 +9,7 @@ from rasterio.transform import from_origin
 
 from cube_split.jobs.ray_partition_core import (
     AssetRecord,
+    _process_local_task_group,
     build_grid_tasks_driver,
     build_manifest,
     cache_source_cog,
@@ -51,6 +52,22 @@ def _write_projected_tif(path: Path) -> None:
         ds.write(data)
 
 
+def test_process_local_task_group_restores_remote_source_uri(monkeypatch):
+    local_path = "/tmp/cube_split_source_cache/worker/source.tif"
+    source_uri = "s3://cube/cube/source/optical/source.tif"
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_partition_core.process_partition",
+        lambda rows, _granularity, include_sample_mean=True: iter([{"asset_path": next(rows).asset_path}]),
+    )
+
+    rows = _process_local_task_group(
+        [{"asset_path": local_path, "source_asset_path": source_uri}],
+        "day",
+    )
+
+    assert rows == [{"asset_path": source_uri, "source_asset_path": source_uri}]
+
+
 class RecordingMinio:
     def __init__(self) -> None:
         self.downloads: list[tuple[str, str, str]] = []
@@ -90,7 +107,7 @@ def test_build_manifest_supports_landsat_collection_filenames(tmp_path: Path):
     assert records[0].sensor == "landsat9_oli_tirs"
 
 
-def test_build_grid_tasks_driver_uses_m1_geohash_cells_with_asset_bbox():
+def test_build_grid_tasks_driver_uses_sdk_geohash_cells_with_asset_bbox():
     tasks = build_grid_tasks_driver(
         [
             AssetRecord(

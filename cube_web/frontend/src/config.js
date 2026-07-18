@@ -13,7 +13,6 @@ export const AUTH_CONFIG = {
 
 const authRuntimeState = reactive({
   required: parseFlag(import.meta.env.VITE_AUTH_REQUIRED, false),
-  m6Mode: import.meta.env.VITE_M6_MODE || 'm6-primary',
   navigation: [],
 });
 
@@ -23,18 +22,6 @@ export function authRequired() {
 
 export function runtimeNavigation() {
   return authRuntimeState.navigation;
-}
-
-export function m6Mode() {
-  return authRuntimeState.m6Mode;
-}
-
-export function m6ReadsEnabled() {
-  return ['m6-read', 'm6-primary'].includes(m6Mode());
-}
-
-export function m6WritesEnabled() {
-  return m6Mode() === 'm6-primary';
 }
 
 export async function loadAuthRuntimeConfig() {
@@ -47,7 +34,6 @@ export async function loadAuthRuntimeConfig() {
       if (body.main_system_url) AUTH_CONFIG.MAIN_SYSTEM_URL = String(body.main_system_url).replace(/\/$/, '');
       if (body.redirect_uri) AUTH_CONFIG.REDIRECT_URI = String(body.redirect_uri);
       authRuntimeState.required = parseFlag(body.auth_required, authRuntimeState.required);
-      if (body.m6_mode) authRuntimeState.m6Mode = String(body.m6_mode);
       if (Array.isArray(body.navigation)) authRuntimeState.navigation = body.navigation;
     }
   } catch {

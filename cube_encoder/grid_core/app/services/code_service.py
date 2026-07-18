@@ -9,7 +9,7 @@ from grid_core.app.models.st_code import STCode
 from grid_core.app.utils.timecode import to_time_code
 from grid_core.app.utils.validator import parse_st_code
 
-# M1 frozen contract: only the three production grid types.
+# Public contract: only the three production grid types.
 PREFIX_MAP = {
     GridType.GEOHASH: "gh",
     GridType.MGRS: "mgrs",

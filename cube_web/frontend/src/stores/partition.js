@@ -2,7 +2,6 @@ import { reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 
 import { requestGet, requestPost } from '@/api/client';
-import { m6Mode } from '@/config';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
 import { derivedPartitionMethod, gridDefinition, withFixedPartitionOptions } from '@/utils/grid';
@@ -119,10 +118,6 @@ export const usePartitionStore = defineStore('partition', () => {
     const request = batchScope.begin();
     loading.batches = true;
     try {
-      if (!['m6-read', 'm6-primary'].includes(m6Mode())) {
-        batches.value = [];
-        return batches.value;
-      }
       const response = await requestGet('/v1/partition/load-batches?limit=100&status=succeeded', { signal: request.signal });
       if (batchScope.isCurrent(request.token)) {
         batches.value = Array.isArray(response?.load_batches)
@@ -159,7 +154,6 @@ export const usePartitionStore = defineStore('partition', () => {
   }
 
   async function submit() {
-    if (m6Mode() !== 'm6-primary') throw invalidRequest('当前运行模式不允许提交 M6 剖分任务。');
     const partitionRunId = createPartitionRunId();
     const body = buildRequest(partitionRunId);
     const request = submitScope.begin();

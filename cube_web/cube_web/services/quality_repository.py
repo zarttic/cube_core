@@ -115,7 +115,7 @@ _ERROR_SORT_COLUMNS = {
 def require_open_gauss_domain_store() -> OpenGaussPartitionDomainStore:
     store = get_partition_domain_store()
     if not isinstance(store, OpenGaussPartitionDomainStore):
-        raise RuntimeError("M3 transactional quality/publication requires OpenGaussPartitionDomainStore")
+        raise RuntimeError("transactional quality/publication requires OpenGaussPartitionDomainStore")
     return store
 
 

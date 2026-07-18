@@ -1,14 +1,14 @@
 from cube_web.services.partition_domain_schema import (
-    LEGACY_ALLOWLIST,
     NEW_DOMAIN_TABLES,
     PARTITION_DOMAIN_SCHEMA_VERSION,
+    TASK_SCHEDULER_TABLES,
     schema_statements,
 )
 
 
-def test_domain_schema_contains_versioned_tables_and_m3_handoff() -> None:
+def test_domain_schema_contains_versioned_tables_and_quality_handoff() -> None:
     sql = "\n".join(schema_statements()).lower()
-    assert PARTITION_DOMAIN_SCHEMA_VERSION == "2026-07-16-m2-mixed-carbon-v1"
+    assert PARTITION_DOMAIN_SCHEMA_VERSION == "2026-07-18-partition-domain-v1"
     assert NEW_DOMAIN_TABLES == {
         "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
         "partition_output_versions", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -16,7 +16,7 @@ def test_domain_schema_contains_versioned_tables_and_m3_handoff() -> None:
         "partition_quality_warn_approvals", "partition_publications", "partition_domain_outbox",
         "partition_domain_schema_version",
     }
-    assert LEGACY_ALLOWLIST == {"quality_reports", "partition_batches", "partition_assets", "partition_job_attempts"}
+    assert TASK_SCHEDULER_TABLES == {"partition_batches", "partition_assets", "partition_job_attempts"}
     for column in ("current_quality_run_id", "quality_status", "quality_sequence", "quality_error_count", "quality_warning_count"):
         assert column in sql
     assert "trigger_event_id uuid null unique" in sql

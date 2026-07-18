@@ -1,7 +1,17 @@
 from uuid import uuid4
 
 from cube_web.services.quality_rules import QualityFinding
-from cube_web.services.quality_worker import _errors_from_findings
+from cube_web.services.quality_worker import _errors_from_findings, _safe_execution_error
+
+
+def test_safe_execution_error_does_not_persist_exception_message() -> None:
+    error = OSError("s3://access:secret@minio/private.tif")
+
+    persisted = _safe_execution_error(error, "quality rule execution failed")
+
+    assert persisted == "quality rule execution failed (OSError)"
+    assert "secret" not in persisted
+    assert "s3://" not in persisted
 
 
 def test_worker_preserves_all_finding_identity_fields_when_persisting_errors() -> None:

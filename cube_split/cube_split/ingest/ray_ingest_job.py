@@ -13,12 +13,35 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from grid_core.sdk import CubeEncoderSDK, GridAddress
+from shapely.geometry import Polygon, shape
 
 from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import _local_file_identity, _object_identity, _read_identity_sidecar, _write_identity_sidecar
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
 
 DEFAULT_POSTGRES_BATCH_SIZE = 1000
+_MGRS_MAX_RELATIVE_AREA_ERROR = 1e-4
+
+
+def _mgrs_storage_ring(geometry: dict[str, object]) -> list[tuple[float, float]]:
+    """Use four corners only when doing so preserves the SDK boundary."""
+    polygon = shape(geometry)
+    original = [(float(lon), float(lat)) for lon, lat in polygon.exterior.coords]
+    min_x, min_y, max_x, max_y = polygon.bounds
+    scale = max(max_x - min_x, max_y - min_y)
+    tolerance = max(scale * 1e-10, 1e-12)
+    for _ in range(12):
+        ring = list(polygon.simplify(tolerance, preserve_topology=True).exterior.coords)
+        if len(ring) == 5:
+            candidate = Polygon(ring)
+            relative_error = candidate.symmetric_difference(polygon).area / max(polygon.area, 1e-30)
+            if relative_error <= _MGRS_MAX_RELATIVE_AREA_ERROR:
+                return [(float(lon), float(lat)) for lon, lat in ring]
+            return original
+        if len(ring) < 5:
+            break
+        tolerance *= 10.0
+    return original
 
 
 @dataclass(frozen=True)
@@ -537,14 +560,13 @@ def cell_geometry_geojson(
 
     ring = coordinates[0]
     if normalized_type == "mgrs" and len(ring) != 5:
-        edge_count = len(ring) - 1
-        if edge_count <= 0 or edge_count % 4 != 0 or ring[0] != ring[-1]:
-            raise ValueError(f"MGRS SDK boundary cannot be reduced to four actual corners: {space_code}")
-        edge_size = edge_count // 4
-        ring = [ring[index * edge_size] for index in range(4)] + [ring[0]]
+        ring = _mgrs_storage_ring(geometry)
 
     normalized_ring = [[float(point[0]), float(point[1])] for point in ring]
-    if len(normalized_ring) != expected_points[normalized_type] or normalized_ring[0] != normalized_ring[-1]:
+    valid_point_count = len(normalized_ring) == expected_points[normalized_type]
+    if normalized_type == "mgrs":
+        valid_point_count = len(normalized_ring) >= 4
+    if not valid_point_count or normalized_ring[0] != normalized_ring[-1]:
         raise ValueError(
             f"invalid {normalized_type} cell boundary point count/closure for {space_code}: {len(normalized_ring)}"
         )

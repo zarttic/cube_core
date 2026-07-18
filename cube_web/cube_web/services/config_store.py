@@ -28,7 +28,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "ingest": {
         "optical": {
-            "dataset": "demo_optical",
+            "dataset": "optical_default",
             "sensor": "optical_mosaic",
             "quality_rule": "best_quality_wins",
             "allow_failed_quality": False,

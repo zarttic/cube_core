@@ -126,7 +126,7 @@ test('mobile partition controls remain individually reachable', async ({ page })
   expect(resetBox.x + resetBox.width <= submitBox.x || submitBox.x + submitBox.width <= resetBox.x).toBe(true);
 });
 
-test('partition keeps one product per subpage and exposes M1-M5 quality and ingest pages', async ({ page }) => {
+test('partition keeps one product per subpage and exposes quality and ingest pages', async ({ page }) => {
   await installApiRoutes(page);
   await page.goto('/partition');
 

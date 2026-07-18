@@ -1,9 +1,9 @@
-"""Persistence boundary for the M2 versioned partition domain.
+"""Persistence boundary for the versioned production partition domain.
 
 The in-memory implementation is deliberately complete rather than a loose mock:
 it is used by workflow tests and mirrors ownership, ordering, idempotency, and
 outbox semantics of the SQL implementation.  The SQL store keeps the same
-behavioural surface while exposing a transaction context for M3 operations.
+behavioural surface while exposing a transaction context for quality and publication operations.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover
     )
 
 SortOrder = Literal["asc", "desc"]
-SCHEMA_VERSION = "2026-07-16-m2-mixed-carbon-v1"
+SCHEMA_VERSION = "2026-07-18-partition-domain-v1"
 
 _DATASET_SORTS = {
     "updated_at": "updated_at",
@@ -699,7 +699,7 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
             raise KeyError(event_id)
         row.update({"status": "pending", "available_at": available_at, "last_error": error, "claimed_at": None, "claimed_by": None})
 
-    # Small deterministic fixtures used by M2/M3 tests and operator diagnostics.
+    # Small deterministic fixtures used by domain tests and operator diagnostics.
     def seed_dataset(self, dataset_id: str, **overrides: Any) -> dict[str, Any]:
         row = {
             "dataset_id": dataset_id,
@@ -755,7 +755,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
 
     SQL mutation/read implementations are layered in by the workflow adapter;
     this class intentionally keeps a real connection transaction available for
-    M3 quality/publication code and fail-closes on schema version mismatches.
+    Quality/publication code fail-closes on schema version mismatches.
     """
 
     def __init__(self, dsn: str | None = None, *, connection_factory: Any | None = None) -> None:
@@ -797,7 +797,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         values: tuple[Any, ...],
         key_columns: tuple[str, ...],
     ) -> None:
-        """OpenGauss-compatible idempotent insert for immutable M2 rows."""
+        """OpenGauss-compatible idempotent insert for immutable domain rows."""
         jsonb_columns = {"attributes", "bbox", "counts", "geometry", "payload"}
         timestamp_columns = {
             "acquisition_time",
@@ -1286,12 +1286,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 for item in attempt_payload.get("datasets", ())
                 if isinstance(item, dict) and item.get("dataset_id")
             } if isinstance(attempt_payload, dict) and attempt_payload.get("strict_partition_request") else set()
-            legacy_batch_matches = bool(
-                attempt
-                and not strict_dataset_ids
-                and str(attempt.get("batch_id") or "") == str(datasets[0].get("batch_id") or "")
-            )
-            if not attempt or (dataset_id not in strict_dataset_ids and not legacy_batch_matches):
+            if not attempt or dataset_id not in strict_dataset_ids:
                 raise RuntimeError("partition attempt is not active for this dataset")
             outputs = self._fetchall(
                 connection,

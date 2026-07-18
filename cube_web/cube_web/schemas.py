@@ -17,22 +17,6 @@ GridType = Literal["geohash", "mgrs", "isea4h"]
 PartitionBackend = Literal["auto", "ray", "thread", "process", "local"]
 
 
-class PartitionRequestRecord(CubeWebModel):
-    endpoint: str = ""
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
-class PartitionRetryRequest(CubeWebModel):
-    request: PartitionRequestRecord = Field(default_factory=PartitionRequestRecord)
-    last_result: dict[str, Any] = Field(default_factory=dict)
-
-
-class PartitionResult(CubeWebModel):
-    status: str | None = None
-    mode: str | None = None
-    data_type: str | None = None
-
-
 class PartitionTaskCreateResponse(CubeWebModel):
     task_id: str
     status: str
@@ -48,48 +32,14 @@ class PartitionTaskResponse(PartitionTaskCreateResponse):
 
 
 class PartitionSchemaImportRequest(CubeWebModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str | None = "1.0"
-    batch_id: str | None = Field(default=None, min_length=1)
-    load_batch_id: str | None = Field(default=None, min_length=1)
+    load_batch_id: str = Field(min_length=1)
     batch_name: str | None = None
-    data_type: Literal["optical", "product", "carbon", "radar"] = "optical"
     source_system: str | None = None
     loaded_at: str | None = None
-    updated_at: str | None = None
-    raw_meta_uri: str | None = None
-    assets: list[dict[str, Any]] | None = None
-    observations: list[dict[str, Any]] | None = None
-    normalized_payload: dict[str, Any] | None = None
-    priority: int = 0
-    max_auto_retries: int = Field(default=1, ge=0)
-
-    @model_validator(mode="after")
-    def normalize_load_batch_id(self) -> "PartitionSchemaImportRequest":
-        load_batch_id = self.load_batch_id or self.batch_id
-        if not load_batch_id:
-            raise ValueError("load_batch_id is required")
-        if self.batch_id is None:
-            object.__setattr__(self, "batch_id", load_batch_id)
-        return self
-
-
-class PartitionSchemaReconcileRequest(CubeWebModel):
-    source_system: str | None = None
-    batch_ids: list[str] | None = None
-    asset_ids: list[str] | None = None
-    observation_ids: list[str] | None = None
-    updated_since: str | None = None
-    include_assets: bool = True
-    include_attempts: bool = False
-
-
-class PartitionBatchRunRequest(CubeWebModel):
-    config_override: dict[str, Any] = Field(default_factory=dict)
-
-
-class PartitionAssetRetryRequest(CubeWebModel):
-    asset_ids: list[str] = Field(min_length=1)
-    config_override: dict[str, Any] = Field(default_factory=dict)
+    datasets: list[dict[str, Any]] = Field(min_length=1)
 
 
 class ManualQualityRunRequest(BaseModel):

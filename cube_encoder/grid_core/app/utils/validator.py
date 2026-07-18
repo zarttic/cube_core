@@ -2,7 +2,7 @@ import re
 
 from grid_core.app.core.exceptions import ParseError
 
-# M1 contract: ST codes use canonical prefixes gh / mgrs / i4h (see
+# Production contract: ST codes use canonical prefixes gh / mgrs / i4h (see
 # grid_core.app.services.code_service.PREFIX_MAP). The numeric segment is
 # grid_level, matching the GridAddress/STCode field name.
 ST_CODE_PATTERN = re.compile(

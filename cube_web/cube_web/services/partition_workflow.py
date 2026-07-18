@@ -2,17 +2,12 @@ from __future__ import annotations
 
 import copy
 import inspect
-import os
-import shlex
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
-
-from cube_split import runtime_config
 
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import (
@@ -23,13 +18,10 @@ from cube_web.services.partition_contracts import (
     make_output_version,
     resolve_dataset_partition,
 )
-from cube_web.services.partition_defaults import normalize_partition_method
 from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.partition_job_store import (
-    InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
     PartitionBatchArchivedError,
-    PartitionBatchNotRequeueableError,
     PartitionJobStore,
     get_partition_job_store,
     normalized_dataset_asset_id,
@@ -40,12 +32,6 @@ ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 TASK_SYNC_WAIT_SECONDS = 30.0
-RAY_JOB_RUNNING_STATUSES = {"PENDING", "RUNNING"}
-PARTITION_SLOT_MATRIX = (
-    ("geohash", "logical"),
-    ("mgrs", "logical"),
-    ("isea4h", "entity"),
-)
 
 
 class PartitionCancelledError(RuntimeError):
@@ -78,8 +64,7 @@ class PartitionWorkflowService:
             try:
                 listener(task_id, status, result)
             except Exception:
-                # The legacy task store remains authoritative during the M6
-                # additive migration; projection failures are reconciliable.
+                # Projection failures are reconciled independently from task execution.
                 continue
 
     @property
@@ -97,12 +82,7 @@ class PartitionWorkflowService:
         domain_store: Any | None = None,
         job_store: Any | None = None,
     ) -> dict[str, Any]:
-        """Execute and commit each normalized dataset independently.
-
-        This boundary is intentionally separate from the legacy batch/asset task
-        queue.  The domain store is injected so the workflow can be tested and
-        integrated before its OpenGauss implementation is mounted here.
-        """
+        """Execute and commit each normalized dataset independently."""
         datasets = group_datasets(request)
         selected_runner = runner or self.dataset_runner
         selected_domain_store = domain_store or self.domain_store or get_partition_domain_store()
@@ -195,7 +175,7 @@ class PartitionWorkflowService:
         *,
         requested_by: str = "operator",
     ) -> PartitionTask:
-        """Queue a strict request whose worker commits through the M2 domain store."""
+        """Queue a normalized request whose worker commits to the domain store."""
         if {dataset.data_type for dataset in request.datasets} != {data_type}:
             raise HTTPException(status_code=422, detail="path data_type must match every dataset data_type")
         return self._submit_normalized(data_type, request, requested_by=requested_by)
@@ -217,6 +197,10 @@ class PartitionWorkflowService:
         request: StrictPartitionRequest,
         *,
         requested_by: str,
+        operation: str = "auto_run",
+        source_task_id: str | None = None,
+        retry_strategy: str | None = None,
+        failure_reason: str | None = None,
     ) -> PartitionTask:
         """Persist and queue a strict request under its batch-level data type."""
         if self.dataset_runner is None:
@@ -283,16 +267,19 @@ class PartitionWorkflowService:
                 self.store.create_attempt(
                     task_id=task_id,
                     batch_id=request.batch_id,
-                    operation="auto_run",
+                    operation=operation,
                     payload=payload,
                     requested_by=requested_by,
+                    source_task_id=source_task_id,
+                    retry_strategy=retry_strategy,
+                    failure_reason=failure_reason,
                 )
             except (PartitionBatchAlreadyActiveError, PartitionBatchArchivedError) as exc:
                 active_task = self._active_task_for_batch(self.get_batch(request.batch_id))
                 if active_task is not None:
                     return active_task
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            self.store.mark_batch_queued(request.batch_id, task_id, operation="auto_run")
+            self.store.mark_batch_queued(request.batch_id, task_id, operation=operation)
             return self.partition_service.task_store.submit(
                 data_type,
                 "run",
@@ -304,66 +291,8 @@ class PartitionWorkflowService:
                 cancellation_check=cancellation_check,
             )
 
-    def import_schema(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return self.store.upsert_schema(payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    def reconcile_schemas(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return _reconcile_partition_schemas(self.store, payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    def list_batches(
-        self,
-        *,
-        status: str | None = None,
-        data_type: str | None = None,
-        keyword: str | None = None,
-        include_succeeded: bool = False,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        batches = self.store.list_batches(
-            status=status,
-            data_type=data_type,
-            keyword=keyword,
-            include_succeeded=include_succeeded,
-            limit=limit,
-        )
-        return [self._enrich_batch(batch) for batch in batches]
-
     def get_batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.store.get_batch(batch_id)
-        if batch is None:
-            raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
-        return self._enrich_batch(batch)
-
-    def list_assets(self, batch_id: str, status: str | None = None) -> list[dict[str, Any]]:
-        self.get_batch(batch_id)
-        return self.store.list_assets(batch_id, status=status)
-
-    def list_attempts(self, batch_id: str) -> list[dict[str, Any]]:
-        self.get_batch(batch_id)
-        return self.store.list_attempts(batch_id)
-
-    def archive_batch(self, batch_id: str) -> dict[str, Any]:
-        try:
-            batch = self.store.archive_batch(batch_id)
-        except PartitionBatchAlreadyActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if batch is None:
-            raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
-        return batch
-
-    def requeue_batch(self, batch_id: str) -> dict[str, Any]:
-        try:
-            batch = self.store.requeue_batch(batch_id)
-        except PartitionBatchAlreadyActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except PartitionBatchNotRequeueableError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if batch is None:
             raise HTTPException(status_code=404, detail=f"Partition batch not found: {batch_id}")
         return batch
@@ -414,233 +343,47 @@ class PartitionWorkflowService:
         batch = self.store.get_batch(str(attempt.get("batch_id") or ""))
         return _task_from_attempt(attempt, batch or {})
 
-    def run_payload(
-        self,
-        data_type: str,
-        payload: dict[str, Any] | None = None,
-        *,
-        requested_by: str = "operator",
-    ) -> PartitionTask:
-        self.partition_service._resolve(data_type, "run")
-        with self._run_lock:
-            raw_payload = copy.deepcopy(payload or {})
-            task_id = f"partition-{uuid4().hex[:12]}"
-            batch_id = _text_or_none(raw_payload.get("batch_id"))
-            batch = self.store.get_batch(batch_id) if batch_id else None
-            if batch is not None and str(batch.get("data_type") or "") != data_type:
-                raise HTTPException(status_code=422, detail=f"Partition batch {batch_id} is not a {data_type} batch")
-            if batch is None:
-                batch_id = batch_id or f"runtime-{task_id}"
-                batch = self.store.ensure_runtime_batch(
-                    batch_id=batch_id,
-                    batch_name=_text_or_none(raw_payload.get("batch_name")) or batch_id,
-                    data_type=data_type,
-                    payload=raw_payload,
-                    max_auto_retries=0,
-                )
-            else:
-                active_task = self._active_task_for_batch(batch)
-                if active_task is not None:
-                    return active_task
-                if str(batch.get("source_system") or "") == "runtime":
-                    batch = self.store.ensure_runtime_batch(
-                        batch_id=str(batch["batch_id"]),
-                        batch_name=_text_or_none(raw_payload.get("batch_name")) or str(batch.get("batch_name") or batch["batch_id"]),
-                        data_type=data_type,
-                        payload=raw_payload,
-                        max_auto_retries=0,
-                    )
-            active_task = self._active_task_for_batch(batch)
-            if active_task is not None:
-                return active_task
-
-            asset_ids = self._selected_asset_ids_for_payload(str(batch["batch_id"]), str(batch["data_type"]), raw_payload)
-            if batch.get("source_system") != "runtime" and asset_ids:
-                key = "selected_observations" if batch["data_type"] == "carbon" else "selected_assets"
-                config_override = {name: value for name, value in raw_payload.items() if name != key}
-                attempt_payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
-            else:
-                attempt_payload = raw_payload
-            attempt_payload = {**attempt_payload, "_operation": "auto_run"}
-            self._ensure_slot_not_completed(str(batch["batch_id"]), attempt_payload, batch=batch)
-            cancellation_state: dict[str, bool | float | None] = {"last_checked_at": None, "last_result": False}
-
-            def cancellation_check() -> bool:
-                now = time.monotonic()
-                last_checked_at = cancellation_state["last_checked_at"]
-                if last_checked_at is not None and now - last_checked_at < CANCELLATION_CHECK_INTERVAL_SECONDS:
-                    return bool(cancellation_state["last_result"])
-                result = self.store.is_cancel_requested(task_id)
-                cancellation_state["last_checked_at"] = now
-                cancellation_state["last_result"] = result
-                return bool(result)
-
-            try:
-                self.store.create_attempt(
-                    task_id=task_id,
-                    batch_id=str(batch["batch_id"]),
-                    operation="auto_run",
-                    payload=attempt_payload,
-                    asset_ids=asset_ids,
-                    requested_by=requested_by,
-                )
-            except (PartitionBatchAlreadyActiveError, PartitionBatchArchivedError) as exc:
-                active_task = self._active_task_for_batch(self.get_batch(str(batch["batch_id"])))
-                if active_task is not None:
-                    return active_task
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            self.store.mark_batch_queued(str(batch["batch_id"]), task_id, operation="auto_run")
-            return self._submit_attempt(
-                task_id=task_id,
-                batch=batch,
-                data_type=data_type,
-                payload=attempt_payload,
-                cancellation_check=cancellation_check,
-            )
-
-    def run_payload_sync(
-        self,
-        data_type: str,
-        payload: dict[str, Any] | None = None,
-        *,
-        requested_by: str = "operator",
-        timeout_seconds: float = TASK_SYNC_WAIT_SECONDS,
-    ) -> dict[str, Any]:
-        task = self.run_payload(data_type, payload, requested_by=requested_by)
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        while True:
-            current = self.get_task(task.task_id)
-            if current.status in {"completed", "failed", "cancelled"}:
-                if current.status == "completed" and isinstance(current.result, dict):
-                    return _json_safe(current.result)
-                return _json_safe(current.to_dict())
-            if time.monotonic() >= deadline:
-                return _json_safe(current.to_dict())
-            time.sleep(0.1)
-
-    def run_batch(
-        self,
-        batch_id: str,
-        *,
-        operation: str = "auto_run",
-        config_override: dict[str, Any] | None = None,
-        asset_ids: list[str] | None = None,
-        requested_by: str = "system",
-        source_task_id: str | None = None,
-        retry_strategy: str | None = None,
-        failure_reason: str | None = None,
-    ) -> PartitionTask:
-        with self._run_lock:
-            batch = self.get_batch(batch_id)
-            active_task = self._active_task_for_batch(batch)
-            if active_task is not None:
-                return active_task
-            payload = self._payload_for_batch(batch, config_override=config_override, asset_ids=asset_ids)
-            effective_asset_ids = self._selected_asset_ids_for_payload(batch_id, str(batch["data_type"]), payload)
-            if effective_asset_ids is None:
-                effective_asset_ids = asset_ids
-            payload = {**payload, "_operation": operation}
-            self._ensure_slot_not_completed(batch_id, payload, batch=batch)
-            response_payload = dict(payload)
-            response_payload.pop("_cancellation_check", None)
-            response_payload.pop("cancellation_check", None)
-            response_payload.pop("_operation", None)
-            task_id = f"partition-{uuid4().hex[:12]}"
-            cancellation_state: dict[str, bool | float | None] = {"last_checked_at": None, "last_result": False}
-
-            def cancellation_check() -> bool:
-                now = time.monotonic()
-                last_checked_at = cancellation_state["last_checked_at"]
-                if last_checked_at is not None and now - last_checked_at < CANCELLATION_CHECK_INTERVAL_SECONDS:
-                    return bool(cancellation_state["last_result"])
-                result = self.store.is_cancel_requested(task_id)
-                cancellation_state["last_checked_at"] = now
-                cancellation_state["last_result"] = result
-                return bool(result)
-
-            try:
-                self.store.create_attempt(
-                    task_id=task_id,
-                    batch_id=batch_id,
-                    operation=operation,
-                    payload=payload,
-                    asset_ids=effective_asset_ids,
-                    requested_by=requested_by,
-                    source_task_id=source_task_id,
-                    retry_strategy=retry_strategy,
-                    failure_reason=failure_reason,
-                )
-            except (PartitionBatchAlreadyActiveError, PartitionBatchArchivedError) as exc:
-                active_task = self._active_task_for_batch(self.get_batch(batch_id))
-                if active_task is not None:
-                    return active_task
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            self.store.mark_batch_queued(batch_id, task_id, operation=operation)
-            data_type = str(batch["data_type"])
-            return self._submit_attempt(
-                task_id=task_id,
-                batch=batch,
-                data_type=data_type,
-                payload=response_payload,
-                cancellation_check=cancellation_check,
-            )
-
-    def retry_batch(self, batch_id: str, config_override: dict[str, Any] | None = None) -> PartitionTask:
+    def retry_task(self, task_id: str) -> PartitionTask:
+        attempt = self.store.get_attempt(task_id)
+        if attempt is None:
+            raise HTTPException(status_code=404, detail=f"Managed partition task not found: {task_id}")
+        task = self.get_task(task_id)
+        if task.status not in {"failed", "cancelled", "manual_required"}:
+            raise HTTPException(status_code=409, detail=f"Partition task is not retryable: {task.status}")
+        batch_id = str(attempt["batch_id"])
         batch = self.get_batch(batch_id)
-        return self.run_batch(
-            batch_id,
-            operation="manual_retry",
-            config_override=config_override,
-            asset_ids=None,
-            requested_by="operator",
-            source_task_id=_text_or_none(batch.get("last_task_id")),
-            retry_strategy="full_batch",
-            failure_reason=_text_or_none(batch.get("last_error")),
-        )
-
-    def retry_assets(self, asset_ids: list[str], config_override: dict[str, Any] | None = None) -> PartitionTask:
-        if not asset_ids:
-            raise HTTPException(status_code=422, detail="asset_ids is required")
-        first_batch: dict[str, Any] | None = None
-        for batch in self.store.list_batches(include_succeeded=True, limit=10000):
-            batch_assets = {asset["asset_id"] for asset in self.store.list_assets(batch["batch_id"])}
-            if asset_ids[0] in batch_assets:
-                first_batch = batch
-                if not set(asset_ids).issubset(batch_assets):
-                    raise HTTPException(status_code=422, detail="asset_ids must belong to the same batch")
-                break
-        if not first_batch:
-            raise HTTPException(status_code=404, detail=f"Partition asset not found: {asset_ids[0]}")
-        source_assets = self.store.list_assets(first_batch["batch_id"])
-        retryable_statuses = {"failed", "manual_required"}
-        non_retryable = [
-            asset["asset_id"]
-            for asset in source_assets
-            if asset["asset_id"] in set(asset_ids) and str(asset.get("status") or "") not in retryable_statuses
-        ]
-        if non_retryable:
-            raise HTTPException(
-                status_code=422,
-                detail=f"asset_ids are not retryable: {', '.join(non_retryable[:5])}",
+        if str(batch.get("last_task_id") or "") != task_id:
+            raise HTTPException(status_code=409, detail="Only the latest partition task can be retried")
+        payload = copy.deepcopy(attempt.get("payload") or {})
+        payload.pop("_operation", None)
+        payload.pop("_cancellation_check", None)
+        payload.pop("cancellation_check", None)
+        is_strict = payload.pop("strict_partition_request", False) is True
+        payload.pop("dataset_partitions", None)
+        if is_strict and payload.get("datasets"):
+            try:
+                request = StrictPartitionRequest.model_validate(payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail="Partition task payload is no longer retryable") from exc
+            data_type = str(batch.get("data_type") or "")
+            if data_type not in {"mixed", "optical", "radar", "product", "carbon"}:
+                raise HTTPException(status_code=409, detail="Partition task has no retryable normalized data type")
+            return self._submit_normalized(
+                data_type,
+                request,
+                requested_by="operator",
+                operation="manual_retry",
+                source_task_id=task_id,
+                retry_strategy="full_batch",
+                failure_reason=_text_or_none(attempt.get("error_message")) or _text_or_none(batch.get("last_error")),
             )
-        return self.run_batch(
-            first_batch["batch_id"],
-            operation="manual_asset_retry",
-            config_override=config_override,
-            asset_ids=asset_ids,
-            requested_by="operator",
-            source_task_id=_text_or_none(first_batch.get("last_task_id")),
-            retry_strategy="selected_assets",
-            failure_reason=_asset_failure_reason(source_assets, asset_ids) or _text_or_none(first_batch.get("last_error")),
-        )
+        raise HTTPException(status_code=409, detail="Partition task payload is not a normalized production request")
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         attempt = self.store.request_cancel(task_id)
+        if attempt is not None and attempt.get("status") == "cancelled":
+            self._notify_task_event(task_id, "cancelled", None)
         task: PartitionTask | None = None
-        if attempt is not None and self._attempt_uses_remote_ray(attempt):
-            self._stop_remote_attempt(task_id)
-            refreshed = self._refresh_active_attempt(task_id, self.store.get_attempt(task_id) or attempt)
-            return refreshed or attempt
         try:
             task = self.partition_service.cancel_task(task_id)
         except HTTPException as exc:
@@ -654,7 +397,7 @@ class PartitionWorkflowService:
             if task is None:
                 raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
             return task.to_dict()
-        return attempt
+        return self.store.get_attempt(task_id) or attempt
 
     def on_task_started(self, task_id: str) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -664,31 +407,19 @@ class PartitionWorkflowService:
 
     def on_task_succeeded(self, task_id: str, result: dict[str, Any]) -> None:
         attempt = self.store.get_attempt(task_id)
+        result_status = str(result.get("status") or "completed")
         if attempt is not None:
-            batch = self.get_batch(attempt["batch_id"])
-            max_auto_retries = _max_auto_retries(batch)
-            auto_retries_used = _auto_retries_used_in_chain(self.store.list_attempts(attempt["batch_id"]), task_id)
-            scoped_asset_ids = set(attempt.get("asset_ids") or [])
-            retryable_asset_ids = _retryable_failed_asset_ids(result, scoped_asset_ids or None)
-            all_failed_asset_ids = _failed_asset_ids(result, scoped_asset_ids or None)
-            should_auto_retry = (
-                bool(retryable_asset_ids)
-                and auto_retries_used < max_auto_retries
-                and attempt.get("operation") in {"auto_run", "auto_retry", "manual_retry", "manual_asset_retry"}
-            )
-            result_to_store = result if should_auto_retry else _manual_required_asset_result(result, set(all_failed_asset_ids))
-            self.store.succeed_attempt(task_id, result_to_store)
-            if should_auto_retry:
-                self.run_batch(
-                    attempt["batch_id"],
-                    operation="auto_retry",
-                    asset_ids=retryable_asset_ids,
-                    requested_by="system",
-                    source_task_id=task_id,
-                    retry_strategy="retryable_assets",
-                    failure_reason=_result_failure_reason(result, retryable_asset_ids),
+            self.store.succeed_attempt(task_id, result)
+            if result_status == "cancelled":
+                self.store.mark_cancelled(task_id)
+            elif result_status in {"failed", "partial_failure"}:
+                self.store.mark_result_manual_required(
+                    task_id,
+                    "One or more datasets failed during partition execution",
+                    error_type="partition_execution_failed",
                 )
-        self._notify_task_event(task_id, str(result.get("status") or "completed"), result)
+        projected_status = "cancelled" if result_status == "cancelled" else ("failed" if result_status in {"failed", "partial_failure"} else result_status)
+        self._notify_task_event(task_id, projected_status, result)
 
     def on_task_failed(self, task_id: str, error: str) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -699,61 +430,9 @@ class PartitionWorkflowService:
             self.store.mark_cancelled(task_id)
             self._notify_task_event(task_id, "cancelled", {"error": error})
             return
-        batch = self.get_batch(attempt["batch_id"])
-        max_auto_retries = _max_auto_retries(batch)
-        auto_retries_used = _auto_retries_used_in_chain(self.store.list_attempts(attempt["batch_id"]), task_id)
         error_type = classify_partition_error(error)
-        should_auto_retry = (
-            is_retryable_partition_error(error_type)
-            and auto_retries_used < max_auto_retries
-            and attempt.get("operation") in {"auto_run", "auto_retry", "manual_retry", "manual_asset_retry"}
-        )
-        self.store.fail_attempt(task_id, error, manual_required=not should_auto_retry, error_type=error_type)
-        if should_auto_retry:
-            self.run_batch(
-                attempt["batch_id"],
-                operation="auto_retry",
-                requested_by="system",
-                source_task_id=task_id,
-                retry_strategy="full_batch",
-                failure_reason=error,
-            )
+        self.store.fail_attempt(task_id, error, manual_required=True, error_type=error_type)
         self._notify_task_event(task_id, "failed", {"error": error})
-
-    def _payload_for_batch(
-        self,
-        batch: dict[str, Any],
-        *,
-        config_override: dict[str, Any] | None = None,
-        asset_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        payload = dict(batch.get("normalized_payload") or {})
-        assets = self.store.list_assets(batch["batch_id"])
-        if assets:
-            target_asset_ids = set(asset_ids) if asset_ids else None
-            selected = [
-                _payload_asset_with_identity(asset) for asset in assets if target_asset_ids is None or asset["asset_id"] in target_asset_ids
-            ]
-            key = "selected_observations" if batch["data_type"] == "carbon" else "selected_assets"
-            payload[key] = selected
-        if config_override:
-            payload.update(config_override)
-        return payload
-
-    def _selected_asset_ids_for_payload(self, batch_id: str, data_type: str, payload: dict[str, Any]) -> list[str] | None:
-        key = "selected_observations" if data_type == "carbon" else "selected_assets"
-        selected = payload.get(key)
-        if not isinstance(selected, list) or not selected:
-            return None
-        assets = self.store.list_assets(batch_id)
-        matched: list[str] = []
-        for item in selected:
-            if not isinstance(item, dict):
-                continue
-            match = _find_asset_for_payload_item(assets, item)
-            if match is not None and match.get("asset_id"):
-                matched.append(str(match["asset_id"]))
-        return matched or None
 
     def _active_task_for_batch(self, batch: dict[str, Any]) -> PartitionTask | None:
         if str(batch.get("status") or "") not in ACTIVE_BATCH_RUN_STATUSES:
@@ -769,165 +448,12 @@ class PartitionWorkflowService:
             return _task_from_attempt(attempt, batch)
         return None
 
-    def _submit_attempt(
-        self,
-        *,
-        task_id: str,
-        batch: dict[str, Any],
-        data_type: str,
-        payload: dict[str, Any],
-        cancellation_check,
-    ) -> PartitionTask:
-        if self._payload_uses_remote_ray(data_type, payload):
-            self._submit_remote_ray_job(
-                task_id=task_id,
-                batch_id=str(batch["batch_id"]),
-                data_type=data_type,
-                payload=payload,
-            )
-            attempt = self.store.get_attempt(task_id)
-            return _task_from_attempt(attempt or {"task_id": task_id, "status": "queued", "operation": "auto_run"}, batch)
-        return self.partition_service.submit(
-            data_type,
-            "run",
-            payload,
-            task_id=task_id,
-            on_started=self.on_task_started,
-            on_succeeded=self.on_task_succeeded,
-            on_failed=self.on_task_failed,
-            cancellation_check=cancellation_check,
-        )
-
-    def _enrich_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        enriched = copy.deepcopy(batch)
-        attempts = self.store.list_attempts(str(batch["batch_id"]))
-        enriched["partition_slots"] = _partition_slots_for_batch(batch, attempts)
-        return enriched
-
-    def _ensure_slot_not_completed(self, batch_id: str, payload: dict[str, Any], *, batch: dict[str, Any] | None = None) -> None:
-        operation = str(payload.get("_operation") or payload.get("operation") or "").strip().lower()
-        if operation in {"retry", "auto_retry", "manual_retry", "manual_asset_retry"}:
-            return
-        current_batch = batch or self.get_batch(batch_id)
-        if payload.get("strict_partition_request"):
-            completed = _completed_dataset_partition_keys(self.store.list_attempts(batch_id))
-            requested = _dataset_partition_keys(payload.get("dataset_partitions"))
-            duplicate = sorted(completed & requested)
-            if duplicate:
-                dataset_id, grid_type, grid_level, partition_method, max_observations = duplicate[0]
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Partition dataset configuration already completed: "
-                        f"{batch_id} {dataset_id} {grid_type} level={grid_level} {partition_method} "
-                        f"max_observations={max_observations or 'unbounded'}"
-                    ),
-                )
-            return
-        slot_key = _partition_slot_key(
-            grid_type=_partition_slot_grid_type(payload, current_batch),
-            partition_method=_partition_slot_method(payload, current_batch),
-        )
-        for slot in current_batch.get("partition_slots") or []:
-            if (
-                isinstance(slot, dict)
-                and _partition_slot_key(
-                    grid_type=str(slot.get("grid_type") or ""),
-                    partition_method=str(slot.get("partition_method") or ""),
-                )
-                == slot_key
-                and str(slot.get("status") or "") == "completed"
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Partition slot already completed: {batch_id} {slot['grid_type']} {slot['partition_method']}",
-                )
-
-    def _payload_uses_remote_ray(self, data_type: str, payload: dict[str, Any] | None) -> bool:
-        return (
-            self._supports_remote_ray_jobs()
-            and self._effective_partition_backend(data_type, payload) == "ray"
-            and bool(self._resolved_ray_address(payload))
-        )
-
-    def _supports_remote_ray_jobs(self) -> bool:
-        configured = getattr(self.store, "supports_remote_jobs", None)
-        if configured is not None:
-            return bool(configured)
-        return not isinstance(self.store, InMemoryPartitionJobStore)
-
-    def _attempt_uses_remote_ray(self, attempt: dict[str, Any], batch: dict[str, Any] | None = None) -> bool:
-        raw_payload = attempt.get("payload")
-        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
-        if payload.get("strict_partition_request"):
-            return False
-        resolved_batch: dict[str, Any] = batch or self.store.get_batch(str(attempt.get("batch_id") or "")) or {}
-        data_type = str(resolved_batch.get("data_type") or payload.get("data_type") or "").strip().lower()
-        return self._payload_uses_remote_ray(data_type, payload)
-
-    def _effective_partition_backend(self, data_type: str, payload: dict[str, Any] | None) -> str:
-        options = payload if isinstance(payload, dict) else {}
-        requested = str(options.get("partition_backend") or self._default_partition_backend(data_type)).strip().lower()
-        ray_address = self._resolved_ray_address(options)
-        if data_type == "carbon":
-            if requested == "auto":
-                return "ray" if ray_address else "process"
-            return requested
-        if requested == "auto":
-            return "ray" if ray_address else "thread"
-        if requested in {"local", "process"}:
-            return "thread"
-        return requested
-
-    def _default_partition_backend(self, data_type: str) -> str:
-        if data_type == "radar":
-            return "thread"
-        if data_type == "carbon":
-            return str(os.environ.get("CUBE_WEB_CARBON_PARTITION_BACKEND", "ray") or "ray")
-        return "ray"
-
-    def _resolved_ray_address(self, payload: dict[str, Any] | None = None) -> str:
-        options = payload if isinstance(payload, dict) else {}
-        return str(options.get("ray_address") or runtime_config.ray_address() or "").strip()
-
-    def _submit_remote_ray_job(
-        self,
-        *,
-        task_id: str,
-        batch_id: str,
-        data_type: str,
-        payload: dict[str, Any],
-    ) -> None:
-        client = _build_ray_job_client(self._resolved_ray_address(payload))
-        try:
-            client.submit_job(
-                entrypoint=f"python3.11 -m cube_web.services.partition_remote_job --task-id {shlex.quote(task_id)}",
-                submission_id=task_id,
-                runtime_env=_ray_job_runtime_env(),
-                metadata={
-                    "task_id": task_id,
-                    "batch_id": batch_id,
-                    "data_type": data_type,
-                    "operation": "run",
-                },
-            )
-        except Exception as exc:
-            self.store.fail_attempt(
-                task_id,
-                _error_text(exc),
-                manual_required=True,
-                error_type="ray_job_submit_failed",
-            )
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     def _refresh_active_attempt(self, task_id: str, attempt: dict[str, Any] | None = None) -> dict[str, Any] | None:
         attempt = attempt or self.store.get_attempt(task_id)
         if attempt is None or str(attempt.get("status") or "") not in ACTIVE_TASK_STATUSES:
             return attempt
-        if self._attempt_uses_remote_ray(attempt):
-            self._reconcile_remote_attempt(task_id, attempt)
-        else:
-            self._reconcile_local_attempt(task_id)
+        self._reconcile_local_attempt(task_id)
         return self.store.get_attempt(task_id) or attempt
 
     def _reconcile_local_attempt(self, task_id: str) -> None:
@@ -952,70 +478,6 @@ class PartitionWorkflowService:
         if current.status == "completed" and isinstance(current.result, dict):
             self.store.succeed_attempt(task_id, current.result)
 
-    def _reconcile_remote_attempt(self, task_id: str, attempt: dict[str, Any]) -> None:
-        try:
-            client = _build_ray_job_client(
-                self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {})
-            )
-            status = _ray_job_status_text(client.get_job_status(task_id))
-        except Exception as exc:
-            if _is_missing_ray_job_error(exc):
-                if str(attempt.get("status") or "") in {"cancel_requested", "cancelled"}:
-                    self.store.mark_cancelled(task_id)
-                else:
-                    self.store.fail_attempt(
-                        task_id,
-                        f"Ray job not found: {task_id}",
-                        manual_required=True,
-                        error_type="ray_job_missing",
-                    )
-            return
-        if status == "RUNNING" and str(attempt.get("status") or "") == "queued":
-            self.store.start_attempt(task_id)
-            return
-        if status in RAY_JOB_RUNNING_STATUSES:
-            return
-        if status == "STOPPED":
-            self.store.mark_cancelled(task_id)
-            return
-        if status == "SUCCEEDED":
-            refreshed = self.store.get_attempt(task_id)
-            if refreshed is not None and str(refreshed.get("status") or "") in ACTIVE_TASK_STATUSES:
-                self.store.fail_attempt(
-                    task_id,
-                    "Ray job succeeded but partition result was not persisted",
-                    manual_required=True,
-                    error_type="ray_job_state_mismatch",
-                )
-            return
-        if status == "FAILED":
-            info = None
-            try:
-                info = client.get_job_info(task_id)
-            except Exception:
-                info = None
-            error_message = _ray_job_failure_message(info) or f"Ray job failed: {task_id}"
-            if "cancel" in error_message.lower():
-                self.store.mark_cancelled(task_id)
-                return
-            self.store.fail_attempt(
-                task_id,
-                error_message,
-                manual_required=True,
-                error_type="ray_job_failed",
-            )
-
-    def _stop_remote_attempt(self, task_id: str) -> None:
-        attempt = self.store.get_attempt(task_id)
-        if attempt is None or not self._attempt_uses_remote_ray(attempt):
-            return
-        try:
-            client = _build_ray_job_client(
-                self._resolved_ray_address(attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {})
-            )
-            client.stop_job(task_id)
-        except Exception:
-            return
 
 
 def classify_partition_error(error: str) -> str:
@@ -1043,247 +505,6 @@ def classify_partition_error(error: str) -> str:
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
         return "permission"
     return "unknown"
-
-
-def _ray_job_runtime_env() -> dict[str, Any]:
-    from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
-
-    runtime_env = dict(_ray_runtime_env_from_env() or {})
-    env_vars = dict(runtime_env.get("env_vars") or {})
-    minio = runtime_config.minio_settings()
-    resolved_defaults = {
-        "CUBE_WEB_POSTGRES_DSN": runtime_config.postgres_dsn(),
-        "CUBE_WEB_RAY_ADDRESS": runtime_config.ray_address(),
-        "CUBE_WEB_MINIO_ENDPOINT": minio.endpoint,
-        "CUBE_WEB_MINIO_ACCESS_KEY": minio.access_key,
-        "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
-        "CUBE_WEB_MINIO_BUCKET": minio.bucket,
-        "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1",
-        "RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S": "3600",
-    }
-    for name in (
-        "CUBE_WEB_POSTGRES_DSN",
-        "POSTGRES_DSN",
-        "DATABASE_URL",
-        "CUBE_WEB_RAY_ADDRESS",
-        "RAY_ADDRESS",
-        "CUBE_WEB_MINIO_ENDPOINT",
-        "MINIO_ENDPOINT",
-        "CUBE_WEB_MINIO_ACCESS_KEY",
-        "MINIO_ACCESS_KEY",
-        "CUBE_WEB_MINIO_SECRET_KEY",
-        "MINIO_SECRET_KEY",
-        "CUBE_WEB_MINIO_BUCKET",
-        "MINIO_BUCKET",
-        "CUBE_WEB_CARBON_PARTITION_BACKEND",
-        "CUBE_WEB_ENV_FILE",
-        "RAY_OVERRIDE_JOB_RUNTIME_ENV",
-        "RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S",
-    ):
-        value = os.environ.get(name)
-        if not value:
-            value = resolved_defaults.get(name, "")
-        if value:
-            env_vars[name] = value
-    if env_vars:
-        runtime_env["env_vars"] = env_vars
-    return runtime_env
-
-
-def _build_ray_job_client(ray_address: str):
-    from ray.job_submission import JobSubmissionClient
-
-    dashboard_url = _ray_job_dashboard_url(ray_address)
-    if not dashboard_url:
-        raise RuntimeError("Ray address is required for durable partition jobs")
-    return JobSubmissionClient(dashboard_url)
-
-
-def _ray_job_dashboard_url(ray_address: str) -> str:
-    address = str(ray_address or "").strip()
-    if not address:
-        return ""
-    if address.startswith("http://") or address.startswith("https://"):
-        return address.rstrip("/")
-    if address.startswith("ray://"):
-        parsed = urlparse(address)
-        host = parsed.hostname or parsed.netloc.replace("ray://", "")
-        return f"http://{host}:8265"
-    host = address.split("://", 1)[-1].split("/", 1)[0]
-    if ":" in host:
-        host = host.rsplit(":", 1)[0]
-    return f"http://{host}:8265"
-
-
-def _ray_job_status_text(status: Any) -> str:
-    value = getattr(status, "value", status)
-    return str(value or "").strip().upper()
-
-
-def _ray_job_failure_message(info: Any) -> str | None:
-    for name in ("message", "error_type"):
-        value = getattr(info, name, None)
-        if value:
-            return str(value)
-    if isinstance(info, dict):
-        for name in ("message", "error_type"):
-            value = info.get(name)
-            if value:
-                return str(value)
-    return None
-
-
-def _is_missing_ray_job_error(exc: Exception) -> bool:
-    message = _error_text(exc).lower()
-    return "job does not exist" in message or "does not exist" in message or "not found" in message
-
-
-def _error_text(exc: Exception) -> str:
-    text = str(exc).strip()
-    return text or exc.__class__.__name__
-
-
-def _partition_slot_grid_type(payload: dict[str, Any], batch: dict[str, Any]) -> str:
-    payload_grid_type = str(payload.get("grid_type") or "").strip().lower()
-    if payload_grid_type:
-        return payload_grid_type
-    batch_grid_type = str((batch.get("normalized_payload") or {}).get("grid_type") or "").strip().lower()
-    return batch_grid_type or "geohash"
-
-
-def _partition_slot_method(payload: dict[str, Any], batch: dict[str, Any]) -> str:
-    grid_type = _partition_slot_grid_type(payload, batch)
-    raw_runner_result = payload.get("runner_result")
-    runner_result: dict[str, Any] = raw_runner_result if isinstance(raw_runner_result, dict) else {}
-    return normalize_partition_method(
-        payload.get("partition_method") or runner_result.get("partition_method") or runner_result.get("partition_type"),
-        grid_type=grid_type,
-    )
-
-
-def _partition_slot_key(*, grid_type: str, partition_method: str) -> tuple[str, str]:
-    return str(grid_type or "").strip().lower(), str(partition_method or "").strip().lower()
-
-
-def _partition_slot_status(attempt_status: str) -> str:
-    status = str(attempt_status or "").strip().lower()
-    if status == "succeeded":
-        return "completed"
-    if status in {"queued", "running", "retrying"}:
-        return status
-    if status == "manual_required":
-        return "failed"
-    if status in {"failed", "cancelled", "cancel_requested"}:
-        return status
-    return "available"
-
-
-def _partition_slot_labels(grid_type: str, partition_method: str) -> tuple[str, str]:
-    grid_labels = {
-        "geohash": "GeoHash格网",
-        "mgrs": "MGRS格网",
-        "isea4h": "六边形格网",
-    }
-    method_labels = {
-        "logical": "逻辑剖分",
-        "entity": "实体剖分",
-    }
-    return grid_labels.get(grid_type, grid_type), method_labels.get(partition_method, partition_method)
-
-
-def _partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if str(batch.get("data_type") or "").strip().lower() == "mixed":
-        return _mixed_partition_slots_for_batch(batch, attempts)
-    slots: dict[tuple[str, str], dict[str, Any]] = {}
-    for grid_type, partition_method in PARTITION_SLOT_MATRIX:
-        grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
-        slots[(grid_type, partition_method)] = {
-            "grid_type": grid_type,
-            "grid_label": grid_label,
-            "partition_method": partition_method,
-            "method_label": method_label,
-            "status": "available",
-            "disabled": False,
-            "latest_task_id": None,
-            "finished_at": None,
-        }
-
-    sorted_attempts = sorted(
-        [attempt for attempt in attempts if isinstance(attempt, dict)],
-        key=lambda attempt: (
-            _parse_slot_datetime(attempt.get("finished_at")),
-            _parse_slot_datetime(attempt.get("updated_at")),
-            _parse_slot_datetime(attempt.get("created_at")),
-        ),
-        reverse=True,
-    )
-    for attempt in sorted_attempts:
-        raw_payload = attempt.get("payload")
-        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
-        raw_runner_result = attempt.get("runner_result")
-        runner_result: dict[str, Any] = raw_runner_result if isinstance(raw_runner_result, dict) else {}
-        combined_payload = {**payload, "runner_result": runner_result}
-        grid_type = _partition_slot_grid_type(combined_payload, batch)
-        partition_method = _partition_slot_method(combined_payload, batch)
-        slot = slots.get(_partition_slot_key(grid_type=grid_type, partition_method=partition_method))
-        if slot is None or slot.get("latest_task_id") is not None:
-            continue
-        slot_status = _partition_slot_status(str(attempt.get("status") or ""))
-        slot["status"] = slot_status
-        slot["disabled"] = slot_status in {"completed", "queued", "running", "retrying"}
-        slot["latest_task_id"] = attempt.get("task_id")
-        slot["finished_at"] = attempt.get("finished_at")
-    return list(slots.values())
-
-
-def _mixed_partition_slots_for_batch(batch: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    payload = batch.get("normalized_payload") if isinstance(batch.get("normalized_payload"), dict) else {}
-    slots: dict[tuple[str, str, int, str, int], dict[str, Any]] = {}
-    for partition in payload.get("dataset_partitions") or []:
-        if not isinstance(partition, dict):
-            continue
-        key = _dataset_partition_key(partition)
-        if key is None:
-            continue
-        dataset_id, grid_type, grid_level, partition_method, max_observations = key
-        grid_label, method_label = _partition_slot_labels(grid_type, partition_method)
-        slots[key] = {
-            "dataset_id": dataset_id,
-            "grid_type": grid_type,
-            "grid_label": grid_label,
-            "requested_grid_level": grid_level,
-            "partition_method": partition_method,
-            "max_observations": max_observations or None,
-            "method_label": method_label,
-            "status": "available",
-            "disabled": False,
-            "latest_task_id": None,
-            "finished_at": None,
-        }
-    for attempt in sorted(
-        [item for item in attempts if isinstance(item, dict)],
-        key=lambda item: (
-            _parse_slot_datetime(item.get("finished_at")),
-            _parse_slot_datetime(item.get("updated_at")),
-            _parse_slot_datetime(item.get("created_at")),
-        ),
-        reverse=True,
-    ):
-        attempt_payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
-        dataset_statuses = _dataset_result_statuses(attempt)
-        for partition in attempt_payload.get("dataset_partitions") or []:
-            key = _dataset_partition_key(partition)
-            slot = None if key is None else slots.get(key)
-            if slot is None or slot.get("latest_task_id") is not None:
-                continue
-            dataset_id = key[0]
-            result_status = dataset_statuses.get(dataset_id)
-            slot_status = _dataset_slot_status(result_status) if result_status is not None else _partition_slot_status(str(attempt.get("status") or ""))
-            slot["status"] = slot_status
-            slot["disabled"] = slot_status in {"completed", "queued", "running", "retrying"}
-            slot["latest_task_id"] = attempt.get("task_id")
-            slot["finished_at"] = attempt.get("finished_at")
-    return list(slots.values())
 
 
 def _dataset_partitions(request: StrictPartitionRequest) -> list[dict[str, Any]]:
@@ -1352,204 +573,6 @@ def _dataset_result_statuses(attempt: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _dataset_slot_status(status: str) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized == "completed":
-        return "completed"
-    if normalized in {"failed", "cancelled"}:
-        return normalized
-    return "available"
-
-
-def _reconcile_partition_schemas(store: PartitionJobStore, payload: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    source_system = _text_or_none(payload.get("source_system")) or "loader"
-    batch_ids = _normalized_string_list(payload.get("batch_ids"))
-    asset_ids = _normalized_string_list(payload.get("asset_ids"))
-    observation_ids = _normalized_string_list(payload.get("observation_ids"))
-    updated_since = _text_or_none(payload.get("updated_since"))
-    include_assets = bool(payload.get("include_assets", True))
-    include_attempts = bool(payload.get("include_attempts", False))
-    if not batch_ids and not asset_ids and not observation_ids and not updated_since:
-        raise ValueError("one of batch_ids, asset_ids, observation_ids, or updated_since is required")
-    updated_since_dt = _parse_optional_iso_datetime(updated_since, "updated_since")
-
-    requested_batch_rows = store.list_received_batches(batch_ids=batch_ids, source_system=source_system) if batch_ids else []
-    matched_assets = store.list_received_assets(asset_ids=asset_ids, source_system=source_system) if asset_ids else []
-    matched_observations = (
-        store.list_received_observations(observation_ids=observation_ids, source_system=source_system) if observation_ids else []
-    )
-    updated_batches = (
-        store.list_received_batches(updated_since=updated_since_dt, source_system=source_system) if updated_since_dt is not None else []
-    )
-
-    related_batch_ids = [
-        *[str(row.get("batch_key") or "") for row in matched_assets],
-        *[str(row.get("batch_key") or "") for row in matched_observations],
-    ]
-    fetched_batch_map = {str(row["batch_id"]): row for row in [*requested_batch_rows, *updated_batches]}
-    missing_related_batch_ids = [batch_id for batch_id in related_batch_ids if batch_id and batch_id not in fetched_batch_map]
-    if missing_related_batch_ids:
-        for row in store.list_received_batches(batch_ids=missing_related_batch_ids, source_system=source_system):
-            fetched_batch_map[str(row["batch_id"])] = row
-
-    ordered_batch_ids: list[str] = []
-    seen_batch_ids: set[str] = set()
-    for batch_id in [*batch_ids, *related_batch_ids, *[str(row["batch_id"]) for row in updated_batches]]:
-        if batch_id and batch_id not in seen_batch_ids:
-            seen_batch_ids.add(batch_id)
-            ordered_batch_ids.append(batch_id)
-
-    known_batch_ids = [batch_id for batch_id in ordered_batch_ids if batch_id in fetched_batch_map]
-    all_assets = store.list_received_assets(batch_ids=known_batch_ids, source_system=source_system) if known_batch_ids else []
-    all_observations = store.list_received_observations(batch_ids=known_batch_ids, source_system=source_system) if known_batch_ids else []
-    members_by_batch: dict[str, list[dict[str, Any]]] = {}
-    for row in [*all_assets, *all_observations]:
-        members_by_batch.setdefault(str(row.get("batch_key") or ""), []).append(row)
-
-    batches: list[dict[str, Any]] = []
-    for batch_id in ordered_batch_ids:
-        batch = fetched_batch_map.get(batch_id)
-        if batch is None:
-            batches.append({"batch_id": batch_id, "known": False, "status": "missing"})
-            continue
-        members = members_by_batch.get(batch_id, [])
-        batches.append(_reconcile_received_batch_row(batch, members, include_assets=include_assets, include_attempts=include_attempts))
-
-    matched_asset_ids = {str(asset["asset_id"]) for asset in matched_assets if asset.get("asset_id")}
-    matched_observation_ids = {
-        str(observation["observation_id"]) for observation in matched_observations if observation.get("observation_id")
-    }
-    missing_batch_ids = [batch_id for batch_id in batch_ids if batch_id not in set(known_batch_ids)]
-    missing_asset_ids = [asset_id for asset_id in asset_ids if asset_id not in matched_asset_ids]
-    missing_observation_ids = [observation_id for observation_id in observation_ids if observation_id not in matched_observation_ids]
-    return {
-        "source_system": source_system,
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "batches": batches,
-        "missing_batch_ids": missing_batch_ids,
-        "missing_asset_ids": missing_asset_ids,
-        "missing_observation_ids": missing_observation_ids,
-        "summary": {
-            "requested_batches": len(batch_ids),
-            "known_batches": len(known_batch_ids),
-            "missing_batches": len(missing_batch_ids),
-            "requested_assets": len(asset_ids),
-            "known_assets": len(matched_asset_ids),
-            "missing_assets": len(missing_asset_ids),
-            "requested_observations": len(observation_ids),
-            "known_observations": len(matched_observation_ids),
-            "missing_observations": len(missing_observation_ids),
-        },
-    }
-
-
-def _normalized_string_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("batch_ids, asset_ids, and observation_ids must be arrays when provided")
-    rows: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        text = str(item or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        rows.append(text)
-    return rows
-
-
-def _parse_optional_iso_datetime(value: str | None, label: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        raise ValueError(f"{label} must be an ISO8601 datetime") from None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    else:
-        parsed = parsed.astimezone(timezone.utc)
-    return parsed
-
-
-def _parse_slot_datetime(value: Any) -> datetime:
-    if value is None or value == "":
-        return datetime.min.replace(tzinfo=timezone.utc)
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return datetime.min.replace(tzinfo=timezone.utc)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _asset_counts(assets: list[dict[str, Any]]) -> dict[str, int]:
-    return {"total": len(assets)}
-
-
-def _reconcile_received_batch_row(
-    batch: dict[str, Any],
-    members: list[dict[str, Any]],
-    *,
-    include_assets: bool,
-    include_attempts: bool,
-) -> dict[str, Any]:
-    return {
-        "batch_id": batch.get("batch_id"),
-        "known": True,
-        "data_type": batch.get("data_type"),
-        "batch_name": batch.get("batch_name"),
-        "source_system": batch.get("source_system"),
-        "status": batch.get("status") or "pending",
-        "loaded_at": _iso_datetime_or_none(batch.get("loaded_at")),
-        "updated_at": _iso_datetime_or_none(batch.get("updated_at")),
-        "raw_meta_uri": batch.get("raw_meta_uri"),
-        "asset_counts": _asset_counts(members),
-        "assets": [_reconcile_received_member_row(member) for member in members] if include_assets else [],
-        "attempts": [] if include_attempts else [],
-    }
-
-
-def _reconcile_received_member_row(member: dict[str, Any]) -> dict[str, Any]:
-    if member.get("asset_id"):
-        return {
-            "kind": "asset",
-            "asset_id": member.get("asset_id"),
-            "source_uri": member.get("source_uri"),
-            "scene_id": member.get("scene_id"),
-        }
-    return {
-        "kind": "observation",
-        "observation_id": member.get("observation_id"),
-        "source_uri": member.get("source_uri"),
-        "source_index": member.get("source_index"),
-    }
-
-
-def _iso_datetime_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
-
-
 def _task_from_attempt(attempt: dict[str, Any], batch: dict[str, Any]) -> PartitionTask:
     raw_result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else None
     result = None
@@ -1590,30 +613,6 @@ def _task_response_operation(operation: str) -> str:
     return operation
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            if str(key).startswith("_") or callable(item):
-                continue
-            cleaned = _json_safe(item)
-            if cleaned is not _JSON_SAFE_SKIP:
-                out[key] = cleaned
-        return out
-    if isinstance(value, list):
-        return [item for item in (_json_safe(item) for item in value) if item is not _JSON_SAFE_SKIP]
-    if callable(value):
-        return _JSON_SAFE_SKIP
-    return value
-
-
-class _JsonSafeSkip:
-    pass
-
-
-_JSON_SAFE_SKIP = _JsonSafeSkip()
-
-
 def _timestamp_or_now(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -1629,109 +628,6 @@ def _timestamp_or_now(value: Any) -> float:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp.timestamp()
-
-
-def is_retryable_partition_error(error_type: str) -> bool:
-    return error_type in {"transient", "unknown"}
-
-
-def _payload_asset_with_identity(asset: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(asset.get("asset_payload") or {})
-    payload.setdefault("asset_id", asset.get("asset_id"))
-    payload.setdefault("source_uri", asset.get("source_uri"))
-    if asset.get("scene_id") is not None:
-        payload.setdefault("scene_id", asset.get("scene_id"))
-    return payload
-
-
-def _find_asset_for_payload_item(assets: list[dict[str, Any]], item: dict[str, Any]) -> dict[str, Any] | None:
-    asset_id = str(item.get("asset_id") or "").strip()
-    if asset_id:
-        for asset in assets:
-            if str(asset.get("asset_id") or "") == asset_id:
-                return asset
-    source_uri = str(item.get("source_uri") or "").strip()
-    scene_id = str(item.get("scene_id") or item.get("product_year") or item.get("observation_id") or item.get("source_index") or "").strip()
-    if source_uri:
-        for asset in assets:
-            if str(asset.get("source_uri") or "") == source_uri:
-                return asset
-    for asset in assets:
-        if scene_id and str(asset.get("scene_id") or "") == scene_id:
-            return asset
-    return None
-
-
-def _asset_results(result: dict[str, Any]) -> list[dict[str, Any]]:
-    items = result.get("asset_results") if isinstance(result, dict) else None
-    if items is None and isinstance(result, dict):
-        items = result.get("partition_asset_results")
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def _asset_result_failed(item: dict[str, Any]) -> bool:
-    return str(item.get("status") or "").strip().lower() in {"failed", "manual_required", "error"}
-
-
-def _asset_result_id(item: dict[str, Any]) -> str:
-    return str(item.get("asset_id") or "").strip()
-
-
-def _asset_result_error_type(item: dict[str, Any]) -> str:
-    explicit = str(item.get("error_type") or "").strip().lower()
-    if explicit:
-        return explicit
-    error = str(item.get("last_error") or item.get("error") or item.get("error_message") or "")
-    return classify_partition_error(error)
-
-
-def _failed_asset_ids(result: dict[str, Any], scoped_asset_ids: set[str] | None = None) -> list[str]:
-    return [
-        _asset_result_id(item)
-        for item in _asset_results(result)
-        if _asset_result_failed(item)
-        and _asset_result_id(item)
-        and (scoped_asset_ids is None or _asset_result_id(item) in scoped_asset_ids)
-    ]
-
-
-def _retryable_failed_asset_ids(result: dict[str, Any], scoped_asset_ids: set[str] | None = None) -> list[str]:
-    return [
-        _asset_result_id(item)
-        for item in _asset_results(result)
-        if _asset_result_failed(item)
-        and _asset_result_id(item)
-        and (scoped_asset_ids is None or _asset_result_id(item) in scoped_asset_ids)
-        and is_retryable_partition_error(_asset_result_error_type(item))
-    ]
-
-
-def _auto_retries_used_in_chain(attempts: list[dict[str, Any]], task_id: str) -> int:
-    by_task_id = {str(attempt.get("task_id") or ""): attempt for attempt in attempts}
-    used = 0
-    current_id = task_id
-    seen: set[str] = set()
-    while current_id and current_id not in seen:
-        seen.add(current_id)
-        attempt = by_task_id.get(current_id)
-        if not attempt:
-            break
-        operation = str(attempt.get("operation") or "")
-        if operation in {"manual_retry", "manual_asset_retry"}:
-            break
-        if operation == "auto_retry":
-            used += 1
-        current_id = str(attempt.get("source_task_id") or "")
-    return used
-
-
-def _max_auto_retries(batch: dict[str, Any]) -> int:
-    value = batch.get("max_auto_retries")
-    if value is None or value == "":
-        return 1
-    return max(0, int(value))
 
 
 def _text_or_none(value: Any) -> str | None:
@@ -1772,52 +668,6 @@ def _strict_task_result(result: dict[str, Any], request: StrictPartitionRequest)
                 }
             )
     return {**result, "asset_results": asset_results}
-
-
-def _asset_failure_reason(assets: list[dict[str, Any]], asset_ids: list[str]) -> str | None:
-    target_ids = set(asset_ids)
-    reasons: list[str] = []
-    for asset in assets:
-        asset_id = str(asset.get("asset_id") or "").strip()
-        if asset_id not in target_ids:
-            continue
-        reason = _text_or_none(asset.get("last_error"))
-        if reason:
-            reasons.append(f"{asset_id}: {reason}")
-    return _joined_reason(reasons)
-
-
-def _result_failure_reason(result: dict[str, Any], asset_ids: list[str]) -> str | None:
-    target_ids = set(asset_ids)
-    reasons: list[str] = []
-    for item in _asset_results(result):
-        asset_id = _asset_result_id(item)
-        if asset_id not in target_ids:
-            continue
-        reason = _text_or_none(item.get("last_error") or item.get("error") or item.get("error_message"))
-        if reason:
-            reasons.append(f"{asset_id}: {reason}")
-    return _joined_reason(reasons)
-
-
-def _joined_reason(reasons: list[str]) -> str | None:
-    if not reasons:
-        return None
-    return "; ".join(reasons[:3])[:500]
-
-
-def _manual_required_asset_result(result: dict[str, Any], asset_ids: set[str]) -> dict[str, Any]:
-    if not asset_ids:
-        return result
-    next_result = copy.deepcopy(result)
-    for key in ("asset_results", "partition_asset_results"):
-        items = next_result.get(key)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if isinstance(item, dict) and _asset_result_id(item) in asset_ids and _asset_result_failed(item):
-                item["status"] = "manual_required"
-    return next_result
 
 
 class _ScenePartitionFailure(RuntimeError):
@@ -1933,7 +783,7 @@ def _completed_dataset_result(result: PartitionDatasetResult, committed: Any) ->
             "indexes": len(result.indexes),
             "grid_cells": len(result.grid_cells),
         }
-    return {
+    completed = {
         "dataset_id": result.dataset_id,
         "output_version": result.output_version,
         "status": "completed",
@@ -1943,6 +793,9 @@ def _completed_dataset_result(result: PartitionDatasetResult, committed: Any) ->
             "grid_cells": int(counts.get("grid_cells") or 0),
         },
     }
+    if result.execution_engine:
+        completed["execution_engine"] = result.execution_engine
+    return completed
 
 
 def _safe_dataset_error(exc: Exception) -> str:

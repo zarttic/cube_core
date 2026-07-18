@@ -232,7 +232,11 @@ def test_opengauss_complete_persists_index_attributes_as_jsonb(monkeypatch) -> N
         if "FROM partition_datasets" in sql:
             return [{"dataset_id": "dataset-a", "batch_id": "batch-a"}]
         if "FROM partition_job_attempts" in sql:
-            return [{"task_id": "task-a", "batch_id": "batch-a", "payload": {}}]
+            return [{
+                "task_id": "task-a",
+                "batch_id": "batch-a",
+                "payload": {"strict_partition_request": True, "datasets": [{"dataset_id": "dataset-a"}]},
+            }]
         if "FROM partition_output_versions" in sql:
             return [{"task_id": "task-a", "status": "staging"}]
         return []

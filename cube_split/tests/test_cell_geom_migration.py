@@ -112,3 +112,11 @@ def test_validate_rejects_wrong_polygon_point_count():
 
     with pytest.raises(RuntimeError, match="wrong_point_count.*1"):
         migration.validate(conn)
+
+
+def test_validate_allows_variable_mgrs_boundary_point_count():
+    cursor = FakeCursor(fetchone=(0, 0, 0))
+    conn = FakeConnection([cursor])
+
+    assert migration.validate(conn) == {"missing": 0, "invalid": 0, "wrong_point_count": 0}
+    assert "grid_type = 'mgrs' AND ST_NPoints(ST_ExteriorRing(cell_geom)) < 4" in cursor.calls[0][0]

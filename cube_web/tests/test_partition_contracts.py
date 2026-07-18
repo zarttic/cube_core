@@ -65,7 +65,7 @@ def test_accepts_exact_dataset_level_normalized_bands() -> None:
     ("grid_type", "minimum", "maximum"),
     [("geohash", 1, 12), ("mgrs", 0, 5), ("isea4h", 0, 15)],
 )
-def test_strict_request_uses_exact_m1_level_ranges(grid_type: str, minimum: int, maximum: int) -> None:
+def test_strict_request_uses_exact_production_level_ranges(grid_type: str, minimum: int, maximum: int) -> None:
     for level in (minimum, maximum):
         payload = normalized_request()
         payload["grid_type"] = grid_type

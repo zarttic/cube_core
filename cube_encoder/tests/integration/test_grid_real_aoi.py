@@ -17,7 +17,7 @@ pytestmark = pytest.mark.real_aoi
 def _real_aoi_uri() -> str:
     uri = os.environ.get("CUBE_GRID_REAL_AOI_URI", "").strip()
     if not uri:
-        pytest.fail("CUBE_GRID_REAL_AOI_URI is required for the M1 real-AOI gate")
+        pytest.fail("CUBE_GRID_REAL_AOI_URI is required for the production real-AOI gate")
     return uri
 
 

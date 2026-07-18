@@ -21,7 +21,7 @@ const GlobeMapStub = {
   props: ['geometries'],
   template: '<div data-testid="partition-map-stub" :data-geometry-count="geometries.length" />',
 };
-const legacyLayoutStubs = {
+const layoutStubs = {
   'el-button': { template: '<button v-bind="$attrs" @click="$emit(\'click\')"><slot /></button>' },
   'el-tag': { template: '<span><slot /></span>' },
 };
@@ -48,7 +48,7 @@ describe('PartitionView map workspace', () => {
       global: {
         stubs: {
           GlobeMap: GlobeMapStub,
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GridParameters: true,
           BatchAssetsPanel: true,
           ExecutionResultPanel: true,
@@ -80,7 +80,7 @@ describe('PartitionView map workspace', () => {
 
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     expect(wrapper.text()).toContain('碳卫星空间预览');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });
 
   it('loads independent Geohash, MGRS and ISEA4H layers together at their exact selected levels', async () => {
@@ -119,7 +119,7 @@ describe('PartitionView map workspace', () => {
       global: {
         stubs: {
           GlobeMap: GlobeMapStub,
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GridParameters: true,
           BatchAssetsPanel: true,
           ExecutionResultPanel: true,
@@ -148,11 +148,106 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
   });
 
+  it('retains grid layers while switching between product pages', async () => {
+    requestJson.mockImplementation(async (_path, payload) => ({
+      cells: [{
+        space_code: `${payload.grid_type}-${payload.requested_grid_level}`,
+        grid_level: payload.requested_grid_level,
+        bbox: payload.bbox,
+      }],
+    }));
+    const store = usePartitionStore();
+    store.form.datasets = [
+      {
+        dataset_id: 'optical-a', data_type: 'optical', scenes: [{ scene_id: 'scene-o' }],
+        assets: [{ source_asset_id: 'asset-o', bbox: [100, 20, 101, 21] }],
+        partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
+      },
+      {
+        dataset_id: 'radar-a', data_type: 'radar', scenes: [{ scene_id: 'scene-r' }],
+        assets: [{ source_asset_id: 'asset-r', bbox: [110, 30, 111, 31] }],
+        partition: { grid_type: 'mgrs', requested_grid_level: 1, partition_method: 'logical' },
+      },
+      {
+        dataset_id: 'product-a', data_type: 'product', scenes: [{ scene_id: 'scene-p' }],
+        assets: [{ source_asset_id: 'asset-p', bbox: [120, 40, 121, 41] }],
+        partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
+      },
+    ];
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub,
+          ...layoutStubs,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          ExecutionResultPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-testid="partition-module-radar"]').trigger('click');
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-testid="partition-module-product"]').trigger('click');
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual(['#2f73d9', '#16836f', '#d97706']);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
+    await wrapper.get('[data-testid="partition-module-optical"]').trigger('click');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
+  });
+
+  it('bounds rendered cells for a large recommended-level preview', async () => {
+    requestJson.mockResolvedValue({
+      cells: Array.from({ length: 5001 }, (_, index) => ({
+        space_code: `cell-${index}`,
+        grid_level: 6,
+        bbox: [100 + index / 10000, 20, 100.01 + index / 10000, 20.01],
+      })),
+    });
+    const store = usePartitionStore();
+    store.form.datasets = [{
+      dataset_id: 'dataset-large', data_type: 'optical', scenes: [{ scene_id: 'scene-large' }],
+      assets: [{ source_asset_id: 'asset-large', bbox: [100, 20, 101, 21] }],
+      partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
+    }];
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub,
+          ...layoutStubs,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          ExecutionResultPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.vm.gridGeometries).toHaveLength(1667);
+    expect(wrapper.text()).toContain('共 5001 个');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1668');
+  });
+
   it('exposes product, quality, ingest and task pages as peer modules', async () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: true,
           BatchAssetsPanel: true,
@@ -191,7 +286,7 @@ describe('PartitionView map workspace', () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: GridParametersStub,
           BatchAssetsPanel: true,
@@ -237,7 +332,7 @@ describe('PartitionView map workspace', () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: {
             props: ['sourceBatchIds'],
@@ -266,7 +361,7 @@ describe('PartitionView map workspace', () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: { template: '<button data-testid="submit" @click="$emit(\'submit\')">submit</button>' },
           BatchAssetsPanel: true,
@@ -286,7 +381,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="result"]').text()).toBe('none');
   });
 
-  it('discards a stale map preview after switching products', async () => {
+  it('keeps an in-flight preview scoped to its originating product', async () => {
     let resolvePreview;
     requestJson.mockImplementationOnce(() => new Promise((resolve) => { resolvePreview = resolve; }));
     const store = usePartitionStore();
@@ -301,7 +396,7 @@ describe('PartitionView map workspace', () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: true,
           BatchAssetsPanel: true,
@@ -318,7 +413,7 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     resolvePreview({ cells: [{ space_code: 'old-grid', grid_level: 6, bbox: [100, 20, 101, 21] }] });
     await flushPromises();
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
 
   it('allows selections accumulated from different loader batches', async () => {
@@ -327,7 +422,7 @@ describe('PartitionView map workspace', () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
-          ...legacyLayoutStubs,
+          ...layoutStubs,
           GlobeMap: GlobeMapStub,
           GridParameters: { template: '<button data-testid="submit" @click="$emit(\'submit\')">submit</button>' },
           BatchAssetsPanel: true,

@@ -340,7 +340,7 @@ def test_entity_tile_object_key_uses_row_grid_type():
     }
     args = SimpleNamespace(
         minio_prefix="cube/entity",
-        dataset="demo_optical",
+        dataset="optical_default",
         sensor="optical_mosaic",
         asset_version="v1",
     )
@@ -353,7 +353,7 @@ def test_entity_tile_object_key_uses_row_grid_type():
 def test_entity_tile_upload_options_default_workers():
     options = entity_partition_job._entity_tile_upload_options(
         SimpleNamespace(
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             minio_endpoint="127.0.0.1:9000",
@@ -559,7 +559,7 @@ def test_entity_partition_minio_updates_rows_and_postgres_metadata(monkeypatch, 
             ray_address="",
             ray_parallelism=0,
             chunk_size=0,
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             asset_storage_backend="minio",
@@ -646,7 +646,7 @@ def test_entity_tile_minio_upload_keys_include_space_code(monkeypatch, tmp_path:
     uploaded = entity_partition_job._upload_entity_tiles_to_minio(
         rows,
         SimpleNamespace(
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             minio_endpoint="127.0.0.1:9000",
@@ -700,7 +700,7 @@ def test_entity_tile_minio_fast_upload_skips_stat(monkeypatch, tmp_path: Path):
             }
         ],
         SimpleNamespace(
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             minio_endpoint="127.0.0.1:9000",
@@ -760,7 +760,7 @@ def test_entity_tile_minio_upload_workers_scale_http_pool(monkeypatch, tmp_path:
     uploaded = entity_partition_job._upload_entity_tiles_to_minio(
         rows,
         SimpleNamespace(
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             minio_endpoint="127.0.0.1:9000",
@@ -855,7 +855,7 @@ def test_entity_partition_ingest_disabled_skips_minio_and_postgres(monkeypatch, 
             ray_address="",
             ray_parallelism=0,
             chunk_size=0,
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             asset_storage_backend="minio",
@@ -959,7 +959,7 @@ def test_entity_partition_ray_ingest_disabled_still_uses_minio_tiles(monkeypatch
             ray_address="10.3.100.182:6379",
             ray_parallelism=0,
             chunk_size=0,
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             asset_storage_backend="local",
@@ -1021,7 +1021,7 @@ def test_entity_partition_ray_requires_minio_tile_output(monkeypatch, tmp_path: 
                 ray_address="10.3.100.182:6379",
                 ray_parallelism=0,
                 chunk_size=0,
-                dataset="demo_optical",
+                dataset="optical_default",
                 sensor="optical_mosaic",
                 asset_version="v1",
                 asset_storage_backend="local",
@@ -1120,7 +1120,7 @@ def test_write_entity_metadata_postgres_reports_probe_metrics(monkeypatch, tmp_p
         rows,
         SimpleNamespace(
             postgres_dsn="postgresql://example",
-            dataset="demo_optical",
+            dataset="optical_default",
             sensor="optical_mosaic",
             asset_version="v1",
             job_id="entity-job-probe",
@@ -1185,7 +1185,7 @@ def test_write_entity_metadata_failure_recreates_job_table_after_rollback(monkey
             [{}],
             SimpleNamespace(
                 postgres_dsn="postgresql://example",
-                dataset="demo_optical",
+                dataset="optical_default",
                 sensor="optical_mosaic",
                 asset_version="v1",
                 job_id="entity-job-failure",

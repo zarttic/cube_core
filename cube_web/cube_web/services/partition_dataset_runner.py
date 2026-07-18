@@ -1,4 +1,4 @@
-"""Ray execution adapter for the M2 normalized dataset contract."""
+"""Ray execution adapter for the normalized production dataset contract."""
 
 from __future__ import annotations
 
@@ -203,6 +203,7 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
             "dataset_id": dataset["dataset_id"], "task_id": value["task_id"], "output_version": value["output_version"],
             "grid_type": grid_type, "requested_grid_level": requested_grid_level,
             "partition_method": "entity" if entity else "logical",
+            "execution_engine": "ray",
             "object_prefix": f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/",
             "tiles": tiles, "indexes": indexes, "grid_cells": list(cells.values()),
         }
@@ -379,6 +380,7 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
             "dataset_id": dataset["dataset_id"], "task_id": value["task_id"], "output_version": value["output_version"],
             "grid_type": grid_type, "requested_grid_level": requested_grid_level,
             "partition_method": "entity" if entity else "logical",
+            "execution_engine": "ray",
             "object_prefix": f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/",
             "tiles": tiles, "indexes": indexes, "grid_cells": list(cells.values()),
         }
@@ -395,7 +397,7 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
 
 
 class NormalizedPartitionDatasetRunner:
-    """Production runner used exclusively by the M2 strict partition route."""
+    """Production runner used by normalized partition runs."""
 
     def run_dataset(
         self,

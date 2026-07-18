@@ -10,7 +10,7 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 
 ## 2. 输入与执行边界
 
-生产剖分接收 M2 `StrictPartitionRequest` 和 loader 交付的完整 `DatasetInput`。同一批次允许包含不同数据类型，每个数据集可在 `datasets[].partition` 中独立选择格网、层级和剖分参数。光学、雷达和信息产品必须提供非空 COG `assets`；`carbon` 使用原始 NetCDF/HDF5 `source_uri`（包括 `.nc4`、`.hdf5`），不要求 TIFF/COG。所有数据集在数据集层提供 `bands`。
+生产剖分接收正式 `StrictPartitionRequest` 和 loader 交付的完整 `DatasetInput`。同一批次允许包含不同数据类型，每个数据集可在 `datasets[].partition` 中独立选择格网、层级和剖分参数。光学、雷达和信息产品必须提供非空 COG `assets`；`carbon` 使用原始 NetCDF/HDF5 `source_uri`（包括 `.nc4`、`.hdf5`），不要求 TIFF/COG。所有数据集在数据集层提供 `bands`。
 
 请求使用 `requested_grid_level`。输出 cell 保留实际 `grid_level`；`minimal` cover 可以返回不同于请求层级的 cell。Geohash 与 MGRS 输出逻辑索引，ISEA4H 输出实体瓦片及其元数据。
 
@@ -26,7 +26,7 @@ ISEA4H 是 entity 格网。其 `space_code` 使用未补零十进制 DGGRID SEQN
 
 运行时配置按进程环境变量、`CUBE_WEB_ENV_FILE`、本地 `.cube_web.env` 和代码默认值的顺序解析。OpenGauss 使用 PostgreSQL 兼容的 `CUBE_WEB_POSTGRES_DSN`；Ray 使用 `CUBE_WEB_RAY_ADDRESS`；MinIO 使用 `CUBE_WEB_MINIO_*`。这些值只属于运行时，绝不能写入业务配置表或 Git。
 
-生产操作名为 `run`。兼容入口不应成为新的生产调用点。演示输入、seed 批次、绝对本机路径和凭据只允许留在隔离的演示环境，不能作为生产工作流或真实验收的前提。
+生产操作名为 `run`。演示输入、seed 批次、绝对本机路径和凭据只允许留在隔离的演示环境，不能作为生产工作流或真实验收的前提。
 
 ## 5. 质量、输出与发布
 
@@ -42,4 +42,4 @@ ISEA4H 是 entity 格网。其 `space_code` 使用未补零十进制 DGGRID SEQN
 PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest
 ```
 
-真实 M5 验收要求 OpenGauss、MinIO 和 Ray 均可用，且六个规定场景全数执行。缺少基础设施、输入对象不可读取、skip、deselection、xfail、mock、fallback、计数不一致或任一场景失败都应以非零状态结束。
+真实验收要求 OpenGauss、MinIO 和 Ray 均可用，并执行三种格网、四类产品、多数据集多景、取消与重试、质检、入库和发布场景。缺少基础设施、输入对象不可读取、skip、deselection、xfail、mock、fallback、计数不一致或任一场景失败都应以非零状态结束。

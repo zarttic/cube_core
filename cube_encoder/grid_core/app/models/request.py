@@ -10,7 +10,7 @@ from grid_core.app.models.grid_address import GridAddress
 
 # ---------------------------------------------------------------------------
 # Canonical level ranges (inclusive on both ends).
-# M2 imports validate_requested_grid_level from this module; do not duplicate.
+# Consumers import validate_requested_grid_level from this module; do not duplicate.
 # ---------------------------------------------------------------------------
 
 LEVEL_RANGES: dict[GridType, tuple[int, int]] = {
@@ -24,7 +24,7 @@ def validate_requested_grid_level(grid_type: GridType, requested_grid_level: int
     """Validate that requested_grid_level is within the accepted inclusive range for grid_type.
 
     Raises ValueError with 'requested_grid_level' in the message on out-of-range input.
-    M2 imports this function directly rather than duplicating the range logic.
+    Downstream packages import this function rather than duplicating range logic.
     """
     minimum, maximum = LEVEL_RANGES[grid_type]
     if not minimum <= requested_grid_level <= maximum:
@@ -76,7 +76,7 @@ class CoverRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Address-based topology request models (M1 frozen contract).
+# Address-based topology request models in the public contract.
 # Topology and geometry operations consume a GridAddress because an ISEA4H
 # sequence number is only meaningful with its resolution, and MGRS topology
 # topology_code remains optional for compatibility with historical records.

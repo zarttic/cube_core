@@ -311,7 +311,7 @@ function renderLayers({ refocus = true } = {}) {
 
   props.geometries.forEach((item, index) => {
     addGeometry(item, index);
-    focusPoints.push(...collectCoordinatePairs(item.geometry));
+    collectCoordinatePairs(item.geometry).forEach((point) => focusPoints.push(point));
   });
 
   const markerPoints = props.markers.map(addMarker).filter(Boolean);
@@ -344,16 +344,23 @@ function cameraHeight() {
 
 function focusToPoints(points) {
   if (!viewer || !points.length) return;
-  const lats = points.map((point) => Number(point.lat)).filter(Number.isFinite);
-  const lngs = points.map((point) => Number(point.lng)).filter(Number.isFinite);
-  if (!lats.length || !lngs.length) return;
-  const west = Math.min(...lngs);
-  const east = Math.max(...lngs);
-  const south = Math.min(...lats);
-  const north = Math.max(...lats);
+  let west = Number.POSITIVE_INFINITY;
+  let east = Number.NEGATIVE_INFINITY;
+  let south = Number.POSITIVE_INFINITY;
+  let north = Number.NEGATIVE_INFINITY;
+  points.forEach((point) => {
+    const lat = Number(point.lat);
+    const lng = Number(point.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    west = Math.min(west, lng);
+    east = Math.max(east, lng);
+    south = Math.min(south, lat);
+    north = Math.max(north, lat);
+  });
+  if (![west, east, south, north].every(Number.isFinite)) return;
   if (points.length === 1 || Math.abs(east - west) < 0.01 || Math.abs(north - south) < 0.01) {
     viewer.camera.flyTo({
-      destination: Cartesian3.fromDegrees(lngs[0], lats[0], cameraHeight()),
+      destination: Cartesian3.fromDegrees(west, south, cameraHeight()),
       duration: 0.35,
     });
     return;

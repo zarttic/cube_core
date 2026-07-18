@@ -24,8 +24,6 @@ from grid_core.app.utils.geometry import to_shapely, wrapped_geometry_variants
 
 _converter = mgrs_lib.MGRS()
 
-_MAX_CELLS = 20_000
-
 
 def cover_geometry(
     geometry: dict,
@@ -35,7 +33,7 @@ def cover_geometry(
     """Cover a GeoJSON geometry at the given MGRS precision.
 
     Returns cells identified by their standard MGRS space_code.
-    Raises ValidationError for unsupported modes or excessive output.
+    Raises ValidationError for unsupported modes.
     """
     if cover_mode not in {CoverMode.INTERSECT.value, CoverMode.CONTAIN.value, CoverMode.MINIMAL.value}:
         raise ValidationError(f"MGRS cover does not support cover_mode={cover_mode!r}")
@@ -87,9 +85,6 @@ def cover_geometry(
                 if aoi_v.covers(clipped):
                     _add_cell(code, precision, domain, clipped, selected)
                     break
-
-        if len(selected) > _MAX_CELLS:
-            raise ValidationError(f"MGRS cover result too large (> {_MAX_CELLS} cells)")
 
         # Expand to neighbors using the UTM offset approach
         for nb_code in _neighbor_codes(code, precision, domain):

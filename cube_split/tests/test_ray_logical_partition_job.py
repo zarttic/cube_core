@@ -125,7 +125,7 @@ def test_parse_args_allows_mgrs_grid_type(monkeypatch):
     assert args.grid_type == "mgrs"
 
 
-def test_parse_args_uses_m2_grid_contract_without_conversion_options(monkeypatch):
+def test_parse_args_uses_production_grid_contract_without_conversion_options(monkeypatch):
     monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "geohash"])
     args = parse_args()
     assert args.grid_type == "geohash"

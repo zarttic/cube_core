@@ -140,6 +140,7 @@ class PartitionDatasetResult(StrictModel):
     grid_type: GridType
     requested_grid_level: int
     partition_method: PartitionMethod
+    execution_engine: str | None = None
     object_prefix: str
     tiles: tuple[dict[str, Any], ...]
     indexes: tuple[dict[str, Any], ...]

@@ -7,9 +7,7 @@
 ## 当前文档
 
 - [WORKFLOW.md](WORKFLOW.md)：当前剖分、manifest、入库、质检、AOI 读取和运行参数说明。
-- [PLANE_GRID_PARTITION.md](PLANE_GRID_PARTITION.md)：源 CRS 保留型逻辑窗口剖分的当前契约和已知限制。
-- [LOGICAL_PARTITION_PERFORMANCE.md](LOGICAL_PARTITION_PERFORMANCE.md)：逻辑剖分性能问题、实测瓶颈和优化思路记录。
-- [ENTITY_PARTITION_PERFORMANCE.md](ENTITY_PARTITION_PERFORMANCE.md)：实体剖分小瓦片性能问题、实测瓶颈和优化思路记录。
+- [CELL_GEOM_MIGRATION.md](CELL_GEOM_MIGRATION.md)：`rs_cube_cell_fact.cell_geom` 迁移和边界验证。
 
 ## 运行版本
 

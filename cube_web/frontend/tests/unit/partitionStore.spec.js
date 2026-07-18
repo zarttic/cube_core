@@ -28,14 +28,14 @@ function dataset(datasetId, scenes, gridType = 'geohash', level = 4) {
   };
 }
 
-describe('partition store M6 scene request', () => {
+describe('partition store scene request', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     requestGet.mockReset().mockResolvedValue({ tasks: [], total: 0, page: 1, page_size: 20, load_batches: [] });
     requestPost.mockReset().mockResolvedValue({ partition_run_id: 'server-run', task_id: 'task-1', status: 'queued' });
   });
 
-  it('submits one M6 run for multiple datasets and source load batches', async () => {
+  it('submits one run for multiple datasets and source load batches', async () => {
     const store = usePartitionStore();
     store.form.datasets = [
       dataset('dataset-optical', [scene('scene-shared', ['load-a', 'load-b']), scene('scene-a', ['load-a'])]),
@@ -88,7 +88,7 @@ describe('partition store M6 scene request', () => {
     });
   });
 
-  it('overrides legacy per-dataset cover, time and cell-limit values', () => {
+  it('normalizes per-dataset cover, time and cell-limit values', () => {
     const store = usePartitionStore();
     const selected = dataset('dataset-a', [scene('scene-a', ['load-a'])]);
     selected.partition = {
@@ -127,7 +127,7 @@ describe('partition store M6 scene request', () => {
     expect(() => store.buildRequest('partition-run-invalid')).toThrow(/不能重复归入/);
   });
 
-  it('loads server-generated batch identities from the M6 endpoint', async () => {
+  it('loads server-generated batch identities from the formal endpoint', async () => {
     requestGet.mockResolvedValueOnce({
       load_batches: [
         { load_batch_id: 'load-a', status: 'succeeded' },

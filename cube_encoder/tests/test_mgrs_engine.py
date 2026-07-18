@@ -4,6 +4,7 @@ import pytest
 from shapely.geometry import box
 
 from grid_core.app.core.exceptions import ValidationError
+from grid_core.app.engines.mgrs import cover as mgrs_cover
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
 
@@ -87,6 +88,28 @@ def test_mgrs_cover_intersect_returns_cells():
 
     assert len(cells) > 0
     assert all(box(*cell.bbox).intersects(target) for cell in cells)
+
+
+def test_mgrs_cover_does_not_apply_legacy_fixed_cell_limit(monkeypatch):
+    monkeypatch.setattr(mgrs_cover, "_MAX_CELLS", 0, raising=False)
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[
+            [116.385, 39.903],
+            [116.397, 39.903],
+            [116.397, 39.911],
+            [116.385, 39.911],
+            [116.385, 39.903],
+        ]],
+    }
+
+    cells = MGRSEngine().cover_geometry(
+        geometry,
+        requested_grid_level=3,
+        cover_mode="intersect",
+    )
+
+    assert cells
 
 
 def test_mgrs_cover_mode_validation():

@@ -3,13 +3,12 @@ from __future__ import annotations
 import time
 from copy import deepcopy
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
 from cube_web.services.partition_contracts import PartitionDatasetResult, StrictPartitionRequest, make_output_version
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, PartitionBatchAlreadyActiveError
-from cube_web.services.partition_service import PartitionBackend, PartitionService, PartitionTask
+from cube_web.services.partition_service import PartitionService, PartitionTask
 from cube_web.services.partition_workflow import PartitionWorkflowService, _merge_scene_rows
 
 
@@ -170,7 +169,7 @@ class FakeRunner:
 
 def _workflow(domain_store, runner, job_store=None) -> PartitionWorkflowService:
     return PartitionWorkflowService(
-        PartitionService({}),
+        PartitionService(),
         store=job_store,
         domain_store=domain_store,
         runner=runner,
@@ -316,8 +315,7 @@ def test_failed_output_does_not_mutate_sibling_rows() -> None:
 def test_submit_strict_executes_dataset_workflow_through_domain_store() -> None:
     domain_store = FakeDomainStore()
     job_store = InMemoryPartitionJobStore()
-    legacy_runner = Mock(side_effect=AssertionError("strict route must not invoke the legacy partition runner"))
-    service = PartitionService({"optical": PartitionBackend(data_type="optical", run=legacy_runner)})
+    service = PartitionService()
     workflow = PartitionWorkflowService(
         service,
         store=job_store,
@@ -338,12 +336,11 @@ def test_submit_strict_executes_dataset_workflow_through_domain_store() -> None:
     assert attempt["status"] == "succeeded"
     assert domain_store.completed[0]["dataset_id"] == "dataset-ok"
     assert domain_store.completed[0]["task_id"] == task.task_id
-    legacy_runner.assert_not_called()
 
 
 def test_submit_strict_returns_existing_task_after_cross_worker_attempt_conflict(monkeypatch) -> None:
     job_store = InMemoryPartitionJobStore()
-    workflow = PartitionWorkflowService(PartitionService({}), store=job_store, domain_store=FakeDomainStore(), runner=FakeRunner())
+    workflow = PartitionWorkflowService(PartitionService(), store=job_store, domain_store=FakeDomainStore(), runner=FakeRunner())
     existing = PartitionTask(task_id="already-running", status="running", data_type="optical", operation="run", created_at=0, updated_at=0)
 
     def reject_duplicate_attempt(**_kwargs):
@@ -362,7 +359,7 @@ def test_submit_strict_returns_existing_task_after_cross_worker_attempt_conflict
     assert workflow.submit_strict("optical", _request()) is existing
 
 
-def test_submit_mixed_persists_effective_dataset_partitions_and_keeps_runner_local() -> None:
+def test_submit_mixed_persists_effective_dataset_partitions() -> None:
     payload = _request().model_dump(mode="json")
     payload["datasets"] = [
         {**_dataset("dataset-optical", "optical"), "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"}},
@@ -395,15 +392,7 @@ def test_submit_mixed_persists_effective_dataset_partitions_and_keeps_runner_loc
         ("dataset-optical", "mgrs", 1),
         ("dataset-radar", "isea4h", 1),
     ]
-    store.supports_remote_jobs = True
-    workflow._payload_uses_remote_ray = lambda *_args: True
-    assert workflow._attempt_uses_remote_ray(attempt) is False
-
-    detail = workflow.get_batch("batch-01")
-    assert {(slot["dataset_id"], slot["grid_type"], slot["requested_grid_level"]) for slot in detail["partition_slots"]} == {
-        ("dataset-optical", "mgrs", 1),
-        ("dataset-radar", "isea4h", 1),
-    }
+    assert workflow.get_batch("batch-01")["batch_id"] == "batch-01"
 
 
 def test_submit_mixed_rejects_homogeneous_and_completed_dataset_partition() -> None:
@@ -419,7 +408,7 @@ def test_submit_mixed_rejects_homogeneous_and_completed_dataset_partition() -> N
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         attempt = store.get_attempt(first.task_id)
-        if attempt and attempt["status"] == "succeeded":
+        if attempt and attempt["status"] == "manual_required":
             break
         time.sleep(0.01)
 
@@ -444,24 +433,22 @@ def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         attempt = store.get_attempt(first.task_id)
-        if attempt and attempt["status"] == "succeeded":
+        if attempt and attempt["status"] == "manual_required":
             break
         time.sleep(0.01)
 
     first_attempt = store.get_attempt(first.task_id)
     assert first_attempt is not None
+    assert first_attempt["status"] == "manual_required"
     assert first_attempt["runner_result"]["status"] == "partial_failure"
+    assert store.get_batch("batch-01")["status"] == "manual_required"
     assert {asset["data_type"]: asset["status"] for asset in store.list_assets("batch-01")} == {
         "optical": "succeeded",
-        "radar": "manual_required",
-    }
-    assert {slot["dataset_id"]: slot["status"] for slot in workflow.get_batch("batch-01")["partition_slots"]} == {
-        "dataset-optical": "completed",
-        "dataset-radar": "failed",
+        "radar": "failed",
     }
 
     runner.failed.clear()
-    second = workflow.submit_mixed(request)
+    second = workflow.retry_task(first.task_id)
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         attempt = store.get_attempt(second.task_id)
@@ -473,9 +460,9 @@ def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
     assert second_attempt is not None
     assert [item["dataset_id"] for item in second_attempt["payload"]["datasets"]] == ["dataset-radar"]
     assert [call["dataset_id"] for call in runner.calls] == ["dataset-optical", "dataset-radar", "dataset-radar"]
-    assert {slot["dataset_id"]: slot["status"] for slot in workflow.get_batch("batch-01")["partition_slots"]} == {
-        "dataset-optical": "completed",
-        "dataset-radar": "completed",
+    assert {asset["data_type"]: asset["status"] for asset in store.list_assets("batch-01")} == {
+        "optical": "succeeded",
+        "radar": "succeeded",
     }
 
 

@@ -103,6 +103,7 @@ def approve_warn(dataset_id: str, quality_run_id: UUID, reason: str, actor: Acto
 
 
 def publish_dataset(dataset_id: str, request: PublishRequest, actor: Actor) -> Publication:
+    require_admin(actor)
     with require_open_gauss_domain_store().transaction() as tx:
         dataset = lock_dataset(tx, dataset_id)
         output_version = request.output_version or dataset["current_output_version"]
@@ -133,6 +134,25 @@ def publish_dataset(dataset_id: str, request: PublishRequest, actor: Actor) -> P
         elif run["status"] != "pass":
             raise PublicationPolicyRejected("quality run status cannot authorize publication")
         with tx.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT ir.ingest_run_id, ir.status FROM ingest_runs ir "
+                "JOIN partition_runs pr ON pr.partition_run_id = ir.partition_run_id "
+                "WHERE ir.dataset_id = %s AND pr.status = 'completed' "
+                "ORDER BY ir.created_at DESC, ir.ingest_run_id DESC LIMIT 1 FOR UPDATE",
+                (dataset_id,),
+            )
+            ingest_run = cur.fetchone()
+            if ingest_run is None or ingest_run["status"] != "completed":
+                raise PublicationPolicyRejected("publication requires completed ingest")
+            cur.execute(
+                "SELECT count(*) AS scene_count, "
+                "COALESCE(sum(CASE WHEN status <> 'completed' OR output_version <> %s THEN 1 ELSE 0 END), 0) AS invalid_count "
+                "FROM ingest_run_scenes WHERE ingest_run_id = %s",
+                (output_version, ingest_run["ingest_run_id"]),
+            )
+            ingest_scenes = cur.fetchone()
+            if int(ingest_scenes["scene_count"] or 0) == 0 or int(ingest_scenes["invalid_count"] or 0) != 0:
+                raise PublicationPolicyRejected("publication requires completed ingest for the current output")
             cur.execute(
                 "SELECT * FROM partition_publications WHERE dataset_id = %s AND output_version = %s AND quality_run_id = %s "
                 "AND status = 'active' FOR UPDATE",

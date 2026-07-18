@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--job-id", default="", help="Ingest job id; defaults to run directory name when ingest is enabled")
     parser.add_argument("--data-type", default="optical", choices=["optical", "radar"], help="Input data type")
-    parser.add_argument("--dataset", default="demo_optical", help="Dataset name used for metadata and object keys")
+    parser.add_argument("--dataset", default="optical_default", help="Dataset name used for metadata and object keys")
     parser.add_argument("--sensor", default="optical_mosaic", help="Sensor name used for metadata and object keys")
     parser.add_argument("--asset-version", default="v1", help="Raw asset version used for ingest")
     parser.add_argument("--cube-version", default="v1", help="Cube fact version used for ingest")

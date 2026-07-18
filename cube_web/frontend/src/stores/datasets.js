@@ -4,7 +4,6 @@ import { defineStore } from 'pinia';
 import { requestGet, requestJson, requestPost } from '@/api/client';
 import { pageQuery, normalizePageResponse } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
-import { m6ReadsEnabled, m6WritesEnabled } from '@/config';
 
 const detailTabs = [
   'overview', 'scenes', 'bands', 'outputs', 'grid', 'tiles', 'indexes',
@@ -59,11 +58,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
     loading.value = true;
     error.value = '';
     try {
-      if (!m6ReadsEnabled()) {
-        records.value = [];
-        Object.assign(pageState, { page: 1, total: 0 });
-        return;
-      }
       const response = await requestGet(`/v1/datasets?${pageQuery(listParameters())}`, { signal: request.signal });
       if (!listScope.isCurrent(request.token)) return;
       const page = normalizePageResponse(response, pageState.page, pageState.pageSize);
@@ -153,7 +147,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   async function runAction(path, payload = {}, method = 'POST', refreshTab = '') {
     if (!selectedDatasetId.value) return;
-    if (!m6WritesEnabled()) throw new Error('当前运行模式只允许查看 Dataset。');
     actionLoading.value = true;
     error.value = '';
     try {

@@ -1,454 +1,134 @@
-# 载入子系统数据载入与对账接口设计
+# 载入子系统交付契约
 
-更新时间：2026-07-13
+更新时间：2026-07-17
 
+本文定义载入子系统向剖分系统交付光学、雷达、信息产品和碳卫星数据的正式接口。
+生产链路只接受 Dataset/Scene 层级，不接受平铺资产批次。
 
-本文档只定义载入子系统如何通过接口把四类数据交给剖分系统，以及双方如何对账。
+## 1. 领域关系
 
-四类数据：
+```text
+LoadBatch N:M Scene N:1 Dataset
+                    |
+                    +-- SceneAsset
+                    +-- SceneBand
+```
 
-- `optical`：光学遥感栅格。
-- `radar`：雷达遥感栅格。
-- `product`：信息产品栅格。
-- `carbon`：碳卫星观测。
+- `LoadBatch` 表示一次载入动作，可以包含多个 Dataset 的 Scene。
+- `Dataset` 是长期管理、质检、入库和发布的主记录。
+- `Scene` 是载入、剖分和入库的最小数据单元。
+- 一个 Dataset 可以在多个 LoadBatch 中持续接收 Scene。
+- 波段属于 Scene；资产保存实际对象 URI 和校验信息。
 
-## 1. 总体约定
-
-载入子系统负责：
-
-- 上传源数据到对象存储。
-- 生成可被剖分系统识别的批次元数据。
-- 调用载入接口，把批次显式交给剖分系统。
-- 通过对账接口查询剖分系统是否已接收、处理到哪一步、是否失败。
-
-剖分系统负责：
-
-- 校验载入元数据。
-- 维护批次、资产、执行、重试、质检和入库状态。
-- 返回批次和资产的当前处理状态。
-
-MinIO 中的 `_meta.json` 可以保留为原始快照，但生产流程不应只依赖扫描 MinIO 目录来发现任务。
-
-## 2. 批次载入接口
-
-### 2.1 接口
+## 2. 导入接口
 
 ```http
 POST /v1/partition/schemas/import
 Content-Type: application/json
 ```
 
-用途：载入子系统在一个数据批次上传完成后，调用该接口把批次元数据交给剖分系统。
+启用认证时该接口仍是载入系统的公开交付入口。接口只登记载入批次、Dataset、Scene、
+资产和波段，不自动发起剖分。
 
-该接口只负责导入批次和资产元数据，不直接启动剖分任务。
-
-启用 `CUBE_WEB_AUTH_REQUIRED=1` 时，该导入接口仍是载入系统的公开交付入口；后续批次查询、运行、重试和质检接口需要 Bearer Token。源数据应使用 MinIO `s3://cube/cube/source/...` URI，不要提交节点本地绝对路径。
-
-格网选择不在导入 schema 中强制写死，由运行请求决定。生产页面使用 `s2`、`tile_matrix`、`isea4h`；`plane_grid` 仅用于带 CRS 的逻辑窗口剖分，不能选择实体方式。
-
-### 2.2 通用请求结构
-
-```json
-{
-  "schema_version": "1.0",
-  "batch_id": "LOAD_BATCH_001",
-  "batch_name": "批次展示名称",
-  "data_type": "optical",
-  "source_system": "loader",
-  "loaded_at": "2026-06-13T08:00:00Z",
-  "updated_at": "2026-06-13T08:05:00Z",
-  "raw_meta_uri": "s3://user-1/raw_data/LOAD_BATCH_001_meta.json",
-  "priority": 0,
-  "max_auto_retries": 1,
-  "assets": []
-}
-```
-
-顶层字段：
+请求顶层只接受以下字段：
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `schema_version` | 是 | 接口 schema 版本，当前为 `1.0`。 |
-| `batch_id` | 是 | 批次稳定 ID。重复推送同一批次时必须保持一致。 |
-| `batch_name` | 建议 | 批次展示名称。 |
-| `data_type` | 是 | `optical`、`radar`、`product`、`carbon`。 |
-| `source_system` | 建议 | 来源系统标识，例如 `loader`。 |
-| `loaded_at` | 建议 | 载入完成时间，UTC ISO8601。 |
-| `updated_at` | 建议 | 元数据更新时间，UTC ISO8601。 |
-| `raw_meta_uri` | 建议 | 原始 `_meta.json` 地址，用于审计和排障。 |
-| `priority` | 可选 | 批次优先级，默认 `0`。 |
-| `max_auto_retries` | 可选 | 自动重试次数，默认 `1`。 |
-| `assets` | 栅格类必填 | `optical`、`radar`、`product` 使用。 |
-| `observations` | 碳卫星必填 | `carbon` 使用。 |
+| `schema_version` | 否 | 当前建议 `1.0`。 |
+| `load_batch_id` | 是 | 载入系统生成的稳定批次 ID。 |
+| `batch_name` | 否 | 页面展示名。 |
+| `source_system` | 否 | 来源系统标识。 |
+| `loaded_at` | 否 | UTC ISO8601 载入时间。 |
+| `datasets` | 是 | 非空 Dataset 数组。 |
 
-### 2.3 通用响应结构
+重复提交相同 `load_batch_id` 应保持 Dataset、Scene 和资产稳定标识一致。接口拒绝旧的
+`batch_id`、顶层 `data_type`、`assets` 和 `observations` 平铺结构。
 
-```json
-{
-  "batch_id": "LOAD_BATCH_001",
-  "batch_name": "批次展示名称",
-  "data_type": "optical",
-  "source_system": "loader",
-  "status": "pending",
-  "ingest_status": "not_ready",
-  "attempt_count": 0,
-  "created_at": "2026-06-13T08:05:10Z",
-  "updated_at": "2026-06-13T08:05:10Z"
-}
-```
-
-导入成功后，批次进入 `pending` 状态。后续是否执行剖分，由剖分系统内部调度或人工触发。
-
-## 3. optical 光学遥感载入
-
-`optical` 使用 `assets[]`。每个 asset 表示一个可剖分的光学栅格资产。
-
-资产必填字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `asset_id` | 资产稳定 ID。 |
-| `source_uri` | 源数据地址，推荐 `s3://...`。 |
-| `scene_id` | 场景 ID。 |
-| `acq_time` | 成像或代表时间，UTC ISO8601。 |
-| `sensor` | 传感器或数据来源。 |
-| `product_family` | 产品族，例如 `sentinel2`、`landsat`、`other`。 |
-| `resolution` | 空间分辨率，单位米，必须大于 0。 |
-| `corners` | WGS84 四角点，4 个 `[lon, lat]`。 |
-| `bands` / `band` | 波段信息，至少提供一种。 |
-
-示例：
+## 3. 完整示例
 
 ```json
 {
   "schema_version": "1.0",
-  "batch_id": "OPTICAL_20260613_001",
-  "batch_name": "山东光学镶嵌影像",
-  "data_type": "optical",
-  "source_system": "loader",
-  "assets": [
+  "load_batch_id": "LOAD_20260717_001",
+  "batch_name": "山东光学与雷达联合载入",
+  "source_system": "ard-loader",
+  "loaded_at": "2026-07-17T08:00:00Z",
+  "datasets": [
     {
-      "asset_id": "optical-2020q3-b4",
-      "source_uri": "s3://user-1/raw_data/optical_2020q3_b4.tif",
-      "scene_id": "Shandong_mosaic_2020Q3",
-      "sensor": "optical_mosaic",
-      "product_family": "other",
-      "bands": ["sr_band4"],
-      "band": "sr_band4",
-      "acq_time": "2020-07-01T00:00:00Z",
-      "resolution": 30,
-      "bbox": [114.75, 33.85, 122.77, 38.50],
-      "corners": [
-        [114.75, 38.50],
-        [122.77, 38.50],
-        [122.77, 33.85],
-        [114.75, 33.85]
-      ],
-      "file_format": "GeoTIFF"
-    }
-  ]
-}
-```
-
-## 4. radar 雷达遥感载入
-
-`radar` 使用 `assets[]`。每个 asset 表示一个雷达栅格资产。
-
-除通用栅格字段外，雷达资产建议提供：
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `polarization` | 是 | 极化方式，例如 `vv`、`vh`。 |
-| `sidecars` | 条件必填 | ENVI `.dat` 等需要 `.hdr` 时必须提供。 |
-| `orbit_direction` | 可选 | 轨道方向。 |
-| `relative_orbit` | 可选 | 相对轨道号。 |
-
-示例：
-
-```json
-{
-  "schema_version": "1.0",
-  "batch_id": "RADAR_20260611221242_1197",
-  "batch_name": "江苏扬州 Sentinel-1 2018-2020 夏季影像",
-  "data_type": "radar",
-  "source_system": "loader",
-  "raw_meta_uri": "s3://user-1/raw_data/RADAR_20260611221242_1197_meta.json",
-  "assets": [
-    {
-      "asset_id": "s1-RADAR_20260611221242_1197-vv",
-      "source_uri": "s3://user-1/raw_data/radar_20200803_vv.tif",
-      "scene_id": "S1_20200803",
-      "sensor": "sentinel1_sar",
-      "product_family": "sentinel1",
-      "bands": ["vv"],
-      "band": "vv",
-      "polarization": "vv",
-      "acq_time": "2020-08-03T00:00:00Z",
-      "resolution": 10,
-      "bbox": [119.36, 32.22, 119.54, 32.48],
-      "corners": [
-        [119.36, 32.48],
-        [119.54, 32.48],
-        [119.54, 32.22],
-        [119.36, 32.22]
-      ],
-      "file_format": "GeoTIFF"
-    }
-  ]
-}
-```
-
-## 5. product 信息产品载入
-
-`product` 使用 `assets[]`。每个 asset 表示一个产品栅格资产。
-
-除通用栅格字段外，信息产品建议提供：
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `product_name` | 是 | 产品名称。 |
-| `product_year` | 是 | 产品年份。 |
-| `product_period` | 可选 | `yearly`、`monthly`、`quarterly` 等。 |
-| `variable` | 建议 | 产品变量名。 |
-| `unit` | 可选 | 产品值单位。 |
-
-示例：
-
-```json
-{
-  "schema_version": "1.0",
-  "batch_id": "PRODUCT_20260611221243_A16C",
-  "batch_name": "滇中生态安全评价数据集 1980",
-  "data_type": "product",
-  "source_system": "loader",
-  "assets": [
-    {
-      "asset_id": "dianzhong-eco-1980",
-      "source_uri": "s3://user-1/raw_data/dianzhong_eco_1980.tif",
-      "scene_id": "dianzhong_ecological_security_1980",
-      "product_name": "1980-2020年滇中地区30米生态安全评价数据集",
-      "product_year": 1980,
-      "product_period": "yearly",
-      "sensor": "data_product",
-      "product_family": "product",
-      "bands": ["product_value"],
-      "band": "product_value",
-      "variable": "product_value",
-      "acq_time": "1980-01-01T00:00:00Z",
-      "resolution": 30,
-      "bbox": [100.64, 23.28, 104.82, 27.06],
-      "corners": [
-        [100.64, 27.06],
-        [104.82, 27.06],
-        [104.82, 23.28],
-        [100.64, 23.28]
-      ],
-      "file_format": "GeoTIFF"
-    }
-  ]
-}
-```
-
-## 6. carbon 碳卫星载入
-
-`carbon` 使用 `observations[]`。每条 observation 表示一个可剖分的碳卫星观测点或足迹。
-
-观测必填字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `observation_id` | 观测稳定 ID。 |
-| `source_uri` | 源文件地址。 |
-| `source_index` | 观测在源文件中的索引，建议提供。 |
-| `acq_time` | 观测时间，UTC ISO8601。 |
-| `sensor` | 例如 `oco2`。 |
-| `product_family` | 例如 `xco2`。 |
-| `resolution` | 足迹或等效分辨率。 |
-| `lon` / `lat` | 中心点。若无中心点，应提供 `corners` 或 `footprint_geojson`。 |
-
-示例：
-
-```json
-{
-  "schema_version": "1.0",
-  "batch_id": "CARBON_20260613_001",
-  "batch_name": "OCO-2 XCO2 观测",
-  "data_type": "carbon",
-  "source_system": "loader",
-  "observations": [
-    {
-      "observation_id": "oco2-20201231-0001",
-      "source_uri": "s3://user-1/raw_data/oco2_20201231.nc4",
-      "source_index": 0,
-      "acq_time": "2020-12-31T00:01:06.700Z",
-      "sensor": "oco2",
-      "product_family": "xco2",
-      "product_type": "xco2",
-      "resolution": 10,
-      "lon": -167.413,
-      "lat": 41.1686,
-      "xco2": 417.384,
-      "quality_flag": "1"
-    }
-  ]
-}
-```
-
-## 7. 对账接口
-
-### 7.1 接口
-
-```http
-POST /v1/partition/schemas/reconcile
-Content-Type: application/json
-```
-
-用途：载入子系统查询剖分系统是否已接收某些批次或资产，以及当前处理状态。
-
-该接口只读，不改变任何状态。
-
-### 7.2 请求结构
-
-```json
-{
-  "source_system": "loader",
-  "batch_ids": [
-    "RADAR_20260611221242_1197",
-    "PRODUCT_20260611221243_A16C"
-  ],
-  "asset_ids": [
-    "s1-RADAR_20260611221242_1197-vv"
-  ],
-  "updated_since": "2026-06-13T00:00:00Z",
-  "include_assets": true,
-  "include_attempts": false
-}
-```
-
-请求字段：
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `source_system` | 建议 | 来源系统标识。 |
-| `batch_ids` | 条件必填 | 要对账的批次 ID。和 `asset_ids`、`updated_since` 至少提供一个。 |
-| `asset_ids` | 条件必填 | 要对账的资产 ID。和 `batch_ids`、`updated_since` 至少提供一个。 |
-| `updated_since` | 条件必填 | 增量对账时间。和 `batch_ids`、`asset_ids` 至少提供一个。 |
-| `include_assets` | 可选 | 是否返回资产明细，默认 `true`。 |
-| `include_attempts` | 可选 | 是否返回执行历史，默认 `false`。 |
-
-规则：
-
-- 提供 `batch_ids` 时，按批次 ID 精确对账。
-- 提供 `asset_ids` 时，按资产 ID 精确对账。
-- 未提供 `batch_ids` 和 `asset_ids` 时，`updated_since` 用于增量对账。
-
-### 7.3 响应结构
-
-```json
-{
-  "source_system": "loader",
-  "generated_at": "2026-06-13T12:30:00Z",
-  "batches": [
-    {
-      "batch_id": "RADAR_20260611221242_1197",
-      "known": true,
-      "data_type": "radar",
-      "batch_name": "江苏扬州 Sentinel-1 2018-2020 夏季影像",
-      "status": "running",
-      "ingest_status": "not_supported",
-      "quality_status": null,
-      "quality_report_id": null,
-      "last_task_id": "partition-abc123",
-      "last_error": null,
-      "attempt_count": 1,
-      "asset_counts": {
-        "total": 1,
-        "pending": 0,
-        "running": 1,
-        "succeeded": 0,
-        "failed": 0,
-        "manual_required": 0
-      },
-      "assets": [
+      "dataset_id": "GF1-SD-2019-2021",
+      "dataset_code": "GF1-SD-ARD",
+      "dataset_title": "山东 GF1 地表反射率",
+      "data_type": "optical",
+      "product_type": "surface_reflectance",
+      "scenes": [
         {
-          "asset_id": "s1-RADAR_20260611221242_1197-vv",
-          "source_uri": "s3://user-1/raw_data/radar_20200803_vv.tif",
-          "scene_id": "S1_20200803",
-          "status": "running",
-          "attempt_count": 1,
-          "last_error": null,
-          "last_run_dir": null,
-          "partitioned_at": null
+          "scene_id": "GF1-SD-20200710",
+          "scene_key": "GF1-SD-20200710",
+          "acquisition_time": "2020-07-10T02:30:00Z",
+          "bbox": [114.75, 33.85, 122.77, 38.50],
+          "assets": [
+            {
+              "asset_id": "GF1-SD-20200710-COG",
+              "source_uri": "s3://cube/cube/source/optocal/GF1-SD-20200710.tif",
+              "cog_uri": "s3://cube/cube/source/optocal/GF1-SD-20200710.tif",
+              "source_kind": "cog",
+              "source_format": "cog",
+              "checksum": "<sha256>",
+              "crs": "EPSG:4326",
+              "resolution_m": 16,
+              "bands": [
+                {"band_code": "B01", "band_name": "Blue", "band_type": "spectral", "display_order": 0},
+                {"band_code": "B02", "band_name": "Green", "band_type": "spectral", "display_order": 1}
+              ]
+            }
+          ]
         }
-      ],
-      "attempts": []
-    },
-    {
-      "batch_id": "PRODUCT_20260611221243_A16C",
-      "known": false,
-      "status": "missing"
+      ]
     }
-  ],
-  "missing_batch_ids": [
-    "PRODUCT_20260611221243_A16C"
-  ],
-  "missing_asset_ids": [],
-  "summary": {
-    "requested_batches": 2,
-    "known_batches": 1,
-    "missing_batches": 1,
-    "requested_assets": 1,
-    "known_assets": 1,
-    "missing_assets": 0
-  }
+  ]
 }
 ```
 
-### 7.4 状态枚举
+光学、雷达和信息产品资产必须提供可读取的 COG `cog_uri`。碳卫星资产使用原始
+NetCDF/HDF5 `source_uri`，不转换为 COG。生产 URI 必须是 MinIO `s3://` 地址，禁止节点
+本地绝对路径。
 
-| 状态 | 说明 |
-| --- | --- |
-| `missing` | 剖分系统未接收到该批次或资产。 |
-| `pending` | 已接收，尚未执行。 |
-| `queued` | 已入队。 |
-| `running` | 正在执行。 |
-| `retrying` | 正在重试。 |
-| `succeeded` | 处理成功。 |
-| `failed` | 处理失败。 |
-| `manual_required` | 需要人工处置。 |
-| `cancel_requested` | 已请求取消。 |
-| `cancelled` | 已取消。 |
-| `archived` | 已归档，不再处理。 |
+## 4. 波段要求
 
-## 8. 幂等要求
+每个资产提供非空 `bands`：
 
-载入子系统重复推送同一批次时：
+- 光学使用 `band_type=spectral`。
+- 雷达使用 `band_type=polarization`，典型编码为 `VV`、`VH`、`HH`、`HV`。
+- 信息产品和碳卫星使用 `band_type=variable`。
+- `band_code` 是稳定身份；`band_name` 仅用于展示。
 
-- `batch_id` 必须保持不变。
-- 同一资产的 `asset_id` 必须保持不变。
-- 同一观测的 `observation_id` 必须保持不变。
-- `source_uri` 指向的对象应保持稳定。
-- 如果元数据发生修正，应更新 `updated_at`，并在 `metadata` 中记录修正说明。
+完整命名与展示规则见
+[BAND_PRESENTATION_CONTRACT.md](../cube_web/docs/BAND_PRESENTATION_CONTRACT.md)。
 
-剖分系统以 `batch_id` 作为批次幂等键，以 `asset_id` / `observation_id` 作为资产或观测幂等键。
+## 5. 剖分与对账
 
-## 9. 错误响应
+导入完成后通过以下接口对账并发起执行：
 
-请求不合法时返回 `422`：
+- `GET /v1/partition/load-batches`
+- `GET /v1/partition/load-batches/{load_batch_id}`
+- `GET /v1/partition/load-batches/{load_batch_id}/scenes`
+- `POST /v1/partition/runs`
+- `GET /v1/partition/tasks/{task_id}`
+- `POST /v1/partition/tasks/{task_id}/cancel`
+- `POST /v1/partition/tasks/{task_id}/retry`
 
-```json
-{
-  "detail": "radar asset #1.source_uri is required"
-}
-```
+运行请求按 Dataset 选择 Scene，并为每个 Dataset 独立指定格网。生产格网仅允许
+`geohash`、`mgrs`、`isea4h`；前两者固定逻辑剖分，ISEA4H 固定实体剖分。
 
-常见错误：
+剖分完成后写入 Dataset 的当前输出版本和剖分完成标记；质检通过后才能入库，入库完成后
+才能发布。Dataset 管理、质量记录和发布历史不以 LoadBatch 为主记录。
 
-- `batch_id` 为空。
-- `data_type` 不在四类数据范围内。
-- 栅格类没有 `assets`。
-- 碳卫星没有 `observations`。
-- 缺少 `source_uri`、`acq_time`、`sensor`、`product_family`、`resolution` 或空间字段。
-- `acq_time` 不是 ISO8601。
-- `corners` 不是 4 个 WGS84 经纬度点。
-- `resolution` 小于等于 0。
+## 6. 失败处理
+
+- 导入校验失败：修正原始 manifest 后使用同一 `load_batch_id` 重试。
+- 单个 Scene 失败：通过正式任务重试入口重试，不创建平铺资产批次。
+- 对象不可读或 checksum 不符：由载入系统修复对象后重新交付。
+- 同一 Scene 不得在一次剖分运行中被多个 Dataset 重复选择。
+
+接口返回 422 表示领域契约不合法，503 表示 Scene 领域存储未配置，其余运行失败通过任务
+详情和质量记录追踪。
