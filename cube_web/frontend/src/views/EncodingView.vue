@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 
 import { apiPrefixes, requestJson } from '@/api/client';
+import { formatShanghaiTime } from '@/utils/time';
 
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
@@ -317,7 +318,7 @@ async function runGridDivision() {
         ? [{ label: '精度', value: String(data.cell.metadata.precision) }]
         : []),
       { label: '中心坐标', value: `${data.cell.center[1].toFixed(6)}, ${data.cell.center[0].toFixed(6)}` },
-      { label: '时间', value: new Date().toLocaleString('zh-CN') },
+      { label: '时间', value: formatShanghaiTime(new Date()) },
     ]);
     return;
   }
@@ -345,7 +346,7 @@ async function runGridDivision() {
     { label: '层级', value: String(config.level) },
     { label: '单元数量', value: String(data.statistics?.cell_count || data.cells.length) },
     { label: '示例编码', value: data.cells.slice(0, 8).map((cell) => cell.space_code).join(', '), code: true },
-    { label: '时间', value: new Date().toLocaleString('zh-CN') },
+    { label: '时间', value: formatShanghaiTime(new Date()) },
   ]);
 }
 
@@ -403,7 +404,7 @@ async function runGridEncoding() {
       : []),
     { label: '完整时空编码', value: codeResp.st_code, code: true },
     { label: '时间粒度', value: config.timeGranularity },
-    { label: '时间', value: new Date(timestamp).toLocaleString('zh-CN') },
+    { label: '时间', value: formatShanghaiTime(timestamp) },
   ]);
 }
 

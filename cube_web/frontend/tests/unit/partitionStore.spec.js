@@ -78,6 +78,19 @@ describe('partition store scene request', () => {
     });
   });
 
+  it('submits the selected band units under their dataset and scene hierarchy', () => {
+    const store = usePartitionStore();
+    const selected = dataset('dataset-a', [scene('scene-a', ['load-a'])]);
+    selected.band_unit_ids = ['band-scene-a-b04', 'band-scene-a-b08'];
+    store.form.datasets = [selected];
+
+    expect(store.buildRequest('partition-run-bands').datasets[0]).toMatchObject({
+      dataset_id: 'dataset-a',
+      scene_ids: ['scene-a'],
+      band_unit_ids: ['band-scene-a-b04', 'band-scene-a-b08'],
+    });
+  });
+
   it('deduplicates source batches retained by the same scene', () => {
     const store = usePartitionStore();
     store.form.datasets = [dataset('dataset-a', [scene('scene-a', ['load-a', 'load-b', 'load-a'])])];
@@ -107,7 +120,7 @@ describe('partition store scene request', () => {
   });
 
   it.each([
-    ['no scenes', [dataset('dataset-a', [])], /至少选择一个数据单元/],
+    ['no scenes', [dataset('dataset-a', [])], /至少选择一个景/],
     ['no source batch', [dataset('dataset-a', [scene('scene-a', [])])], /来源载入批次/],
     ['invalid grid level', [dataset('dataset-a', [scene('scene-a', ['load-a'])], 'geohash', 99)], /层级/],
     ['invalid partition method', [{ ...dataset('dataset-a', [scene('scene-a', ['load-a'])]), partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'logical' } }], /剖分方式/],

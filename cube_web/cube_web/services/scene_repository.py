@@ -8,6 +8,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
+from cube_web.services.partition_defaults import resolution_metadata_from_assets
 from cube_web.services.scene_contracts import ScenePartitionRunRequest
 
 
@@ -107,20 +108,32 @@ class OpenGaussSceneRepository:
                                      %s::text AS scene_key, %s::text AS identity_key,
                                      %s::text AS source_asset_id, %s::text AS source_uri,
                                      %s::text AS checksum, %s::timestamptz AS acquisition_time,
-                                     %s::jsonb AS bbox, %s::text AS crs, %s::jsonb AS attributes
+                                     %s::jsonb AS bbox, %s::text AS crs,
+                                     %s::double precision AS resolution_native,
+                                     %s::text AS resolution_unit,
+                                     %s::double precision AS resolution_m,
+                                     %s::text AS suggested_grid_type,
+                                     %s::jsonb AS attributes
                             ) source ON (target.identity_key = source.identity_key)
                             WHEN MATCHED THEN UPDATE SET
                               source_asset_id = source.source_asset_id, source_uri = source.source_uri,
                               checksum = source.checksum, acquisition_time = source.acquisition_time,
                               bbox = source.bbox, crs = source.crs,
+                              resolution_native = source.resolution_native,
+                              resolution_unit = source.resolution_unit,
+                              resolution_m = source.resolution_m,
+                              suggested_grid_type = source.suggested_grid_type,
                               attributes = target.attributes || source.attributes, updated_at = now()
                             WHEN NOT MATCHED THEN INSERT (
                               scene_id,dataset_id,scene_key,identity_key,source_asset_id,source_uri,
-                              checksum,acquisition_time,bbox,crs,status,attributes
+                              checksum,acquisition_time,bbox,crs,resolution_native,resolution_unit,
+                              resolution_m,suggested_grid_type,status,attributes
                             ) VALUES (
                               source.scene_id,source.dataset_id,source.scene_key,source.identity_key,
                               source.source_asset_id,source.source_uri,source.checksum,
-                              source.acquisition_time,source.bbox,source.crs,'loaded',source.attributes
+                              source.acquisition_time,source.bbox,source.crs,source.resolution_native,
+                              source.resolution_unit,source.resolution_m,source.suggested_grid_type,
+                              'loaded',source.attributes
                             )
                             """,
                             (
@@ -134,6 +147,10 @@ class OpenGaussSceneRepository:
                                 scene.get("acquisition_time"),
                                 json.dumps(scene.get("bbox")),
                                 scene.get("crs"),
+                                scene.get("resolution_native"),
+                                scene.get("resolution_unit"),
+                                scene.get("resolution_m"),
+                                scene.get("suggested_grid_type"),
                                 json.dumps(scene["attributes"]),
                             ),
                         )
@@ -188,7 +205,7 @@ class OpenGaussSceneRepository:
                                     """
                                     MERGE INTO scene_bands target USING (
                                       SELECT %s::text AS scene_id, %s::text AS asset_id,
-                                             %s::text AS band_code, %s::text AS band_name,
+                                             %s::text AS band_unit_id, %s::text AS band_code, %s::text AS band_name,
                                              %s::text AS band_type, %s::text AS unit,
                                              %s::int AS display_order, %s::jsonb AS attributes
                                     ) source ON (
@@ -196,18 +213,21 @@ class OpenGaussSceneRepository:
                                       AND target.band_code = source.band_code
                                     )
                                     WHEN MATCHED THEN UPDATE SET
+                                      band_unit_id = source.band_unit_id,
                                       band_name = source.band_name, band_type = source.band_type,
                                       unit = source.unit, display_order = source.display_order,
                                       attributes = target.attributes || source.attributes
                                     WHEN NOT MATCHED THEN INSERT (
-                                      scene_id,asset_id,band_code,band_name,band_type,unit,display_order,attributes
+                                      scene_id,asset_id,band_unit_id,band_code,band_name,band_type,unit,display_order,attributes
                                     ) VALUES (
-                                      source.scene_id,source.asset_id,source.band_code,source.band_name,
+                                      source.scene_id,source.asset_id,source.band_unit_id,source.band_code,source.band_name,
                                       source.band_type,source.unit,source.display_order,source.attributes
                                     )
                                     """,
                                     (
-                                        persisted_scene_id, asset["asset_id"], band["band_code"], band["band_name"],
+                                        persisted_scene_id, asset["asset_id"],
+                                        _band_unit_id(persisted_scene_id, asset["asset_id"], band["band_code"]),
+                                        band["band_code"], band["band_name"],
                                         band["band_type"], band.get("unit"), band["display_order"], json.dumps(band["attributes"]),
                                     ),
                                 )
@@ -356,8 +376,10 @@ class OpenGaussSceneRepository:
         )
         scene_ids = [str(scene["scene_id"]) for scene in scenes]
         band_rows = self._read(
-            "SELECT scene_id,asset_id,band_code,band_name,band_type,unit,display_order,attributes "
-            "FROM scene_bands WHERE scene_id = ANY(%s::text[]) ORDER BY scene_id,display_order,band_code",
+            "SELECT b.scene_id,b.asset_id,b.band_unit_id,b.band_code,b.band_name,b.band_type,b.unit,b.display_order,b.attributes "
+            "FROM scene_bands b JOIN scene_assets a ON a.scene_id=b.scene_id AND a.asset_id=b.asset_id "
+            "WHERE b.scene_id = ANY(%s::text[]) AND a.asset_role='data' "
+            "ORDER BY b.scene_id,b.display_order,b.band_code",
             (scene_ids,),
         ) if scene_ids else []
         bands_by_scene: dict[str, list[dict[str, Any]]] = {}
@@ -409,7 +431,10 @@ class OpenGaussSceneRepository:
             (selected_scene_ids,),
         )
         band_rows = self._read(
-            "SELECT * FROM scene_bands WHERE scene_id = ANY(%s::text[]) ORDER BY scene_id, asset_id, display_order, band_code",
+            "SELECT b.* FROM scene_bands b "
+            "JOIN scene_assets a ON a.scene_id=b.scene_id AND a.asset_id=b.asset_id "
+            "WHERE b.scene_id = ANY(%s::text[]) AND a.asset_role='data' "
+            "ORDER BY b.scene_id, b.asset_id, b.display_order, b.band_code",
             (selected_scene_ids,),
         )
         assets_by_scene: dict[str, list[dict[str, Any]]] = {}
@@ -427,12 +452,27 @@ class OpenGaussSceneRepository:
                 raise ValueError(f"scenes do not belong to dataset {selection.dataset_id}: {mismatched}")
             assets: list[SourceAssetInput] = []
             bands: list[BandInput] = []
+            selected_band_units = set(selection.band_unit_ids or ())
+            if selected_band_units:
+                available_band_units = {
+                    str(item.get("band_unit_id") or "")
+                    for scene_id in selection.scene_ids
+                    for item in bands_by_scene.get(scene_id, [])
+                }
+                missing_band_units = sorted(selected_band_units - available_band_units)
+                if missing_band_units:
+                    raise ValueError(f"band units do not belong to selected scenes: {missing_band_units}")
             for row in scene_rows:
                 scene_id = str(row["scene_id"])
+                selected_band_rows = [
+                    item for item in bands_by_scene.get(scene_id, [])
+                    if not selected_band_units or str(item.get("band_unit_id") or "") in selected_band_units
+                ]
+                selected_asset_ids = {str(item["asset_id"]) for item in selected_band_rows}
                 scene_assets, scene_bands = _scene_inputs(
                     row,
-                    assets_by_scene.get(scene_id, []),
-                    bands_by_scene.get(scene_id, []),
+                    [item for item in assets_by_scene.get(scene_id, []) if str(item["asset_id"]) in selected_asset_ids],
+                    selected_band_rows,
                     batches_by_scene[scene_id],
                 )
                 assets.extend(scene_assets)
@@ -521,8 +561,16 @@ class OpenGaussSceneRepository:
                     connection.commit()
                     return {**run, "created": False}
                 for selection in request.datasets:
-                    grid_config = selection.partition.model_dump(mode="json", exclude_none=True)
                     for scene_id in selection.scene_ids:
+                        grid_config = selection.partition.model_dump(mode="json", exclude_none=True)
+                        if selection.band_unit_ids:
+                            cursor.execute(
+                                """SELECT band_unit_id FROM scene_bands
+                                   WHERE scene_id=%s AND band_unit_id=ANY(%s::text[])
+                                   ORDER BY band_unit_id""",
+                                (scene_id, list(selection.band_unit_ids)),
+                            )
+                            grid_config["band_unit_ids"] = [str(row[0]) for row in cursor.fetchall()]
                         cursor.execute(
                             """
                             SELECT load_batch_id FROM load_batch_scenes
@@ -821,7 +869,10 @@ def _scene_inputs(
             band_type=str(item.get("band_type") or ("variable" if data_type in {"product", "carbon"} else "spectral")),
             unit=item.get("unit"),
             display_order=int(item.get("display_order") or 0),
-            attributes=_json_object(item.get("attributes")),
+            attributes={
+                **_json_object(item.get("attributes")),
+                "band_unit_id": str(item.get("band_unit_id") or ""),
+            },
         )
         for item in band_rows
     ]
@@ -927,6 +978,7 @@ def _normalize_load_scene(
         "bands", "band", "variable", "source_format", "time_end",
         "resolution", "resolution_m", "spatial_resolution", "spatial_resolution_m",
         "ground_resolution", "pixel_size", "pixel_size_m", "gsd", "gsd_m",
+        "resolution_native", "resolution_unit", "pixel_size_unit",
     ):
         if item.get(key) is not None:
             attributes[key] = item[key]
@@ -941,6 +993,10 @@ def _normalize_load_scene(
         attributes["bands"] = [
             {"band_code": str(item["variable"]), "band_name": str(item["variable"]), "band_type": "variable", "unit": item.get("unit")}
         ]
+    resolution_metadata = resolution_metadata_from_assets([{
+        **primary,
+        "attributes": {**primary_attributes, **attributes},
+    }])
     return {
         "scene_id": scene_id,
         "scene_key": scene_key,
@@ -948,9 +1004,13 @@ def _normalize_load_scene(
         "source_asset_id": primary["asset_id"],
         "source_uri": primary["source_uri"],
         "checksum": primary.get("checksum"),
-        "acquisition_time": primary.get("acquisition_time"),
+        "acquisition_time": primary.get("acquisition_time") or item.get("acquisition_time") or item.get("acq_time") or item.get("time_start"),
         "bbox": primary.get("bbox"),
         "crs": primary.get("crs"),
+        "resolution_native": resolution_metadata.get("resolution_native"),
+        "resolution_unit": resolution_metadata.get("resolution_unit"),
+        "resolution_m": resolution_metadata.get("resolution_m"),
+        "suggested_grid_type": resolution_metadata.get("suggested_grid_type"),
         "attributes": {**attributes, "data_type": data_type},
         "assets": assets,
     }
@@ -976,6 +1036,7 @@ def _normalize_scene_asset(
     )
     source_kind = str(item.get("source_kind") or ("observation" if data_type == "carbon" else "cog"))
     source_format = str(item.get("source_format") or (_source_format(source_uri) if data_type == "carbon" else "cog"))
+    asset_role = str(item.get("asset_role") or "data")
     raw_bands = item.get("bands")
     if not isinstance(raw_bands, list):
         raw_bands = []
@@ -983,7 +1044,10 @@ def _normalize_scene_asset(
         raw_bands = [item["band"]]
     if not raw_bands and item.get("variable") is not None:
         raw_bands = [{"band_code": item["variable"], "band_name": item["variable"], "band_type": "variable", "unit": item.get("unit")}]
+    if asset_role == "data" and not raw_bands:
+        raise ValueError(f"data asset requires at least one band: {asset_id}")
     bands = []
+    source_band_indexes: set[int] = set()
     for band_index, raw_band in enumerate(raw_bands):
         band = raw_band if isinstance(raw_band, dict) else {"band_code": str(raw_band), "band_name": str(raw_band)}
         band_code = str(band.get("band_code") or band.get("code") or band.get("band") or "").strip()
@@ -995,6 +1059,25 @@ def _normalize_scene_asset(
         if band_type not in {"spectral", "polarization", "variable"}:
             raise ValueError(f"unsupported band_type: {band_type}")
         band_attributes = _json_object(band.get("attributes"))
+        if data_type != "carbon":
+            raw_source_band_index = band.get(
+                "source_band_index", band_attributes.get("source_band_index", band_index + 1)
+            )
+            valid_integer = isinstance(raw_source_band_index, int) and not isinstance(raw_source_band_index, bool)
+            valid_integer_string = (
+                isinstance(raw_source_band_index, str)
+                and raw_source_band_index.isdigit()
+                and str(int(raw_source_band_index)) == raw_source_band_index
+            )
+            if not valid_integer and not valid_integer_string:
+                raise ValueError(f"source_band_index must be a positive integer: {asset_id}/{band_code}")
+            source_band_index = int(raw_source_band_index)
+            if source_band_index < 1:
+                raise ValueError(f"source_band_index must be a positive integer: {asset_id}/{band_code}")
+            if source_band_index in source_band_indexes:
+                raise ValueError(f"duplicate source_band_index in asset {asset_id}: {source_band_index}")
+            source_band_indexes.add(source_band_index)
+            band_attributes["source_band_index"] = source_band_index
         if generated_code:
             band_attributes = {
                 **band_attributes,
@@ -1013,6 +1096,7 @@ def _normalize_scene_asset(
     for key in (
         "resolution", "resolution_m", "spatial_resolution", "spatial_resolution_m",
         "ground_resolution", "pixel_size", "pixel_size_m", "gsd", "gsd_m",
+        "resolution_native", "resolution_unit", "pixel_size_unit",
     ):
         if item.get(key) is not None:
             attributes[key] = item[key]
@@ -1020,7 +1104,7 @@ def _normalize_scene_asset(
         "asset_id": asset_id,
         "source_uri": source_uri,
         "cog_uri": item.get("cog_uri") or (source_uri if source_kind == "cog" else None),
-        "asset_role": str(item.get("asset_role") or "data"),
+        "asset_role": asset_role,
         "source_kind": source_kind,
         "source_format": source_format,
         "checksum": item.get("checksum"),
@@ -1038,6 +1122,11 @@ def _default_band_type(data_type: str) -> str:
     if data_type == "radar":
         return "polarization"
     return "spectral"
+
+
+def _band_unit_id(scene_id: str, asset_id: str, band_code: str) -> str:
+    digest = sha256(f"{scene_id}\0{asset_id}\0{band_code}".encode("utf-8")).hexdigest()[:32]
+    return f"band-{digest}"
 
 
 def _partition_scene_idempotency_key(partition_run_id: str, scene_id: str, grid_config: dict[str, Any]) -> str:

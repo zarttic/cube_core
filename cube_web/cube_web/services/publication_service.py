@@ -40,6 +40,7 @@ class PublicationNotFound(LookupError):
 class PublishRequest:
     output_version: str | None = None
     quality_run_id: UUID | None = None
+    targets: tuple[dict[str, str], ...] = ()
 
 
 def _approval(row: dict) -> WarnApproval:
@@ -160,14 +161,43 @@ def publish_dataset(dataset_id: str, request: PublishRequest, actor: Actor) -> P
             )
             existing = cur.fetchone()
             if existing is not None:
+                publication_id = existing["publication_id"]
+            else:
+                cur.execute(
+                    "INSERT INTO partition_publications "
+                    "(publication_id, dataset_id, output_version, quality_run_id, status, desired_action, service_version_id, requested_by, requested_at, activated_at) "
+                    "VALUES (%s, %s, %s, %s, 'active', 'activate', %s, %s, %s, %s) RETURNING *",
+                    (uuid4(), dataset_id, output_version, quality_run_id, output_version, actor.username, datetime.now(UTC), datetime.now(UTC)),
+                )
+                existing = cur.fetchone()
+                publication_id = existing["publication_id"]
+            if request.targets:
+                for target in request.targets:
+                    source_asset_id = str(target.get("source_asset_id") or "").strip()
+                    band_code = str(target.get("band_code") or "").strip()
+                    if not source_asset_id or not band_code:
+                        raise PublicationPolicyRejected("publication target requires source_asset_id and band_code")
+                    cur.execute(
+                        "SELECT 1 FROM partition_dataset_bands WHERE dataset_id=%s AND source_asset_id=%s AND band_code=%s",
+                        (dataset_id, source_asset_id, band_code),
+                    )
+                    if cur.fetchone() is None:
+                        raise PublicationPolicyRejected(f"publication target does not belong to dataset: {source_asset_id}/{band_code}")
+                    cur.execute(
+                        "SELECT 1 FROM partition_indexes WHERE dataset_id=%s AND output_version=%s AND source_asset_id=%s AND band_code=%s LIMIT 1",
+                        (dataset_id, output_version, source_asset_id, band_code),
+                    )
+                    if cur.fetchone() is None:
+                        raise PublicationPolicyRejected(f"publication target is not partitioned: {source_asset_id}/{band_code}")
+                    cur.execute(
+                        "INSERT INTO partition_publication_targets "
+                        "(publication_id,dataset_id,output_version,source_asset_id,band_code) "
+                        "SELECT %s,%s,%s,%s,%s WHERE NOT EXISTS ("
+                        "SELECT 1 FROM partition_publication_targets WHERE publication_id=%s AND source_asset_id=%s AND band_code=%s)",
+                        (publication_id, dataset_id, output_version, source_asset_id, band_code, publication_id, source_asset_id, band_code),
+                    )
+            if existing is not None:
                 return _publication(existing)
-            cur.execute(
-                "INSERT INTO partition_publications "
-                "(publication_id, dataset_id, output_version, quality_run_id, status, desired_action, service_version_id, requested_by, requested_at, activated_at) "
-                "VALUES (%s, %s, %s, %s, 'active', 'activate', %s, %s, %s, %s) RETURNING *",
-                (uuid4(), dataset_id, output_version, quality_run_id, output_version, actor.username, datetime.now(UTC), datetime.now(UTC)),
-            )
-            return _publication(cur.fetchone())
 
 
 def withdraw_publication(dataset_id: str, publication_id: UUID, reason: str, actor: Actor) -> Publication:

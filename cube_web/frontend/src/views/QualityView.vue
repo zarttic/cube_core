@@ -6,17 +6,27 @@ import { ElMessage } from 'element-plus';
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useQualityStore } from '@/stores/quality';
+import { formatShanghaiTime } from '@/utils/time';
 import QualityDetailDrawer from '@/views/quality/QualityDetailDrawer.vue';
 
 const props = defineProps({ embedded: Boolean });
 const store = useQualityStore();
 const ruleDrawerVisible = ref(false);
+const ruleDetailVisible = ref(false);
+const selectedRule = ref(null);
 const dataTypeLabels = { optical: '光学遥感', radar: '雷达遥感', product: '信息产品', carbon: '碳卫星' };
 const pageErrorCount = computed(() => store.records.reduce((total, row) => total + Number(row.error_count || 0), 0));
 const pageWarningCount = computed(() => store.records.reduce((total, row) => total + Number(row.warning_count || 0), 0));
 
 function dataTypeLabel(value) { return dataTypeLabels[value] || value || '-'; }
-function qualityTime(row) { return row.completed_at || row.started_at || row.created_at || '-'; }
+function qualityTime(row) { return formatShanghaiTime(row.completed_at || row.started_at || row.created_at); }
+function openRuleDetail(rule) {
+  selectedRule.value = rule;
+  ruleDetailVisible.value = true;
+}
+function ruleParameters(rule) {
+  return JSON.stringify(rule?.parameters || {}, null, 2);
+}
 
 function refresh() {
   store.pageState.page = 1;
@@ -132,12 +142,28 @@ onUnmounted(() => store.dispose());
     <el-drawer v-model="ruleDrawerVisible" title="质检规则" size="min(900px, 94vw)" destroy-on-close>
       <div class="rule-version">规则集版本 <strong>{{ store.ruleCatalog?.rule_set_version || '-' }}</strong></div>
       <AppTable :data="store.ruleCatalog?.items || []" :loading="store.ruleCatalogLoading" :pagination="false" row-key="code">
-        <el-table-column prop="name" label="质检项" min-width="180"><template #default="{ row }"><div class="rule-name"><strong>{{ row.name }}</strong><span>{{ row.code }}</span></div></template></el-table-column>
+        <el-table-column prop="name" label="质检项" min-width="220"><template #default="{ row }"><button type="button" class="rule-link" @click="openRuleDetail(row)"><span class="rule-name"><strong>{{ row.name }}</strong><span>{{ row.code }}</span></span></button></template></el-table-column>
         <el-table-column label="级别" width="90"><template #default="{ row }"><el-tag :type="row.mandatory ? 'danger' : 'info'" effect="plain" size="small">{{ row.mandatory ? '必选' : '可选' }}</el-tag></template></el-table-column>
         <el-table-column label="适用产品" min-width="230"><template #default="{ row }"><div class="applicability-tags"><el-tag v-for="type in row.applicability?.data_types || []" :key="type" effect="plain" size="small">{{ dataTypeLabel(type) }}</el-tag></div></template></el-table-column>
         <el-table-column prop="implementation_version" label="实现版本" width="110" />
+        <el-table-column label="操作" width="100"><template #default="{ row }"><el-button link type="primary" @click.stop="openRuleDetail(row)">查看规则</el-button></template></el-table-column>
       </AppTable>
     </el-drawer>
+
+    <el-dialog v-model="ruleDetailVisible" :title="selectedRule?.name || '规则详情'" width="min(680px, 92vw)" destroy-on-close>
+      <template v-if="selectedRule">
+        <div class="rule-detail-grid">
+          <div><span>规则编码</span><strong>{{ selectedRule.code }}</strong></div>
+          <div><span>检查级别</span><strong>{{ selectedRule.mandatory ? '必选' : '可选' }}</strong></div>
+          <div><span>实现版本</span><strong>{{ selectedRule.implementation_version || '-' }}</strong></div>
+          <div><span>规则集版本</span><strong>{{ store.ruleCatalog?.rule_set_version || '-' }}</strong></div>
+        </div>
+        <div class="rule-detail-section"><h4>适用产品</h4><div class="applicability-tags"><el-tag v-for="type in selectedRule.applicability?.data_types || []" :key="type" effect="plain">{{ dataTypeLabel(type) }}</el-tag><span v-if="!(selectedRule.applicability?.data_types || []).length">全部产品</span></div></div>
+        <div v-if="selectedRule.applicability?.product_types?.length" class="rule-detail-section"><h4>适用产品类型</h4><div class="applicability-tags"><el-tag v-for="type in selectedRule.applicability.product_types" :key="type" effect="plain">{{ type }}</el-tag></div></div>
+        <div class="rule-detail-section"><h4>规则说明</h4><p class="rule-description">{{ selectedRule.description || '暂无规则说明' }}</p></div>
+        <div class="rule-detail-section"><h4>检查参数</h4><pre class="rule-parameters">{{ ruleParameters(selectedRule) }}</pre></div>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -163,6 +189,17 @@ onUnmounted(() => store.dispose());
 .quality-identity span, .rule-name span { overflow: hidden; color: #8993a4; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .rule-version { margin-bottom: 14px; color: #667085; font-size: 13px; }
 .applicability-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.rule-link { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; }
+.rule-link:hover strong { color: #1769aa; }
+.rule-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-bottom: 18px; border-bottom: 1px solid #e7ebf1; }
+.rule-detail-grid div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rule-detail-grid span, .rule-detail-section h4 { color: #748095; font-size: 12px; font-weight: 500; }
+.rule-detail-grid strong { color: #263247; font-size: 13px; overflow-wrap: anywhere; }
+.rule-detail-section { padding-top: 16px; }
+.rule-detail-section h4 { margin: 0 0 8px; }
+.rule-detail-section > span { color: #667085; font-size: 13px; }
+.rule-description { margin: 0; color: #475467; font-size: 13px; line-height: 1.7; }
+.rule-parameters { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px solid #e1e6ee; border-radius: 5px; background: #f7f9fc; color: #475467; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 @media (max-width: 880px) { .filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .quality-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .view-header { align-items: stretch; flex-direction: column; } .header-actions { display: grid; grid-template-columns: 1fr 1fr; } .quality-summary { grid-template-columns: 1fr; } .quality-summary div { border-right: 0; border-bottom: 1px solid #e7ebf1; } }
+@media (max-width: 560px) { .quality-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .view-header { align-items: stretch; flex-direction: column; } .header-actions { display: grid; grid-template-columns: 1fr 1fr; } .quality-summary { grid-template-columns: 1fr; } .quality-summary div { border-right: 0; border-bottom: 1px solid #e7ebf1; } .rule-detail-grid { grid-template-columns: 1fr; } }
 </style>

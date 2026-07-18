@@ -39,7 +39,7 @@ describe('GridParameters', () => {
     expect(wrapper.find('.queue-header-meta').text()).toBe('打开列表');
     expect(wrapper.text()).not.toContain('S2');
     expect(wrapper.text()).not.toContain('MGRS');
-    expect(wrapper.get('.queue-selected-summary').text()).toContain('2 个数据集 · 3 个数据单元');
+    expect(wrapper.get('.queue-selected-summary').text()).toContain('2 个数据集 · 3 个波段');
     expect(wrapper.text()).not.toContain('跨产品');
     expect(wrapper.get('[data-testid="selected-load-batches"]').text()).toContain('2 个批次');
     expect(wrapper.get('[data-testid="selected-load-batches"]').text()).toContain('REFLECT_20260717143357_8E3F');

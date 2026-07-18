@@ -184,12 +184,16 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/quality-runs`, {}, 'POST', 'quality');
   }
 
+  function requestIngest() {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/ingest`, {}, 'POST', 'ingest-records');
+  }
+
   function retrySceneIngest(sceneId) {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/scenes/${encodeURIComponent(sceneId)}/ingest-retry`, {}, 'POST', 'ingest-records');
   }
 
-  function publish() {
-    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publish`, {}, 'POST', 'publications');
+  function publish(targets = []) {
+    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publish`, { targets }, 'POST', 'publications');
   }
 
   function withdraw(publicationId) {
@@ -213,7 +217,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   return {
     filters, pageState, records, summary, loading, error, actionLoading, selectedDatasetId, selectedDataset,
     detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
-    setActiveTab, setTabPage, setTabPageSize, updateMetadata, reassignScene, rerunQuality,
+    setActiveTab, setTabPage, setTabPageSize, updateMetadata, reassignScene, rerunQuality, requestIngest,
     retrySceneIngest, publish, withdraw, archive, closeDetail, dispose,
   };
 });

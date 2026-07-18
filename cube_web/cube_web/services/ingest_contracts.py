@@ -40,6 +40,10 @@ class RetryIngestScenes(FrozenModel):
     scene_ids: tuple[str, ...] = Field(min_length=1)
 
 
+class ManualCollectionIngest(FrozenModel):
+    scene_ids: tuple[str, ...] = Field(min_length=1)
+
+
 class CancelIngestRun(FrozenModel):
     reason: str = Field(default="", max_length=1000)
 

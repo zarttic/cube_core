@@ -27,7 +27,7 @@ defineEmits(['reset', 'submit', 'open-datasets']);
           </span>
         </button>
         <div class="queue-selected-summary">
-          当前选择：{{ selectedDatasetCount }} 个数据集 · {{ selectedCount }} 个数据单元
+          当前选择：{{ selectedDatasetCount }} 个数据集 · {{ selectedCount }} 个波段
         </div>
       </div>
     </div>

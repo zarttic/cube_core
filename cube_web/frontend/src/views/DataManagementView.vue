@@ -13,18 +13,18 @@ const activeView = ref('datasets');
 <template>
   <section class="data-management-view" :class="{ embedded }">
     <header class="data-management-header">
-      <h1>数据管理与入库</h1>
+      <h1>数据管理</h1>
     </header>
 
     <el-tabs v-model="activeView" class="data-management-tabs">
-      <el-tab-pane name="datasets" label="数据集">
-        <DatasetsView embedded title="数据集" />
+      <el-tab-pane name="datasets" label="数据管理">
+        <DatasetsView embedded title="数据管理" />
       </el-tab-pane>
       <el-tab-pane name="load-batches" label="载入批次" lazy>
         <LoadBatchesView />
       </el-tab-pane>
-      <el-tab-pane name="ingest-runs" label="入库运行" lazy>
-        <IngestView embedded title="入库运行" />
+      <el-tab-pane name="ingest-runs" label="数据入库" lazy>
+        <IngestView embedded title="数据入库" />
       </el-tab-pane>
     </el-tabs>
   </section>

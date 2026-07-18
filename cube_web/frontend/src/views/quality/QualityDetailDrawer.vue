@@ -5,6 +5,7 @@ import { Download, Refresh } from '@element-plus/icons-vue';
 import AppTable from '@/components/AppTable.vue';
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
+import { qualityErrorLabel, qualityRuleLabel } from '@/utils/qualityLabels';
 
 const props = defineProps({
   testId: { type: String, default: '' },
@@ -56,9 +57,8 @@ function rerun() {
       <el-tabs :model-value="activeTab" @tab-change="emit('tab-change', $event)">
         <el-tab-pane name="results"><template #label><span data-testid="quality-detail-tab-results">规则结果</span></template>
           <AppTable :data="results" :page="resultsPage.page" :page-size="resultsPage.pageSize" :total="resultsPage.total" :pagination="false" row-key="rule_code">
-            <el-table-column prop="rule_code" label="规则" min-width="170" />
+            <el-table-column label="规则" min-width="170"><template #default="{ row }"><span :title="row.rule_code">{{ qualityRuleLabel(row.rule_code) }}</span></template></el-table-column>
             <el-table-column label="状态" width="100"><template #default="{ row }"><StatusTag domain="quality" :value="row.status" size="small" /></template></el-table-column>
-            <el-table-column prop="finding_count" label="发现" width="80" />
             <el-table-column prop="error_count" label="错误" width="80" />
             <el-table-column prop="warning_count" label="告警" width="80" />
           </AppTable>
@@ -67,7 +67,7 @@ function rerun() {
           <el-form class="error-filters" inline @submit.prevent="emit('load-errors')">
             <el-form-item label="规则">
               <el-select v-model="errorFilters.ruleCode" clearable placeholder="全部规则">
-                <el-option v-for="ruleCode in errorRuleOptions" :key="ruleCode" :label="ruleCode" :value="ruleCode" />
+                <el-option v-for="ruleCode in errorRuleOptions" :key="ruleCode" :label="qualityRuleLabel(ruleCode)" :value="ruleCode" />
               </el-select>
             </el-form-item>
             <el-form-item label="错误码"><el-input v-model="errorFilters.errorCode" clearable /></el-form-item>
@@ -79,8 +79,8 @@ function rerun() {
             <el-button :icon="Download" :loading="exporting" @click="emit('export', { format: 'json', filtered: true })">导出当前筛选结果 JSON</el-button>
           </div>
           <AppTable :data="errors" :page="errorPage" :page-size="errorPageSize" :total="errorTotal" row-key="quality_error_id" @current-change="emit('error-page-change', $event)" @size-change="emit('error-page-size-change', $event)">
-            <el-table-column prop="rule_code" label="规则" min-width="150" />
-            <el-table-column prop="error_code" label="错误码" min-width="150" />
+            <el-table-column label="规则" min-width="180"><template #default="{ row }"><span :title="row.rule_code">{{ qualityRuleLabel(row.rule_code) }}</span></template></el-table-column>
+            <el-table-column label="错误码" min-width="180"><template #default="{ row }"><span :title="row.error_code">{{ qualityErrorLabel(row.error_code) }}</span></template></el-table-column>
             <el-table-column prop="field" label="字段" min-width="120" />
             <el-table-column prop="message" label="说明" min-width="230" show-overflow-tooltip />
           </AppTable>

@@ -4,7 +4,7 @@ from typing import Any, Protocol
 
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
-from cube_web.services.partition_defaults import default_grid_level_for_resolution, finest_resolution_from_assets
+from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
 from cube_web.services.scene_contracts import ScenePartitionRunRequest
 
 
@@ -139,12 +139,13 @@ class SceneDomainService:
         for group in grouped.values():
             if group.get("data_type") == "carbon":
                 continue
-            resolution = finest_resolution_from_assets(group["scenes"])
-            if resolution is None:
+            resolution_metadata = resolution_metadata_from_assets(group["scenes"])
+            if not resolution_metadata:
                 continue
-            group["resolution_m"] = resolution
+            group.update(resolution_metadata)
+            resolution_m = resolution_metadata["resolution_m"]
             group["suggested_grid_levels"] = {
-                grid_type: default_grid_level_for_resolution(resolution, grid_type=grid_type)
+                grid_type: default_grid_level_for_resolution(resolution_m, grid_type=grid_type)
                 for grid_type in ("geohash", "mgrs", "isea4h")
             }
         return {

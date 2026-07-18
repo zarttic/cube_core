@@ -92,6 +92,28 @@ def test_complete_output_is_idempotent_and_resets_quality() -> None:
     assert len(store.claim_outbox("worker", limit=10)) == 1
 
 
+def test_repartition_rebinds_dataset_to_latest_runtime_batch() -> None:
+    store = InMemoryPartitionDomainStore()
+    first_request = _request()
+    first_version = store.start_output(first_request, first_request.datasets[0], "first-task")
+    first_result = _result(first_version)
+    first_result.task_id = "first-task"
+    store.complete_output(first_result)
+
+    second_request = _request()
+    second_request.batch_id = "batch-b"
+    second_request.grid_type = "isea4h"
+    second_request.requested_grid_level = 6
+    store.start_output(second_request, second_request.datasets[0], "second-task")
+
+    dataset = store.get_dataset("dataset-a")
+    assert dataset["batch_id"] == "batch-b"
+    assert dataset["grid_type"] == "isea4h"
+    assert dataset["requested_grid_level"] == 6
+    assert dataset["partition_status"] == "running"
+    assert dataset["partition_completed_at"] is None
+
+
 def test_detail_failure_rolls_back_pointer_and_outbox() -> None:
     store = InMemoryPartitionDomainStore()
     request = _request()
@@ -189,6 +211,23 @@ def test_opengauss_mutation_uses_schema_guard_and_transaction_order() -> None:
     statements = [sql for sql, _params in connection.statements]
     assert "SELECT schema_version FROM partition_domain_schema_version WHERE singleton = TRUE" in statements[0]
     assert any("MERGE INTO partition_output_versions" in sql for sql in statements)
+    rebind = next(
+        (sql, params)
+        for sql, params in connection.statements
+        if "UPDATE partition_datasets SET" in sql and "batch_id = %s" in sql
+    )
+    assert rebind[1] == (
+        "batch-a", "geohash", 7, "7", "logical", "intersect",
+        "dataset-a", "dataset-a", version,
+    )
+    output_merge_index = next(
+        index for index, (sql, _params) in enumerate(connection.statements)
+        if "MERGE INTO partition_output_versions" in sql
+    )
+    rebind_index = connection.statements.index(rebind)
+    assert output_merge_index < rebind_index
+    assert "status = 'staging'" in rebind[0]
+    assert "partition_completed_at = NULL" in rebind[0]
     assert version
 
 

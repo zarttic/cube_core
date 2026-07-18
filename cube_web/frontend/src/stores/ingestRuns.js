@@ -17,6 +17,8 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
   const detail = ref(null);
   const detailLoading = ref(false);
   const actionLoading = ref(false);
+  const manualCandidates = ref([]);
+  const manualCandidatesLoading = ref(false);
   const listScope = createRequestScope();
   const detailScope = createRequestScope();
   let detailGeneration = 0;
@@ -103,6 +105,38 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
     return runAction('cancel', { reason });
   }
 
+  async function requestManualCollection(partitionRunId, sceneIds) {
+    const id = String(partitionRunId || '').trim();
+    const ids = (Array.isArray(sceneIds) ? sceneIds : []).map((value) => String(value || '').trim()).filter(Boolean);
+    if (!id || !ids.length) return;
+    actionLoading.value = true;
+    error.value = '';
+    try {
+      const response = await requestPost(`/v1/ingest-runs/collections/${encodeURIComponent(id)}/ingest`, { scene_ids: ids });
+      await loadList();
+      await loadManualCandidates();
+      return response;
+    } catch (requestError) {
+      error.value = requestError.message || '手动入库提交失败';
+      throw requestError;
+    } finally {
+      actionLoading.value = false;
+    }
+  }
+
+  async function loadManualCandidates() {
+    manualCandidatesLoading.value = true;
+    try {
+      const response = await requestGet('/v1/datasets?quality_status=pass&page=1&page_size=500&sort_by=updated_at&sort_order=desc');
+      manualCandidates.value = (Array.isArray(response?.items) ? response.items : []).filter((item) => (
+        Number(item.quality_pass_count || 0) > Number(item.ingested_count || 0)
+      ));
+      return manualCandidates.value;
+    } finally {
+      manualCandidatesLoading.value = false;
+    }
+  }
+
   function closeDetail() {
     resetDetail();
     detailLoading.value = false;
@@ -115,6 +149,7 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
 
   return {
     filters, pageState, records, summary, loading, error, selectedRunId, detailVisible, detail,
-    detailLoading, actionLoading, loadList, openDetail, retryFailedScenes, cancelRun, closeDetail, dispose,
+    detailLoading, actionLoading, manualCandidates, manualCandidatesLoading, loadList, openDetail, retryFailedScenes, cancelRun,
+    requestManualCollection, loadManualCandidates, closeDetail, dispose,
   };
 });

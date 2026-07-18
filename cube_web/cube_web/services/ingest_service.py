@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from cube_web.services.ingest_contracts import CreateIngestRun, IngestPage, IngestRun
 from cube_web.services.ingest_repository import IngestRepository
+from cube_web.services.quality_ingest_bridge import request_manual_ingest_collection
 
 
 class QualityGateRejected(RuntimeError):
@@ -50,6 +51,15 @@ class IngestRunService:
             page_size=page_size,
             summary=self.repository.summarize_runs(**filters),
         )
+
+    def list_collections(self, *, page: int = 1, page_size: int = 20) -> dict:
+        if page < 1:
+            raise ValueError("page must be positive")
+        items = self.repository.list_collections(limit=page_size, offset=(page - 1) * page_size)
+        return {"items": items, "total": self.repository.count_collections(), "page": page, "page_size": page_size}
+
+    def request_collection_ingest(self, partition_run_id: str, scene_ids: tuple[str, ...], *, requested_by: str) -> dict:
+        return request_manual_ingest_collection(partition_run_id, set(scene_ids), requested_by=requested_by)
 
     def start_scene(self, ingest_run_id: str, scene_id: str) -> IngestRun:
         return self.repository.start_scene(ingest_run_id, scene_id)

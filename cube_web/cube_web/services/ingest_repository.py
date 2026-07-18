@@ -391,6 +391,66 @@ class OpenGaussIngestRepository:
             raise IngestConflict("one or more scene outputs already have an ingest owner") from exc
         return self.get(ingest_run_id)
 
+    def list_collections(self, *, limit: int = 100, offset: int = 0) -> tuple[dict[str, Any], ...]:
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT pr.partition_run_id, pr.created_at AS partition_created_at,
+                       prs.scene_id, prs.dataset_id, prs.output_version,
+                       d.dataset_code, d.dataset_title,
+                       q.status AS quality_status,
+                       irs.status AS ingest_status
+                FROM partition_runs pr
+                JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
+                JOIN datasets d ON d.dataset_id=prs.dataset_id
+                LEFT JOIN LATERAL (
+                  SELECT status FROM partition_quality_runs
+                  WHERE dataset_id=prs.dataset_id AND output_version=prs.output_version
+                    AND status IN ('pass','warn') AND result_complete=true
+                  ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1
+                ) q ON true
+                LEFT JOIN LATERAL (
+                  SELECT irs.status FROM ingest_run_scenes irs
+                  WHERE irs.scene_id=prs.scene_id AND irs.output_version=prs.output_version
+                  ORDER BY irs.updated_at DESC LIMIT 1
+                ) irs ON true
+                WHERE pr.status='completed'
+                ORDER BY pr.created_at DESC, pr.partition_run_id, prs.dataset_id, prs.scene_id
+                """,
+            )
+            rows = cur.fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            collection = grouped.setdefault(str(row["partition_run_id"]), {
+                "partition_run_id": str(row["partition_run_id"]),
+                "created_at": row["partition_created_at"], "units": [],
+            })
+            collection["units"].append({
+                "scene_id": str(row["scene_id"]), "dataset_id": str(row["dataset_id"]),
+                "dataset_code": row["dataset_code"], "dataset_title": row["dataset_title"],
+                "output_version": row["output_version"], "quality_status": row["quality_status"],
+                "ingest_status": row["ingest_status"],
+            })
+        collections = []
+        for collection in list(grouped.values())[offset:offset + limit]:
+            units = collection["units"]
+            collection.update(
+                dataset_count=len({unit["dataset_id"] for unit in units}),
+                scene_count=len(units),
+                quality_pass_count=sum(unit["quality_status"] in {"pass", "warn"} for unit in units),
+                ingested_count=sum(unit["ingest_status"] == "completed" for unit in units),
+            )
+            collection["status"] = "completed" if collection["ingested_count"] == collection["scene_count"] else (
+                "partial" if collection["ingested_count"] else "pending"
+            )
+            collections.append(collection)
+        return tuple(collections)
+
+    def count_collections(self) -> int:
+        with self.pool.connection() as connection, connection.cursor() as cur:
+            cur.execute("SELECT count(*) FROM partition_runs WHERE status='completed'")
+            return int(cur.fetchone()[0])
+
     def _existing_request(self, request: CreateIngestRun) -> IngestRun | None:
         keys = [scene_idempotency_key(request.dataset_id, scene.scene_id, scene.output_version) for scene in request.scenes]
         with self.pool.connection() as connection, connection.cursor() as cur:

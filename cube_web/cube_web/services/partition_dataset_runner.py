@@ -59,6 +59,16 @@ def _consume_observation_budget(remaining: int | None, consumed: int) -> int | N
     return max(0, remaining - consumed)
 
 
+def _source_band_index(band: dict[str, Any], source_band_count: int) -> int:
+    """Resolve the one-based source raster band represented by a normalized band unit."""
+    attributes = band.get("attributes") or {}
+    value = attributes.get("source_band_index", int(band.get("display_order", 0)) + 1)
+    index = int(value)
+    if index < 1 or index > source_band_count:
+        raise ValueError(f"source band index {index} is outside raster band count {source_band_count}")
+    return index
+
+
 def _carbon_index_attributes(row: dict[str, Any], *, source_index: int) -> dict[str, Any]:
     return {
         "satellite": row["satellite"],
@@ -121,15 +131,15 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
                 break
             source_uri = str(asset["source_uri"])
             parsed = urlparse(source_uri)
-            if parsed.scheme != "s3" or parsed.netloc != settings["bucket"]:
-                raise ValueError("normalized carbon source must be in the configured MinIO bucket")
+            if parsed.scheme != "s3" or not parsed.netloc:
+                raise ValueError("normalized carbon source must use an accessible MinIO bucket")
             source_format = str(asset["source_format"])
             suffix = Path(parsed.path).suffix.lower()
             allowed_suffixes = {"netcdf": {".nc", ".nc4"}, "hdf5": {".h5", ".hdf", ".hdf5"}}
             if suffix not in allowed_suffixes.get(source_format, set()):
                 raise ValueError(f"carbon source suffix {suffix!r} does not match source_format={source_format!r}")
             local_path = cache_source_cog(
-                source_uri, Path("/tmp/cube_split_source_cache") / "loader", client, settings["bucket"]
+                source_uri, Path("/tmp/cube_split_source_cache") / "loader", client, parsed.netloc
             )
             source_bytes = local_path.read_bytes()
             actual_source_checksum = sha256(source_bytes).hexdigest()
@@ -257,10 +267,10 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
         for asset in dataset["assets"]:
             source_uri = str(asset["cog_uri"])
             parsed = urlparse(source_uri)
-            if parsed.scheme != "s3" or parsed.netloc != settings["bucket"]:
-                raise ValueError("normalized source COG must be in the configured MinIO bucket")
+            if parsed.scheme != "s3" or not parsed.netloc:
+                raise ValueError("normalized source COG must use an accessible MinIO bucket")
             local_path = cache_source_cog(
-                source_uri, Path("/tmp/cube_split_source_cache") / "loader", client, settings["bucket"]
+                source_uri, Path("/tmp/cube_split_source_cache") / "loader", client, parsed.netloc
             )
             actual_source_checksum = sha256(local_path.read_bytes()).hexdigest()
             if actual_source_checksum != asset["checksum"]:
@@ -268,9 +278,13 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
             with rasterio.open(local_path) as source:
                 bounds = source.bounds
                 if source.crs and str(source.crs).upper() != "EPSG:4326":
-                    source_bbox = list(transform_bounds(source.crs, "EPSG:4326", bounds.left, bounds.bottom, bounds.right, bounds.top))
+                    source_bbox = _normalize_wgs84_bbox(transform_bounds(
+                        source.crs, "EPSG:4326", bounds.left, bounds.bottom, bounds.right, bounds.top,
+                    ))
                 else:
-                    source_bbox = [float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top)]
+                    source_bbox = _normalize_wgs84_bbox([
+                        bounds.left, bounds.bottom, bounds.right, bounds.top,
+                    ])
                 covered = sdk.cover(
                     grid_type=grid_type,
                     requested_grid_level=requested_grid_level,
@@ -315,6 +329,7 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                          "space_code": cell.space_code, "topology_code": cell.topology_code, "bbox": cell.bbox, "geometry": cell_geometry},
                     )
                     for band in (band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]):
+                        source_band_index = _source_band_index(band, source.count)
                         bucket = _time_bucket(asset["time_start"], value["time_granularity"])
                         identity = OutputIdentity(
                             dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"],
@@ -334,6 +349,10 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                             "source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type,
                             "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
                             "time_bucket": bucket, "value_ref_uri": source_uri,
+                            "attributes": {
+                                "band_unit_id": (band.get("attributes") or {}).get("band_unit_id"),
+                                "source_band_index": source_band_index,
+                            },
                         }
                         index["st_code"] = sdk.generate_st_code(
                             address=address, timestamp=datetime.fromisoformat(asset["time_start"].replace("Z", "+00:00")),
@@ -343,9 +362,13 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                             geometry = cell_geometry
                             if source.crs and str(source.crs).upper() != "EPSG:4326":
                                 geometry = transform_geom("EPSG:4326", source.crs, geometry)
-                            data, tile_transform = rasterio.mask.mask(source, [geometry], crop=True)
+                            data, tile_transform = rasterio.mask.mask(
+                                source, [geometry], crop=True, indexes=[source_band_index]
+                            )
                             profile = source.profile.copy()
-                            profile.update(driver="GTiff", width=data.shape[2], height=data.shape[1], transform=tile_transform)
+                            profile.update(
+                                driver="GTiff", count=1, width=data.shape[2], height=data.shape[1], transform=tile_transform
+                            )
                             with MemoryFile() as memory:
                                 with memory.open(**profile) as destination:
                                     destination.write(data)
@@ -434,3 +457,15 @@ class NormalizedPartitionDatasetRunner:
         if dataset.data_type == "carbon":
             return _run_carbon_dataset_on_ray(payload, ray_runtime_env)
         return _run_dataset_on_ray(payload, ray_runtime_env)
+def _normalize_wgs84_bbox(bbox: list[float] | tuple[float, ...]) -> list[float]:
+    """Clamp raster-derived WGS84 bounds to the legal geographic range."""
+    if len(bbox) != 4:
+        raise ValueError("WGS84 bbox must contain four coordinates")
+    west, south, east, north = (float(value) for value in bbox)
+    west = max(-180.0, min(180.0, west))
+    east = max(-180.0, min(180.0, east))
+    south = max(-90.0, min(90.0, south))
+    north = max(-90.0, min(90.0, north))
+    if south > north:
+        raise ValueError("WGS84 bbox south must be <= north")
+    return [west, south, east, north]

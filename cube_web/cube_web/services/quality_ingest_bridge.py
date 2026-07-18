@@ -11,11 +11,98 @@ from psycopg.types.json import Jsonb
 
 from cube_web.services.ingest_contracts import CreateIngestRun, IngestSceneInput
 from cube_web.services.ingest_repository import scene_idempotency_key
+from cube_web.services.quality_repository import require_open_gauss_domain_store
 
 
 @dataclass(frozen=True)
 class AutoIngestPolicy:
     allow_warn: bool = False
+
+
+class ManualIngestRejected(RuntimeError):
+    pass
+
+
+def request_manual_ingest_collection(partition_run_id: str, scene_ids: set[str], *, requested_by: str) -> dict[str, Any]:
+    """Create ingest runs for the selected scenes in one partition collection."""
+    if not scene_ids:
+        raise ManualIngestRejected("at least one partitioned data unit must be selected")
+    store = require_open_gauss_domain_store()
+    with store.transaction() as tx:
+        with tx.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT prs.scene_id, prs.dataset_id, prs.output_version,
+                       q.quality_run_id, q.status AS quality_status
+                FROM partition_run_scenes prs
+                JOIN partition_runs pr ON pr.partition_run_id=prs.partition_run_id AND pr.status='completed'
+                LEFT JOIN LATERAL (
+                  SELECT quality_run_id, status FROM partition_quality_runs
+                  WHERE dataset_id=prs.dataset_id AND output_version=prs.output_version
+                    AND status IN ('pass','warn') AND result_complete=true
+                  ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1
+                ) q ON true
+                WHERE prs.partition_run_id=%s AND prs.status='completed' AND prs.scene_id=ANY(%s)
+                """,
+                (partition_run_id, sorted(scene_ids)),
+            )
+            rows = cur.fetchall()
+        if not rows:
+            raise ManualIngestRejected("selected data units are not completed partition outputs")
+        if any(row["quality_run_id"] is None for row in rows):
+            raise ManualIngestRejected("all selected data units must pass quality before ingest")
+        grouped: dict[tuple[str, str, str, str], set[str]] = {}
+        for row in rows:
+            grouped.setdefault((str(row["dataset_id"]), str(row["output_version"]), str(row["quality_run_id"]), str(row["quality_status"])), set()).add(str(row["scene_id"]))
+        created = 0
+        for (dataset_id, output_version, quality_run_id, quality_status), selected in grouped.items():
+            created += create_ingest_runs_after_quality(
+                tx, quality_run_id=UUID(quality_run_id), dataset_id=dataset_id,
+                output_version=output_version, quality_status=quality_status,
+                requested_by=requested_by, manual=True, scene_ids=selected,
+            )
+        return {"partition_run_id": partition_run_id, "selected_scene_count": len(rows), "created": created}
+
+
+def request_manual_ingest(dataset_id: str, *, requested_by: str) -> dict[str, Any]:
+    """Queue the current quality-approved output only after an explicit action."""
+    store = require_open_gauss_domain_store()
+    with store.transaction() as tx:
+        with tx.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT d.status,
+                       COALESCE(pd.current_output_version, d.current_output_version) AS output_version,
+                       q.quality_run_id, q.status AS quality_status
+                FROM datasets d
+                LEFT JOIN partition_datasets pd ON pd.dataset_id=d.dataset_id
+                LEFT JOIN LATERAL (
+                  SELECT quality_run_id, status FROM partition_quality_runs
+                  WHERE dataset_id=d.dataset_id
+                    AND output_version=COALESCE(pd.current_output_version, d.current_output_version)
+                    AND status IN ('pass','warn') AND result_complete=true
+                  ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                  LIMIT 1
+                ) q ON true
+                WHERE d.dataset_id=%s
+                """,
+                (dataset_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise ManualIngestRejected(f"dataset not found: {dataset_id}")
+        if row["status"] != "active" or not row["output_version"] or not row["quality_run_id"]:
+            raise ManualIngestRejected("manual ingest requires a current output that passed quality")
+        created = create_ingest_runs_after_quality(
+            tx,
+            quality_run_id=row["quality_run_id"],
+            dataset_id=dataset_id,
+            output_version=str(row["output_version"]),
+            quality_status=str(row["quality_status"]),
+            requested_by=requested_by,
+            manual=True,
+        )
+        return {"dataset_id": dataset_id, "output_version": str(row["output_version"]), "created": created}
 
 
 @dataclass(frozen=True)
@@ -44,11 +131,12 @@ def plan_ingest_requests(
     dataset: DatasetAutoIngestState,
     partition_scenes: Iterable[PartitionSceneOutput],
     policy: AutoIngestPolicy = AutoIngestPolicy(),
+    manual: bool = False,
 ) -> tuple[CreateIngestRun, ...]:
     accepted_statuses = {"pass", "warn"} if policy.allow_warn or dataset.allow_warn_auto_ingest else {"pass"}
     if quality_status not in accepted_statuses:
         return ()
-    if dataset.status != "active" or not dataset.auto_ingest_allowed or dataset.current_output_version is None:
+    if dataset.status != "active" or (not manual and not dataset.auto_ingest_allowed) or dataset.current_output_version is None:
         return ()
 
     grouped: dict[str, list[IngestSceneInput]] = {}
@@ -105,6 +193,9 @@ def create_ingest_runs_after_quality(
     output_version: str,
     quality_status: str,
     policy: AutoIngestPolicy = AutoIngestPolicy(),
+    requested_by: str = "system:quality-gate",
+    manual: bool = False,
+    scene_ids: set[str] | None = None,
 ) -> int:
     """Create managed ingest intents in the quality-completion transaction."""
     if quality_status not in {"pass", "warn"}:
@@ -159,6 +250,8 @@ def create_ingest_runs_after_quality(
             (dataset_id, output_version),
         )
         completed_rows = cur.fetchall()
+        if scene_ids is not None:
+            completed_rows = [row for row in completed_rows if str(row["scene_id"]) in scene_ids]
         if not completed_rows:
             return 0
         scene_ids = sorted({str(item["scene_id"]) for item in completed_rows})
@@ -187,7 +280,10 @@ def create_ingest_runs_after_quality(
             dataset=dataset,
             partition_scenes=candidates,
             policy=policy,
+            manual=manual,
         )
+        if manual:
+            requests = tuple(request.model_copy(update={"requested_by": requested_by}) for request in requests)
         created = 0
         for request in requests:
             created += _insert_request(cur, request)

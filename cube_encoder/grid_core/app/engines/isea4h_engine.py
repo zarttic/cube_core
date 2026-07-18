@@ -37,6 +37,8 @@ _MAX_OUTPUT_CELLS = 100_000
 _MAX_COVER_SECONDS = 30.0
 _GRID_TYPE = "isea4h"
 _WGS84_BOUNDS = box(-180.0, -90.0, 180.0, 90.0)
+_INDEXED_LEVEL_MAX_CELLS = 200_000
+_COVER_INDEX_CACHE: dict[int, tuple[object, list[object]]] = {}
 
 
 def _validate_level(level: int) -> int:
@@ -236,6 +238,35 @@ class ISEA4HEngine(BaseGridEngine):
                 shape_cache[key] = cached
             return cached
 
+        def indexed_candidates(search_target: object, level: int) -> set[int] | None:
+            """Return spatial-index candidates for levels that fit in memory.
+
+            Neighbor walking is fast for a small local AOI, but it can miss a
+            cell when a path crosses an ISEA4H quad edge or a pole.  The
+            bounded index makes the default production levels exhaustive while
+            retaining the local walk for very fine levels.
+            """
+            if cell_count(level) > _INDEXED_LEVEL_MAX_CELLS:
+                return None
+            try:
+                from shapely.strtree import STRtree
+            except ImportError:  # pragma: no cover - Shapely is a runtime dependency
+                return None
+            cached_index = _COVER_INDEX_CACHE.get(level)
+            if cached_index is None:
+                envelopes = [
+                    box(*_cell_bbox(seqnum, level))
+                    for seqnum in range(1, cell_count(level) + 1)
+                ]
+                cached_index = (STRtree(envelopes), envelopes)
+                _COVER_INDEX_CACHE[level] = cached_index
+            tree, _envelopes = cached_index
+            candidates: set[int] = set()
+            for variant in longitude_variants(search_target):
+                for index in tree.query(variant):
+                    candidates.add(int(index) + 1)
+            return candidates
+
         def component_seeds(search_target: object, level: int) -> set[int]:
             pending = [search_target]
             seeds: set[int] = set()
@@ -260,11 +291,27 @@ class ISEA4HEngine(BaseGridEngine):
 
         def intersecting_cells(search_target: object, level: int) -> Iterator[tuple[int, object]]:
             nonlocal visited_count
+            search_variants = longitude_variants(search_target)
+            candidates = indexed_candidates(search_target, level)
+            if candidates is not None:
+                for seqnum in sorted(candidates):
+                    visited_count += 1
+                    if visited_count > _MAX_CANDIDATE_CELLS:
+                        raise ValidationError(
+                            f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
+                            f"limit={_MAX_CANDIDATE_CELLS}, observed={visited_count}"
+                        )
+                    if time.monotonic() > deadline:
+                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
+                    cell = cached_cell_shape(seqnum, level)
+                    if intersects_area(cell, search_variants):
+                        yield seqnum, cell
+                return
+
             seeds = component_seeds(search_target, level)
             queue = deque(seeds)
             for seed in seeds:
                 queue.extend(cell_neighbors(seed, level))
-            search_variants = longitude_variants(search_target)
             visited: set[int] = set()
             while queue:
                 seqnum = queue.popleft()

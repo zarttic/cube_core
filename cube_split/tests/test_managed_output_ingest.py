@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,59 @@ def test_raster_logical_writes_actual_managed_cell_geometry(capture):
     assert result.target_tables == ("rs_raw_scene_asset", "rs_cube_cell_fact")
     assert json.loads(capture["cube"][0].cell_geom_geojson) == snapshot["indexes"][0]["cell_geometry"]
     assert capture["cube"][0].cube_version == "output-v1"
+
+
+def test_managed_ingest_verifies_accessible_cross_bucket_source(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def stat_object(self, bucket, key):
+            calls.append((bucket, key))
+            return SimpleNamespace(metadata={})
+
+    import minio
+
+    monkeypatch.setattr(minio, "Minio", Client)
+    monkeypatch.setattr(
+        managed.runtime_config,
+        "minio_settings",
+        lambda: SimpleNamespace(endpoint="minio:9000", access_key="key", secret_key="secret", secure=False, bucket="cube"),
+    )
+    snapshot = _snapshot()
+    snapshot["indexes"][0].update({
+        "cog_uri": "s3://user-1/cog/source.tif",
+        "value_ref_uri": "s3://user-1/cog/source.tif#window=0,0,8,8",
+    })
+
+    managed._verify_minio_objects(snapshot)
+
+    assert calls == [("user-1", "cog/source.tif")]
+
+
+def test_managed_ingest_rejects_cross_bucket_entity_tile(monkeypatch):
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def stat_object(self, _bucket, _key):
+            return SimpleNamespace(metadata={})
+
+    import minio
+
+    monkeypatch.setattr(minio, "Minio", Client)
+    monkeypatch.setattr(
+        managed.runtime_config,
+        "minio_settings",
+        lambda: SimpleNamespace(endpoint="minio:9000", access_key="key", secret_key="secret", secure=False, bucket="cube"),
+    )
+    snapshot = _snapshot(method="entity")
+    snapshot["indexes"][0]["value_ref_uri"] = "s3://user-1/cog/entity-tile.tif"
+
+    with pytest.raises(RuntimeError, match="outside configured MinIO bucket"):
+        managed._verify_minio_objects(snapshot)
 
 
 def test_raster_entity_writes_cube_geometry_and_entity_catalog(capture):

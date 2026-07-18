@@ -40,6 +40,40 @@ def test_reader_opens_local_raster_and_returns_fixed_shape_pixel_statistics(tmp_
     assert 0 < result.nonzero_pixels < result.valid_pixels
 
 
+def test_reader_samples_requested_band_from_multiband_raster(tmp_path: Path) -> None:
+    source = tmp_path / "multiband.tif"
+    with rasterio.open(
+        source,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=16,
+        count=2,
+        dtype="uint16",
+        crs="EPSG:4326",
+        transform=from_origin(116, 40, 0.01, 0.01),
+    ) as dataset:
+        dataset.write(np.zeros((16, 16), dtype=np.uint16), 1)
+        dataset.write(np.full((16, 16), 10, dtype=np.uint16), 2)
+
+    result = QualityObjectReader().inspect(
+        str(source),
+        "cog",
+        sample_pixels=True,
+        sample_band_index=2,
+    )
+
+    assert result.nonzero_pixels == result.valid_pixels == 16 * 16
+
+
+def test_reader_rejects_requested_band_outside_raster(tmp_path: Path) -> None:
+    source = tmp_path / "singleband.tif"
+    _write_raster(source, np.ones((16, 16), dtype=np.uint16))
+
+    with pytest.raises(ValueError, match="band index is out of range"):
+        QualityObjectReader().inspect(str(source), "cog", sample_band_index=2)
+
+
 def test_reader_rejects_missing_local_object(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         QualityObjectReader().inspect(str(tmp_path / "missing.tif"), "cog")

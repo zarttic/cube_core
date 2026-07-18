@@ -9,7 +9,6 @@ import { derivedPartitionMethod, gridDefinition, nativeLevelLabel, withFixedPart
 import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
 import BatchAssetsPanel from '@/views/partition/BatchAssetsPanel.vue';
-import ExecutionResultPanel from '@/views/partition/ExecutionResultPanel.vue';
 import GridParameters from '@/views/partition/GridParameters.vue';
 import TaskQueuePanel from '@/views/partition/TaskQueuePanel.vue';
 
@@ -34,11 +33,8 @@ const datasetDrawerVisible = ref(false);
 const gridPreviewLoading = ref(false);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
-const resultsByModule = ref({});
-const errorsByModule = ref({});
 let gridPreviewGeneration = 0;
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
-const MAX_RENDERED_GRID_CELLS = 2000;
 const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [value, {
   gridType: value === 'carbon' ? 'isea4h' : 'geohash',
   requestedGridLevel: value === 'carbon' ? 5 : 4,
@@ -101,13 +97,51 @@ const formModel = computed({
   },
 });
 
-function bboxGeometry(bbox) {
+function normalizeBbox(bbox) {
   if (!Array.isArray(bbox) || bbox.length !== 4) return null;
-  const [west, south, east, north] = bbox.map(Number);
+  const [rawWest, rawSouth, rawEast, rawNorth] = bbox.map(Number);
+  if (![rawWest, rawSouth, rawEast, rawNorth].every(Number.isFinite)) return null;
+  const west = Math.max(-180, Math.min(180, rawWest));
+  const south = Math.max(-90, Math.min(90, rawSouth));
+  const east = Math.max(-180, Math.min(180, rawEast));
+  const north = Math.max(-90, Math.min(90, rawNorth));
   if (![west, south, east, north].every(Number.isFinite) || west >= east || south >= north) return null;
+  return [west, south, east, north];
+}
+
+function bboxGeometry(bbox) {
+  const normalized = normalizeBbox(bbox);
+  if (!normalized) return null;
+  const [west, south, east, north] = normalized;
+  const displaySouth = Math.max(-89.999, south);
+  const displayNorth = Math.min(89.999, north);
+  // Cesium rejects a ground polygon edge when its endpoints are nearly antipodal.
+  if (west <= -179.999 && east >= 179.999 && south <= -89.999 && north >= 89.999) {
+    const longitudes = [-180, -90, 0, 90, 180];
+    const latitudes = [displaySouth, 0, displayNorth];
+    return {
+      type: 'MultiPolygon',
+      coordinates: longitudes.slice(0, -1).flatMap((sliceWest, longitudeIndex) => (
+        latitudes.slice(0, -1).map((sliceSouth, latitudeIndex) => {
+          const sliceEast = longitudes[longitudeIndex + 1];
+          const sliceNorth = latitudes[latitudeIndex + 1];
+          return [[
+            [sliceWest, sliceSouth],
+            [sliceEast, sliceSouth],
+            [sliceEast, sliceNorth],
+            [sliceWest, sliceNorth],
+            [sliceWest, sliceSouth],
+          ]];
+        })
+      )),
+    };
+  }
   return {
     type: 'Polygon',
-    coordinates: [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+    coordinates: [[
+      [west, displaySouth], [east, displaySouth], [east, displayNorth],
+      [west, displayNorth], [west, displaySouth],
+    ]],
   };
 }
 
@@ -126,8 +160,12 @@ const selectedGeometries = computed(() => store.form.datasets.flatMap((dataset, 
 )));
 const activeGridGeometries = computed(() => gridGeometriesByModule.value[activeModule.value] || []);
 const gridGeometries = computed(() => Object.values(gridGeometriesByModule.value).flat());
-const gridPreviewLimited = computed(() => Boolean(gridPreviewMetaByModule.value[activeModule.value]?.limited));
-const mapGeometries = computed(() => [...selectedGeometries.value, ...gridGeometries.value]);
+// The grid preview already covers the selected source extent. Keeping repeated
+// global footprints in the same Cesium ground batch can cause mismatched
+// attribute lists and adds no visual information.
+const mapGeometries = computed(() => (
+  gridGeometries.value.length ? gridGeometries.value : selectedGeometries.value
+));
 const activeGridLegends = computed(() => {
   const legends = new Map();
   store.form.datasets.forEach((dataset) => {
@@ -142,27 +180,15 @@ const activeGridLegends = computed(() => {
   });
   return [...legends.values()];
 });
-const mapHint = computed(() => {
-  if (!activeDatasets.value.length) return '从' + (activeProduct.value?.label || '') + '待剖分队列选择数据后可预览范围';
-  if (gridPreviewLoading.value) return '正在加载真实格网覆盖';
-  if (activeGridGeometries.value.length) {
-    const total = gridPreviewMetaByModule.value[activeModule.value]?.total || activeGridGeometries.value.length;
-    return '已加载 ' + activeGridGeometries.value.length + ' 个格网单元'
-      + (total > activeGridGeometries.value.length ? `（共 ${total} 个）` : '')
-      + (gridPreviewLimited.value ? '（仅预览前 30 个数据单元范围）' : '');
-  }
-  return '已显示 ' + selectedGeometries.value.length + ' 个数据单元范围';
-});
-const activeSceneCount = computed(() => activeDatasets.value.reduce((total, dataset) => total + (dataset.scenes || []).length, 0));
+const activeBandUnitCount = computed(() => activeDatasets.value.reduce((total, dataset) => (
+  total + (Array.isArray(dataset.band_unit_ids) ? dataset.band_unit_ids.length : (dataset.scenes || []).length)
+), 0));
 const selectedSourceBatchIds = computed(() => [...new Set(activeDatasets.value.flatMap((dataset) => (
   (dataset.scenes || []).flatMap((scene) => [
     ...(Array.isArray(scene.source_batch_ids) ? scene.source_batch_ids : []),
     scene.load_batch_id,
   ])
 )).map((value) => String(value || '').trim()).filter(Boolean))]);
-const activeTaskCount = computed(() => store.tasks.filter((task) => ['queued', 'running', 'retrying', 'cancel_requested'].includes(task.status)).length);
-const activeResult = computed(() => resultsByModule.value[activeModule.value] || null);
-const activeError = computed(() => errorsByModule.value[activeModule.value] || '');
 
 function selectModule(moduleName) {
   activeModule.value = moduleName;
@@ -178,18 +204,11 @@ function setModuleGridPreview(moduleName, geometries, meta = {}) {
 
 async function submit() {
   const moduleName = activeModule.value;
-  const submittedModules = [...new Set(store.form.datasets.map((dataset) => dataset.data_type))];
   try {
-    errorsByModule.value[moduleName] = '';
     Object.assign(store.form, moduleForms.value[moduleName]);
-    const result = await store.submit();
-    (submittedModules.length ? submittedModules : [moduleName]).forEach((item) => {
-      resultsByModule.value[item] = result;
-      errorsByModule.value[item] = '';
-    });
+    await store.submit();
     ElMessage.success('剖分任务已提交。');
   } catch (error) {
-    errorsByModule.value[moduleName] = error.message || '提交剖分失败。';
     ElMessage.error(error.message || '提交剖分失败。');
   }
 }
@@ -197,8 +216,6 @@ async function submit() {
 function reset() {
   const currentType = activeModule.value;
   store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== currentType);
-  resultsByModule.value[currentType] = null;
-  errorsByModule.value[currentType] = '';
   gridPreviewGeneration += 1;
   setModuleGridPreview(currentType, []);
 }
@@ -235,8 +252,8 @@ async function loadMap() {
       requested_grid_level: Number(formModel.value.requestedGridLevel),
     };
     (dataset.assets || []).forEach((asset) => {
-      const bbox = Array.isArray(asset.bbox) ? asset.bbox.map(Number) : [];
-      if (!bboxGeometry(bbox)) return;
+      const bbox = normalizeBbox(asset.bbox);
+      if (!bbox) return;
       const key = [partition.grid_type, partition.requested_grid_level, bbox.join(',')].join(':');
       if (!requests.has(key)) requests.set(key, { partition, bbox });
     });
@@ -252,7 +269,6 @@ async function loadMap() {
     const failures = settled.filter((item) => item.status === 'rejected');
     if (!successful.length && failures.length) throw failures[0].reason;
     const cells = successful.flat();
-    const stride = Math.max(1, Math.ceil(cells.length / MAX_RENDERED_GRID_CELLS));
     const uniqueKeys = new Set();
     const rendered = new Map();
     cells.forEach((cell) => {
@@ -261,7 +277,6 @@ async function loadMap() {
       const key = [cell.preview_grid_type, cell.grid_level, cell.space_code].join(':');
       if (uniqueKeys.has(key)) return;
       uniqueKeys.add(key);
-      if ((uniqueKeys.size - 1) % stride !== 0 || rendered.size >= MAX_RENDERED_GRID_CELLS) return;
       rendered.set(key, {
         geometry,
         label: cell.space_code,
@@ -272,7 +287,7 @@ async function loadMap() {
       });
     });
     const geometries = [...rendered.values()];
-    const limited = requests.size > previewRequests.length || uniqueKeys.size > geometries.length;
+    const limited = requests.size > previewRequests.length;
     setModuleGridPreview(moduleName, geometries, { limited, total: uniqueKeys.size });
     if (failures.length) {
       ElMessage.warning(`已加载 ${geometries.length} 个格网单元，${failures.length} 个范围加载失败。`);
@@ -371,7 +386,7 @@ onMounted(() => {
               v-model="formModel"
               :loading="store.loading.submit"
               :data-type-label="activeProduct.label"
-              :selected-count="activeSceneCount"
+              :selected-count="activeBandUnitCount"
               :selected-dataset-count="activeDatasets.length"
               :source-batch-ids="selectedSourceBatchIds"
               @open-datasets="datasetDrawerVisible = true"
@@ -382,9 +397,10 @@ onMounted(() => {
 
             <div class="workspace-main">
               <div class="map-panel" aria-label="剖分范围地图">
-                <div class="panel-header">
-                  <div class="panel-header-main">
-                    <h3>{{ activeProduct.label }}空间预览</h3>
+                <div class="panel-header"><h3>地图</h3></div>
+                <div class="map-canvas-wrap">
+                  <GlobeMap :geometries="mapGeometries" :zoom="4" />
+                  <div class="map-overlay-actions">
                     <div class="map-actions">
                       <el-tag v-for="legend in activeGridLegends" :key="legend.key" size="small" class="grid-legend-tag">
                         <span class="grid-legend-dot" :style="{ backgroundColor: legend.color }" />{{ legend.label }}
@@ -392,30 +408,6 @@ onMounted(() => {
                       <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">加载格网</el-button>
                       <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
                     </div>
-                  </div>
-                  <span class="map-hint">{{ mapHint }}</span>
-                </div>
-                <GlobeMap :geometries="mapGeometries" :zoom="4" />
-              </div>
-            </div>
-
-            <div class="workspace-result">
-              <div class="result-panel">
-                <div class="result-panel-header">
-                  <h3>执行结果</h3>
-                  <el-button size="small" @click="selectModule('tasks')">任务队列</el-button>
-                </div>
-                <div class="results-content">
-                  <div class="quality-section-title">剖分进程</div>
-                  <div class="partition-context-grid">
-                    <div class="partition-context-item"><span>当前数据集</span><strong>{{ activeDatasets.length }}</strong></div>
-                    <div class="partition-context-item"><span>当前数据单元</span><strong>{{ activeSceneCount }}</strong></div>
-                    <div class="partition-context-item"><span>来源批次</span><strong>{{ selectedSourceBatchIds.length }}</strong></div>
-                    <div class="partition-context-item"><span>活动任务</span><strong>{{ activeTaskCount }}</strong></div>
-                  </div>
-                  <ExecutionResultPanel :result="activeResult" :error="activeError" />
-                  <div v-if="!activeResult && !activeError" class="empty-state">
-                    <p>配置参数并提交剖分任务</p>
                   </div>
                 </div>
               </div>

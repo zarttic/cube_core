@@ -58,6 +58,7 @@ let lastFocusSignature = '';
 let previewLayer = null;
 let lifecycleGeneration = 0;
 let imageryGeneration = 0;
+let resizeObserver = null;
 
 function viewerIsCurrent(candidate, generation) {
   return generation === lifecycleGeneration && candidate && candidate === viewer && !candidate.isDestroyed();
@@ -626,6 +627,14 @@ function handleFallbackPointerLeave() {
 
 onMounted(() => {
   const generation = ++lifecycleGeneration;
+  if (typeof ResizeObserver !== 'undefined' && mapEl.value) {
+    resizeObserver = new ResizeObserver(() => {
+      if (!viewer || viewer.isDestroyed()) return;
+      viewer.resize();
+      viewer.scene.requestRender();
+    });
+    resizeObserver.observe(mapEl.value);
+  }
   initViewer(generation);
 });
 
@@ -648,6 +657,8 @@ watch(() => props.interactionMode, () => {
 onBeforeUnmount(() => {
   lifecycleGeneration += 1;
   imageryGeneration += 1;
+  resizeObserver?.disconnect();
+  resizeObserver = null;
   handler?.destroy();
   handler = null;
   viewer?.destroy();

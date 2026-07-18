@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import pytest
+from shapely.geometry import box, shape
+from shapely.ops import unary_union
 
 from grid_core.app.engines.geohash_engine import GeohashEngine
 from grid_core.app.models.grid_address import GridAddress
@@ -228,6 +230,21 @@ def test_cover_intersect_returns_grid_cells() -> None:
     assert all(isinstance(c, GridCell) for c in cells)
     assert all(c.grid_type == "geohash" for c in cells)
     assert all(c.grid_level == 5 for c in cells)
+
+
+def test_real_optical_acceptance_extent_is_fully_covered_at_level_one() -> None:
+    engine = GeohashEngine()
+    aoi = box(121.62816895913849, 34.64424493372776, 122.77479470513347, 38.0121103661017)
+
+    covered = engine.cover_geometry(aoi.__geo_interface__, 1, "intersect")
+    union = unary_union([
+        shape(engine.code_to_geometry(GridAddress(
+            grid_type="geohash", grid_level=1, space_code=cell.space_code,
+        )))
+        for cell in covered
+    ])
+
+    assert union.covers(aoi)
 
 
 def test_cover_contain_subset_of_intersect() -> None:

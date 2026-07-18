@@ -1,6 +1,6 @@
 # 质检规则契约
 
-当前规则集版本为 `2026.07.17-v3`，以
+当前规则集版本为 `2026.07.18-v5`，以
 `cube_web.services.quality_rules.default_rule_registry()` 的运行时注册结果为准。
 前端通过 `GET /v1/quality/rules` 展示同一份定义，不单独维护规则矩阵。
 
@@ -24,7 +24,7 @@
 
 | 规则代码 | 质检项 | 适用产品 |
 | --- | --- | --- |
-| `pixel_sample` | COG 首波段确定性像素抽样 | 光学、雷达、信息产品 |
+| `pixel_sample` | 每个 COG 按标准化波段元数据选择一个业务信号波段进行确定性像素抽样 | 光学、雷达、信息产品 |
 | `metadata_completeness` | 元数据完整性 | 全部四类产品 |
 | `declared_metadata_warnings` | 已声明元数据警告（`severity=warning`） | 全部四类产品 |
 
@@ -33,10 +33,9 @@
 | 适用产品 | 规则代码 | 质检项 |
 | --- | --- | --- |
 | 光学、雷达、信息产品 | `asset_crs` | 声明 CRS 合法且与影像内 CRS 一致 |
-| 光学遥感 | `optical_band_contract` | 光谱波段编码与类型规范 |
+| 光学遥感 | `optical_band_contract` | 光谱波段必须为 `spectral`；明确的 QA/气溶胶质量层允许使用 `variable` |
 | 雷达遥感 | `radar_band_contract` | 极化通道编码与类型规范 |
 | 信息产品 | `product_band_contract` | 产品变量编码与类型规范 |
-| 信息产品 | `product_year_consistency` | 产品年份一致性 |
 | 碳卫星 | `carbon_schema` | 碳卫星数据结构 |
 | 碳卫星 | `carbon_coordinates` | 碳卫星坐标有效性 |
 | 碳卫星 | `carbon_xco2_range` | XCO2 数值范围 |
@@ -54,6 +53,8 @@
 生产 `asset_readability` 会从 MinIO 下载缓存并真实打开数据；读取器也支持本地路径用于
 测试和诊断，但生产领域表只接受 `s3://`。COG 使用 rasterio，NetCDF 使用 netCDF4，
 非 NetCDF 数据模型的 HDF5 使用 GDAL/rasterio fallback。读取错误只记录
-通用错误类型，不保存连接异常文本或凭据。`pixel_sample` 最多抽样首波段 `128 x 128`
+通用错误类型，不保存连接异常文本或凭据。`pixel_sample` 每个源文件只抽样一个业务信号波段，
+光学选择 `spectral`、雷达选择 `polarization`、信息产品选择 `variable`，并按波段元数据中的
+`source_band_index` 读取，最多抽样 `128 x 128`
 像素，并分别检查有效像素和非零像素；碳卫星继续使用观测结构、坐标、XCO2、质量标识、
 重复和足迹专项规则，不执行栅格像素抽样。

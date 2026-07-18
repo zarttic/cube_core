@@ -11,7 +11,6 @@ from psycopg.rows import dict_row
 from cube_web.services.ingest_worker import process_queued_ingest_scenes
 from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.quality_contracts import QualityResult
-from cube_web.services.quality_ingest_bridge import create_ingest_runs_after_quality
 from cube_web.services.quality_object_reader import quality_object_reader
 from cube_web.services.quality_repository import (
     ERROR_BATCH_SIZE,
@@ -237,14 +236,8 @@ def execute_quality_run(lease: QualityLease) -> None:
                 completed_at=datetime.now(UTC),
             )
             quality_completed = True
-            if is_current:
-                create_ingest_runs_after_quality(
-                    tx,
-                    quality_run_id=lease.quality_run_id,
-                    dataset_id=run.dataset_id,
-                    output_version=run.output_version,
-                    quality_status=terminal_status,
-                )
+            # Ingest is an explicit data-management action. Quality completion
+            # only records the gate result; it must not enqueue ingest work.
         except Exception as exc:
             if quality_completed:
                 raise

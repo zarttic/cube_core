@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue';
 import AppTable from '@/components/AppTable.vue';
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
+import { formatShanghaiTime } from '@/utils/time';
 
 const props = defineProps({
   visible: Boolean, runId: { type: String, default: '' }, detail: { type: Object, default: null },
@@ -12,7 +13,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'retry-scenes', 'cancel']);
 const cancelDialog = ref(false);
 const cancelReason = ref('');
-const title = computed(() => props.detail?.ingest_run_id || props.runId || '入库运行详情');
+const title = computed(() => props.detail?.ingest_run_id || props.runId || '数据入库详情');
 const scenes = computed(() => props.detail?.scenes || []);
 const failedSceneIds = computed(() => scenes.value.filter((scene) => scene.status === 'failed').map((scene) => scene.scene_id));
 const cancellable = computed(() => ['pending', 'queued', 'running'].includes(props.detail?.status));
@@ -37,12 +38,12 @@ function confirmCancel() {
     </div>
     <template v-if="detail">
       <el-descriptions :column="2" border>
-        <el-descriptions-item label="入库运行">{{ detail.ingest_run_id }}</el-descriptions-item>
+        <el-descriptions-item label="数据入库">{{ detail.ingest_run_id }}</el-descriptions-item>
         <el-descriptions-item label="状态"><StatusTag domain="ingest" :value="detail.status" size="small" /></el-descriptions-item>
         <el-descriptions-item label="数据集">{{ detail.dataset_code || detail.dataset_id }}</el-descriptions-item>
         <el-descriptions-item label="剖分运行">{{ detail.partition_run_id }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ detail.created_at || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="完成时间">{{ detail.completed_at || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="创建时间">{{ formatShanghaiTime(detail.created_at) }}</el-descriptions-item>
+        <el-descriptions-item label="完成时间">{{ formatShanghaiTime(detail.completed_at) }}</el-descriptions-item>
         <el-descriptions-item label="错误" :span="2">{{ detail.error_message || '-' }}</el-descriptions-item>
       </el-descriptions>
       <h3>景入库明细</h3>
@@ -56,8 +57,8 @@ function confirmCancel() {
         <el-table-column v-if="writeEnabled" label="操作" width="80" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" link type="primary" @click="emit('retry-scenes', [row.scene_id])">重试</el-button></template></el-table-column>
       </AppTable>
     </template>
-    <el-empty v-else description="正在加载入库运行" />
-    <el-dialog v-model="cancelDialog" title="取消入库运行" width="480px" append-to-body>
+    <el-empty v-else description="正在加载数据入库" />
+    <el-dialog v-model="cancelDialog" title="取消数据入库" width="480px" append-to-body>
       <el-input v-model="cancelReason" type="textarea" :rows="3" placeholder="可填写取消原因" />
       <template #footer><el-button @click="cancelDialog = false">返回</el-button><el-button type="danger" @click="confirmCancel">确认取消</el-button></template>
     </el-dialog>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from shapely.geometry import MultiPolygon, Polygon, box, shape
+from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 from grid_core.app.core.exceptions import ValidationError
@@ -39,6 +40,19 @@ def test_intersect_keeps_all_cells_touching_a_vertex_with_positive_area() -> Non
     covered = engine.cover_geometry(aoi.__geo_interface__, resolution, "intersect")
 
     assert {cell.space_code for cell in covered} == _exact_intersections(aoi, resolution)
+
+
+def test_real_optical_acceptance_extent_is_fully_covered_at_level_six() -> None:
+    engine = ISEA4HEngine()
+    aoi = box(121.62816895913849, 34.64424493372776, 122.77479470513347, 38.0121103661017)
+
+    covered = engine.cover_geometry(aoi.__geo_interface__, 6, "intersect")
+    union = make_valid(unary_union([
+        shape(engine.code_to_geometry(GridAddress(grid_type="isea4h", grid_level=6, space_code=cell.space_code)))
+        for cell in covered
+    ]))
+
+    assert union.covers(aoi)
 
 
 def test_contain_requires_the_complete_cell_geometry() -> None:

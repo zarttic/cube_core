@@ -22,6 +22,8 @@ from cube_web.services.partition_job_store import PostgresPartitionJobStore  # n
 from cube_web.services.scene_domain_schema import (  # noqa: E402
     SCENE_DOMAIN_SCHEMA_VERSION,
     apply_scene_domain_schema,
+    backfill_scene_band_unit_ids,
+    backfill_scene_resolution_metadata,
     schema_statements,
 )
 
@@ -59,8 +61,15 @@ def main() -> int:
         # performs this idempotent ensure during runtime recovery.
         apply_partition_domain_schema(connection)
         report = apply_scene_domain_schema(connection)
+        resolution_rows_updated = backfill_scene_resolution_metadata(connection)
+        band_unit_rows_updated = backfill_scene_band_unit_ids(connection)
     PostgresConfigStore(dsn).ensure_schema()
-    print(json.dumps({**asdict(report), "status": "completed"}, sort_keys=True))
+    print(json.dumps({
+        **asdict(report),
+        "band_unit_rows_updated": band_unit_rows_updated,
+        "resolution_rows_updated": resolution_rows_updated,
+        "status": "completed",
+    }, sort_keys=True))
     return 0
 
 

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-18-scene-domain-v1"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-18-scene-domain-v3"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -65,12 +65,20 @@ def schema_statements() -> tuple[str, ...]:
           acquisition_time TIMESTAMPTZ,
           bbox JSONB,
           crs TEXT,
+          resolution_native DOUBLE PRECISION CHECK (resolution_native IS NULL OR resolution_native > 0),
+          resolution_unit TEXT CHECK (resolution_unit IS NULL OR resolution_unit IN ('degree','m')),
+          resolution_m DOUBLE PRECISION CHECK (resolution_m IS NULL OR resolution_m > 0),
+          suggested_grid_type TEXT CHECK (suggested_grid_type IS NULL OR suggested_grid_type IN ('geohash','mgrs')),
           status TEXT NOT NULL DEFAULT 'loaded' CHECK (status IN ('discovered','loaded','partitioning','partitioned','quality_pending','quality_passed','quality_failed','ingesting','available','failed','archived')),
           attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           UNIQUE (dataset_id, scene_key)
         )""",
+        """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_native DOUBLE PRECISION""",
+        """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_unit TEXT""",
+        """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_m DOUBLE PRECISION""",
+        """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS suggested_grid_type TEXT""",
         """CREATE TABLE IF NOT EXISTS load_batches (
           load_batch_id TEXT PRIMARY KEY,
           batch_name TEXT NOT NULL,
@@ -101,6 +109,7 @@ def schema_statements() -> tuple[str, ...]:
         """CREATE TABLE IF NOT EXISTS scene_bands (
           scene_id TEXT NOT NULL,
           asset_id TEXT NOT NULL,
+          band_unit_id TEXT,
           band_code TEXT NOT NULL,
           band_name TEXT,
           band_type TEXT CHECK (band_type IS NULL OR band_type IN ('spectral','polarization','variable')),
@@ -111,6 +120,7 @@ def schema_statements() -> tuple[str, ...]:
           PRIMARY KEY (scene_id, asset_id, band_code),
           FOREIGN KEY (scene_id, asset_id) REFERENCES scene_assets(scene_id, asset_id)
         )""",
+        """ALTER TABLE scene_bands ADD COLUMN IF NOT EXISTS band_unit_id TEXT""",
         """CREATE TABLE IF NOT EXISTS load_batch_scenes (
           load_batch_id TEXT NOT NULL REFERENCES load_batches(load_batch_id),
           scene_id TEXT NOT NULL REFERENCES scenes(scene_id),
@@ -197,6 +207,7 @@ def schema_statements() -> tuple[str, ...]:
         "CREATE INDEX IF NOT EXISTS idx_scenes_dataset_time ON scenes(dataset_id, acquisition_time)",
         "CREATE INDEX IF NOT EXISTS idx_scenes_status ON scenes(status, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_scene_assets_source_uri ON scene_assets(source_uri)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scene_bands_unit_id ON scene_bands(band_unit_id)",
         "CREATE INDEX IF NOT EXISTS idx_load_batch_scenes_scene ON load_batch_scenes(scene_id, load_batch_id)",
         "CREATE INDEX IF NOT EXISTS idx_partition_run_scenes_dataset_status ON partition_run_scenes(dataset_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_ingest_run_scenes_status ON ingest_run_scenes(status, updated_at)",
@@ -256,3 +267,54 @@ def apply_scene_domain_schema(connection: Any) -> SchemaInstallReport:
         connection.rollback()
         raise
     return SchemaInstallReport(schema_version=SCENE_DOMAIN_SCHEMA_VERSION, **counts)
+
+
+def backfill_scene_resolution_metadata(connection: Any) -> int:
+    """Populate persisted resolution semantics for pre-v2 Scene rows."""
+    from cube_web.services.partition_defaults import resolution_metadata_from_assets
+
+    updated = 0
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT scene_id, crs, attributes FROM scenes")
+            for scene_id, crs, attributes in cursor.fetchall():
+                metadata = resolution_metadata_from_assets([{"crs": crs, "attributes": attributes or {}}])
+                if not metadata:
+                    continue
+                cursor.execute(
+                    """UPDATE scenes SET resolution_native=%s, resolution_unit=%s, resolution_m=%s,
+                       suggested_grid_type=%s, updated_at=now() WHERE scene_id=%s""",
+                    (
+                        metadata["resolution_native"], metadata["resolution_unit"], metadata["resolution_m"],
+                        metadata["suggested_grid_type"], scene_id,
+                    ),
+                )
+                updated += 1
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return updated
+
+
+def backfill_scene_band_unit_ids(connection: Any) -> int:
+    """Assign stable identities to pre-v3 Scene band rows."""
+    from hashlib import sha256
+
+    updated = 0
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT scene_id, asset_id, band_code FROM scene_bands WHERE band_unit_id IS NULL")
+            for scene_id, asset_id, band_code in cursor.fetchall():
+                digest = sha256(f"{scene_id}\0{asset_id}\0{band_code}".encode("utf-8")).hexdigest()[:32]
+                cursor.execute(
+                    """UPDATE scene_bands SET band_unit_id=%s
+                       WHERE scene_id=%s AND asset_id=%s AND band_code=%s""",
+                    (f"band-{digest}", scene_id, asset_id, band_code),
+                )
+                updated += 1
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return updated

@@ -65,6 +65,7 @@ def _payload() -> dict[str, Any]:
             {
                 "dataset_id": "dataset-optical",
                 "scene_ids": ["scene-optical"],
+                "band_unit_ids": ["band-scene-optical-b04"],
                 "partition": {
                     "grid_type": "geohash",
                     "requested_grid_level": 6,
@@ -75,6 +76,7 @@ def _payload() -> dict[str, Any]:
             {
                 "dataset_id": "dataset-carbon",
                 "scene_ids": ["scene-carbon"],
+                "band_unit_ids": ["band-scene-carbon-xco2"],
                 "partition": {
                     "grid_type": "isea4h",
                     "requested_grid_level": 1,
@@ -211,6 +213,7 @@ def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None
     assert workflow.request.batch_id == "partition-run-001"
     assert "load-001" not in workflow.request.batch_id
     assert repository.bound == ("partition-run-001", "partition-task-001")
+    assert repository.run_request.datasets[0].band_unit_ids == ("band-scene-optical-b04",)
     assert [dataset.dataset_id for dataset in workflow.request.datasets] == ["dataset-optical", "dataset-carbon"]
     assert workflow.request.datasets[1].partition.grid_type == "isea4h"
 
@@ -620,6 +623,7 @@ def test_load_schema_generates_stable_band_code_at_ingest_boundary() -> None:
     assert first[0]["attributes"] == {
         "band_code_generated": True,
         "band_code_basis": "data_type+product_type+asset_id+band_index",
+        "source_band_index": 1,
     }
 
 
@@ -646,7 +650,25 @@ def test_load_schema_preserves_source_native_band_code() -> None:
     band = dataset["scenes"][0]["assets"][0]["bands"][0]
     assert band["band_code"] == "VV"
     assert band["band_type"] == "polarization"
-    assert band["attributes"] == {}
+    assert band["attributes"] == {"source_band_index": 1}
+
+
+def test_multi_asset_scene_uses_scene_level_acquisition_time_as_fallback() -> None:
+    scene = _load_schema_datasets(
+        {"datasets": [{
+            "dataset_id": "dataset-optical", "data_type": "optical",
+            "scenes": [{
+                "scene_key": "scene-a", "acquisition_time": "2024-06-15T00:00:00Z",
+                "assets": [{
+                    "asset_id": "asset-a", "source_uri": "s3://user-1/cog/a.tif",
+                    "bands": [{"band_code": "B04"}],
+                }],
+            }],
+        }]},
+        load_batch_id="load-scene-time",
+    )[0]["scenes"][0]
+
+    assert scene["acquisition_time"] == "2024-06-15T00:00:00Z"
 
 
 def test_multi_asset_scene_requires_asset_level_band_mapping() -> None:
@@ -669,6 +691,40 @@ def test_multi_asset_scene_requires_asset_level_band_mapping() -> None:
                 ],
             },
             load_batch_id="load-001",
+        )
+
+
+def test_load_schema_rejects_data_asset_without_band_units() -> None:
+    with pytest.raises(ValueError, match="data asset requires at least one band"):
+        _load_schema_datasets(
+            {"datasets": [{
+                "dataset_id": "dataset-optical",
+                "data_type": "optical",
+                "scenes": [{"source_uri": "s3://cube/source/a.tif", "asset_id": "asset-a"}],
+            }]},
+            load_batch_id="load-no-bands",
+        )
+
+
+@pytest.mark.parametrize("indexes, message", [
+    ([0], "positive integer"),
+    ([1.9], "positive integer"),
+    ([True], "positive integer"),
+    ([1, 1], "duplicate source_band_index"),
+])
+def test_load_schema_rejects_invalid_source_band_indexes(indexes, message) -> None:
+    bands = [
+        {"band_code": f"B{position + 1}", "source_band_index": source_index}
+        for position, source_index in enumerate(indexes)
+    ]
+    with pytest.raises(ValueError, match=message):
+        _load_schema_datasets(
+            {"datasets": [{
+                "dataset_id": "dataset-optical",
+                "data_type": "optical",
+                "scenes": [{"source_uri": "s3://cube/source/a.tif", "asset_id": "asset-a", "bands": bands}],
+            }]},
+            load_batch_id="load-invalid-indexes",
         )
 
 
@@ -775,9 +831,11 @@ def test_scene_import_is_additive_and_writes_scene_assets_and_bands() -> None:
         for statement, params in connection.cursor_instance.statements
         if statement.startswith("MERGE INTO scene_bands")
     )
-    assert band_write[2].startswith("auto-optical-")
-    assert band_write[3:5] == ("Red", "spectral")
-    assert json.loads(band_write[7])["band_code_generated"] is True
+    assert band_write[2].startswith("band-")
+    assert band_write[3].startswith("auto-optical-")
+    assert band_write[4:6] == ("Red", "spectral")
+    assert json.loads(band_write[8])["band_code_generated"] is True
+    assert json.loads(band_write[8])["source_band_index"] == 1
 
 
 def test_partition_scene_idempotency_is_scoped_to_run() -> None:
@@ -803,8 +861,8 @@ def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:
             }]
         if "FROM scene_bands" in sql:
             return [
-                {"scene_id": "scene-a", "asset_id": "asset-a", "band_code": "B04", "band_name": "红光", "band_type": "spectral", "unit": None, "display_order": 1, "attributes": {}},
-                {"scene_id": "scene-a", "asset_id": "asset-a", "band_code": "B08", "band_name": "近红外", "band_type": "spectral", "unit": None, "display_order": 2, "attributes": {}},
+                {"scene_id": "scene-a", "asset_id": "asset-a", "band_unit_id": "band-a-b04", "band_code": "B04", "band_name": "红光", "band_type": "spectral", "unit": None, "display_order": 1, "attributes": {}},
+                {"scene_id": "scene-a", "asset_id": "asset-a", "band_unit_id": "band-a-b08", "band_code": "B08", "band_name": "近红外", "band_type": "spectral", "unit": None, "display_order": 2, "attributes": {}},
             ]
         raise AssertionError(sql)
 
@@ -812,6 +870,7 @@ def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:
     rows = repository.list_load_batch_scenes("load-a")
 
     assert [band["band_code"] for band in rows[0]["bands"]] == ["B04", "B08"]
+    assert [band["band_unit_id"] for band in rows[0]["bands"]] == ["band-a-b04", "band-a-b08"]
 
 
 def test_load_batch_scene_groups_include_resolution_grid_recommendations() -> None:
@@ -827,3 +886,40 @@ def test_load_batch_scene_groups_include_resolution_grid_recommendations() -> No
 
     assert result["datasets"][0]["resolution_m"] == 10
     assert result["datasets"][0]["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 11}
+
+
+def test_geographic_scene_resolution_keeps_degrees_and_recommends_geohash() -> None:
+    repository = _Repository()
+    repository.list_load_batch_scenes = lambda *_args, **_kwargs: [{
+        "scene_id": "scene-optical", "dataset_id": "dataset-optical",
+        "dataset_code": "OPTICAL", "dataset_title": "Optical", "data_type": "optical",
+        "crs": "EPSG:4326", "attributes": {"resolution_m": 0.00030906354339487385},
+    }]
+    service = SceneDomainService(repository, _Workflow())
+
+    dataset = service.list_load_batch_scenes("load-001")["datasets"][0]
+
+    assert dataset["crs"] == "EPSG:4326"
+    assert dataset["resolution_native"] == pytest.approx(0.00030906354339487385)
+    assert dataset["resolution_unit"] == "degree"
+    assert dataset["resolution_m"] == pytest.approx(34.403, rel=1e-3)
+    assert dataset["suggested_grid_type"] == "geohash"
+    assert dataset["suggested_grid_levels"] == {"geohash": 4, "mgrs": 0, "isea4h": 8}
+
+
+def test_projected_scene_resolution_keeps_meters_and_recommends_mgrs() -> None:
+    repository = _Repository()
+    repository.list_load_batch_scenes = lambda *_args, **_kwargs: [{
+        "scene_id": "scene-radar", "dataset_id": "dataset-radar",
+        "dataset_code": "RADAR", "dataset_title": "Radar", "data_type": "radar",
+        "crs": "EPSG:32650", "attributes": {"resolution_m": 10},
+    }]
+    service = SceneDomainService(repository, _Workflow())
+
+    dataset = service.list_load_batch_scenes("load-001")["datasets"][0]
+
+    assert dataset["resolution_native"] == 10
+    assert dataset["resolution_unit"] == "m"
+    assert dataset["resolution_m"] == 10
+    assert dataset["suggested_grid_type"] == "mgrs"
+    assert dataset["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 11}

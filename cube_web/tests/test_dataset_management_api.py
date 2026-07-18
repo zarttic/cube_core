@@ -36,7 +36,7 @@ def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[st
                     {"scene_id": "scene-a2", "dataset_id": "dataset-a", "scene_key": "A2", "status": "failed", "acquisition_time": "2026-06-02T00:00:00+00:00", "source_uri": "s3://cube/a2.tif"},
                 ],
                 "assets": [{"scene_id": "scene-a1", "asset_id": "asset-a1", "source_uri": "s3://cube/a1.tif"}],
-                "bands": [{"scene_id": "scene-a1", "asset_id": "asset-a1", "band_code": "B01"}],
+                "bands": [{"scene_id": "scene-a1", "asset_id": "asset-a1", "band_unit_id": "band-a1-b01", "band_code": "B01"}],
                 "outputs": [{"output_version": "out-a", "status": "completed"}],
                 "grid": [{"output_id": "grid-a", "space_code": "wx4"}],
                 "tiles": [{"output_id": "tile-a", "status": "ready"}],
@@ -55,7 +55,7 @@ def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[st
         hooks["quality"].append((dataset_id, actor.username))
         return {"quality_run_id": "quality-new", "dataset_id": dataset_id, "status": "pending"}
 
-    def publish(dataset_id, actor):
+    def publish(dataset_id, actor, targets=()):
         hooks["publish"].append((dataset_id, actor.username))
         return {"publication_id": "publication-new", "dataset_id": dataset_id, "status": "active"}
 
@@ -111,6 +111,18 @@ def test_all_management_detail_domains_are_paginated() -> None:
     missing = client.get("/v1/datasets/missing/scenes")
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "dataset_not_found"
+
+
+def test_scene_detail_embeds_band_units_for_three_level_management() -> None:
+    client, _, _ = _fixture()
+
+    body = client.get("/v1/datasets/dataset-a/scenes", params={"page": 1, "page_size": 20}).json()
+
+    assert body["items"][0]["scene_id"] == "scene-a1"
+    assert body["items"][0]["bands"] == [{
+        "scene_id": "scene-a1", "asset_id": "asset-a1",
+        "band_unit_id": "band-a1-b01", "band_code": "B01",
+    }]
 
 
 def test_metadata_and_scene_reassignment_are_audited() -> None:

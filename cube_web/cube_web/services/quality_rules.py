@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -10,7 +11,7 @@ from pyproj import CRS
 
 from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, TerminalQualityStatus
 
-DEFAULT_RULE_SET_VERSION = "2026.07.17-v3"
+DEFAULT_RULE_SET_VERSION = "2026.07.18-v5"
 
 RULE_NAMES = {
     "index_schema": "索引结构完整性",
@@ -29,7 +30,6 @@ RULE_NAMES = {
     "metadata_completeness": "元数据完整性",
     "declared_metadata_defects": "已声明元数据缺陷",
     "declared_metadata_warnings": "已声明元数据警告",
-    "product_year_consistency": "产品年份一致性",
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
     "carbon_xco2_range": "XCO2 数值范围",
@@ -37,6 +37,35 @@ RULE_NAMES = {
     "carbon_observation_duplicates": "碳卫星观测重复",
     "carbon_footprints": "碳卫星观测足迹",
 }
+
+RULE_DESCRIPTIONS = {
+    "index_schema": "检查索引记录是否具备完整的格网编码和关联信息。",
+    "output_count_consistency": "核对输出瓦片、索引与源数据单元数量是否一致。",
+    "output_reference_integrity": "检查索引引用的瓦片或输出对象是否真实存在。",
+    "grid_method_agreement": "确认格网类型、层级和剖分方式与任务配置一致。",
+    "cell_bbox_validity": "验证瓦片边界是否为合法的经纬度范围并且方向正确。",
+    "time_bucket_consistency": "检查数据时间分桶是否与数据单元采集时间一致。",
+    "asset_readability": "尝试读取输出数据，确认文件可打开且内容可访问。",
+    "asset_crs": "检查数据单元是否声明有效且可解析的坐标参考系。",
+    "window_bounds": "验证像素窗口没有超出源影像的有效行列范围。",
+    "pixel_sample": "抽样读取像素值，检查输出栅格是否存在明显损坏。",
+    "optical_band_contract": "检查光学产品波段名称、数量和展示字段是否符合规范。",
+    "radar_band_contract": "检查雷达产品极化通道名称和数据结构是否符合规范。",
+    "product_band_contract": "检查信息产品变量名称、单位和数据字段是否符合规范。",
+    "metadata_completeness": "检查数据集、景和波段的必需元数据是否完整。",
+    "declared_metadata_defects": "汇总载入阶段已声明的元数据缺陷，作为质检失败项。",
+    "declared_metadata_warnings": "汇总载入阶段已声明的元数据警告，作为质检告警项。",
+    "carbon_schema": "检查碳卫星文件是否包含规定的观测变量和维度结构。",
+    "carbon_coordinates": "验证碳卫星观测经纬度是否存在且处于合法范围。",
+    "carbon_xco2_range": "检查XCO2观测值是否落在物理合理范围内。",
+    "carbon_quality_flags": "检查碳卫星质量标识是否存在并符合有效取值。",
+    "carbon_observation_duplicates": "识别同一观测时间和位置的重复记录。",
+    "carbon_footprints": "验证碳卫星观测足迹几何是否完整且有效。",
+}
+
+OPTICAL_AUXILIARY_VARIABLE_BANDS = frozenset({
+    "aerosol_qa", "bqa", "cloud_qa", "pixel_qa", "qa_pixel", "qa_radsat", "radsat_qa", "sr_aerosol", "sr_qa_aerosol",
+})
 
 
 @dataclass(frozen=True)
@@ -116,6 +145,7 @@ def snapshot_rules(registry: RuleRegistry, *, data_type: str, product_type: str 
         RuleSnapshot(
             code=rule.code,
             name=rule.name,
+            description=RULE_DESCRIPTIONS.get(rule.code, ""),
             applicability=dict(rule.applicability),
             mandatory=rule.mandatory,
             parameters=dict(rule.parameters),
@@ -241,7 +271,7 @@ def _time_bucket_consistency(context: RuleContext) -> Iterable[QualityFinding]:
                 output_id=row["output_id"],
                 field="time_bucket",
             )
-        elif acquisition_time is not None and not time_bucket.startswith(acquisition_time.strftime("%Y%m%d")):
+        elif acquisition_time is not None and not time_bucket.startswith(acquisition_time.astimezone(UTC).strftime("%Y%m%d")):
             yield QualityFinding(
                 "time_bucket_mismatch",
                 "time bucket does not match acquisition date",
@@ -330,7 +360,7 @@ def _asset_crs(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
         "SELECT source_asset_id, cog_uri, source_format, crs, checksum FROM partition_dataset_assets a "
-        "WHERE dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "WHERE a.dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
         "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
     ):
         value = str(row["crs"] or "").strip()
@@ -373,19 +403,51 @@ def _pixel_sample(context: RuleContext) -> Iterable[QualityFinding]:
     if context.object_reader is None:
         yield QualityFinding("object_reader_unavailable", "quality object reader is unavailable", field="source_uri")
         return
-    for row in _rows(
+    rows = _rows(
         context,
-        "SELECT source_asset_id, cog_uri, source_format, checksum FROM partition_dataset_assets a "
-        "WHERE dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
-        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
-    ):
+        "SELECT a.source_asset_id, a.cog_uri, a.source_format, a.checksum, "
+        "b.band_code, b.band_type, b.display_order, b.attributes "
+        "FROM partition_dataset_assets a LEFT JOIN partition_dataset_bands b "
+        "ON b.dataset_id=a.dataset_id AND b.source_asset_id=a.source_asset_id "
+        "WHERE a.dataset_id = %s AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
+        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id) "
+        "ORDER BY a.source_asset_id, b.display_order, b.band_code",
+    )
+    expected_band_type = {
+        "optical": "spectral",
+        "radar": "polarization",
+        "product": "variable",
+    }.get(context.data_type)
+    rows_by_asset: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        rows_by_asset.setdefault(str(row["source_asset_id"]), []).append(row)
+    for source_asset_id, asset_rows in rows_by_asset.items():
+        signal_row = next(
+            (row for row in asset_rows if row.get("band_type") == expected_band_type),
+            None,
+        )
+        if signal_row is None:
+            continue
+        row = asset_rows[0]
         if row["source_format"] != "cog" or not row["cog_uri"]:
             continue
+        attributes = signal_row.get("attributes") or {}
+        if isinstance(attributes, str):
+            import json
+
+            attributes = json.loads(attributes)
+        sample_band_index = int(
+            attributes.get(
+                "source_band_index",
+                int(signal_row.get("display_order") or 0) + 1,
+            )
+        )
         try:
             inspection = context.object_reader.inspect(
                 str(row["cog_uri"]),
                 "cog",
                 sample_pixels=True,
+                sample_band_index=sample_band_index,
                 expected_checksum=str(row["checksum"]),
             )
         except Exception:
@@ -395,20 +457,25 @@ def _pixel_sample(context: RuleContext) -> Iterable[QualityFinding]:
             yield QualityFinding(
                 "no_valid_sample_pixels",
                 "deterministic raster sample contains no valid pixels",
-                source_asset_id=row["source_asset_id"],
+                source_asset_id=source_asset_id,
                 field="pixels",
             )
         elif not inspection.nonzero_pixels:
             yield QualityFinding(
                 "zero_sample_pixels",
                 "deterministic raster sample contains only zero-valued pixels",
-                source_asset_id=row["source_asset_id"],
+                source_asset_id=source_asset_id,
                 field="pixels",
                 context={"sample_pixels": inspection.sample_pixels, "valid_pixels": inspection.valid_pixels},
             )
 
 
-def _band_contract(context: RuleContext, expected_type: str) -> Iterable[QualityFinding]:
+def _band_contract(
+    context: RuleContext,
+    expected_type: str,
+    *,
+    allowed_variable_bands: frozenset[str] = frozenset(),
+) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
         "SELECT a.source_asset_id, b.band_code, b.band_type FROM partition_dataset_assets a "
@@ -424,7 +491,10 @@ def _band_contract(context: RuleContext, expected_type: str) -> Iterable[Quality
                 source_asset_id=row["source_asset_id"],
                 field="band_code",
             )
-        elif row["band_type"] != expected_type:
+        elif row["band_type"] != expected_type and not (
+            row["band_type"] == "variable"
+            and str(row["band_code"]).strip().lower() in allowed_variable_bands
+        ):
             yield QualityFinding(
                 "invalid_band_type",
                 f"band_type must be {expected_type} for {context.data_type} data",
@@ -435,7 +505,11 @@ def _band_contract(context: RuleContext, expected_type: str) -> Iterable[Quality
 
 
 def _optical_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
-    return _band_contract(context, "spectral")
+    return _band_contract(
+        context,
+        "spectral",
+        allowed_variable_bands=OPTICAL_AUXILIARY_VARIABLE_BANDS,
+    )
 
 
 def _radar_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
@@ -520,32 +594,6 @@ def _declared_metadata_defects(context: RuleContext) -> Iterable[QualityFinding]
 
 def _declared_metadata_warnings(context: RuleContext) -> Iterable[QualityFinding]:
     return _declared_metadata_findings(context, warning=True)
-
-
-def _product_year_consistency(context: RuleContext) -> Iterable[QualityFinding]:
-    for row in _rows(
-        context,
-        "SELECT source_asset_id, time_start, attributes FROM partition_dataset_assets a WHERE a.dataset_id = %s "
-        "AND EXISTS (SELECT 1 FROM partition_indexes i WHERE i.dataset_id = a.dataset_id "
-        "AND i.output_version = %s AND i.source_asset_id = a.source_asset_id)",
-    ):
-        attributes = row["attributes"] or {}
-        if isinstance(attributes, str):
-            import json
-
-            attributes = json.loads(attributes)
-        year = attributes.get("product_year")
-        if year is None:
-            yield QualityFinding(
-                "missing_product_year", "product asset has no product_year", source_asset_id=row["source_asset_id"], field="product_year"
-            )
-        elif row["time_start"] is not None and str(year) != str(row["time_start"].year):
-            yield QualityFinding(
-                "product_year_mismatch",
-                "product_year does not match source time",
-                source_asset_id=row["source_asset_id"],
-                field="product_year",
-            )
 
 
 def _carbon_schema(context: RuleContext) -> Iterable[QualityFinding]:
@@ -716,7 +764,6 @@ def default_rule_registry() -> RuleRegistry:
         "metadata_completeness": _metadata_completeness,
         "declared_metadata_defects": _declared_metadata_defects,
         "declared_metadata_warnings": _declared_metadata_warnings,
-        "product_year_consistency": _product_year_consistency,
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
         "carbon_xco2_range": _carbon_xco2_range,
@@ -791,35 +838,36 @@ def default_rule_registry() -> RuleRegistry:
             RULE_NAMES["pixel_sample"],
             {"data_types": ["optical", "radar", "product"]},
             False,
-            {"band": 1, "sample_shape": [128, 128]},
+            {
+                "sample_shape": [128, 128],
+                "sample_band_selection": "first normalized signal band per source asset",
+                "optical_auxiliary_variable_bands": sorted(OPTICAL_AUXILIARY_VARIABLE_BANDS),
+            },
+            implementation_version="1.1.0",
             evaluator=evaluators["pixel_sample"],
         )
     )
-    rules.extend(
-        RegisteredRule(
-            code,
-            RULE_NAMES[code],
-            {"data_types": [data_type]},
-            True,
-            {"expected_band_type": band_type},
-            evaluator=evaluators[code],
+    for code, data_type, band_type in (
+        ("optical_band_contract", "optical", "spectral"),
+        ("radar_band_contract", "radar", "polarization"),
+        ("product_band_contract", "product", "variable"),
+    ):
+        parameters: dict[str, Any] = {"expected_band_type": band_type}
+        implementation_version = "1.0.0"
+        if code == "optical_band_contract":
+            parameters["allowed_variable_bands"] = sorted(OPTICAL_AUXILIARY_VARIABLE_BANDS)
+            implementation_version = "1.1.0"
+        rules.append(
+            RegisteredRule(
+                code,
+                RULE_NAMES[code],
+                {"data_types": [data_type]},
+                True,
+                parameters,
+                implementation_version=implementation_version,
+                evaluator=evaluators[code],
+            )
         )
-        for code, data_type, band_type in (
-            ("optical_band_contract", "optical", "spectral"),
-            ("radar_band_contract", "radar", "polarization"),
-            ("product_band_contract", "product", "variable"),
-        )
-    )
-    rules.append(
-        RegisteredRule(
-            "product_year_consistency",
-            RULE_NAMES["product_year_consistency"],
-            {"data_types": ["product"]},
-            True,
-            {},
-            evaluator=evaluators["product_year_consistency"],
-        )
-    )
     rules.extend(
         RegisteredRule(code, RULE_NAMES[code], {"data_types": ["carbon"]}, True, {}, evaluator=evaluators[code])
         for code in (

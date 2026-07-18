@@ -93,6 +93,15 @@ def test_cache_source_cog_downloads_atomically_without_source_upload(tmp_path: P
     assert len(cached.parent.name) == 64
 
 
+def test_cache_source_cog_reads_an_accessible_source_bucket_different_from_output(tmp_path: Path) -> None:
+    client = RecordingMinio()
+
+    cached = cache_source_cog("s3://user-1/cog/a.tif", tmp_path, client, "cube")
+
+    assert cached.read_bytes() == b"loader-owned-cog"
+    assert client.downloads == [("user-1", "cog/a.tif", str(cached.with_suffix(".tif.part")))]
+
+
 def test_build_manifest_supports_landsat_collection_filenames(tmp_path: Path):
     source = tmp_path / "LC09_L2SP_123033_20240424_20240425_02_T1_SR_B4.TIF"
     _write_tif(source)

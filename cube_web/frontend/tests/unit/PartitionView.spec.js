@@ -34,6 +34,53 @@ describe('PartitionView map workspace', () => {
     });
   });
 
+  it('splits a slightly out-of-bounds global product extent for Cesium', () => {
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub,
+          ...layoutStubs,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          ExecutionResultPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DatasetsView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    const geometry = wrapper.vm.bboxGeometry([-180.0044, -90.0022, 180.0044, 90.0022]);
+    expect(wrapper.vm.normalizeBbox([-180.0044, -90.0022, 180.0044, 90.0022]))
+      .toEqual([-180, -90, 180, 90]);
+    expect(geometry.type).toBe('MultiPolygon');
+    expect(geometry.coordinates).toHaveLength(8);
+    expect(geometry.coordinates.every((polygon) => polygon[0].length === 5)).toBe(true);
+    expect(geometry.coordinates.flat(2).every(([longitude, latitude]) => (
+      longitude >= -180 && longitude <= 180 && latitude >= -90 && latitude <= 90
+    ))).toBe(true);
+    expect(geometry.coordinates.flat(2).every(([, latitude]) => Math.abs(latitude) < 90)).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('uses grid cells alone after a grid preview is loaded', () => {
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true,
+          BatchAssetsPanel: true, ExecutionResultPanel: true, TaskQueuePanel: true,
+          QualityView: true, DatasetsView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+    expect(wrapper.vm.mapGeometries).toEqual(wrapper.vm.selectedGeometries);
+    wrapper.vm.gridGeometriesByModule = { optical: [{ geometry: { type: 'Polygon', coordinates: [] } }] };
+    expect(wrapper.vm.mapGeometries).toEqual(wrapper.vm.gridGeometries);
+    wrapper.unmount();
+  });
+
   it('renders the map and previews selected asset bounds', async () => {
     const store = usePartitionStore();
     store.form.datasets = [{
@@ -65,7 +112,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.find('.workspace').exists()).toBe(true);
     expect(wrapper.find('.workspace-sidebar').exists()).toBe(true);
     expect(wrapper.find('.map-panel').exists()).toBe(true);
-    expect(wrapper.find('.result-panel').exists()).toBe(true);
+    expect(wrapper.find('.result-panel').exists()).toBe(false);
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
     await wrapper.get('[data-testid="load-map"]').trigger('click');
     await flushPromises();
@@ -74,12 +121,12 @@ describe('PartitionView map workspace', () => {
       requested_grid_level: 4,
       bbox: [100, 20, 101, 21],
     }));
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
     await wrapper.get('[data-testid="reset-grid"]').trigger('click');
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
 
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
-    expect(wrapper.text()).toContain('碳卫星空间预览');
+    expect(wrapper.text()).toContain('地图');
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });
 
@@ -145,7 +192,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.text()).toContain('经纬度格网 · 第 6 级');
     expect(wrapper.text()).toContain('平面格网 · 第 2 级');
     expect(wrapper.text()).toContain('六边形格网 · 第 6 级');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
   });
 
   it('retains grid layers while switching between product pages', async () => {
@@ -200,12 +247,12 @@ describe('PartitionView map workspace', () => {
     await flushPromises();
 
     expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual(['#2f73d9', '#16836f', '#d97706']);
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
     await wrapper.get('[data-testid="partition-module-optical"]').trigger('click');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
   });
 
-  it('bounds rendered cells for a large recommended-level preview', async () => {
+  it('renders every cell returned for a large recommended-level preview', async () => {
     requestJson.mockResolvedValue({
       cells: Array.from({ length: 5001 }, (_, index) => ({
         space_code: `cell-${index}`,
@@ -238,9 +285,9 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="load-map"]').trigger('click');
     await flushPromises();
 
-    expect(wrapper.vm.gridGeometries).toHaveLength(1667);
-    expect(wrapper.text()).toContain('共 5001 个');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1668');
+    expect(wrapper.vm.gridGeometries).toHaveLength(5001);
+    expect(wrapper.text()).not.toContain('已加载 5001 个格网单元');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('5001');
   });
 
   it('exposes product, quality, ingest and task pages as peer modules', async () => {
@@ -355,7 +402,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="source-batches"]').text()).toBe('');
   });
 
-  it('does not show a completed product result on another product page', async () => {
+  it('does not render an execution result panel', async () => {
     const store = usePartitionStore();
     vi.spyOn(store, 'submit').mockResolvedValue({ task_id: 'optical-task', status: 'queued' });
     const wrapper = mount(PartitionView, {
@@ -376,9 +423,7 @@ describe('PartitionView map workspace', () => {
 
     await wrapper.get('[data-testid="submit"]').trigger('click');
     await flushPromises();
-    expect(wrapper.get('[data-testid="result"]').text()).toBe('optical-task');
-    await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
-    expect(wrapper.get('[data-testid="result"]').text()).toBe('none');
+    expect(wrapper.find('[data-testid="result"]').exists()).toBe(false);
   });
 
   it('keeps an in-flight preview scoped to its originating product', async () => {
@@ -413,7 +458,7 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     resolvePreview({ cells: [{ space_code: 'old-grid', grid_level: 6, bbox: [100, 20, 101, 21] }] });
     await flushPromises();
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });
 
   it('allows selections accumulated from different loader batches', async () => {

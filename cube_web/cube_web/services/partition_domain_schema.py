@@ -223,6 +223,13 @@ def schema_statements() -> tuple[str, ...]:
                  (status = 'withdrawn' AND desired_action = 'withdraw' AND service_version_id IS NOT NULL AND withdrawn_by IS NOT NULL AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL AND length(btrim(withdrawal_reason)) BETWEEN 1 AND 2000) OR
                  (status = 'failed' AND failure IS NOT NULL))
         )""",
+        """CREATE TABLE IF NOT EXISTS partition_publication_targets (
+          publication_id UUID NOT NULL REFERENCES partition_publications(publication_id) ON DELETE CASCADE,
+          dataset_id TEXT NOT NULL, output_version TEXT NOT NULL, source_asset_id TEXT NOT NULL, band_code TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (publication_id, source_asset_id, band_code),
+          FOREIGN KEY (dataset_id, source_asset_id, band_code) REFERENCES partition_dataset_bands(dataset_id, source_asset_id, band_code)
+        )""",
         """CREATE TABLE IF NOT EXISTS partition_domain_outbox (
           event_id UUID PRIMARY KEY, dataset_id TEXT NOT NULL, output_version TEXT NOT NULL,
           event_type TEXT NOT NULL CHECK (event_type = 'output-version.completed'), payload JSONB NOT NULL,

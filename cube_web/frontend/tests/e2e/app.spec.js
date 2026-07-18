@@ -2,6 +2,65 @@ import { expect, test } from '@playwright/test';
 
 import { installApiRoutes, qualityExportCsvFixture } from './fixtures.js';
 
+function callbackState(target = '/partition') {
+  return Buffer.from(encodeURIComponent(JSON.stringify({ target }))).toString('base64');
+}
+
+test('cold auth callback exchanges the code before entering a protected route', async ({ page }) => {
+  await installApiRoutes(page);
+  const callbackRequests = [];
+  const meRequests = [];
+  const loginRequests = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/callback') callbackRequests.push(request.url());
+    if (path === '/api/me') meRequests.push(request.url());
+    if (path === '/api/auth/login') loginRequests.push(request.url());
+  });
+  await page.route('**/api/config', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ auth_required: true, redirect_uri: '/callback', navigation: [] }),
+  }));
+  await page.route('**/api/callback?**', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ access_token: 'callback-token' }),
+  }));
+  await page.route('**/api/me', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ username: 'admin', role: '管理员' }),
+  }));
+
+  await page.goto(`/callback?code=one-time-code&state=${encodeURIComponent(callbackState())}`);
+
+  await expect(page).toHaveURL(/\/partition$/);
+  await expect(page.getByRole('heading', { name: '光学遥感空间预览' })).toBeVisible();
+  expect(callbackRequests).toHaveLength(1);
+  expect(meRequests).toHaveLength(1);
+  expect(loginRequests).toHaveLength(0);
+});
+
+test('failed auth callback stops instead of starting another login redirect', async ({ page }) => {
+  await installApiRoutes(page);
+  const loginRequests = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/auth/login') loginRequests.push(request.url());
+  });
+  await page.route('**/api/config', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ auth_required: true, redirect_uri: '/callback', navigation: [] }),
+  }));
+  await page.route('**/api/callback?**', (route) => route.fulfill({
+    status: 401,
+    contentType: 'application/json',
+    body: JSON.stringify({ detail: 'invalid authorization code' }),
+  }));
+
+  await page.goto(`/callback?code=expired-code&state=${encodeURIComponent(callbackState())}`);
+
+  await expect(page.getByRole('alert')).toContainText('登录回调处理失败');
+  expect(loginRequests).toHaveLength(0);
+});
+
 test('routed dataset drawer resets between records', async ({ page }) => {
   await installApiRoutes(page);
   await page.goto('/data-management');

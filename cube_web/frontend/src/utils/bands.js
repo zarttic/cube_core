@@ -22,6 +22,8 @@ export function sceneBands(scene, dataType = '') {
     if (!code) contractErrors.push('缺少波段编码');
     if (!type) contractErrors.push('缺少波段类型');
     return {
+      band_unit_id: String(band.band_unit_id || '').trim(),
+      asset_id: String(band.asset_id || '').trim(),
       band_code: code,
       band_name: String(band.band_name || '').trim(),
       band_type: type,

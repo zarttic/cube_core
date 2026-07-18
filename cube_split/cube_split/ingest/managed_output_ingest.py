@@ -313,12 +313,18 @@ def _verify_minio_objects(snapshot: dict[str, Any]) -> None:
         secret_key=settings.secret_key,
         secure=settings.secure,
     )
-    uris = {
+    source_uris = {
         str(value).split("#", 1)[0]
         for row in snapshot["indexes"]
-        for value in (row.get("cog_uri"), row.get("source_uri"), row.get("value_ref_uri"))
+        for value in (row.get("cog_uri"), row.get("source_uri"))
         if str(value or "").startswith("s3://")
     }
+    value_uris = {
+        str(row["value_ref_uri"]).split("#", 1)[0]
+        for row in snapshot["indexes"]
+        if str(row.get("value_ref_uri") or "").startswith("s3://")
+    }
+    uris = source_uris | value_uris
     tile_checksums = {
         str(row["value_ref_uri"]).split("#", 1)[0]: str(row["tile_checksum"])
         for row in snapshot["indexes"]
@@ -326,8 +332,14 @@ def _verify_minio_objects(snapshot: dict[str, Any]) -> None:
     }
     for uri in sorted(uris):
         parsed = urlparse(uri)
-        if parsed.netloc != settings.bucket:
-            raise RuntimeError(f"managed ingest object is outside configured MinIO bucket: {uri}")
+        if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
+            raise RuntimeError(f"managed ingest object is not a valid MinIO URI: {uri}")
+        if (
+            snapshot["output"]["partition_method"] == "entity"
+            and uri in value_uris
+            and parsed.netloc != settings.bucket
+        ):
+            raise RuntimeError(f"managed entity tile is outside configured MinIO bucket: {uri}")
         stat = client.stat_object(parsed.netloc, unquote(parsed.path.lstrip("/")))
         expected_checksum = tile_checksums.get(uri)
         if expected_checksum:

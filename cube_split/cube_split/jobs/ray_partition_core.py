@@ -95,8 +95,9 @@ def _minio_client(options: dict[str, Any] | None = None):
 def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: str) -> Path:
     """Cache one loader-owned COG locally without altering its content."""
     parsed = urlparse(cog_uri)
-    if parsed.scheme != "s3" or parsed.netloc != bucket or not parsed.path.lstrip("/"):
-        raise ValueError(f"invalid source COG URI for bucket {bucket}: {cog_uri}")
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
+        raise ValueError(f"invalid source COG URI: {cog_uri}")
+    source_bucket = parsed.netloc
     key = unquote(parsed.path).lstrip("/")
     target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
     if target.exists():
@@ -104,7 +105,7 @@ def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: s
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(f"{target.suffix}.part")
     try:
-        minio_client.fget_object(bucket, key, str(temporary))
+        minio_client.fget_object(source_bucket, key, str(temporary))
     except OSError as exc:
         if exc.errno != errno.ENOSPC:
             raise
@@ -112,7 +113,7 @@ def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: s
         temporary.unlink(missing_ok=True)
         shutil.rmtree(cache_dir.parent, ignore_errors=True)
         target.parent.mkdir(parents=True, exist_ok=True)
-        minio_client.fget_object(bucket, key, str(temporary))
+        minio_client.fget_object(source_bucket, key, str(temporary))
     temporary.replace(target)
     return target
 

@@ -5,6 +5,7 @@ import { Collection, FolderOpened, Picture, Search, Unlock } from '@element-plus
 import { requestGet } from '@/api/client';
 import { bandDisplayLabel, dataUnitTypeLabel, sceneBands, sceneMatchesBand } from '@/utils/bands';
 import { derivedPartitionMethod, gridDefinition, gridDefinitions, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
+import { formatShanghaiTime } from '@/utils/time';
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
@@ -21,16 +22,42 @@ const selectedBatchIds = ref([]);
 const availableDatasets = ref([]);
 const availableBatchGroups = ref([]);
 const selectedSceneIds = ref([]);
+const selectedBandUnitIds = ref([]);
 const bandKeyword = ref('');
+const collapsedBatches = ref(new Set());
+const collapsedDatasets = ref(new Set());
+const collapsedScenes = ref(new Set());
 let sceneRequestGeneration = 0;
 let sceneRequestController = null;
-let committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneIds: [] };
+let committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneIds: [], bandUnitIds: [] };
 
 function sceneSourceBatchIds(scene) {
   return [...new Set([
     ...(Array.isArray(scene?.source_batch_ids) ? scene.source_batch_ids : []),
     scene?.load_batch_id,
   ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function batchGroupKey(batch) { return String(batch.load_batch_id); }
+function datasetGroupKey(batch, dataset) { return `${batch.load_batch_id}:${dataset.dataset_id}`; }
+function toggleBatchGroup(batch) {
+  const key = batchGroupKey(batch);
+  const next = new Set(collapsedBatches.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  collapsedBatches.value = next;
+}
+function toggleDatasetGroup(batch, dataset) {
+  const key = datasetGroupKey(batch, dataset);
+  const next = new Set(collapsedDatasets.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  collapsedDatasets.value = next;
+}
+function sceneGroupKey(dataset, scene) { return `${dataset.dataset_id}:${scene.scene_id}`; }
+function toggleSceneGroup(dataset, scene) {
+  const key = sceneGroupKey(dataset, scene);
+  const next = new Set(collapsedScenes.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  collapsedScenes.value = next;
 }
 
 function normalizedPartition(gridType, requestedGridLevel) {
@@ -63,10 +90,19 @@ function fallbackGridLevel(dataset, gridType) {
 }
 
 function defaultPartition(dataset) {
+  const recommendedGridType = ['geohash', 'mgrs'].includes(dataset?.suggested_grid_type)
+    ? dataset.suggested_grid_type
+    : props.defaultGridType;
   return normalizedPartition(
-    props.defaultGridType,
-    suggestedLevel(dataset, props.defaultGridType) ?? fallbackGridLevel(dataset, props.defaultGridType),
+    recommendedGridType,
+    suggestedLevel(dataset, recommendedGridType) ?? fallbackGridLevel(dataset, recommendedGridType),
   );
+}
+
+function resolutionLabel(dataset) {
+  const resolution = Number(dataset?.resolution_native);
+  if (!Number.isFinite(resolution) || resolution <= 0) return '';
+  return dataset.resolution_unit === 'degree' ? `${resolution}°` : `${resolution} m`;
 }
 
 function selectedBatchesFromModel() {
@@ -79,6 +115,12 @@ function selectedScenesFromModel() {
   return props.modelValue
     .filter((dataset) => !props.dataTypeFilter || dataset.data_type === props.dataTypeFilter)
     .flatMap((dataset) => (dataset.scenes || []).map((scene) => scene.scene_id));
+}
+
+function selectedBandsFromModel() {
+  return props.modelValue
+    .filter((dataset) => !props.dataTypeFilter || dataset.data_type === props.dataTypeFilter)
+    .flatMap((dataset) => Array.isArray(dataset.band_unit_ids) ? dataset.band_unit_ids : []);
 }
 
 async function loadAvailable() {
@@ -95,6 +137,7 @@ async function loadAvailable() {
       availableBatches.value.some((batch) => batch.load_batch_id === batchId)
     ));
     selectedSceneIds.value = selectedScenesFromModel();
+    selectedBandUnitIds.value = selectedBandsFromModel();
     if (selectedBatchIds.value.length) await loadSelectedBatches(selectedBatchIds.value);
   } catch (caught) {
     error.value = caught.message || '载入批次失败。';
@@ -113,6 +156,10 @@ function mergeBatchDatasets(responses) {
       if (Number.isFinite(incomingResolution) && incomingResolution > 0
           && (!Number.isFinite(existingResolution) || existingResolution <= 0 || incomingResolution < existingResolution)) {
         existing.resolution_m = incomingResolution;
+        existing.resolution_native = dataset.resolution_native;
+        existing.resolution_unit = dataset.resolution_unit;
+        existing.crs = dataset.crs;
+        existing.suggested_grid_type = dataset.suggested_grid_type;
         existing.suggested_grid_levels = dataset.suggested_grid_levels;
       }
       (dataset.scenes || []).forEach((scene) => {
@@ -191,15 +238,29 @@ async function loadSelectedBatches(batchIds) {
     if (generation !== sceneRequestGeneration) return;
     availableDatasets.value = mergeBatchDatasets(responses);
     availableBatchGroups.value = buildBatchGroups(responses, availableDatasets.value);
-    const availableSceneIds = new Set(availableDatasets.value.flatMap((dataset) => dataset.scenes.map((scene) => scene.scene_id)));
-    selectedSceneIds.value = selectedSceneIds.value.filter((sceneId) => availableSceneIds.has(sceneId));
+    collapsedBatches.value = new Set(availableBatchGroups.value.map(batchGroupKey));
+    collapsedDatasets.value = new Set(availableBatchGroups.value.flatMap((batch) => batch.datasets.map((dataset) => datasetGroupKey(batch, dataset))));
+    collapsedScenes.value = new Set(availableBatchGroups.value.flatMap((batch) => batch.datasets.flatMap((dataset) => dataset.scenes.map((scene) => sceneGroupKey(dataset, scene)))));
+    const bands = availableDatasets.value.flatMap((dataset) => dataset.scenes.flatMap((scene) => (
+      bandsFor(scene, dataset.data_type).map((band) => ({ ...band, scene_id: scene.scene_id }))
+    )));
+    const availableBandUnitIds = new Set(bands.map((band) => band.band_unit_id).filter(Boolean));
+    if (!selectedBandUnitIds.value.length && selectedSceneIds.value.length) {
+      const legacySceneIds = new Set(selectedSceneIds.value);
+      selectedBandUnitIds.value = bands
+        .filter((band) => legacySceneIds.has(band.scene_id) && band.band_unit_id)
+        .map((band) => band.band_unit_id);
+    } else {
+      selectedBandUnitIds.value = selectedBandUnitIds.value.filter((bandUnitId) => availableBandUnitIds.has(bandUnitId));
+    }
     committedBatchState = {
       batchIds: [...ids],
       datasets: availableDatasets.value,
       batchGroups: availableBatchGroups.value,
       sceneIds: [...selectedSceneIds.value],
+      bandUnitIds: [...selectedBandUnitIds.value],
     };
-    updateSceneSelection(selectedSceneIds.value);
+    updateBandSelection(selectedBandUnitIds.value);
   } catch (caught) {
     if (generation !== sceneRequestGeneration || caught?.name === 'AbortError') return;
     error.value = caught.message || '载入批次数据单元失败。';
@@ -207,6 +268,7 @@ async function loadSelectedBatches(batchIds) {
     availableDatasets.value = committedBatchState.datasets;
     availableBatchGroups.value = committedBatchState.batchGroups;
     selectedSceneIds.value = [...committedBatchState.sceneIds];
+    selectedBandUnitIds.value = [...committedBatchState.bandUnitIds];
   } finally {
     if (generation === sceneRequestGeneration) loading.value = false;
   }
@@ -223,21 +285,34 @@ function scenePreviewAsset(scene) {
   };
 }
 
-function updateSceneSelection(sceneIds) {
-  selectedSceneIds.value = [...new Set(sceneIds)];
+function updateBandSelection(bandUnitIds) {
+  selectedBandUnitIds.value = [...new Set(bandUnitIds)];
+  const selectedBands = new Set(selectedBandUnitIds.value);
+  selectedSceneIds.value = availableDatasets.value.flatMap((dataset) => dataset.scenes)
+    .filter((scene) => bandsFor(scene, availableDatasets.value.find((dataset) => dataset.dataset_id === scene.dataset_id)?.data_type)
+      .some((band) => selectedBands.has(band.band_unit_id)))
+    .map((scene) => scene.scene_id);
+  selectedSceneIds.value = [...new Set(selectedSceneIds.value)];
   if (
     selectedBatchIds.value.length === committedBatchState.batchIds.length
     && selectedBatchIds.value.every((batchId, index) => batchId === committedBatchState.batchIds[index])
   ) {
-    committedBatchState = { ...committedBatchState, sceneIds: [...selectedSceneIds.value] };
+    committedBatchState = {
+      ...committedBatchState,
+      sceneIds: [...selectedSceneIds.value],
+      bandUnitIds: [...selectedBandUnitIds.value],
+    };
   }
-  const selected = new Set(selectedSceneIds.value);
   const existingById = new Map(props.modelValue.map((dataset) => [dataset.dataset_id, dataset]));
   const retained = props.dataTypeFilter
     ? props.modelValue.filter((dataset) => dataset.data_type !== props.dataTypeFilter)
     : [];
   const current = availableDatasets.value.flatMap((dataset) => {
-    const scenes = dataset.scenes.filter((scene) => selected.has(scene.scene_id));
+    const datasetBandUnitIds = dataset.scenes.flatMap((scene) => bandsFor(scene, dataset.data_type))
+      .map((band) => band.band_unit_id)
+      .filter((bandUnitId) => bandUnitId && selectedBands.has(bandUnitId));
+    const scenes = dataset.scenes.filter((scene) => bandsFor(scene, dataset.data_type)
+      .some((band) => selectedBands.has(band.band_unit_id)));
     if (!scenes.length) return [];
     const existing = existingById.get(dataset.dataset_id);
     return [{
@@ -247,9 +322,14 @@ function updateSceneSelection(sceneIds) {
       data_type: dataset.data_type,
       product_type: dataset.product_type ?? null,
       resolution_m: dataset.resolution_m ?? null,
+      resolution_native: dataset.resolution_native ?? null,
+      resolution_unit: dataset.resolution_unit ?? null,
+      crs: dataset.crs ?? null,
+      suggested_grid_type: dataset.suggested_grid_type ?? null,
       suggested_grid_levels: dataset.suggested_grid_levels ?? {},
       grid_level_unlocked: existing?.grid_level_unlocked === true,
       scenes,
+      band_unit_ids: datasetBandUnitIds,
       assets: scenes.map(scenePreviewAsset),
       partition: existing?.partition ? withFixedPartitionOptions(existing.partition) : defaultPartition(dataset),
     }];
@@ -257,7 +337,7 @@ function updateSceneSelection(sceneIds) {
   emit('update:modelValue', [...retained, ...current]);
 }
 
-const selectedCount = computed(() => selectedSceneIds.value.length);
+const selectedCount = computed(() => selectedBandUnitIds.value.length);
 const selectedDatasetsById = computed(() => new Map(props.modelValue.map((dataset) => [dataset.dataset_id, dataset])));
 const visibleBatchGroups = computed(() => availableBatchGroups.value.map((batch) => ({
   ...batch,
@@ -269,6 +349,38 @@ const visibleBatchGroups = computed(() => availableBatchGroups.value.map((batch)
 
 function bandsFor(scene, dataType) {
   return sceneBands(scene, dataType);
+}
+
+function selectableBandIdsForScene(scene, dataType) {
+  if (!eligibleScene(scene)) return [];
+  return bandsFor(scene, dataType)
+    .filter((band) => band.band_unit_id && band.contract_errors.length === 0)
+    .map((band) => band.band_unit_id);
+}
+
+function selectableBandIdsForDataset(datasetId) {
+  const dataset = availableDatasets.value.find((item) => item.dataset_id === datasetId);
+  return dataset ? dataset.scenes.flatMap((scene) => selectableBandIdsForScene(scene, dataset.data_type)) : [];
+}
+
+function groupSelectionState(bandUnitIds) {
+  const selected = new Set(selectedBandUnitIds.value);
+  const count = bandUnitIds.filter((bandUnitId) => selected.has(bandUnitId)).length;
+  return { checked: bandUnitIds.length > 0 && count === bandUnitIds.length, indeterminate: count > 0 && count < bandUnitIds.length };
+}
+
+function toggleBandGroup(bandUnitIds, checked) {
+  const next = new Set(selectedBandUnitIds.value);
+  bandUnitIds.forEach((bandUnitId) => checked ? next.add(bandUnitId) : next.delete(bandUnitId));
+  updateBandSelection([...next]);
+}
+
+function toggleDatasetSelection(datasetId, checked) {
+  toggleBandGroup(selectableBandIdsForDataset(datasetId), checked);
+}
+
+function toggleSceneSelection(scene, dataType, checked) {
+  toggleBandGroup(selectableBandIdsForScene(scene, dataType), checked);
 }
 
 function partitionFor(dataset) {
@@ -330,7 +442,7 @@ onBeforeUnmount(() => {
   <section class="partition-data-list">
     <div class="partition-drawer-heading">
       <h3>{{ dataTypeLabel || '' }}待剖分数据</h3>
-      <span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个数据单元</span>
+      <span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 
@@ -340,7 +452,7 @@ onBeforeUnmount(() => {
         <el-checkbox v-for="batch in availableBatches" :key="batch.load_batch_id" :value="batch.load_batch_id" :data-testid="`load-batch-${batch.load_batch_id}`">
           <span class="partition-batch-option">
             <strong>{{ batch.batch_name || batch.load_batch_id }}</strong>
-            <span>{{ batch.load_batch_id }} · {{ batch.dataset_count || 0 }} 个数据集 · {{ batch.scene_count || 0 }} 个数据单元</span>
+            <span>{{ batch.load_batch_id }} · {{ batch.dataset_count || 0 }} 个数据集 · {{ batch.scene_count || 0 }} 景</span>
           </span>
         </el-checkbox>
       </el-checkbox-group>
@@ -354,22 +466,31 @@ onBeforeUnmount(() => {
 
     <div v-loading="loading" class="partition-batch-tree-list">
       <section v-for="batch in visibleBatchGroups" :key="batch.load_batch_id" class="partition-batch-tree" :data-testid="`batch-tree-${batch.load_batch_id}`">
-        <header class="partition-batch-tree-header">
+        <header class="partition-batch-tree-header" :aria-expanded="!collapsedBatches.has(batchGroupKey(batch))" @click="toggleBatchGroup(batch)">
           <div class="partition-tree-identity">
             <el-icon><FolderOpened /></el-icon>
             <div><strong>{{ batch.batch_name || batch.load_batch_id }}</strong><span>{{ batch.load_batch_id }}</span></div>
           </div>
-          <span>{{ batch.datasets.length }} 个数据集 · {{ batch.datasets.reduce((total, dataset) => total + dataset.scenes.length, 0) }} 个数据单元</span>
+          <span>{{ batch.datasets.length }} 个数据集 · {{ batch.datasets.reduce((total, dataset) => total + dataset.scenes.length, 0) }} 景</span>
         </header>
 
-        <div class="partition-dataset-tree-list">
+        <div v-show="!collapsedBatches.has(batchGroupKey(batch))" class="partition-dataset-tree-list">
           <section v-for="dataset in batch.datasets" :key="`${batch.load_batch_id}-${dataset.dataset_id}`" class="partition-dataset-tree" :data-testid="`dataset-tree-${batch.load_batch_id}-${dataset.dataset_id}`">
-            <div class="partition-scene-group-header">
+            <div class="partition-scene-group-header" :aria-expanded="!collapsedDatasets.has(datasetGroupKey(batch, dataset))" @click="toggleDatasetGroup(batch, dataset)">
               <div class="partition-tree-identity">
                 <el-icon><Collection /></el-icon>
-                <div><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><span>{{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 个数据单元<span v-if="dataset.resolution_m"> · {{ dataset.resolution_m }} m</span></span></div>
+                <div><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><span>{{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + bandsFor(scene, dataset.data_type).length, 0) }} 波段<span v-if="dataset.crs"> · {{ dataset.crs }}</span><span v-if="resolutionLabel(dataset)"> · {{ resolutionLabel(dataset) }}</span></span></div>
               </div>
-              <div v-if="selectedDatasetsById.has(dataset.dataset_id)" class="partition-dataset-grid">
+              <el-checkbox
+                class="dataset-select-all"
+                @click.stop
+                :model-value="groupSelectionState(selectableBandIdsForDataset(dataset.dataset_id)).checked"
+                :indeterminate="groupSelectionState(selectableBandIdsForDataset(dataset.dataset_id)).indeterminate"
+                :disabled="selectableBandIdsForDataset(dataset.dataset_id).length === 0"
+                :data-testid="`select-dataset-${dataset.dataset_id}`"
+                @change="toggleDatasetSelection(dataset.dataset_id, $event)"
+              >全选数据集</el-checkbox>
+              <div v-if="selectedDatasetsById.has(dataset.dataset_id)" class="partition-dataset-grid" @click.stop>
                 <el-select
                   :data-testid="`dataset-grid-${dataset.dataset_id}`"
                   :model-value="partitionFor(dataset).grid_type"
@@ -390,27 +511,43 @@ onBeforeUnmount(() => {
                 </el-tooltip>
               </div>
             </div>
-            <el-checkbox-group class="partition-scene-list" :model-value="selectedSceneIds" @update:model-value="updateSceneSelection">
-              <el-checkbox
-                v-for="scene in dataset.scenes"
-                :key="scene.scene_id"
-                :value="scene.scene_id"
-                :disabled="!eligibleScene(scene)"
-                :data-testid="`scene-${scene.scene_id}`"
-              >
-                <span class="partition-scene-option">
+            <div v-show="!collapsedDatasets.has(datasetGroupKey(batch, dataset))" class="partition-scene-list">
+              <section v-for="scene in dataset.scenes" :key="scene.scene_id" class="partition-scene-option" :data-testid="`scene-${scene.scene_id}`">
+                <div class="partition-scene-identity" :aria-expanded="!collapsedScenes.has(sceneGroupKey(dataset, scene))" @click="toggleSceneGroup(dataset, scene)">
                   <el-icon><Picture /></el-icon>
                   <span>
                     <strong>{{ scene.scene_key || scene.scene_id }}</strong>
-                    <small>{{ dataUnitTypeLabel(dataset.data_type) }} · {{ scene.acquisition_time || '采集时间未登记' }}</small>
-                    <span v-if="bandsFor(scene, dataset.data_type).length" class="scene-band-list">
-                      <span v-for="(band, bandIndex) in bandsFor(scene, dataset.data_type)" :key="`${scene.scene_id}-${band.band_code || 'invalid'}-${band.display_order}-${bandIndex}`" class="scene-band-chip">{{ bandDisplayLabel(band) }}</span>
-                    </span>
-                    <small v-else class="band-missing">波段信息未登记</small>
+                    <small>景 · {{ formatShanghaiTime(scene.acquisition_time, '采集时间未登记') }}</small>
                   </span>
-                </span>
-              </el-checkbox>
-            </el-checkbox-group>
+                  <el-checkbox
+                    class="scene-select-all"
+                    @click.stop
+                    :model-value="groupSelectionState(selectableBandIdsForScene(scene, dataset.data_type)).checked"
+                    :indeterminate="groupSelectionState(selectableBandIdsForScene(scene, dataset.data_type)).indeterminate"
+                    :disabled="selectableBandIdsForScene(scene, dataset.data_type).length === 0"
+                    :data-testid="`select-scene-${scene.scene_id}`"
+                    @change="toggleSceneSelection(scene, dataset.data_type, $event)"
+                  >全选该景</el-checkbox>
+                </div>
+                <el-checkbox-group
+                  v-show="!collapsedScenes.has(sceneGroupKey(dataset, scene)) && bandsFor(scene, dataset.data_type).length"
+                  class="scene-band-list"
+                  :model-value="selectedBandUnitIds"
+                  @update:model-value="updateBandSelection"
+                >
+                  <el-checkbox
+                    v-for="(band, bandIndex) in bandsFor(scene, dataset.data_type)"
+                    :key="`${scene.scene_id}-${band.band_unit_id || band.band_code || 'invalid'}-${band.display_order}-${bandIndex}`"
+                    :value="band.band_unit_id"
+                    :disabled="!eligibleScene(scene) || !band.band_unit_id || band.contract_errors.length > 0"
+                    :data-testid="band.band_unit_id ? `band-unit-${band.band_unit_id}` : undefined"
+                  >
+                    <span class="scene-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ bandDisplayLabel(band) }}</span>
+                  </el-checkbox>
+                </el-checkbox-group>
+                  <small v-if="!bandsFor(scene, dataset.data_type).length" class="band-missing">波段信息未登记</small>
+              </section>
+            </div>
           </section>
         </div>
       </section>
@@ -426,7 +563,7 @@ onBeforeUnmount(() => {
 .partition-section-title span { color: var(--el-text-color-secondary); font-size: 12px; }
 .partition-batch-picker :deep(.el-checkbox-group) { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px 16px; }
 .partition-batch-picker :deep(.el-checkbox) { align-items: flex-start; height: auto; margin: 0; padding: 8px 0; }
-.partition-batch-picker :deep(.el-checkbox__label), .partition-scene-list :deep(.el-checkbox__label) { min-width: 0; white-space: normal; }
+.partition-batch-picker :deep(.el-checkbox__label), .scene-band-list :deep(.el-checkbox__label) { min-width: 0; white-space: normal; }
 .partition-batch-option { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .partition-batch-option strong { color: var(--el-text-color-primary); font-size: 13px; line-height: 1.4; }
 .partition-batch-option span { color: var(--el-text-color-secondary); font-size: 12px; overflow-wrap: anywhere; }
@@ -438,7 +575,7 @@ onBeforeUnmount(() => {
 .band-filter-toolbar .el-input { width: min(360px, 48%); }
 .partition-batch-tree { border-left: 3px solid var(--el-color-primary); }
 .partition-batch-tree + .partition-batch-tree { margin-top: 18px; }
-.partition-batch-tree-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 8px 12px; background: var(--el-fill-color-light); border-bottom: 1px solid var(--el-border-color-lighter); }
+.partition-batch-tree-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 8px 12px; background: var(--el-fill-color-light); border-bottom: 1px solid var(--el-border-color-lighter); cursor: pointer; }
 .partition-batch-tree-header > span { flex: none; color: var(--el-text-color-secondary); font-size: 12px; }
 .partition-dataset-tree-list { padding-left: 22px; }
 .partition-dataset-tree { padding: 14px 0 14px 14px; border-bottom: 1px solid var(--el-border-color-lighter); }
@@ -447,18 +584,22 @@ onBeforeUnmount(() => {
 .partition-tree-identity > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .partition-tree-identity strong { overflow-wrap: anywhere; }
 .partition-tree-identity span { color: var(--el-text-color-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.partition-scene-group-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.partition-scene-group-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; cursor: pointer; }
+.dataset-select-all { flex: none; margin-left: auto; }
 .partition-dataset-grid { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(170px, 1fr) 32px; gap: 8px; width: min(420px, 56%); }
 .partition-dataset-grid :deep(.el-button) { width: 32px; padding: 0; }
-.partition-scene-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 16px; }
-.partition-scene-list :deep(.el-checkbox) { align-items: flex-start; height: auto; margin: 0; padding: 7px 0; }
-.partition-scene-option { display: flex; min-width: 0; align-items: flex-start; gap: 8px; }
-.partition-scene-option > .el-icon { flex: none; margin-top: 2px; color: var(--el-text-color-secondary); }
-.partition-scene-option > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.partition-scene-option strong { color: var(--el-text-color-primary); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
-.partition-scene-option small { color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-.scene-band-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
-.scene-band-chip { padding: 2px 6px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
+.partition-scene-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px 16px; }
+.partition-scene-option { min-width: 0; padding: 9px 10px; border-left: 2px solid var(--el-border-color); background: var(--el-fill-color-extra-light); }
+.partition-scene-identity { display: flex; min-width: 0; align-items: flex-start; gap: 8px; cursor: pointer; }
+.partition-scene-identity > .el-icon { flex: none; margin-top: 2px; color: var(--el-text-color-secondary); }
+.partition-scene-identity > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.scene-select-all { flex: none; margin-left: auto; }
+.partition-scene-identity strong { color: var(--el-text-color-primary); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.partition-scene-identity small { color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scene-band-list { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 8px; padding-left: 25px; }
+.scene-band-list :deep(.el-checkbox) { height: auto; margin: 0; }
+.scene-band-chip { display: flex; flex-direction: column; padding: 3px 7px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
+.scene-band-chip small { color: var(--el-text-color-secondary); font-size: 10px; }
 .band-missing { color: #a16a1c !important; }
 @media (max-width: 720px) {
   .partition-drawer-heading { align-items: flex-start; flex-direction: column; gap: 4px; }

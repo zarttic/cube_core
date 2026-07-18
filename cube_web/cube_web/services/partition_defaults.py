@@ -9,9 +9,11 @@ DEFAULT_GEOHASH_GRID_LEVEL = 4
 DEFAULT_MGRS_GRID_LEVEL = 1
 DEFAULT_ISEA4H_GRID_LEVEL = 6
 DEFAULT_ENTITY_GRID_LEVEL = DEFAULT_ISEA4H_GRID_LEVEL
+METERS_PER_DEGREE = 111_320.0
 
 _RESOLUTION_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _RESOLUTION_KEYS = (
+    "resolution_native",
     "resolution",
     "resolution_m",
     "spatial_resolution",
@@ -79,6 +81,10 @@ def default_grid_level_for_resolution(
         if parsed < 10:
             return 1
         return 0
+    if parsed >= 1000:
+        return 2
+    if parsed >= 500:
+        return 3
     if parsed < 10:
         return 6
     if parsed <= 30:
@@ -118,6 +124,45 @@ def finest_resolution_from_assets(assets: Iterable[Any] | None) -> float | None:
             if resolution is not None:
                 resolutions.append(resolution)
     return min(resolutions) if resolutions else None
+
+
+def is_geographic_crs(value: Any) -> bool:
+    if not value:
+        return False
+    try:
+        from pyproj import CRS
+
+        return bool(CRS.from_user_input(value).is_geographic)
+    except Exception:
+        return str(value).strip().upper() in {"EPSG:4326", "CRS:84", "OGC:CRS84"}
+
+
+def resolution_metadata_from_assets(assets: Iterable[Any] | None) -> dict[str, Any]:
+    values = [asset for asset in (assets or []) if isinstance(asset, dict)]
+    resolution = finest_resolution_from_assets(values)
+    if resolution is None:
+        return {}
+    crs_values = {
+        str(asset.get("crs") or "").strip()
+        for asset in values
+        if str(asset.get("crs") or "").strip()
+    }
+    crs = next(iter(crs_values)) if len(crs_values) == 1 else None
+    if crs and is_geographic_crs(crs) and resolution <= 1.0:
+        return {
+            "crs": crs,
+            "resolution_native": resolution,
+            "resolution_unit": "degree",
+            "resolution_m": resolution * METERS_PER_DEGREE,
+            "suggested_grid_type": "geohash",
+        }
+    return {
+        "crs": crs,
+        "resolution_native": resolution,
+        "resolution_unit": "m",
+        "resolution_m": resolution,
+        "suggested_grid_type": "mgrs" if crs else "geohash",
+    }
 
 
 def apply_resolution_grid_defaults(

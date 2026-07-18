@@ -5,6 +5,7 @@ import { Refresh, RefreshLeft, Check, Connection, DataLine } from '@element-plus
 
 import { apiPrefixes, requestJson } from '@/api/client';
 import { fixedPartitionOptions, gridDefinition, gridDefinitions } from '@/utils/grid';
+import { formatShanghaiTime } from '@/utils/time';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -131,10 +132,7 @@ async function resetConfig() {
 }
 
 function formatUpdatedAt(value) {
-  if (!value) return '尚未保存';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('zh-CN');
+  return formatShanghaiTime(value, '尚未保存');
 }
 
 onMounted(loadConfig);

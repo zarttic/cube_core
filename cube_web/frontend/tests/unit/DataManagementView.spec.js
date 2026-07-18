@@ -36,8 +36,8 @@ describe('DataManagementView', () => {
     });
     wrappers.push(wrapper);
 
-    expect(wrapper.get('h1').text()).toBe('数据管理与入库');
-    expect(wrapper.findAll('[data-label]').map((item) => item.attributes('data-label'))).toEqual(['数据集', '载入批次', '入库运行']);
+    expect(wrapper.get('h1').text()).toBe('数据管理');
+    expect(wrapper.findAll('[data-label]').map((item) => item.attributes('data-label'))).toEqual(['数据管理', '载入批次', '数据入库']);
   });
 });
 

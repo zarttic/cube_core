@@ -30,6 +30,7 @@ class QualityObjectReader:
         source_format: str,
         *,
         sample_pixels: bool = False,
+        sample_band_index: int = 1,
         expected_checksum: str | None = None,
     ) -> AssetInspection:
         local_path = Path(resolve_asset_source_path(uri, self._resolve_options))
@@ -38,7 +39,11 @@ class QualityObjectReader:
         if expected_checksum is not None:
             self._verify_checksum(local_path, expected_checksum)
         if source_format == "cog":
-            return self._inspect_raster(local_path, sample_pixels=sample_pixels)
+            return self._inspect_raster(
+                local_path,
+                sample_pixels=sample_pixels,
+                sample_band_index=sample_band_index,
+            )
         if source_format in {"netcdf", "hdf5"}:
             self._inspect_scientific_container(local_path, source_format)
             return AssetInspection()
@@ -69,16 +74,23 @@ class QualityObjectReader:
         return digest.hexdigest()
 
     @staticmethod
-    def _inspect_raster(path: Path, *, sample_pixels: bool) -> AssetInspection:
+    def _inspect_raster(
+        path: Path,
+        *,
+        sample_pixels: bool,
+        sample_band_index: int = 1,
+    ) -> AssetInspection:
         with rasterio.open(path) as dataset:
             if dataset.width <= 0 or dataset.height <= 0 or dataset.count <= 0:
                 raise ValueError("raster has no readable pixels")
+            if sample_band_index < 1 or sample_band_index > dataset.count:
+                raise ValueError(f"raster band index is out of range: {sample_band_index}")
             crs = dataset.crs.to_string() if dataset.crs else None
             if not sample_pixels:
                 return AssetInspection(crs=crs)
             height = min(dataset.height, 128)
             width = min(dataset.width, 128)
-            sample = dataset.read(1, masked=True, out_shape=(1, height, width))
+            sample = dataset.read(sample_band_index, masked=True, out_shape=(1, height, width))
             valid_mask = ~np.ma.getmaskarray(sample)
             return AssetInspection(
                 crs=crs,

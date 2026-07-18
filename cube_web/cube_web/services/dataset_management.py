@@ -90,11 +90,13 @@ class DatasetManagementService:
         repository: DatasetManagementRepository,
         *,
         quality_hook: Callable[[str, Any], dict[str, Any]] | None = None,
-        publish_hook: Callable[[str, Any], dict[str, Any]] | None = None,
+        ingest_hook: Callable[[str, Any], dict[str, Any]] | None = None,
+        publish_hook: Callable[[str, Any, tuple[dict[str, str], ...]], dict[str, Any]] | None = None,
         withdraw_hook: Callable[[str, str, str, Any], dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.quality_hook = quality_hook
+        self.ingest_hook = ingest_hook
         self.publish_hook = publish_hook
         self.withdraw_hook = withdraw_hook
 
@@ -144,7 +146,16 @@ class DatasetManagementService:
         self.get_dataset(dataset_id)
         return self.repository.retry_failed_scene_ingest(dataset_id, scene_id, actor=actor)
 
-    def publish(self, dataset_id: str, actor: Any) -> dict[str, Any]:
+    def request_ingest(self, dataset_id: str, actor: Any) -> dict[str, Any]:
+        self.get_dataset(dataset_id)
+        if self.ingest_hook is None:
+            raise DatasetManagementConflict("ingest service is not configured")
+        target_id = self.repository.action_dataset_id(dataset_id)
+        if target_id is None:
+            raise DatasetManagementConflict("manual ingest requires a managed partition output")
+        return self.ingest_hook(target_id, actor)
+
+    def publish(self, dataset_id: str, actor: Any, targets: tuple[dict[str, str], ...] = ()) -> dict[str, Any]:
         dataset = self.get_dataset(dataset_id)
         if dataset.get("quality_status") != "pass":
             raise DatasetManagementConflict("publication requires a passing quality decision")
@@ -155,6 +166,8 @@ class DatasetManagementService:
         target_id = self.repository.action_dataset_id(dataset_id)
         if target_id is None:
             raise DatasetManagementConflict("publication requires a managed quality snapshot")
+        if targets:
+            return self.publish_hook(target_id, actor, targets)
         return self.publish_hook(target_id, actor)
 
     def withdraw(self, dataset_id: str, publication_id: str, reason: str, actor: Any) -> dict[str, Any]:
@@ -221,6 +234,12 @@ class InMemoryDatasetManagementRepository:
     def list_detail(self, dataset_id: str, detail: str, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
         with self._lock:
             rows = copy.deepcopy(self.details.get(dataset_id, {}).get(detail, []))
+            if detail == "scenes":
+                bands_by_scene: dict[str, list[dict[str, Any]]] = {}
+                for band in self.details.get(dataset_id, {}).get("bands", []):
+                    bands_by_scene.setdefault(str(band.get("scene_id") or ""), []).append(copy.deepcopy(band))
+                for scene in rows:
+                    scene["bands"] = bands_by_scene.get(str(scene.get("scene_id") or ""), [])
             if detail == "provenance":
                 rows.extend(copy.deepcopy([row for row in self.scene_audit if row.get("dataset_id") == dataset_id or row.get("previous_dataset_id") == dataset_id]))
                 rows.extend(copy.deepcopy([row for row in self.metadata_audit if row.get("dataset_id") == dataset_id]))
@@ -390,6 +409,33 @@ class OpenGaussDatasetManagementRepository:
             sql, params = self._detail_sql(detail, dataset_id)
             cursor.execute(f"SELECT * FROM ({sql}) detail_rows LIMIT %s OFFSET %s", (*params, limit, offset))
             items = [self._normalize(row) for row in cursor.fetchall()]
+            if detail == "scenes" and items:
+                scene_ids = [str(item["scene_id"]) for item in items]
+                cursor.execute(
+                    """SELECT sb.* FROM scene_bands sb JOIN scene_assets sa
+                       ON sa.scene_id=sb.scene_id AND sa.asset_id=sb.asset_id
+                       WHERE sb.scene_id=ANY(%s::text[]) AND sa.asset_role='data'
+                       ORDER BY sb.scene_id,sb.display_order,sb.band_code""",
+                    (scene_ids,),
+                )
+                bands_by_scene: dict[str, list[dict[str, Any]]] = {}
+                for band in cursor.fetchall():
+                    bands_by_scene.setdefault(str(band["scene_id"]), []).append(self._normalize(band))
+                cursor.execute(
+                    """SELECT t.source_asset_id,t.band_code
+                         FROM partition_publication_targets t
+                         JOIN partition_publications p ON p.publication_id=t.publication_id
+                        WHERE t.dataset_id=%s AND p.status='active'""",
+                    (dataset_id,),
+                )
+                published_targets = {(str(row["source_asset_id"]), str(row["band_code"])) for row in cursor.fetchall()}
+                for scene in items:
+                    scene["bands"] = []
+                    for band in bands_by_scene.get(str(scene["scene_id"]), []):
+                        band["publication_status"] = "active" if (
+                            str(band.get("asset_id") or ""), str(band.get("band_code") or "")
+                        ) in published_targets else "unpublished"
+                        scene["bands"].append(band)
             cursor.execute(f"SELECT COUNT(*) AS total FROM ({sql}) detail_rows", params)
             total = int(cursor.fetchone()["total"])
         return items, total
@@ -488,7 +534,8 @@ class OpenGaussDatasetManagementRepository:
     @staticmethod
     def _overview_sql(where: str) -> str:
         return f"""
-            SELECT d.dataset_id,d.dataset_code,d.dataset_title,d.data_type,d.product_type,d.status,d.current_output_version,
+            SELECT d.dataset_id,d.dataset_code,d.dataset_title,d.data_type,d.product_type,d.status,
+                   COALESCE((SELECT pd0.current_output_version FROM partition_datasets pd0 WHERE pd0.dataset_id=d.dataset_id), d.current_output_version) AS current_output_version,
                    d.attributes->>'description' AS description,d.attributes->'keywords' AS keywords,
                    COALESCE(
                      CASE WHEN count(s.bbox) FILTER (WHERE jsonb_typeof(s.bbox)='array') > 0 THEN json_build_array(
@@ -501,7 +548,14 @@ class OpenGaussDatasetManagementRepository:
                    count(s.scene_id) AS scene_count,min(s.acquisition_time) AS time_start,max(s.acquisition_time) AS time_end,
                    count(s.scene_id) FILTER (WHERE s.status='available') AS ready_scene_count,
                    count(s.scene_id) FILTER (WHERE s.status='failed') AS failed_scene_count,
-                   COALESCE((SELECT ir.status FROM ingest_runs ir WHERE ir.dataset_id=d.dataset_id ORDER BY ir.created_at DESC LIMIT 1),'pending') AS ingest_status,
+                   COALESCE((SELECT ir.status FROM ingest_runs ir
+                              WHERE ir.dataset_id=d.dataset_id
+                                AND EXISTS (SELECT 1 FROM partition_datasets pd1
+                                            WHERE pd1.dataset_id=d.dataset_id AND pd1.current_output_version IS NOT NULL
+                                              AND EXISTS (SELECT 1 FROM ingest_run_scenes irs
+                                                          WHERE irs.ingest_run_id=ir.ingest_run_id
+                                                            AND irs.output_version=pd1.current_output_version))
+                              ORDER BY ir.created_at DESC LIMIT 1),'pending') AS ingest_status,
                    COALESCE((SELECT pd.quality_status FROM partition_datasets pd WHERE pd.dataset_id=d.dataset_id),'pending') AS quality_status,
                    COALESCE((SELECT pp.status FROM partition_publications pp WHERE pp.dataset_id=d.dataset_id ORDER BY pp.requested_at DESC LIMIT 1),'unpublished') AS publish_status
             FROM datasets d LEFT JOIN scenes s ON s.dataset_id=d.dataset_id
@@ -586,7 +640,15 @@ class OpenGaussDatasetManagementRepository:
             """,
             "ingest-records": "SELECT irs.*,ir.dataset_id,ir.status AS run_status,ir.requested_by FROM ingest_run_scenes irs JOIN ingest_runs ir ON ir.ingest_run_id=irs.ingest_run_id WHERE ir.dataset_id=%s ORDER BY irs.updated_at DESC",
             "quality": "SELECT q.* FROM partition_quality_runs q JOIN datasets d ON d.dataset_id=q.dataset_id WHERE d.dataset_id=%s ORDER BY q.created_at DESC",
-            "publications": "SELECT p.* FROM partition_publications p JOIN datasets d ON d.dataset_id=p.dataset_id WHERE d.dataset_id=%s ORDER BY p.requested_at DESC",
+            "publications": """
+                SELECT p.*,
+                       COALESCE((SELECT json_agg(json_build_object(
+                         'source_asset_id', t.source_asset_id, 'band_code', t.band_code
+                       ) ORDER BY t.source_asset_id, t.band_code)
+                       FROM partition_publication_targets t WHERE t.publication_id=p.publication_id), '[]'::json) AS targets
+                  FROM partition_publications p JOIN datasets d ON d.dataset_id=p.dataset_id
+                 WHERE d.dataset_id=%s ORDER BY p.requested_at DESC
+            """,
             "provenance": " UNION ALL ".join(provenance) + " ORDER BY created_at DESC",
         }
         if detail not in queries:

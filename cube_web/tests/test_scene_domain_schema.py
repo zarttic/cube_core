@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-18-scene-domain-v1"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-18-scene-domain-v3"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -34,6 +34,11 @@ def test_schema_is_a_fresh_production_install() -> None:
     assert "partition_run_id text not null" in sql
     assert "output_version text not null" in sql
     assert "'backfill'" not in sql
+    assert "resolution_native double precision" in sql
+    assert "resolution_unit text" in sql
+    assert "resolution_m double precision" in sql
+    assert "suggested_grid_type text" in sql
+    assert "band_unit_id text" in sql
 
 
 class _Cursor:

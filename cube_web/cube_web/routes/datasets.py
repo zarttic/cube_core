@@ -27,6 +27,7 @@ from cube_web.services.publication_service import (
 )
 from cube_web.services.quality_repository import DatasetNotFound, OutputVersionNotFound, QualityRunNotFound
 from cube_web.services.quality_run_service import request_manual_quality_run
+from cube_web.services.quality_ingest_bridge import ManualIngestRejected, request_manual_ingest
 
 
 class StrictPayload(BaseModel):
@@ -56,6 +57,10 @@ class ArchiveRequest(StrictPayload):
 
 class WithdrawRequest(StrictPayload):
     reason: str = Field(default="数据管理页面撤回", min_length=1, max_length=2000)
+
+
+class PublishRequestPayload(StrictPayload):
+    targets: list[dict[str, str]] = Field(default_factory=list)
 
 
 def create_datasets_router(service: DatasetManagementService | None = None) -> APIRouter:
@@ -115,10 +120,15 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
         actor = require_admin(current_actor(request))
         return _call(lambda: service.retry_failed_scene_ingest(dataset_id, scene_id, actor=actor.username))
 
-    @router.post("/{dataset_id}/publish", status_code=201)
-    def publish(dataset_id: str, request: Request) -> dict:
+    @router.post("/{dataset_id}/ingest", status_code=202)
+    def request_ingest(dataset_id: str, request: Request) -> dict:
         actor = require_admin(current_actor(request))
-        return _call(lambda: service.publish(dataset_id, actor))
+        return _call(lambda: service.request_ingest(dataset_id, actor))
+
+    @router.post("/{dataset_id}/publish", status_code=201)
+    def publish(dataset_id: str, payload: PublishRequestPayload, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        return _call(lambda: service.publish(dataset_id, actor, tuple(payload.targets)))
 
     @router.post("/{dataset_id}/publications/{publication_id}/withdraw")
     def withdraw(dataset_id: str, publication_id: UUID, payload: WithdrawRequest, request: Request) -> dict:
@@ -168,12 +178,19 @@ def _production_service() -> DatasetManagementService:
     def quality_hook(dataset_id, actor):
         return request_manual_quality_run(dataset_id, None, actor).model_dump(mode="json")
 
-    def publish_hook(dataset_id, actor):
-        return publish_dataset(dataset_id, PublishRequest(), actor).model_dump(mode="json")
+    def ingest_hook(dataset_id, actor):
+        try:
+            return request_manual_ingest(dataset_id, requested_by=actor.username)
+        except ManualIngestRejected as exc:
+            raise DatasetManagementConflict(str(exc)) from exc
+
+    def publish_hook(dataset_id, actor, targets=()):
+        return publish_dataset(dataset_id, PublishRequest(targets=tuple(targets)), actor).model_dump(mode="json")
 
     def withdraw_hook(dataset_id, publication_id, reason, actor):
         return withdraw_publication(dataset_id, UUID(publication_id), reason, actor).model_dump(mode="json")
 
     return DatasetManagementService(
-        repository, quality_hook=quality_hook, publish_hook=publish_hook, withdraw_hook=withdraw_hook
+        repository, quality_hook=quality_hook, ingest_hook=ingest_hook,
+        publish_hook=publish_hook, withdraw_hook=withdraw_hook
     )

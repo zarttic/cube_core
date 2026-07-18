@@ -104,6 +104,7 @@ export function useSubUserStore() {
     avatarUrl,
     isAuthenticated,
     persistToken,
+    persistUserInfo,
     fetchUserInfo,
     exchangeCode,
     redirectToAuth,

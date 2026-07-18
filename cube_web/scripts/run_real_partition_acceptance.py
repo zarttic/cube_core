@@ -120,6 +120,8 @@ def derive_manifest(prepared: dict[str, Any], carbon: dict[str, Any]) -> dict[st
 
     def raster_asset(role: str, asset_id: str, bands: list[dict[str, Any]]) -> dict[str, Any]:
         row = assets[role]
+        native_resolution = max(float(value) for value in row.get("resolution_native") or [30])
+        geographic = str(row.get("crs") or "").upper() == "EPSG:4326"
         return {
             "asset_id": asset_id,
             "source_uri": row["s3_uri"],
@@ -130,7 +132,8 @@ def derive_manifest(prepared: dict[str, Any], carbon: dict[str, Any]) -> dict[st
             "acquisition_time": "2020-07-10T00:00:00Z",
             "bbox": row["bbox_wgs84"],
             "crs": row["crs"],
-            "resolution_m": max(float(value) for value in row.get("resolution_native") or [30]),
+            "resolution": native_resolution,
+            "resolution_unit": "degree" if geographic else "m",
             "bands": bands,
         }
 

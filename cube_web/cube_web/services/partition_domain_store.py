@@ -281,6 +281,18 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
         if existing is not None:
             if existing.get("dataset_code") != _field(dataset, "dataset_code"):
                 raise ValueError("dataset identity conflict")
+            existing.update(
+                {
+                    "batch_id": _field(request, "batch_id"),
+                    "grid_type": _field(request, "grid_type"),
+                    "requested_grid_level": _field(request, "requested_grid_level"),
+                    "partition_method": _field(request, "partition_method"),
+                    "cover_mode": _field(request, "cover_mode", "intersect"),
+                    "partition_status": "running",
+                    "partition_completed_at": None,
+                    "updated_at": now,
+                }
+            )
             return existing
         row = {
             "dataset_id": dataset_id,
@@ -1258,6 +1270,29 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                     _field(request, "partition_method"),
                     "staging",
                     f"partition/{dataset_id}/versions/{version}/",
+                ),
+            )
+            self._execute(
+                connection,
+                """UPDATE partition_datasets SET
+                     batch_id = %s, grid_type = %s, requested_grid_level = %s,
+                     requested_grid_level_name = %s, partition_method = %s,
+                     cover_mode = %s, partition_status = 'running',
+                     partition_completed_at = NULL, updated_at = now()
+                   WHERE dataset_id = %s AND EXISTS (
+                     SELECT 1 FROM partition_output_versions
+                     WHERE dataset_id = %s AND output_version = %s AND status = 'staging'
+                   )""",
+                (
+                    _field(request, "batch_id"),
+                    _field(request, "grid_type"),
+                    _field(request, "requested_grid_level"),
+                    str(_field(request, "requested_grid_level")),
+                    _field(request, "partition_method"),
+                    _field(request, "cover_mode", "intersect"),
+                    dataset_id,
+                    dataset_id,
+                    version,
                 ),
             )
             if hasattr(connection, "commit"):

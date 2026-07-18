@@ -57,16 +57,24 @@ function normalizeSceneBatchIds(scene) {
 
 function buildDatasetSelection(dataset) {
   if (!String(dataset?.dataset_id || '').trim()) throw invalidRequest('数据集必须包含有效标识。');
-  if (!Array.isArray(dataset.scenes) || !dataset.scenes.length) throw invalidRequest('每个数据集至少选择一个数据单元。');
+  if (!Array.isArray(dataset.scenes) || !dataset.scenes.length) throw invalidRequest('每个数据集至少选择一个景。');
   const partition = withFixedPartitionOptions(dataset.partition);
   validatePartition(partition);
   const sceneIds = dataset.scenes.map((scene) => String(scene?.scene_id || '').trim());
   if (sceneIds.some((sceneId) => !sceneId) || new Set(sceneIds).size !== sceneIds.length) {
     throw invalidRequest('数据集包含无效或重复的数据单元。');
   }
+  const bandUnitIds = Array.isArray(dataset.band_unit_ids)
+    ? dataset.band_unit_ids.map((value) => String(value || '').trim())
+    : null;
+  if (bandUnitIds && (!bandUnitIds.length || bandUnitIds.some((value) => !value)
+    || new Set(bandUnitIds).size !== bandUnitIds.length)) {
+    throw invalidRequest('数据集包含无效或重复的波段数据单元。');
+  }
   return {
     dataset_id: dataset.dataset_id,
     scene_ids: sceneIds,
+    ...(bandUnitIds ? { band_unit_ids: bandUnitIds } : {}),
     partition: Object.fromEntries(Object.entries(partition).filter(([key, value]) => partitionFields.has(key) && value != null)),
   };
 }
@@ -102,6 +110,8 @@ export const usePartitionStore = defineStore('partition', () => {
     const datasets = form.datasets.map(buildDatasetSelection);
     const allSceneIds = datasets.flatMap((dataset) => dataset.scene_ids);
     if (new Set(allSceneIds).size !== allSceneIds.length) throw invalidRequest('同一数据单元不能重复归入多个数据集。');
+    const allBandUnitIds = datasets.flatMap((dataset) => dataset.band_unit_ids || []);
+    if (new Set(allBandUnitIds).size !== allBandUnitIds.length) throw invalidRequest('同一波段数据单元不能重复归入多个数据集。');
     const sourceBatchIds = [...new Set(form.datasets.flatMap((dataset) => (
       dataset.scenes.flatMap(normalizeSceneBatchIds)
     )))];

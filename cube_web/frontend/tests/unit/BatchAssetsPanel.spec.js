@@ -39,7 +39,13 @@ function scene(sceneId, batchId, status = 'succeeded') {
     source_asset_id: `asset-${sceneId}`,
     bbox: [100, 20, 101, 21],
     crs: 'EPSG:4326',
-    bands: [{ band_code: bandCode, band_name: bandCode === 'B04' ? '红光' : bandCode, band_type: bandCode === 'VV' ? 'polarization' : 'spectral' }],
+    bands: [{
+      band_unit_id: `band-${sceneId}-${bandCode}`,
+      asset_id: `asset-${sceneId}`,
+      band_code: bandCode,
+      band_name: bandCode === 'B04' ? '红光' : bandCode,
+      band_type: bandCode === 'VV' ? 'polarization' : 'spectral',
+    }],
   };
 }
 
@@ -85,7 +91,25 @@ beforeEach(() => {
 });
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
 
-describe('BatchAssetsPanel scene selection', () => {
+describe('BatchAssetsPanel dataset, scene and band selection', () => {
+  it('defaults geographic datasets to Geohash and projected datasets to MGRS', async () => {
+    const wrapper = mountPanel();
+    await flushPromises();
+    const geographic = {
+      suggested_grid_type: 'geohash', suggested_grid_levels: { geohash: 4 },
+      resolution_native: 0.00030906354339487385, resolution_unit: 'degree',
+    };
+    const projected = {
+      suggested_grid_type: 'mgrs', suggested_grid_levels: { mgrs: 0 },
+      resolution_native: 10, resolution_unit: 'm',
+    };
+
+    expect(wrapper.vm.defaultPartition(geographic)).toMatchObject({ grid_type: 'geohash', requested_grid_level: 4 });
+    expect(wrapper.vm.resolutionLabel(geographic)).toBe('0.00030906354339487385°');
+    expect(wrapper.vm.defaultPartition(projected)).toMatchObject({ grid_type: 'mgrs', requested_grid_level: 0 });
+    expect(wrapper.vm.resolutionLabel(projected)).toBe('10 m');
+  });
+
   it('loads multiple batches and groups a single batch containing multiple datasets', async () => {
     const wrapper = mountPanel();
     await flushPromises();
@@ -101,11 +125,11 @@ describe('BatchAssetsPanel scene selection', () => {
     expect(wrapper.get('[data-testid="dataset-tree-load-a-dataset-a"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="dataset-tree-load-a-dataset-b"]').exists()).toBe(true);
 
-    wrapper.vm.updateSceneSelection(['scene-a', 'b-scene']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04', 'band-b-scene-VV']);
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted).toEqual(expect.arrayContaining([
-      expect.objectContaining({ dataset_id: 'dataset-a', scenes: [expect.objectContaining({ scene_id: 'scene-a' })] }),
-      expect.objectContaining({ dataset_id: 'dataset-b', scenes: [expect.objectContaining({ scene_id: 'b-scene' })] }),
+      expect.objectContaining({ dataset_id: 'dataset-a', band_unit_ids: ['band-scene-a-B04'], scenes: [expect.objectContaining({ scene_id: 'scene-a' })] }),
+      expect.objectContaining({ dataset_id: 'dataset-b', band_unit_ids: ['band-b-scene-VV'], scenes: [expect.objectContaining({ scene_id: 'b-scene' })] }),
     ]));
   });
 
@@ -121,18 +145,49 @@ describe('BatchAssetsPanel scene selection', () => {
     expect(wrapper.vm.availableBatchGroups[0].datasets[0].scenes[0].load_status).toBe('succeeded');
     expect(wrapper.vm.availableBatchGroups[1].datasets[0].scenes[0].load_status).toBe('duplicate');
 
-    wrapper.vm.updateSceneSelection(['scene-shared', 'scene-b']);
+    wrapper.vm.updateBandSelection(['band-scene-shared-B08', 'band-scene-b-B08']);
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted).toHaveLength(1);
     expect(emitted[0].dataset_id).toBe('dataset-a');
     expect(emitted[0].scenes).toHaveLength(2);
   });
 
+  it('selects and clears all bands by scene or by dataset', async () => {
+    const wrapper = mountPanel();
+    await flushPromises();
+    await wrapper.vm.loadSelectedBatches(['load-a']);
+
+    const sceneA = wrapper.vm.availableDatasets[0].scenes.find((item) => item.scene_id === 'scene-a');
+    sceneA.bands.push({
+      band_unit_id: 'band-scene-a-B03', asset_id: 'asset-scene-a',
+      band_code: 'B03', band_name: '绿光', band_type: 'spectral', display_order: 1,
+    });
+    wrapper.vm.toggleSceneSelection(sceneA, 'optical', true);
+    let emitted = wrapper.emitted('update:modelValue').at(-1)[0];
+    expect(emitted[0].band_unit_ids).toEqual(['band-scene-a-B04', 'band-scene-a-B03']);
+    expect(wrapper.vm.groupSelectionState(wrapper.vm.selectableBandIdsForScene(sceneA, 'optical'))).toEqual({
+      checked: true, indeterminate: false,
+    });
+
+    wrapper.vm.toggleSceneSelection(sceneA, 'optical', false);
+    expect(wrapper.emitted('update:modelValue').at(-1)[0]).toEqual([]);
+
+    wrapper.vm.toggleDatasetSelection('dataset-a', true);
+    emitted = wrapper.emitted('update:modelValue').at(-1)[0];
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].scenes.map((item) => item.scene_id)).toEqual(['scene-shared', 'scene-a']);
+    expect(emitted[0].band_unit_ids).toEqual([
+      'band-scene-shared-B08', 'band-scene-a-B04', 'band-scene-a-B03',
+    ]);
+    expect(wrapper.get('[data-testid="select-dataset-dataset-a"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="select-scene-scene-a"]').exists()).toBe(true);
+  });
+
   it('supports partial scene selection and keeps each dataset grid independent', async () => {
     const wrapper = mountPanel({ defaultGridType: 'isea4h', defaultRequestedGridLevel: 4 });
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
     let emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted[0].partition).toMatchObject({
       grid_type: 'isea4h', requested_grid_level: 11, partition_method: 'entity',
@@ -162,7 +217,7 @@ describe('BatchAssetsPanel scene selection', () => {
     const wrapper = mountPanel({ defaultGridType: 'mgrs', defaultRequestedGridLevel: 5 });
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
 
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted[0]).toMatchObject({
@@ -184,7 +239,7 @@ describe('BatchAssetsPanel scene selection', () => {
     const wrapper = mountPanel({ defaultGridType: 'mgrs', defaultRequestedGridLevel: 6 });
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
 
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted[0].partition.requested_grid_level).toBe(1);
@@ -214,7 +269,7 @@ describe('BatchAssetsPanel scene selection', () => {
     const wrapper = mountPanel({ modelValue: [carbon] });
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted).toEqual(expect.arrayContaining([
       carbon,
@@ -245,7 +300,7 @@ describe('BatchAssetsPanel scene selection', () => {
     const wrapper = mountPanel();
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
     requestGet.mockImplementation((url) => {
       if (url.includes('/load-b/')) return Promise.reject(new Error('batch detail unavailable'));
       return Promise.resolve(batches);
@@ -255,6 +310,7 @@ describe('BatchAssetsPanel scene selection', () => {
 
     expect(wrapper.vm.selectedBatchIds).toEqual(['load-a']);
     expect(wrapper.vm.selectedSceneIds).toEqual(['scene-a']);
+    expect(wrapper.vm.selectedBandUnitIds).toEqual(['band-scene-a-B04']);
     expect(wrapper.vm.availableBatchGroups.map((item) => item.load_batch_id)).toEqual(['load-a']);
     expect(wrapper.vm.availableDatasets.map((item) => item.dataset_id)).toEqual(['dataset-a', 'dataset-b']);
   });
@@ -264,7 +320,7 @@ describe('BatchAssetsPanel scene selection', () => {
     const wrapper = mountPanel();
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
-    wrapper.vm.updateSceneSelection(['scene-a']);
+    wrapper.vm.updateBandSelection(['band-scene-a-B04']);
     requestGet.mockImplementation((url) => {
       if (url.includes('/load-b/')) return new Promise((resolve) => { resolveBatchB = resolve; });
       if (url.includes('/load-c/')) return Promise.reject(new Error('batch C unavailable'));
@@ -279,6 +335,7 @@ describe('BatchAssetsPanel scene selection', () => {
 
     expect(wrapper.vm.selectedBatchIds).toEqual(['load-a']);
     expect(wrapper.vm.selectedSceneIds).toEqual(['scene-a']);
+    expect(wrapper.vm.selectedBandUnitIds).toEqual(['band-scene-a-B04']);
     expect(wrapper.vm.availableBatchGroups.map((item) => item.load_batch_id)).toEqual(['load-a']);
     expect(wrapper.vm.availableDatasets.map((item) => item.dataset_id)).toEqual(['dataset-a', 'dataset-b']);
   });

@@ -5,6 +5,7 @@ import { Refresh, Search } from '@element-plus/icons-vue';
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useDatasetsStore } from '@/stores/datasets';
+import { formatShanghaiRange } from '@/utils/time';
 import DatasetDetailDrawer from '@/views/datasets/DatasetDetailDrawer.vue';
 
 const props = defineProps({
@@ -59,7 +60,6 @@ onUnmounted(() => store.dispose());
       <el-form-item label="产品类型"><el-input v-model="store.filters.productType" clearable /></el-form-item>
       <el-form-item label="入库状态"><el-select v-model="store.filters.ingestStatus" clearable><el-option label="运行中" value="running" /><el-option label="已完成" value="completed" /><el-option label="部分失败" value="partial_failure" /><el-option label="失败" value="failed" /></el-select></el-form-item>
       <el-form-item label="质量状态"><el-select v-model="store.filters.qualityStatus" clearable><el-option label="通过" value="pass" /><el-option label="告警" value="warn" /><el-option label="失败" value="fail" /><el-option label="异常" value="error" /></el-select></el-form-item>
-      <el-form-item label="发布状态"><el-select v-model="store.filters.publishStatus" clearable><el-option label="未发布" value="unpublished" /><el-option label="已发布" value="active" /><el-option label="已撤回" value="withdrawn" /></el-select></el-form-item>
       <el-form-item label="归档状态"><el-select v-model="store.filters.archived" clearable><el-option label="使用中" value="false" /><el-option label="已归档" value="true" /></el-select></el-form-item>
       <el-form-item class="filter-action"><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
     </el-form>
@@ -88,11 +88,10 @@ onUnmounted(() => store.dispose());
       <el-table-column label="数据类型" width="120"><template #default="{ row }">{{ dataTypeLabel(row.data_type) }}</template></el-table-column>
       <el-table-column prop="product_type" label="产品类型" min-width="170" show-overflow-tooltip />
       <el-table-column prop="scene_count" label="景数量" width="90" />
-      <el-table-column label="时间范围" min-width="180"><template #default="{ row }">{{ row.time_start || '-' }} 至 {{ row.time_end || '-' }}</template></el-table-column>
+      <el-table-column label="时间范围" min-width="180"><template #default="{ row }">{{ formatShanghaiRange(row.time_start, row.time_end) }}</template></el-table-column>
       <el-table-column prop="current_output_version" label="当前版本" min-width="130" show-overflow-tooltip />
       <el-table-column label="质检" width="110"><template #default="{ row }"><StatusTag domain="quality" :value="row.quality_status" size="small" /></template></el-table-column>
       <el-table-column label="入库" width="110"><template #default="{ row }"><StatusTag domain="ingest" :value="row.ingest_status" size="small" /></template></el-table-column>
-      <el-table-column label="发布" width="110"><template #default="{ row }"><StatusTag domain="publication" :value="row.publish_status" size="small" /></template></el-table-column>
       <el-table-column label="操作" width="86" fixed="right"><template #default="{ row }"><el-button :data-testid="`dataset-row-${row.dataset_id}`" link type="primary" @click.stop="store.openDetail(row.dataset_id).catch(() => {})">详情</el-button></template></el-table-column>
     </AppTable>
 
@@ -113,7 +112,6 @@ onUnmounted(() => store.dispose());
       @reassign-scene="({ scene_id, target_dataset_id, reason }) => store.reassignScene(scene_id, target_dataset_id, reason).catch(() => {})"
       @rerun-quality="store.rerunQuality().catch(() => {})"
       @retry-scene-ingest="(sceneId) => store.retrySceneIngest(sceneId).catch(() => {})"
-      @publish="store.publish().catch(() => {})"
       @withdraw="(publicationId) => store.withdraw(publicationId).catch(() => {})"
       @archive="(reason) => store.archive(reason).catch(() => {})"
     />
