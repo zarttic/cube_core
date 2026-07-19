@@ -9,6 +9,7 @@ from pathlib import Path
 from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import create_unique_run_dir
 from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
+from cube_split.partition.carbon_products import normalize_carbon_product_type
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,11 +60,12 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
 
     backend = _resolve_backend(args.partition_backend, args.ray_address)
     worker_count = _resolve_worker_count(int(args.partition_workers), int(args.ray_parallelism), backend)
+    product_type = normalize_carbon_product_type(args.product_type)
     config = CarbonPartitionConfig(
         grid_type=args.grid_type,
         grid_level=int(args.grid_level),
         time_granularity=args.time_granularity,
-        product_type=args.product_type,
+        product_type=product_type,
         max_observations=(None if int(args.max_observations) <= 0 else int(args.max_observations)),
         selected_source_indexes=getattr(args, "selected_source_indexes", None),
         source_uris=getattr(args, "source_uris", None),
@@ -91,7 +93,7 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
         "grid_type": config.grid_type,
         "grid_level": config.grid_level,
         "time_granularity": config.time_granularity,
-        "product_type": config.product_type,
+        "product_type": product_type,
         "max_observations": config.max_observations,
         "partition_chunk_size": config.partition_chunk_size,
         "execution_engine": backend,

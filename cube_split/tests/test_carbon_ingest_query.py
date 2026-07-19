@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import cube_split.ingest.carbon_ingest_job as carbon_ingest_job
 from cube_split.ingest.carbon_ingest_job import run_carbon_ingest
@@ -202,3 +202,56 @@ def test_carbon_query_uses_frozen_sdk_cover_signature(monkeypatch):
             "crs": "EPSG:4326",
         }
     ]
+
+
+def test_carbon_query_normalizes_tansat_alias_before_sql(monkeypatch):
+    class FakeSDK:
+        def cover_compact(self, **_kwargs):
+            return [SimpleNamespace(space_code="cell-tansat")]
+
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        @staticmethod
+        def connect(_dsn, row_factory=None):
+            _ = row_factory
+            return FakeConnection()
+
+    monkeypatch.setattr("cube_split.read.carbon_query.CubeEncoderSDK", FakeSDK)
+    monkeypatch.setitem(sys.modules, "psycopg", FakePsycopg)
+    fake_rows = ModuleType("psycopg.rows")
+    fake_rows.dict_row = object()
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+
+    assert query_carbon_observations(
+        postgres_dsn="postgresql://example",
+        bbox=[116.3, 39.8, 116.4, 39.9],
+        time_start="20260424",
+        time_end="20260424",
+        product_type="tansat_xco2",
+    ) == []
+    assert captured["params"][4] == "tansat"

@@ -17,7 +17,7 @@ class CarbonProductAdapter(Protocol):
 
 class XCO2ProductAdapter:
     product_type = "xco2"
-    aliases = ("xco2", "oco2_lite", "oco2", "tansat_xco2")
+    aliases = ("xco2", "oco2_lite", "oco2")
 
     def supports_file(self, path: Path) -> bool:
         return path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
@@ -28,8 +28,24 @@ class XCO2ProductAdapter:
         return list(_load_xco2_observations_from_file(path, max_observations=max_observations))
 
 
+class TanSatProductAdapter:
+    """Adapter for TanSat XCO2 observation products."""
+
+    product_type = "tansat"
+    aliases = ("tansat", "tansat_xco2")
+
+    def supports_file(self, path: Path) -> bool:
+        return path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
+
+    def load_observations(self, path: Path, max_observations: int | None = None) -> list[object]:
+        from cube_split.partition.carbon import _load_tansat_observations_from_file
+
+        return list(_load_tansat_observations_from_file(path, max_observations=max_observations))
+
+
 _ADAPTERS: tuple[CarbonProductAdapter, ...] = (
     XCO2ProductAdapter(),
+    TanSatProductAdapter(),
 )
 
 

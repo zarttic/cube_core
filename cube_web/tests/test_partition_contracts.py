@@ -14,6 +14,7 @@ from cube_web.services.partition_contracts import (
     resolve_dataset_partition,
     validate_partition_method,
 )
+from cube_web.schemas import SpatiotemporalQueryRequest
 
 
 def normalized_request() -> dict:
@@ -85,6 +86,7 @@ def test_carbon_uses_explicit_raw_dataset_source_not_observations() -> None:
     payload = normalized_request()
     dataset = payload["datasets"][0]
     dataset["data_type"] = "carbon"
+    dataset["product_type"] = "xco2"
     asset = dataset["assets"][0]
     asset.pop("cog_uri")
     asset.pop("bbox")
@@ -98,6 +100,47 @@ def test_carbon_uses_explicit_raw_dataset_source_not_observations() -> None:
     payload["datasets"][0]["observations"] = [{"latitude": 20.0, "longitude": 100.0}]
     with pytest.raises(ValidationError):
         StrictPartitionRequest.model_validate(payload)
+
+
+def test_carbon_contract_normalizes_tansat_product_type() -> None:
+    payload = normalized_request()
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    dataset["product_type"] = "tansat_xco2"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.pop("bbox")
+    asset.pop("crs")
+    asset.update({"source_uri": "s3://cube/cube/source/carbon/tansat.h5", "source_kind": "raw", "source_format": "hdf5"})
+
+    request = StrictPartitionRequest.model_validate(payload)
+
+    assert request.datasets[0].product_type == "tansat"
+
+
+def test_carbon_contract_rejects_unknown_product_type() -> None:
+    payload = normalized_request()
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    dataset["product_type"] = "unknown"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.pop("bbox")
+    asset.pop("crs")
+    asset.update({"source_uri": "s3://cube/cube/source/carbon/unknown.h5", "source_kind": "raw", "source_format": "hdf5"})
+
+    with pytest.raises(ValidationError, match="Unsupported carbon product_type"):
+        StrictPartitionRequest.model_validate(payload)
+
+
+def test_carbon_query_contract_normalizes_tansat_product_type() -> None:
+    request = SpatiotemporalQueryRequest(
+        product_type="tansat_xco2",
+        time_start="2026-04-24T00:00:00Z",
+        time_end="2026-04-25T00:00:00Z",
+    )
+
+    assert request.product_type == "tansat"
 
 
 def test_non_carbon_cog_still_requires_bbox_and_crs() -> None:
@@ -119,6 +162,7 @@ def test_carbon_raw_source_format_and_suffix_are_strict(source_format: str, sour
     payload = normalized_request()
     dataset = payload["datasets"][0]
     dataset["data_type"] = "carbon"
+    dataset["product_type"] = "xco2"
     asset = dataset["assets"][0]
     asset.pop("cog_uri")
     asset.update({"source_uri": source_uri, "source_format": source_format})
@@ -225,6 +269,7 @@ def test_max_observations_is_carbon_only_and_resolves_per_dataset() -> None:
     payload = normalized_request()
     dataset = payload["datasets"][0]
     dataset["data_type"] = "carbon"
+    dataset["product_type"] = "xco2"
     asset = dataset["assets"][0]
     asset.pop("cog_uri")
     asset.update({"source_uri": "s3://cube/cube/source/carbon/oco2.nc4", "source_kind": "raw", "source_format": "netcdf"})
