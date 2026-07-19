@@ -24,6 +24,7 @@ from cube_split.partition.carbon import (
     _ray_runtime_env_from_env,
     _time_bucket,
     load_oco2_lite_observations,
+    load_observations_from_file,
     partition_observation,
 )
 from cube_split.partition.carbon_products import get_carbon_product_adapter, supported_carbon_product_types
@@ -195,9 +196,10 @@ def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
 def test_supported_carbon_product_types_are_registered():
     service = CarbonSatellitePartitionService()
 
-    assert service.supported_product_types == ("xco2",)
-    assert supported_carbon_product_types() == ("xco2",)
+    assert service.supported_product_types == ("xco2", "tansat")
+    assert supported_carbon_product_types() == ("xco2", "tansat")
     assert get_carbon_product_adapter("oco2_lite").product_type == "xco2"
+    assert get_carbon_product_adapter("tansat_xco2").product_type == "tansat"
 
 
 def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path: Path):
@@ -229,6 +231,58 @@ def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path
     row = json.loads(result.rows_path.read_text(encoding="utf-8"))
     assert row["product_type"] == "xco2"
     assert row["satellite"] == "OCO2"
+
+
+def test_carbon_service_partitions_tansat_with_its_own_product_type(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+    (input_dir / "tansat.jsonl").write_text(
+        json.dumps(
+            {
+                "satellite": "TanSat",
+                "observation_id": "exposure-1",
+                "acq_time": "2026-04-24T00:00:00Z",
+                "lon": 116.391,
+                "lat": 39.907,
+                "xco2": 420.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CarbonSatellitePartitionService().run(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CarbonPartitionConfig(product_type="tansat_xco2", grid_type="isea4h", grid_level=7),
+        workers=1,
+    )
+
+    row = json.loads(result.rows_path.read_text(encoding="utf-8"))
+    assert row["product_type"] == "tansat"
+    assert row["satellite"] == "TanSat"
+
+
+def test_tansat_product_rejects_non_tansat_observations(tmp_path: Path):
+    path = tmp_path / "oco2.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "satellite": "OCO2",
+                "observation_id": "snd-1",
+                "acq_time": "2026-04-24T00:00:00Z",
+                "lon": 116.391,
+                "lat": 39.907,
+                "xco2": 420.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="TanSat product requires TanSat observations"):
+        load_observations_from_file(path, product_type="tansat")
 
 
 def test_carbon_service_rejects_unknown_product_type(tmp_path: Path):
@@ -1016,7 +1070,11 @@ def test_carbon_loader_reads_tansat_style_h5_via_generic_netcdf4_schema(monkeypa
 
     monkeypatch.setattr("cube_split.partition.carbon._netcdf4_dataset_class", lambda: FakeDataset)
 
-    observations = load_oco2_lite_observations(tmp_path / "TanSat_demo.h5", max_observations=2)
+    observations = load_observations_from_file(
+        tmp_path / "TanSat_demo.h5",
+        max_observations=2,
+        product_type="tansat",
+    )
 
     assert len(observations) == 2
     assert observations[0].satellite == "TanSat"
@@ -1075,6 +1133,23 @@ def test_carbon_loader_reads_tansat_style_h5_slice(monkeypatch, tmp_path: Path):
     assert [obs.source_index for obs in observations] == [1, 2]
     assert observations[0].source_uri == "s3://cube/cube/source/carbon/TanSat_demo.h5"
     assert observations[1].acq_time == "2020-01-01T00:02:00Z"
+
+
+def test_carbon_ray_source_slice_planning_supports_tansat(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._oco2_lite_observation_count_for_source",
+        lambda source_uri: 3 if source_uri.endswith("tansat.h5") else None,
+    )
+
+    slices = _plan_oco2_lite_source_slices(
+        ["s3://cube/cube/source/carbon/tansat.h5"],
+        CarbonPartitionConfig(product_type="tansat", partition_backend="ray", partition_chunk_size=2),
+    )
+
+    assert slices == [
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/tansat.h5", 0, 2),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/tansat.h5", 2, 3),
+    ]
 
 
 @pytest.mark.filterwarnings("ignore:numpy.ndarray size changed.*:RuntimeWarning")

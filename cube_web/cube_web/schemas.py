@@ -4,8 +4,9 @@ from typing import Any, Literal
 
 from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cube_split.partition.carbon_products import normalize_carbon_product_type
 from cube_web.services.partition_contracts import StrictPartitionRequest as StrictPartitionRequest
 
 
@@ -86,6 +87,11 @@ class SpatiotemporalQueryRequest(CubeWebModel):
     grid_level: int = Field(default=5, ge=0)
     cube_version: str = "v1"
     limit: int = Field(default=1000, ge=1, le=10000)
+
+    @field_validator("product_type")
+    @classmethod
+    def _normalize_carbon_product_type(cls, value: str) -> str:
+        return normalize_carbon_product_type(value)
 
     @model_validator(mode="after")
     def _validate_grid_level(self) -> "SpatiotemporalQueryRequest":

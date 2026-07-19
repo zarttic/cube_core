@@ -7,6 +7,8 @@ from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cube_split.partition.carbon_products import normalize_carbon_product_type
+
 GridType = Literal["geohash", "mgrs", "isea4h"]
 PartitionMethod = Literal["logical", "entity"]
 
@@ -76,12 +78,17 @@ class DatasetInput(StrictModel):
 
     @model_validator(mode="after")
     def bands_reference_assets(self) -> "DatasetInput":
+        normalized_product_type = self.product_type
         asset_ids = {asset.source_asset_id for asset in self.assets}
         unknown = sorted({band.source_asset_id for band in self.bands} - asset_ids)
         if unknown:
             raise ValueError(f"bands reference unknown source assets: {unknown}")
         for asset in self.assets:
             if self.data_type == "carbon":
+                try:
+                    normalized_product_type = normalize_carbon_product_type(self.product_type or "xco2")
+                except ValueError as exc:
+                    raise ValueError(str(exc)) from exc
                 if asset.cog_uri is not None or asset.source_uri is None:
                     raise ValueError("carbon assets require source_uri and must not use cog_uri")
                 if asset.source_kind != "raw" or asset.source_format not in {"netcdf", "hdf5"}:
@@ -99,6 +106,8 @@ class DatasetInput(StrictModel):
                 raise ValueError("non-carbon COG assets require bbox and crs")
         if self.data_type != "carbon" and self.partition is not None and self.partition.max_observations is not None:
             raise ValueError("max_observations is only valid for carbon datasets")
+        if normalized_product_type != self.product_type:
+            return self.model_copy(update={"product_type": normalized_product_type})
         return self
 
 
