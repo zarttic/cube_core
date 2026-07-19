@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from cube_web.routes.auth import current_actor, require_admin
 from cube_web.services.scene_contracts import (
+    CarbonFootprintPreviewRequest,
     PartitionDraftCreateRequest,
     PartitionDraftSubmittedRequest,
     ScenePartitionRunRequest,
@@ -41,6 +42,14 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
             data_type=data_type,
             dataset_id=dataset_id,
         )
+
+    @router.post("/carbon/footprints")
+    def preview_carbon_footprints(payload: CarbonFootprintPreviewRequest, request: Request) -> dict:
+        require_admin(current_actor(request))
+        try:
+            return service.preview_carbon_footprints(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/runs", response_model=ScenePartitionRunResponse, status_code=202)
     def submit_partition_run(payload: ScenePartitionRunRequest, request: Request) -> dict:

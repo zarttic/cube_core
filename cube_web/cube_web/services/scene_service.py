@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from math import isfinite
+from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from cube_split.jobs.ray_partition_core import resolve_asset_source_path
+from cube_split.partition.carbon import CarbonSatelliteObservation, load_observations_from_file
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
-from cube_web.services.scene_contracts import PartitionDraftCreateRequest, ScenePartitionRunRequest
+from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
 
 
 class SceneRepository(Protocol):
@@ -30,6 +34,12 @@ class SceneRepository(Protocol):
         status: str | None = None,
         data_type: str | None = None,
         dataset_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def list_carbon_preview_sources(
+        self,
+        source_batch_ids: tuple[str, ...],
+        scene_ids: tuple[str, ...],
     ) -> list[dict[str, Any]]: ...
 
     def materialize_partition_datasets(self, request: ScenePartitionRunRequest) -> tuple[DatasetInput, ...]: ...
@@ -176,6 +186,47 @@ class SceneDomainService:
             "scene_count": len(scenes),
         }
 
+    def preview_carbon_footprints(self, request: CarbonFootprintPreviewRequest) -> dict[str, Any]:
+        selected_scene_ids = set(request.scene_ids)
+        for batch_id in request.source_batch_ids:
+            self.get_load_batch(batch_id)
+        sources = self.repository.list_carbon_preview_sources(request.source_batch_ids, request.scene_ids)
+        available_scene_ids = {str(source.get("scene_id") or "") for source in sources}
+        missing = sorted(selected_scene_ids - available_scene_ids)
+        if missing:
+            raise ValueError(f"carbon scenes are not eligible in source_batch_ids: {missing}")
+
+        items: list[dict[str, Any]] = []
+        truncated = False
+        seen_sources: set[tuple[str, str]] = set()
+        for source in sources:
+            if len(items) >= request.limit:
+                truncated = True
+                break
+            scene_id = str(source["scene_id"])
+            source_batch_id = str(source["load_batch_id"])
+            source_uri = str(source.get("source_uri") or "").strip()
+            if not source_uri:
+                raise ValueError(f"carbon scene has no source_uri: {scene_id}")
+            source_key = (source_uri, str(source.get("product_type") or "xco2"))
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            local_path = Path(resolve_asset_source_path(
+                source_uri,
+                {"source_cache_dir": "/tmp/cube_split_source_cache/preview"},
+            ))
+            remaining = request.limit - len(items)
+            observations = load_observations_from_file(
+                local_path,
+                max_observations=remaining,
+                product_type=source_key[1],
+            )
+            items.extend(_carbon_footprint_item(scene_id, source_batch_id, observation) for observation in observations)
+            if len(observations) >= remaining:
+                truncated = True
+        return {"items": items, "truncated": truncated}
+
     def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
         datasets = self.repository.materialize_partition_datasets(request)
         strict_request = build_partition_execution_request(request, datasets)
@@ -295,6 +346,35 @@ class SceneDomainService:
         if draft is None:
             raise HTTPException(status_code=404, detail=f"Pending partition draft not found: {draft_id}")
         return draft
+
+
+def _carbon_footprint_item(
+    scene_id: str,
+    source_batch_id: str,
+    observation: CarbonSatelliteObservation,
+) -> dict[str, Any]:
+    if observation.footprint:
+        coordinates = [[float(point[0]), float(point[1])] for point in observation.footprint]
+        if len(coordinates) < 3 or not all(
+            isfinite(longitude) and isfinite(latitude) and -180 <= longitude <= 180 and -90 <= latitude <= 90
+            for longitude, latitude in coordinates
+        ):
+            raise ValueError(f"carbon observation has an invalid footprint: {observation.observation_id}")
+        if coordinates[0] != coordinates[-1]:
+            coordinates.append(coordinates[0])
+        geometry: dict[str, Any] = {"type": "Polygon", "coordinates": [coordinates]}
+    else:
+        longitude, latitude = float(observation.lon), float(observation.lat)
+        if not isfinite(longitude) or not isfinite(latitude) or not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
+            raise ValueError(f"carbon observation has invalid coordinates: {observation.observation_id}")
+        geometry = {"type": "Point", "coordinates": [longitude, latitude]}
+    return {
+        "scene_id": scene_id,
+        "source_batch_id": source_batch_id,
+        "observation_id": observation.observation_id,
+        "source_index": observation.source_index,
+        "geometry": geometry,
+    }
 
 
 def build_partition_execution_request(

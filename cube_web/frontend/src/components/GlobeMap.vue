@@ -207,8 +207,29 @@ function addPolygon(coordinates, item, id) {
   });
 }
 
+function addPoint(coordinates, item, id) {
+  const [lng, lat] = coordinates || [];
+  if (!isValidLatLng(lat, lng)) return;
+  overlaySource.entities.add({
+    id,
+    position: Cartesian3.fromDegrees(Number(lng), Number(lat), 0),
+    point: {
+      pixelSize: 8,
+      color: cssColor(item.color || '#2f91ea', 0.95),
+      outlineColor: Color.BLACK.withAlpha(0.7),
+      outlineWidth: 1,
+      heightReference: HeightReference.CLAMP_TO_GROUND,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+    },
+  });
+}
+
 function addGeometry(item, itemIndex) {
   flattenGeoJson(item.geometry).forEach((geometry, geometryIndex) => {
+    if (geometry.type === 'Point') {
+      addPoint(geometry.coordinates, item, `point-${itemIndex}-${geometryIndex}`);
+      return;
+    }
     if (geometry.type === 'Polygon') {
       addPolygon(geometry.coordinates, item, `polygon-${itemIndex}-${geometryIndex}`);
       return;

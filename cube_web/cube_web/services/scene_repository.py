@@ -667,6 +667,26 @@ class OpenGaussSceneRepository:
             scene["bands"] = scene_bands
         return scenes
 
+    def list_carbon_preview_sources(
+        self,
+        source_batch_ids: tuple[str, ...],
+        scene_ids: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        return self._read(
+            """
+            SELECT lbs.load_batch_id,lbs.scene_id,lbs.source_uri,d.product_type
+            FROM load_batch_scenes lbs
+            JOIN scenes s ON s.scene_id=lbs.scene_id
+            JOIN datasets d ON d.dataset_id=s.dataset_id
+            WHERE lbs.load_batch_id=ANY(%s::text[])
+              AND lbs.scene_id=ANY(%s::text[])
+              AND lbs.load_status IN ('succeeded','duplicate')
+              AND d.data_type='carbon'
+            ORDER BY lbs.load_batch_id,lbs.scene_id
+            """,
+            (list(source_batch_ids), list(scene_ids)),
+        )
+
     def materialize_partition_datasets(self, request: ScenePartitionRunRequest) -> tuple[DatasetInput, ...]:
         selected_scene_ids = [scene_id for item in request.datasets for scene_id in item.scene_ids]
         batch_rows = self._read(

@@ -178,6 +178,72 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });
 
+  it('loads selected carbon source footprints onto the map', async () => {
+    const store = usePartitionStore();
+    store.form.datasets = [{
+      dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
+      scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
+      assets: [{ source_asset_id: 'asset-carbon', bbox: [100, 20, 101, 21] }],
+      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+    }];
+    requestJson.mockImplementation(async (path) => (
+      path === '/v1/partition/carbon/footprints'
+        ? { items: [{ observation_id: 'obs-1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [101, 21], [100, 20]]] } }] }
+        : { cells: [] }
+    ));
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true, BatchAssetsPanel: true,
+          QualityView: true, DataManagementView: true, 'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
+    await wrapper.get('[data-testid="load-carbon-footprints"]').trigger('click');
+    await flushPromises();
+
+    expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/footprints', expect.objectContaining({
+      source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'], limit: 2000,
+    }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+  });
+
+  it('discards a carbon footprint response after the selected scenes change', async () => {
+    const store = usePartitionStore();
+    store.form.datasets = [{
+      dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon',
+      scenes: [{ scene_id: 'scene-a', source_batch_ids: ['load-a'] }],
+      assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
+      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+    }];
+    let resolvePreview;
+    requestJson.mockReturnValue(new Promise((resolve) => { resolvePreview = resolve; }));
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true, BatchAssetsPanel: true,
+          QualityView: true, DataManagementView: true, 'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
+    await wrapper.get('[data-testid="load-carbon-footprints"]').trigger('click');
+    wrapper.vm.updateDatasets([{
+      dataset_id: 'carbon-b', dataset_title: 'TanSat B', data_type: 'carbon',
+      scenes: [{ scene_id: 'scene-b', source_batch_ids: ['load-b'] }],
+      assets: [{ source_asset_id: 'asset-b', bbox: [110, 30, 111, 31] }],
+      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+    }]);
+    resolvePreview({ items: [{ observation_id: 'stale', geometry: { type: 'Point', coordinates: [100.5, 20.5] } }] });
+    await flushPromises();
+
+    expect(wrapper.vm.activeCarbonFootprints).toEqual([]);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+  });
+
   it('loads independent Geohash, MGRS and ISEA4H layers together at their exact selected levels', async () => {
     requestJson.mockImplementation(async (_path, payload) => {
       return {

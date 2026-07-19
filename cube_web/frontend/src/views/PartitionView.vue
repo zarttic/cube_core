@@ -31,11 +31,14 @@ const store = usePartitionStore();
 const activeModule = ref('optical');
 const datasetDrawerVisible = ref(false);
 const gridPreviewLoading = ref(false);
+const carbonFootprintLoading = ref(false);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
+const carbonFootprintsByModule = ref({});
 const pendingDrafts = ref([]);
 const activeDraftId = ref('');
 let gridPreviewGeneration = 0;
+let carbonFootprintGeneration = 0;
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
 const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [value, {
   gridType: value === 'carbon' ? 'isea4h' : 'geohash',
@@ -162,11 +165,29 @@ const selectedGeometries = computed(() => store.form.datasets.flatMap((dataset, 
 )));
 const activeGridGeometries = computed(() => gridGeometriesByModule.value[activeModule.value] || []);
 const gridGeometries = computed(() => Object.values(gridGeometriesByModule.value).flat());
-// The grid preview already covers the selected source extent. Keeping repeated
-// global footprints in the same Cesium ground batch can cause mismatched
-// attribute lists and adds no visual information.
+const activeCarbonFootprints = computed(() => carbonFootprintsByModule.value[activeModule.value] || []);
+const carbonFootprintGeometries = computed(() => activeCarbonFootprints.value.flatMap((item, index) => {
+  if (!item.geometry) return [];
+  return [{
+    geometry: item.geometry,
+    label: item.observation_id || `足迹 ${index + 1}`,
+    color: '#16836f',
+    fillColor: '#16836f',
+    fillOpacity: 0.18,
+    weight: 1.25,
+  }];
+}));
+const sourcePreviewGeometries = computed(() => (
+  activeModule.value === 'carbon' && carbonFootprintGeometries.value.length
+    ? carbonFootprintGeometries.value
+    : selectedGeometries.value
+));
+// Carbon source scenes are organized as observation footprints. A bbox is only
+// used until the raw source footprints have been loaded.
 const mapGeometries = computed(() => (
-  gridGeometries.value.length ? gridGeometries.value : selectedGeometries.value
+  gridGeometries.value.length
+    ? [...gridGeometries.value, ...(activeModule.value === 'carbon' ? carbonFootprintGeometries.value : [])]
+    : sourcePreviewGeometries.value
 ));
 const activeGridLegends = computed(() => {
   const legends = new Map();
@@ -192,10 +213,47 @@ const selectedSourceBatchIds = computed(() => [...new Set(activeDatasets.value.f
   ])
 )).map((value) => String(value || '').trim()).filter(Boolean))]);
 
+function selectedCarbonSceneIds() {
+  return [...new Set(activeDatasets.value.flatMap((dataset) => (
+    (dataset.scenes || []).map((scene) => String(scene.scene_id || '').trim())
+  )).filter(Boolean))];
+}
+
 function selectModule(moduleName) {
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
   gridPreviewLoading.value = false;
+}
+
+async function loadCarbonFootprints() {
+  const sceneIds = selectedCarbonSceneIds();
+  if (!sceneIds.length || !selectedSourceBatchIds.value.length) {
+    ElMessage.warning('请先选择碳卫星数据集和景。');
+    return;
+  }
+  const generation = ++carbonFootprintGeneration;
+  carbonFootprintLoading.value = true;
+  try {
+    const response = await requestJson('/v1/partition/carbon/footprints', {
+      source_batch_ids: selectedSourceBatchIds.value,
+      scene_ids: sceneIds,
+      limit: 2000,
+    });
+    if (generation !== carbonFootprintGeneration || activeModule.value !== 'carbon') return;
+    carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
+    const suffix = response.truncated ? '，已按上限截断' : '';
+    ElMessage.success(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}。`);
+  } catch (error) {
+    if (generation === carbonFootprintGeneration) ElMessage.error(error.message || '加载碳卫星足迹失败。');
+  } finally {
+    if (generation === carbonFootprintGeneration) carbonFootprintLoading.value = false;
+  }
+}
+
+function resetCarbonFootprints() {
+  carbonFootprintGeneration += 1;
+  carbonFootprintLoading.value = false;
+  carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: [] };
 }
 
 function selectDraft(draft) {
@@ -212,6 +270,7 @@ function selectDraft(draft) {
   datasetDrawerVisible.value = false;
   gridPreviewGeneration += 1;
   setModuleGridPreview(draft.data_type, []);
+  if (draft.data_type === 'carbon') resetCarbonFootprints();
   ElMessage.success('已载入待剖分批次，请确认后提交。');
 }
 
@@ -250,6 +309,7 @@ function reset() {
   store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== currentType);
   gridPreviewGeneration += 1;
   setModuleGridPreview(currentType, []);
+  if (currentType === 'carbon') resetCarbonFootprints();
 }
 
 async function loadGridPreview(partition, bbox) {
@@ -356,6 +416,7 @@ function updateDatasets(datasets) {
   }
   gridPreviewGeneration += 1;
   setModuleGridPreview(activeModule.value, []);
+  if (activeModule.value === 'carbon') resetCarbonFootprints();
 }
 
 onMounted(() => {
@@ -437,6 +498,11 @@ onMounted(() => {
                       </el-tag>
                       <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">加载格网</el-button>
                       <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
+                      <template v-if="activeModule === 'carbon'">
+                        <el-tag size="small" type="warning">{{ activeCarbonFootprints.length }} 个足迹</el-tag>
+                        <el-button data-testid="load-carbon-footprints" size="small" :loading="carbonFootprintLoading" @click="loadCarbonFootprints">预览足迹</el-button>
+                        <el-button data-testid="reset-carbon-footprints" size="small" :disabled="!activeCarbonFootprints.length" @click="resetCarbonFootprints">清除足迹</el-button>
+                      </template>
                     </div>
                   </div>
                 </div>

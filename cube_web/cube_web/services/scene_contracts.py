@@ -70,6 +70,20 @@ class ScenePartitionRunResponse(SceneStrictModel):
     operation: str
 
 
+class CarbonFootprintPreviewRequest(SceneStrictModel):
+    source_batch_ids: tuple[str, ...] = Field(min_length=1)
+    scene_ids: tuple[str, ...] = Field(min_length=1)
+    limit: int = Field(default=2000, ge=1, le=5000)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> "CarbonFootprintPreviewRequest":
+        if len(set(self.source_batch_ids)) != len(self.source_batch_ids):
+            raise ValueError("duplicate source_batch_id")
+        if len(set(self.scene_ids)) != len(self.scene_ids):
+            raise ValueError("duplicate scene_id")
+        return self
+
+
 class PartitionDraftCreateRequest(SceneStrictModel):
     data_type: Literal["optical", "radar", "product", "carbon"]
     draft_name: str = Field(min_length=1, max_length=160)

@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from cube_split.partition.carbon import CarbonSatelliteObservation
 from cube_web.routes.auth import Actor
 from cube_web.routes.partition import import_partition_schema_payload
 from cube_web.routes.scene_partition import create_scene_partition_router
@@ -145,8 +146,21 @@ class _Repository:
                 "dataset_code": "CARBON",
                 "dataset_title": "Carbon",
                 "data_type": "carbon",
+                "product_type": "tansat",
+                "source_uri": "s3://cube/source/scene-carbon.nc",
+                "load_status": "succeeded",
             },
         ]
+
+    def list_carbon_preview_sources(self, source_batch_ids, scene_ids):
+        if tuple(source_batch_ids) != ("load-001",) or tuple(scene_ids) != ("scene-carbon",):
+            return []
+        return [{
+            "load_batch_id": "load-001",
+            "scene_id": "scene-carbon",
+            "source_uri": "s3://cube/source/load-001/scene-carbon.nc",
+            "product_type": "tansat",
+        }]
 
     def materialize_partition_datasets(self, request):
         if self.fail_materialize:
@@ -241,6 +255,50 @@ def test_load_batch_scenes_are_grouped_by_dataset(api) -> None:
     assert body["scene_count"] == 2
     assert [item["dataset_id"] for item in body["datasets"]] == ["dataset-optical", "dataset-carbon"]
     assert body["datasets"][0]["scenes"][0]["scene_id"] == "scene-optical"
+
+
+def test_carbon_footprint_preview_reads_selected_source_scene(api, monkeypatch, tmp_path) -> None:
+    client, _, _ = api
+    source_path = tmp_path / "tansat.nc"
+    source_path.write_bytes(b"fixture")
+    source_uris: list[str] = []
+
+    def resolve_source(source_uri, *_args, **_kwargs):
+        source_uris.append(source_uri)
+        return str(source_path)
+
+    monkeypatch.setattr("cube_web.services.scene_service.resolve_asset_source_path", resolve_source)
+    monkeypatch.setattr(
+        "cube_web.services.scene_service.load_observations_from_file",
+        lambda *_args, **_kwargs: [
+            CarbonSatelliteObservation(
+                satellite="TanSat", observation_id="obs-1", acq_time="2026-07-01T00:00:00Z",
+                lon=100.5, lat=20.5, xco2=420.0,
+                footprint=[[100.0, 20.0], [101.0, 20.0], [100.5, 21.0]], source_index=3,
+            ),
+            CarbonSatelliteObservation(
+                satellite="TanSat", observation_id="obs-2", acq_time="2026-07-01T00:00:01Z",
+                lon=100.75, lat=20.25, xco2=421.0, source_index=4,
+            ),
+        ],
+    )
+
+    response = client.post("/v1/partition/carbon/footprints", json={
+        "source_batch_ids": ["load-001"], "scene_ids": ["scene-carbon"], "limit": 50,
+    })
+
+    assert response.status_code == 200
+    assert source_uris == ["s3://cube/source/load-001/scene-carbon.nc"]
+    assert response.json() == {
+        "items": [{
+            "scene_id": "scene-carbon", "source_batch_id": "load-001", "observation_id": "obs-1", "source_index": 3,
+            "geometry": {"type": "Polygon", "coordinates": [[[100.0, 20.0], [101.0, 20.0], [100.5, 21.0], [100.0, 20.0]]]},
+        }, {
+            "scene_id": "scene-carbon", "source_batch_id": "load-001", "observation_id": "obs-2", "source_index": 4,
+            "geometry": {"type": "Point", "coordinates": [100.75, 20.25]},
+        }],
+        "truncated": False,
+    }
 
 
 def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None:
