@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Cube 遥感数据剖分、质检与入库使用手册" />
+  <title>Cube 使用手册</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="doc-extra.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#/start" aria-label="Cube 使用手册首页"><span class="brand-mark">C</span><span><strong>Cube</strong><small>使用手册</small></span></a>
+      <div class="topbar-meta"><span class="version-dot"></span><span>面向 Cube Web 生产工作流</span><a href="https://github.com/zarttic/cube_core" target="_blank" rel="noreferrer">查看源码 ↗</a></div>
+      <button class="menu-button" id="menu-toggle" type="button" aria-label="打开目录">☰</button>
+    </header>
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-intro"><span class="eyebrow">从这里开始</span><p>第一次使用？按顺序完成左侧 1–5 步即可跑通一批数据。</p></div>
+        <label class="search-box" for="doc-search"><span aria-hidden="true">⌕</span><input id="doc-search" type="search" placeholder="搜索文档" autocomplete="off" /><kbd>/</kbd></label>
+        <nav id="nav" aria-label="文档目录"></nav>
+        <div class="sidebar-footer"><span class="status-led"></span><span>契约版本 2026.07</span></div>
+      </aside>
+      <main class="main" id="main-content" tabindex="-1"></main>
+      <aside class="toc" id="toc" aria-label="本页目录"></aside>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

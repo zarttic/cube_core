@@ -14,8 +14,6 @@ export function withFixedPartitionOptions(partition = {}) {
   return { ...partition, ...fixedPartitionOptions };
 }
 
-const mgrsLabels = ['100 km', '10 km', '1 km', '100 m', '10 m', '1 m'];
-
 export function gridDefinition(gridType) {
   return gridDefinitions.find((item) => item.value === gridType) || null;
 }
@@ -27,11 +25,9 @@ export function derivedPartitionMethod(gridType) {
 }
 
 export function nativeLevelLabel(gridType, level) {
+  if (!gridDefinition(gridType)) return '';
   const numericLevel = Number(level);
-  if (gridType === 'geohash') return `第 ${numericLevel} 级 · 精度 ${numericLevel}`;
-  if (gridType === 'mgrs') return `第 ${numericLevel} 级 · ${mgrsLabels[numericLevel] || ''}`;
-  if (gridType === 'isea4h') return `第 ${numericLevel} 级 · 分辨率 ${numericLevel}`;
-  return '';
+  return `层级 ${numericLevel}`;
 }
 
 export function recommendedGridLevel(resolutionM, gridType) {

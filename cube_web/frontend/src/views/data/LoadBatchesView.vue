@@ -81,7 +81,6 @@ onUnmounted(() => {
     <header class="section-toolbar">
       <div>
         <h2>载入批次</h2>
-        <span>已载入 {{ batches.length }} 个批次</span>
       </div>
       <div class="toolbar-actions">
         <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索批次名称或 ID" />

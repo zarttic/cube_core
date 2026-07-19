@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { Refresh, Search } from '@element-plus/icons-vue';
+import { Collection, Picture, Refresh, Search } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useIngestRunsStore } from '@/stores/ingestRuns';
 import { formatShanghaiTime } from '@/utils/time';
+import { bandDisplayLabel, dataUnitTypeLabel } from '@/utils/bands';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 
 defineProps({ embedded: Boolean, title: { type: String, default: '数据入库' } });
@@ -14,6 +15,8 @@ const store = useIngestRunsStore();
 const manualDialogVisible = ref(false);
 const manualCollectionId = ref('');
 const manualBandUnitIds = ref([]);
+const collapsedManualDatasets = ref(new Set());
+const collapsedManualScenes = ref(new Set());
 
 function refresh() { store.pageState.page = 1; return store.loadList(); }
 function setPage(page) { store.pageState.page = page; return store.loadList(); }
@@ -23,6 +26,78 @@ onMounted(() => { refresh().catch(() => {}); store.loadManualCandidates().catch(
 onUnmounted(() => store.dispose());
 
 const selectedCollection = computed(() => store.manualCandidates.find((item) => item.partition_run_id === manualCollectionId.value));
+const selectableManualUnits = computed(() => (selectedCollection.value?.units || []).filter((unit) => (
+  ['pass', 'warn'].includes(unit.quality_status) && unit.ingest_status !== 'completed'
+)));
+const manualDatasetGroups = computed(() => {
+  const datasets = new Map();
+  selectableManualUnits.value.forEach((unit) => {
+    const dataset = datasets.get(unit.dataset_id) || {
+      dataset_id: unit.dataset_id,
+      dataset_code: unit.dataset_code,
+      dataset_title: unit.dataset_title,
+      data_type: unit.data_type,
+      scenes: new Map(),
+    };
+    const scene = dataset.scenes.get(unit.scene_id) || {
+      scene_id: unit.scene_id,
+      scene_key: unit.scene_key,
+      bands: [],
+    };
+    scene.bands.push(unit);
+    dataset.scenes.set(unit.scene_id, scene);
+    datasets.set(unit.dataset_id, dataset);
+  });
+  return [...datasets.values()].map((dataset) => ({
+    ...dataset,
+    scenes: [...dataset.scenes.values()].map((scene) => ({
+      ...scene,
+      bands: scene.bands.sort((left, right) => Number(left.display_order || 0) - Number(right.display_order || 0)),
+    })),
+  }));
+});
+
+function toggleManualDataset(datasetId) {
+  const next = new Set(collapsedManualDatasets.value);
+  if (next.has(datasetId)) next.delete(datasetId); else next.add(datasetId);
+  collapsedManualDatasets.value = next;
+}
+
+function toggleManualScene(dataset, scene) {
+  const key = `${dataset.dataset_id}:${scene.scene_id}`;
+  const next = new Set(collapsedManualScenes.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  collapsedManualScenes.value = next;
+}
+
+function manualSelectionState(units = []) {
+  const ids = units.map((unit) => unit.band_unit_id).filter(Boolean);
+  const selected = new Set(manualBandUnitIds.value);
+  const selectedCount = ids.filter((id) => selected.has(id)).length;
+  return {
+    checked: ids.length > 0 && selectedCount === ids.length,
+    indeterminate: selectedCount > 0 && selectedCount < ids.length,
+    disabled: ids.length === 0,
+  };
+}
+
+function toggleManualSelection(units, checked) {
+  const next = new Set(manualBandUnitIds.value);
+  units.map((unit) => unit.band_unit_id).filter(Boolean).forEach((id) => {
+    if (checked) next.add(id); else next.delete(id);
+  });
+  manualBandUnitIds.value = [...next];
+}
+
+function manualBandLabel(unit) {
+  return bandDisplayLabel(unit);
+}
+
+function changeManualCollection() {
+  manualBandUnitIds.value = [];
+  collapsedManualDatasets.value = new Set();
+  collapsedManualScenes.value = new Set();
+}
 async function submitManualIngest() {
   try {
     await store.requestManualCollection(manualCollectionId.value, manualBandUnitIds.value);
@@ -39,13 +114,15 @@ async function openManualIngest(partitionRunId = '') {
   manualDialogVisible.value = true;
   manualCollectionId.value = partitionRunId;
   manualBandUnitIds.value = [];
+  collapsedManualDatasets.value = new Set();
+  collapsedManualScenes.value = new Set();
   try { await store.loadManualCandidates(); } catch (requestError) { ElMessage.error(requestError.message || '可入库数据加载失败'); }
 }
 </script>
 
 <template>
   <section class="ingest-view" :class="{ embedded }">
-    <header class="view-header"><div><h2>{{ title }}</h2><span>{{ store.pageState.total }} 条数据入库记录</span></div><div class="header-actions"><el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
+    <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
     <section class="pending-ingest-panel" aria-label="待手动入库">
       <div class="pending-ingest-heading"><div><h3>待手动入库</h3><span>剖分完成且质检通过的剖分批次数据集合</span></div><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
       <div v-if="store.manualCandidatesLoading" class="pending-state">正在加载待入库集合</div>
@@ -84,12 +161,55 @@ async function openManualIngest(partitionRunId = '') {
     <IngestRunDetailDrawer :visible="store.detailVisible" :run-id="store.selectedRunId" :detail="store.detail" :loading="store.detailLoading" :action-loading="store.actionLoading" @close="store.closeDetail" @retry-band-units="(bandUnitIds) => store.retryFailedBandUnits(bandUnitIds).catch(() => {})" @cancel="(reason) => store.cancelRun(reason).catch(() => {})" />
       </div>
     </details>
-    <el-dialog v-model="manualDialogVisible" title="手动入库" width="460px" append-to-body>
+    <el-dialog v-model="manualDialogVisible" title="手动入库" width="760px" append-to-body>
       <el-form label-width="92px" @submit.prevent="submitManualIngest">
-        <el-form-item label="剖分集合"><el-select v-model="manualCollectionId" filterable clearable :loading="store.manualCandidatesLoading" placeholder="选择剖分批次数据集合" style="width: 100%">
+        <el-form-item label="剖分集合"><el-select v-model="manualCollectionId" filterable clearable :loading="store.manualCandidatesLoading" placeholder="选择剖分批次数据集合" style="width: 100%" @change="changeManualCollection">
           <el-option v-for="collection in store.manualCandidates" :key="collection.partition_run_id" :label="collection.partition_run_id" :value="collection.partition_run_id"><span>{{ collection.partition_run_id }}</span><small class="candidate-meta">{{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count }} 个质检通过</small></el-option>
         </el-select></el-form-item>
-        <el-form-item v-if="selectedCollection" label="入库波段"><el-select v-model="manualBandUnitIds" multiple collapse-tags filterable placeholder="选择要入库的波段数据" style="width: 100%"><el-option v-for="unit in selectedCollection.units.filter((item) => ['pass', 'warn'].includes(item.quality_status) && item.ingest_status !== 'completed')" :key="unit.band_unit_id" :label="unit.dataset_code + ' / ' + unit.scene_id + ' / ' + unit.band_unit_id" :value="unit.band_unit_id" /></el-select></el-form-item>
+        <el-form-item v-if="selectedCollection" label="入库数据">
+          <div class="manual-ingest-tree" data-testid="manual-ingest-tree">
+            <div class="manual-tree-summary">{{ manualDatasetGroups.length }} 个数据集 · {{ selectableManualUnits.length }} 个可入库波段 · 已选 {{ manualBandUnitIds.length }} 个波段</div>
+            <section v-for="dataset in manualDatasetGroups" :key="dataset.dataset_id" class="manual-dataset-tree">
+              <div class="manual-tree-header-row">
+                <button type="button" class="manual-tree-header" :aria-expanded="!collapsedManualDatasets.has(dataset.dataset_id)" @click="toggleManualDataset(dataset.dataset_id)">
+                  <el-icon><Collection /></el-icon>
+                  <span><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><small>{{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + scene.bands.length, 0) }} 个波段</small></span>
+                </button>
+                <el-checkbox
+                  class="manual-select-all"
+                  :model-value="manualSelectionState(dataset.scenes.flatMap((scene) => scene.bands)).checked"
+                  :indeterminate="manualSelectionState(dataset.scenes.flatMap((scene) => scene.bands)).indeterminate"
+                  :disabled="manualSelectionState(dataset.scenes.flatMap((scene) => scene.bands)).disabled"
+                  :data-testid="`manual-select-dataset-${dataset.dataset_id}`"
+                  @change="toggleManualSelection(dataset.scenes.flatMap((scene) => scene.bands), $event)"
+                >全选数据集</el-checkbox>
+              </div>
+              <div v-show="!collapsedManualDatasets.has(dataset.dataset_id)" class="manual-scene-list">
+                <section v-for="scene in dataset.scenes" :key="scene.scene_id" class="manual-scene-tree">
+                  <div class="manual-scene-header-row">
+                    <button type="button" class="manual-scene-header" :aria-expanded="!collapsedManualScenes.has(`${dataset.dataset_id}:${scene.scene_id}`)" @click="toggleManualScene(dataset, scene)">
+                      <el-icon><Picture /></el-icon><span>{{ scene.scene_key || scene.scene_id }}</span>
+                    </button>
+                    <el-checkbox
+                      class="manual-select-all"
+                      :model-value="manualSelectionState(scene.bands).checked"
+                      :indeterminate="manualSelectionState(scene.bands).indeterminate"
+                      :disabled="manualSelectionState(scene.bands).disabled"
+                      :data-testid="`manual-select-scene-${scene.scene_id}`"
+                      @change="toggleManualSelection(scene.bands, $event)"
+                    >全选该景</el-checkbox>
+                  </div>
+                  <el-checkbox-group v-show="!collapsedManualScenes.has(`${dataset.dataset_id}:${scene.scene_id}`)" v-model="manualBandUnitIds" class="manual-band-list">
+                    <el-checkbox v-for="unit in scene.bands" :key="unit.band_unit_id" :value="unit.band_unit_id" :data-testid="`manual-ingest-band-${unit.band_unit_id}`">
+                      <span class="manual-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ manualBandLabel(unit) }}</span>
+                    </el-checkbox>
+                  </el-checkbox-group>
+                </section>
+              </div>
+            </section>
+            <div v-if="!manualDatasetGroups.length" class="manual-tree-empty">当前集合没有可手动入库的波段</div>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer><el-button @click="manualDialogVisible = false">取消</el-button><el-button type="primary" :loading="store.actionLoading" :disabled="!manualCollectionId || !manualBandUnitIds.length" @click="submitManualIngest">提交入库</el-button></template>
     </el-dialog>
@@ -129,5 +249,26 @@ async function openManualIngest(partitionRunId = '') {
 .run-cell span, .run-progress > span { color: #8993a4; font-size: 12px; }
 .run-progress { min-width: 130px; }
 .run-progress :deep(.el-progress__text) { min-width: 36px; font-size: 12px !important; }
-@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } }
+.manual-ingest-tree { width: 100%; max-height: 480px; overflow: auto; border: 1px solid #dfe4ec; border-radius: 5px; }
+.manual-tree-summary { padding: 9px 12px; color: #748095; font-size: 12px; background: #fafbfd; border-bottom: 1px solid #e6eaf0; }
+.manual-dataset-tree + .manual-dataset-tree { border-top: 1px solid #e6eaf0; }
+.manual-tree-header-row, .manual-scene-header-row { display: flex; align-items: center; gap: 10px; }
+.manual-tree-header, .manual-scene-header { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; border: 0; background: transparent; color: #263247; cursor: pointer; text-align: left; }
+.manual-tree-header { padding: 10px 12px; }
+.manual-tree-header .el-icon { color: #1769aa; font-size: 17px; }
+.manual-tree-header span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.manual-tree-header strong, .manual-tree-header small { overflow-wrap: anywhere; }
+.manual-tree-header small { color: #8993a4; font-size: 12px; }
+.manual-scene-list { padding: 0 12px 10px 38px; }
+.manual-scene-tree + .manual-scene-tree { margin-top: 8px; }
+.manual-scene-header { padding: 5px 0; font-size: 13px; }
+.manual-scene-header .el-icon { color: #748095; }
+.manual-select-all { flex: none; margin-left: auto; }
+.manual-band-list { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 4px 0 0 24px; }
+.manual-band-list :deep(.el-checkbox) { height: auto; margin: 0; }
+.manual-band-list :deep(.el-checkbox__label) { min-width: 0; white-space: normal; }
+.manual-band-chip { display: flex; flex-direction: column; padding: 3px 7px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
+.manual-band-chip small { color: #748095; font-size: 10px; }
+.manual-tree-empty { padding: 18px; color: #8993a4; text-align: center; font-size: 12px; }
+@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } .manual-tree-header-row, .manual-scene-header-row { align-items: stretch; flex-direction: column; gap: 2px; } .manual-select-all { margin-left: 0; } }
 </style>

@@ -1,0 +1,12 @@
+<h2 id="decision">先判断故障在哪一层</h2>
+<div class="flow"><div class="flow-item"><b>输入</b><span>manifest / object</span></div><div class="flow-item"><b>领域</b><span>Dataset / Scene</span></div><div class="flow-item"><b>执行</b><span>Ray / worker</span></div><div class="flow-item"><b>输出</b><span>tile / index</span></div><div class="flow-item"><b>门禁</b><span>quality / ingest</span></div></div>
+<p>不要看到失败就直接换格网或删除批次。先从 task、quality_run 或 ingest_run 的详情中拿到稳定 ID 和错误码，再决定恢复层。</p>
+<h2 id="catalog">常见现象</h2>
+<table class="grid-table"><thead><tr><th>现象</th><th>可能原因</th><th>正确处理</th></tr></thead><tbody><tr><td>导入 422</td><td>额外字段、缺 datasets、bands 为空、URI 非 s3</td><td>按 detail 修正原 manifest，使用同一 load_batch_id</td></tr><tr><td>导入 503</td><td>Scene 领域存储或 OpenGauss 未配置</td><td>查运行时配置和数据库连接，不重复导入</td></tr><tr><td>任务 queued 很久</td><td>Ray 地址错误、worker 没资源、任务等待</td><td>查 Ray Dashboard 和 worker 日志</td></tr><tr><td>任务 failed</td><td>源对象不可读、缓存空间不足、参数或运行异常</td><td>先定位失败数据单元，只重试最新失败任务</td></tr><tr><td>质量 asset_readability fail</td><td>对象不存在、权限、格式或 checksum 错</td><td>MinIO stat + 节点下载后真实打开验证</td></tr><tr><td>质量 grid_method_agreement fail</td><td>格网和方式不匹配</td><td>修正请求；geohash/mgrs logical，isea4h entity</td></tr><tr><td>入库 409</td><td>波段状态已变化或混入不可重试状态</td><td>刷新详情，只提交当前 failed 的 band_unit</td></tr><tr><td>页面跳门户</td><td>非管理员或 token 失效</td><td>重新认证并确认角色；不要只改前端路由</td></tr></tbody></table>
+<h2 id="s3">s3:// 对象排查</h2>
+<p>Ray worker 不能访问 driver 的本地临时路径。正确链路是 worker 读取稳定 s3 URI → 写入 worker 本地缓存 → 打开/转换 → 上传输出 → 用 s3:// 写 index。对象键包含中文时，先 URL decode，避免二次编码。</p>
+<div class="callout warning"><span class="callout-icon">!</span><p>发生 ENOSPC 时，只清理当前 worker 的 <code>/tmp/cube_split_source_cache</code> 并重试一次。不能递归清理整个 /tmp，也不能删除其他任务目录。</p></div>
+<h2 id="quality-errors">质量错误的修复方向</h2>
+<table class="grid-table"><thead><tr><th>错误类别</th><th>责任方</th><th>恢复动作</th></tr></thead><tbody><tr><td>missing_crs / invalid_crs</td><td>载入方</td><td>修正影像元数据并重新交付</td></tr><tr><td>invalid_cog_uri / source_object_unreadable</td><td>对象存储/载入方</td><td>恢复对象、权限或 checksum 后重质检</td></tr><tr><td>output_count_mismatch / missing_tile_reference</td><td>剖分运行</td><td>原 partition run 的失败单元重试</td></tr><tr><td>carbon_coordinates / carbon_xco2_range</td><td>碳数据提供方</td><td>修复原始观测，不能在剖分层伪造值</td></tr></tbody></table>
+<h2 id="evidence">如何收集证据</h2>
+<ol><li>保存稳定业务 ID 和 UTC 时间。</li><li>保存错误码、rule_code、source_asset_id、band_code，不保存含凭据的原始异常。</li><li>保存输入对象 checksum 和目标 output_version。</li><li>保存重试前后的 attempt、质量序列和波段状态。</li></ol>

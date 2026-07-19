@@ -1,0 +1,23 @@
+<h2 id="before">A. 开始前签字检查</h2>
+<table class="grid-table"><thead><tr><th>检查项</th><th>证据</th><th>结果</th></tr></thead><tbody><tr><td>运行目标已确认</td><td>环境名、操作人、时间窗口</td><td>□</td></tr><tr><td>OpenGauss 可连接</td><td>不打印密码的连接测试</td><td>□</td></tr><tr><td>Ray 集群可连接</td><td>head 地址、worker 数、资源</td><td>□</td></tr><tr><td>MinIO 对象已 stat</td><td>bucket、key、size、checksum</td><td>□</td></tr><tr><td>源数据不是本地路径</td><td>manifest 中全部是 s3://</td><td>□</td></tr><tr><td>认证已开启</td><td>CUBE_WEB_AUTH_REQUIRED 不为 0</td><td>□</td></tr></tbody></table>
+<h2 id="load">B. 导入检查</h2>
+<ol><li>记录 <code>load_batch_id</code>，确认它由载入方生成且可复用。</li><li>确认 datasets 非空；每个 Dataset 有 dataset_id、dataset_code、title、data_type。</li><li>确认每个 Scene 有稳定 scene_id、采集时间和空间信息。</li><li>确认每个资产有 checksum；非碳数据有 COG、bbox、crs；碳数据有 NetCDF/HDF5 source_uri。</li><li>确认 bands 非空且 band_code 稳定，不让前端猜波段语义。</li><li>导入后通过批次详情对账，不以 HTTP 202 单独证明数据完整。</li></ol>
+<h2 id="partition">C. 剖分检查</h2>
+<ol><li>创建或确认 partition_run_id，并记录 source_batch_ids。</li><li>确认选中的 Scene 不重复，BandUnit 不重复。</li><li>确认本次运行的所有 Dataset 使用相同 grid_type 和 requested_grid_level。</li><li>确认格网方式：geohash/mgrs → logical；isea4h → entity。</li><li>确认 max_cells_per_asset=0 是正式任务；小正数只用于 smoke。</li><li>记录 task_id，轮询任务详情，不重复提交。</li></ol>
+<h2 id="quality">D. 质检和入库检查</h2>
+<ol><li>只对 current output 发起质量运行，记录 quality_run_id。</li><li>查看 quality status 和 results_complete；error 或 incomplete 不能进入入库。</li><li>若为 warn，确认是否有批准人、理由和策略允许；不要把 warn 自动当 pass。</li><li>查看待入库集合，选择明确的 band_unit_ids。</li><li>记录 ingest_run_id；部分失败只重试失败波段。</li></ol>
+<h2 id="handoff">E. 交接记录模板</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>环境：production / staging / local
+操作人：
+开始时间 / 结束时间：
+load_batch_id：
+partition_run_id：
+task_id / 最新 attempt：
+output_version：
+quality_run_id / status：
+ingest_run_id / completed bands：
+publication_id / status：
+输入对象与 checksum 清单：
+异常、恢复动作、未解决问题：</code></pre></div>
+<h2 id="never">绝对不要做的事</h2>
+<ul><li>不要把 DSN、Ray 地址、MinIO endpoint 或凭据写入 <code>cube_web_configs</code>。</li><li>不要在生产启动时自动 seed 演示批次；只有演示环境显式设置加载开关。</li><li>不要让 driver 生成只有本机可见的 /tmp COG 再交给 Ray worker。</li><li>不要用 Path.exists() 判断 s3:// 输出；先下载到节点缓存再用 rasterio/netCDF 读取。</li><li>不要为了重试创建新的平铺资产批次，优先使用原运行的正式 retry。</li></ul>

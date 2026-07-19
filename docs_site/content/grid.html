@@ -1,0 +1,11 @@
+<h2 id="matrix">当前生产矩阵</h2>
+<table class="grid-table"><thead><tr><th>格网</th><th>名称</th><th>方式</th><th>层级</th><th>选择提示</th></tr></thead><tbody><tr><td><code>geohash</code></td><td>经纬度格网</td><td><code>logical</code></td><td>1–12</td><td>经纬度层级编码、矩形范围</td></tr><tr><td><code>mgrs</code></td><td>标准 MGRS</td><td><code>logical</code></td><td>0–5</td><td>UTM/UPS、标准 MGRS 下游</td></tr><tr><td><code>isea4h</code></td><td>六边形格网</td><td><code>entity</code></td><td>0–15</td><td>均匀邻接关系、实体瓦片、碳卫星</td></tr></tbody></table>
+<h2 id="method">格网为什么会改变执行方式</h2>
+<p>logical 剖分以源影像窗口和逻辑格网索引为核心；entity 剖分需要生成实体瓦片几何并对观测/影像做实体覆盖。方式不是操作员可自由选择的参数，后端会校验格网与方式是否一致。</p>
+<h2 id="selection">按需求选择</h2>
+<div class="steps"><div class="step"><span class="step-num">A</span><div><h3>选 geohash</h3><p>当下游以经纬度编码、区域查询和父子精度理解网格时使用。</p></div></div><div class="step"><span class="step-num">B</span><div><h3>选 mgrs</h3><p>当下游明确要求标准 UTM/UPS MGRS。它不是 geohash 的另一种显示格式，不要假设存在连续全球父子树。</p></div></div><div class="step"><span class="step-num">C</span><div><h3>选 isea4h</h3><p>当需要全球六边形邻接关系或实体瓦片时使用。它固定走 entity 剖分。</p></div></div></div>
+<h2 id="level">层级和资源</h2>
+<p>层级越细，覆盖单元数量、Ray 计算、MinIO 读写和索引规模通常越大。正式层级应结合源数据分辨率、AOI 面积、下游查询粒度和集群容量评估；不要为了让任务快一点静默降低层级。</p>
+<div class="callout warning"><span class="callout-icon">!</span><p>smoke 任务可以使用 ISEA4H level 1、单景、ray_parallelism=2 和 max_cells_per_asset=50，但结果只能用于链路验证。</p></div>
+<h2 id="forbidden">禁止值</h2>
+<p>生产 API、Web 和 split 不接受 <code>s2</code>、<code>tile_matrix</code>、<code>plane_grid</code>。遇到历史数据使用这些值时，先做迁移映射，不要重新暴露旧入口。</p>

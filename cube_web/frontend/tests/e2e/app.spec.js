@@ -79,14 +79,8 @@ test('data management unifies datasets, load batches and ingest runs', async ({ 
   await page.goto('/data-management');
 
   await expect(page.getByRole('heading', { name: '数据管理与入库' })).toBeVisible();
-  await expect(page.getByRole('tab')).toHaveText(['数据集', '载入批次', '入库运行']);
+  await expect(page.getByRole('tab')).toHaveText(['数据集', '入库运行']);
   await expect(page.getByRole('link', { name: '数据集管理' })).toHaveCount(0);
-
-  await page.getByRole('tab', { name: '载入批次' }).click();
-  await page.getByTestId('load-batch-load-batch-a').click();
-  const loadBatchPanel = page.getByRole('tabpanel', { name: '载入批次' });
-  await expect(loadBatchPanel.getByText('Dataset A')).toBeVisible();
-  await expect(loadBatchPanel.getByText('Scene A')).toBeVisible();
 
   await page.getByRole('tab', { name: '入库运行' }).click();
   await expect(page.getByTestId('ingest-row-ingest-run-a')).toBeVisible();
@@ -229,6 +223,5 @@ test('partition keeps one product per subpage and exposes quality and ingest pag
   await page.getByRole('tab', { name: '入库运行' }).click();
   await expect(page.getByTestId('ingest-row-ingest-run-a')).toBeVisible();
 
-  await page.getByTestId('partition-module-tasks').click();
-  await expect(page.getByRole('heading', { name: '剖分任务队列' })).toBeVisible();
+  await expect(page.getByTestId('partition-module-tasks')).toHaveCount(0);
 });

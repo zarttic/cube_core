@@ -37,7 +37,7 @@ describe('DataManagementView', () => {
     wrappers.push(wrapper);
 
     expect(wrapper.find('h1').exists()).toBe(false);
-    expect(wrapper.findAll('[data-label]').map((item) => item.attributes('data-label'))).toEqual(['数据管理', '载入批次', '数据入库']);
+    expect(wrapper.findAll('[data-label]').map((item) => item.attributes('data-label'))).toEqual(['数据管理', '数据入库']);
   });
 });
 

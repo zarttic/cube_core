@@ -7,7 +7,6 @@ import { createPartitionDraft } from '@/api/partitionDrafts';
 import { queuePartitionSelection } from '@/stores/partitionTransfer';
 import DatasetsView from '@/views/DatasetsView.vue';
 import IngestView from '@/views/IngestView.vue';
-import LoadBatchesView from '@/views/data/LoadBatchesView.vue';
 
 const props = defineProps({ embedded: Boolean });
 const emit = defineEmits(['queue-partition']);
@@ -34,9 +33,6 @@ async function queuePartition(dataset) {
     <el-tabs v-model="activeView" class="data-management-tabs">
       <el-tab-pane name="datasets" label="数据管理">
         <DatasetsView embedded title="" @queue-partition="queuePartition" />
-      </el-tab-pane>
-      <el-tab-pane name="load-batches" label="载入批次" lazy>
-        <LoadBatchesView />
       </el-tab-pane>
       <el-tab-pane name="ingest-runs" label="数据入库" lazy>
         <IngestView embedded title="数据入库" />

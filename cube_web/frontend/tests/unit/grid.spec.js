@@ -9,9 +9,9 @@ describe('grid contract', () => {
     expect(derivedPartitionMethod('geohash')).toBe('logical');
     expect(derivedPartitionMethod('mgrs')).toBe('logical');
     expect(derivedPartitionMethod('isea4h')).toBe('entity');
-    expect(nativeLevelLabel('mgrs', 3)).toBe('第 3 级 · 100 m');
-    expect(nativeLevelLabel('geohash', 6)).toBe('第 6 级 · 精度 6');
-    expect(nativeLevelLabel('isea4h', 7)).toBe('第 7 级 · 分辨率 7');
+    expect(nativeLevelLabel('mgrs', 3)).toBe('层级 3');
+    expect(nativeLevelLabel('geohash', 6)).toBe('层级 6');
+    expect(nativeLevelLabel('isea4h', 7)).toBe('层级 7');
   });
 
   it('recommends a frozen level from the dataset resolution for each grid', () => {

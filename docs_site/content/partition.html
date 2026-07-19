@@ -1,0 +1,33 @@
+<h2 id="before-submit">提交前必须先确认</h2>
+<ul><li>LoadBatch 已成功导入，并能查询到 Dataset、Scene、资产和 bands。</li><li>每个被选 Dataset 的源对象已在 MinIO stat 成功。</li><li>本次运行的 Dataset、Scene 和 BandUnit 不重复；一条 Scene 只能在同一 partition run 中选择一次。</li><li>同一 partition run 的所有 Dataset 必须使用同一个格网类型和层级。不同产品可以在不同 partition run 使用不同格网。</li></ul>
+<h2 id="ui">页面操作：从批次到运行</h2>
+<figure class="doc-shot"><img src="assets/partition-page.png" alt="Cube 剖分页面：左侧数据配置和右侧地图预览"><figcaption><strong>图 1：已登录管理员看到的剖分页面。</strong>左侧是数据配置和来源载入批次，右侧是地图预览；提交前先核对数据选择，再点击“提交剖分”。截图来自真实 API 会话，当前环境没有选择数据单元，所以提交按钮仍应保持谨慎。</figcaption></figure>
+<div class="steps"><div class="step"><span class="step-num">1</span><div><h3>打开分析就绪数据剖分</h3><p>管理员进入剖分页后，先选择 optical、radar、product 或 carbon。页面数据来自 <code>GET /v1/partition/load-batches</code> 和对应的 scenes 接口。</p></div></div><div class="step"><span class="step-num">2</span><div><h3>刷新并打开批次</h3><p>用批次 ID、数据类型或关键词过滤。打开批次详情，检查 Dataset 数、Scene 数和波段数，确认没有漏选或选错数据。</p></div></div><div class="step"><span class="step-num">3</span><div><h3>选择 Dataset 和 Scene</h3><p>选择一个或多个 Dataset，再在每个 Dataset 下选择 Scene。若需要局部运行，可继续指定 band_unit_ids，但不能提交空数组。</p></div></div><div class="step"><span class="step-num">4</span><div><h3>选择格网和层级</h3><p>页面用格网类型推导 partition_method：geohash/mgrs 是 logical，isea4h 是 entity。不要把两者当成两个独立下拉框。</p></div></div><div class="step"><span class="step-num">5</span><div><h3>预览覆盖，再提交</h3><p>先确认覆盖图和数据范围，再提交。成功响应会返回 partition_run_id、task_id、status、data_type 和 operation。</p></div></div></div>
+<h2 id="request">实际运行请求的结构</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>{
+  "partition_run_id": "RUN_20260719_EAST_001",
+  "source_batch_ids": ["LOAD_20260719_001"],
+  "selection_source": "load_batch",
+  "datasets": [{
+    "dataset_id": "GF1-EAST-2020",
+    "scene_ids": ["GF1-EAST-20200710"],
+    "band_unit_ids": ["GF1-EAST-20200710-B01", "GF1-EAST-20200710-B02"],
+    "partition": {"grid_type":"geohash", "requested_grid_level":5}
+  }]
+}</code></pre></div>
+<p>接口是 <code>POST /v1/partition/runs</code>，响应状态码为 202。前端的草稿接口会先保存选择，再标记草稿 submitted；真正的生产运行仍以 partition run 为准。</p>
+<h2 id="grid-contract">格网契约</h2>
+<table class="grid-table"><thead><tr><th>grid_type</th><th>派生方式</th><th>有效层级</th><th>典型用途</th></tr></thead><tbody><tr><td><code>geohash</code></td><td><code>logical</code></td><td>1–12</td><td>经纬度层次格网</td></tr><tr><td><code>mgrs</code></td><td><code>logical</code></td><td>0–5</td><td>标准 UTM/UPS MGRS</td></tr><tr><td><code>isea4h</code></td><td><code>entity</code></td><td>0–15</td><td>全球六边形实体瓦片</td></tr></tbody></table>
+<div class="callout danger"><span class="callout-icon">!</span><p><code>s2</code>、<code>tile_matrix</code>、<code>plane_grid</code> 是历史格网，不属于当前生产入口。不要为了绕过校验把它们写进请求。</p></div>
+<h2 id="parameters">固定参数与资源控制</h2>
+<table class="grid-table"><thead><tr><th>参数</th><th>生产值</th><th>含义</th></tr></thead><tbody><tr><td><code>cover_mode</code></td><td><code>intersect</code></td><td>覆盖与资产相交的格网</td></tr><tr><td><code>time_granularity</code></td><td><code>day</code></td><td>时间桶按天</td></tr><tr><td><code>max_cells_per_asset</code></td><td><code>0</code></td><td>不设上限；不能静默截断或降级</td></tr><tr><td><code>ray_parallelism</code></td><td>运行时配置</td><td>决定 Ray 并发规模，按集群容量设置</td></tr></tbody></table>
+<p>冒烟任务可以显式设置小的正数 max_cells_per_asset、ISEA4H level 1、单景和 ray_parallelism 2。冒烟结果只能验证链路，不能当作生产完整覆盖结果。</p>
+<h2 id="monitor">监控和状态</h2>
+<figure class="doc-shot"><img src="assets/tasks-page.png" alt="Cube 剖分任务队列页面：任务 ID、剖分执行 ID、类型和状态列"><figcaption><strong>图 4：已登录管理员看到的任务队列。</strong>任务列表用于按 task_id、剖分执行 ID、数据类型和状态定位运行；“已完成”只能说明剖分任务完成，失败重试前仍要打开最新任务详情。</figcaption></figure>
+<p>任务接口：<code>GET /v1/partition/tasks/{task_id}</code>。列表接口：<code>GET /v1/partition/tasks</code>，可按 status、data_type 和 keyword 过滤。</p>
+<table class="grid-table"><thead><tr><th>状态</th><th>你应该做什么</th></tr></thead><tbody><tr><td>queued</td><td>等待执行；检查 Ray 地址和 worker 资源，不要重复提交。</td></tr><tr><td>running</td><td>等待或查看 worker 日志；不要再次点击提交。</td></tr><tr><td>completed</td><td>记录 output_version，下一步触发质检。</td></tr><tr><td>failed</td><td>打开详情读取错误；只有最新失败任务允许 retry。</td></tr><tr><td>cancelled</td><td>确认取消原因；需要继续时使用允许的重试入口。</td></tr></tbody></table>
+<h2 id="retry-cancel">取消和重试</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>GET  /v1/partition/tasks/{task_id}
+POST /v1/partition/tasks/{task_id}/cancel
+POST /v1/partition/tasks/{task_id}/retry</code></pre></div>
+<p>重试沿用原 partition_run_id 的业务身份，并只重排符合条件的失败数据单元。不要复制一个新 batch_id 来“重试”，否则会丢失原批次的历史关系。</p>

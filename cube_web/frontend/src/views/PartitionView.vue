@@ -12,7 +12,6 @@ import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
 import BatchAssetsPanel from '@/views/partition/BatchAssetsPanel.vue';
 import GridParameters from '@/views/partition/GridParameters.vue';
-import TaskQueuePanel from '@/views/partition/TaskQueuePanel.vue';
 
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
@@ -26,7 +25,6 @@ const modules = Object.freeze([
   ...productModules,
   { value: 'quality', label: '自动化质检' },
   { value: 'ingest', label: '数据管理与入库' },
-  { value: 'tasks', label: '剖分任务队列' },
 ]);
 
 const store = usePartitionStore();
@@ -198,7 +196,6 @@ function selectModule(moduleName) {
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
   gridPreviewLoading.value = false;
-  if (moduleName === 'tasks') store.loadTasks(1, store.taskPage.pageSize);
 }
 
 function selectDraft(draft) {
@@ -374,7 +371,6 @@ onMounted(() => {
     };
   }
   store.loadBatches();
-  store.loadTasks();
   loadDrafts().then(() => {
     const requestedDraftId = String(router.currentRoute.value.query.draft_id || '');
     const draft = pendingSelection || pendingDrafts.value.find((item) => item.draft_id === requestedDraftId);
@@ -406,24 +402,7 @@ onMounted(() => {
     <main class="main-content-area">
       <div class="container">
         <div class="module-content active">
-          <div v-if="activeModule === 'tasks'" class="partition-task-workspace">
-            <div class="partition-task-page-header">
-              <div>
-                <h3>剖分任务队列</h3>
-                <span>共 {{ store.taskPage.total }} 个任务</span>
-              </div>
-              <el-button :loading="store.loading.tasks" @click="store.loadTasks(1, store.taskPage.pageSize)">刷新</el-button>
-            </div>
-            <TaskQueuePanel
-              :tasks="store.tasks"
-              :page="store.taskPage"
-              :loading="store.loading.tasks"
-              @page-change="store.loadTasks($event, store.taskPage.pageSize)"
-              @page-size-change="store.loadTasks(1, $event)"
-            />
-          </div>
-
-          <div v-else-if="activeModule === 'quality'" class="module-page">
+          <div v-if="activeModule === 'quality'" class="module-page">
             <QualityView embedded />
           </div>
 

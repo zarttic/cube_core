@@ -1,0 +1,23 @@
+<h2 id="eligibility">为什么集合会出现在待入库</h2>
+<p>待入库接口只返回同时满足这些条件的剖分集合：</p><ul><li>存在 current output version；</li><li>关联数据单元已经剖分完成；</li><li>质量状态为 pass，或业务策略明确允许 warn；</li><li>至少有一个波段尚未 completed；</li><li>集合没有被取消或其他活动运行锁住。</li></ul>
+<p>接口：<code>GET /v1/ingest-runs/collections</code>。页面会把集合显示为“数据集数 · 景数 · 待入库波段数”。</p>
+<h2 id="manual-flow">页面操作步骤</h2>
+<figure class="doc-shot"><img src="assets/ingest-page.png" alt="Cube 数据管理与入库页面：数据集列表和状态筛选"><figcaption><strong>图 3：已登录管理员看到的数据管理页面。</strong>页面显示真实 Dataset、数据类型、产品类型、景数量、时间范围、当前版本、质检和入库状态；先确认当前输出与质量状态，再进入“数据入库”工作区选择剖分集合和 BandUnit。</figcaption></figure>
+<div class="steps"><div class="step"><span class="step-num">1</span><div><h3>刷新待入库集合</h3><p>先刷新，不要使用上一轮打开页面时缓存的列表。列表中的 partition_run_id 是后续 API 路径参数。</p></div></div><div class="step"><span class="step-num">2</span><div><h3>选择集合</h3><p>打开“选择数据入库”，选择一个 partition run。页面会加载该集合的 units。</p></div></div><div class="step"><span class="step-num">3</span><div><h3>选择 BandUnit</h3><p>只选择质量 pass 或允许 warn 且 ingest_status 不是 completed 的单元。选择结果按 band_unit_id 固化。</p></div></div><div class="step"><span class="step-num">4</span><div><h3>提交入库</h3><p>点击提交后返回 202，记录 ingest_run_id；随后在入库记录中观察波段级进度。</p></div></div></div>
+<h2 id="request">API 请求示例</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>POST /v1/ingest-runs/collections/RUN_20260719_EAST_001/ingest
+Content-Type: application/json
+
+{"band_unit_ids":["GF1-EAST-20200710-B01","GF1-EAST-20200710-B02"]}</code></pre></div>
+<h2 id="states">入库状态怎么理解</h2>
+<table class="grid-table"><thead><tr><th>状态</th><th>含义</th><th>可做什么</th></tr></thead><tbody><tr><td>queued</td><td>等待 worker</td><td>等待，不要重复提交</td></tr><tr><td>running</td><td>正在读取剖分产物并写入托管表</td><td>等待或查看详情</td></tr><tr><td>completed</td><td>该波段完成</td><td>不能再次入库</td></tr><tr><td>partial_failure</td><td>同一运行部分波段成功、部分失败</td><td>只选择失败 band_unit 重试</td></tr><tr><td>failed</td><td>所有相关波段失败或运行失败</td><td>查看每个波段错误</td></tr><tr><td>cancelled</td><td>未完成波段被取消</td><td>按业务需要重新创建或使用允许的恢复路径</td></tr></tbody></table>
+<h2 id="retry">波段级重试</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>POST /v1/ingest-runs/{ingest_run_id}/retry
+{"band_unit_ids":["GF1-EAST-20200710-B02"]}</code></pre></div>
+<p>重试接口要求明确传入失败 band_unit_ids。completed、queued、running 混入会返回 409；不存在或不属于该运行的波段返回 404。成功波段不应因为同一景的另一个波段失败而被回滚。</p>
+<h2 id="cancel">取消运行</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>POST /v1/ingest-runs/{ingest_run_id}/cancel
+{"reason":"源对象维护，暂停本次入库"}</code></pre></div>
+<p>取消只会把未完成波段变为 cancelled，已 completed 的波段保持完成。对 completed、failed、cancelled 等终态运行再次取消会返回 409。</p>
+<h2 id="history">交接时看什么</h2>
+<p>在入库详情中保留 ingest_run_id、partition_run_id、每个 band_unit 的 status、error_message、attempt_count 和 retry_history。部分失败不是“整批失败”，不要直接删除历史运行。</p>

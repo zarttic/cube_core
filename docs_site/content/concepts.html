@@ -1,0 +1,11 @@
+<h2 id="domain">领域对象关系</h2>
+<div class="flow"><div class="flow-item"><b>LoadBatch</b><span>一次载入动作</span></div><div class="flow-item"><b>Dataset</b><span>长期管理主记录</span></div><div class="flow-item"><b>Scene</b><span>一次观测/场景</span></div><div class="flow-item"><b>BandUnit</b><span>可选择数据单元</span></div><div class="flow-item"><b>Output</b><span>某次剖分版本</span></div></div>
+<p>一个 LoadBatch 可以包含多个 Dataset；一个 Dataset 可以在不同载入批次持续接收 Scene；一个 Scene 下有资产和 bands。剖分、质检、入库和发布以 Dataset 的当前输出为业务主线。</p>
+<h2 id="identities">每个 ID 什么时候记录</h2>
+<table class="grid-table"><thead><tr><th>ID</th><th>产生时机</th><th>后续用途</th></tr></thead><tbody><tr><td><code>load_batch_id</code></td><td>载入方交付</td><td>导入幂等、批次查询、来源追踪</td></tr><tr><td><code>dataset_id</code></td><td>导入登记</td><td>数据集详情、质检、入库、发布</td></tr><tr><td><code>partition_run_id</code></td><td>提交剖分</td><td>剖分集合、质检集合、待入库集合</td></tr><tr><td><code>task_id</code></td><td>提交异步任务</td><td>queued/running/failed、取消、重试</td></tr><tr><td><code>output_version</code></td><td>剖分输出</td><td>质量和发布的版本身份</td></tr><tr><td><code>quality_run_id</code></td><td>触发质检</td><td>规则快照、结果、错误和 warn 审批</td></tr><tr><td><code>ingest_run_id</code></td><td>手动入库</td><td>波段级入库状态与 retry history</td></tr><tr><td><code>publication_id</code></td><td>请求发布</td><td>active/failed/withdrawn 版本历史</td></tr></tbody></table>
+<h2 id="state">不要混淆三套状态</h2>
+<table class="grid-table"><thead><tr><th>状态对象</th><th>回答的问题</th><th>错误例子</th></tr></thead><tbody><tr><td>partition task</td><td>剖分执行到哪一步</td><td>任务 completed 不等于质量 pass</td></tr><tr><td>quality run</td><td>当前输出是否满足质量门禁</td><td>质量 pass 不等于已入库</td></tr><tr><td>ingest run</td><td>选择的波段是否已写入托管数据</td><td>入库 completed 不等于已发布</td></tr><tr><td>publication</td><td>哪个版本对下游服务生效</td><td>有 output 不等于 publication active</td></tr></tbody></table>
+<h2 id="band">为什么 BandUnit 是关键</h2>
+<p>系统在业务上以 Scene 选择和物化资产，但质量、入库和重试需要精确到波段/变量。band_code 是稳定身份，band_name 只用于展示，band_type 区分 spectral、polarization、variable。前端不得根据 B01 猜传感器语义。</p>
+<h2 id="version">当前输出和历史输出</h2>
+<p>Dataset 的 current_output_version 指向默认服务对象。新的剖分成功后会产生新版本，历史版本保留用于审计；历史质量结果不能覆盖当前质量字段，历史输出也不能未经授权直接发布。</p>

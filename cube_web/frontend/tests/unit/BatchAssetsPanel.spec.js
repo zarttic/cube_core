@@ -131,8 +131,22 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     }];
 
     expect(wrapper.vm.bandConsumedByLoadBatch(target.bands[0])).toBe(true);
-    expect(wrapper.vm.ingestedGridLabel(target.bands[0])).toBe('平面格网 · 第 1 级 · 10 km');
+    expect(wrapper.vm.ingestedGridLabel(target.bands[0])).toBe('平面格网 · 层级 1');
+    expect(wrapper.vm.bandStatusLabel(target.bands[0])).toBe('已入库 · 平面格网 · 层级 1');
     expect(wrapper.vm.selectableBandIdsForScene(target, 'optical', dataset)).toEqual([]);
+  });
+
+  it('shows pending and running states for bands that remain in the queue', async () => {
+    const wrapper = mountPanel();
+    await flushPromises();
+    await wrapper.vm.loadSelectedBatches(['load-a']);
+    const dataset = wrapper.vm.availableDatasets.find((item) => item.dataset_id === 'dataset-a');
+    const pending = dataset.scenes.find((item) => item.scene_id === 'scene-a').bands[0];
+    pending.grid_statuses = [{ grid_type: 'geohash', grid_level: 4, partition_status: 'completed', quality_status: 'pass', ingest_status: 'pending' }];
+    expect(wrapper.vm.bandStatusLabel(pending)).toBe('待入库 · 经纬度格网 · 层级 4');
+    pending.grid_statuses[0].ingest_status = 'running';
+    expect(wrapper.vm.bandStatusLabel(pending)).toBe('入库中 · 经纬度格网 · 层级 4');
+    expect(wrapper.vm.bandConsumedByLoadBatch(pending)).toBe(false);
   });
 
   it('defaults geographic datasets to Geohash and projected datasets to MGRS', async () => {

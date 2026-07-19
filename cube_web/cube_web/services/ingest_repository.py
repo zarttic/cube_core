@@ -404,14 +404,17 @@ class OpenGaussIngestRepository:
             cur.execute(
                 """
                 SELECT pr.partition_run_id, pr.created_at AS partition_created_at,
-                       prs.scene_id, prs.dataset_id, prs.output_version, g.band_unit_id,
-                       d.dataset_code, d.dataset_title,
+                       prs.scene_id, s.scene_key, prs.dataset_id, prs.output_version, g.band_unit_id,
+                       d.dataset_code, d.dataset_title, d.data_type,
+                       sb.band_code, sb.band_name, sb.band_type, sb.unit, sb.display_order,
                        g.quality_status,
                        irs.status AS ingest_status
                 FROM partition_runs pr
                 JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
                 JOIN partition_data_unit_grid_status g ON g.partition_run_id=prs.partition_run_id AND g.scene_id=prs.scene_id
                 JOIN datasets d ON d.dataset_id=prs.dataset_id
+                JOIN scenes s ON s.scene_id=prs.scene_id
+                JOIN scene_bands sb ON sb.band_unit_id=g.band_unit_id
                 LEFT JOIN LATERAL (
                   SELECT irs.status FROM ingest_run_scenes irs
                   WHERE irs.scene_id=prs.scene_id AND irs.output_version=prs.output_version
@@ -433,9 +436,13 @@ class OpenGaussIngestRepository:
                 "created_at": row["partition_created_at"], "units": [],
             })
             collection["units"].append({
-                "scene_id": str(row["scene_id"]), "dataset_id": str(row["dataset_id"]),
-                "dataset_code": row["dataset_code"], "dataset_title": row["dataset_title"],
+                "scene_id": str(row["scene_id"]), "scene_key": row["scene_key"],
+                "dataset_id": str(row["dataset_id"]), "dataset_code": row["dataset_code"],
+                "dataset_title": row["dataset_title"], "data_type": row["data_type"],
                 "output_version": row["output_version"], "band_unit_id": str(row["band_unit_id"]),
+                "band_code": row["band_code"], "band_name": row["band_name"],
+                "band_type": row["band_type"], "unit": row["unit"],
+                "display_order": row["display_order"],
                 "quality_status": row["quality_status"],
                 "ingest_status": row["ingest_status"],
             })

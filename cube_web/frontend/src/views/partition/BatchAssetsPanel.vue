@@ -428,10 +428,42 @@ function ingestedGridStatus(band) {
 }
 
 function ingestedGridLabel(band) {
-  const status = ingestedGridStatus(band);
+  return gridStatusLabel(ingestedGridStatus(band));
+}
+
+function gridStatusLabel(status) {
   if (!status) return '';
   const definition = gridDefinition(status.grid_type);
-  return `${definition?.label || status.grid_type} · ${nativeLevelLabel(status.grid_type, Number(status.grid_level))}`;
+  return `${definition?.label || status.grid_type} · 层级 ${Number(status.grid_level)}`;
+}
+
+function bandStatusLabel(band) {
+  const statuses = band.grid_statuses || [];
+  const status = statuses.find((item) => item.ingest_status === 'completed') || statuses[0];
+  if (!status) return '待剖分';
+  const gridLabel = gridStatusLabel(status);
+  const withGrid = (label) => gridLabel ? `${label} · ${gridLabel}` : label;
+  if (status.ingest_status === 'completed') return withGrid('已入库');
+  if (status.ingest_status === 'running') return withGrid('入库中');
+  if (status.ingest_status === 'queued') return withGrid('等待入库');
+  if (status.ingest_status === 'failed') return withGrid('入库失败');
+  if (status.quality_status === 'running') return withGrid('质检中');
+  if (['fail', 'error'].includes(status.quality_status)) return withGrid('质检未通过');
+  if (status.partition_status === 'running') return withGrid('剖分中');
+  if (status.partition_status === 'queued') return withGrid('等待剖分');
+  if (status.partition_status === 'failed') return withGrid('剖分失败');
+  if (status.partition_status === 'completed' && ['pass', 'warn'].includes(status.quality_status)) return withGrid('待入库');
+  if (status.partition_status === 'completed') return withGrid('待质检');
+  return withGrid('待剖分');
+}
+
+function bandStatusClass(band) {
+  const label = bandStatusLabel(band);
+  if (label === '已入库' || label.startsWith('已入库 ·')) return 'status-complete';
+  if (label.includes('失败') || label === '质检未通过') return 'status-failed';
+  if (label === '待入库') return 'status-ready';
+  if (label.includes('中') || label.includes('等待')) return 'status-running';
+  return 'status-pending';
 }
 
 function bandConsumedByLoadBatch(band) {
@@ -637,7 +669,7 @@ onBeforeUnmount(() => {
                     :disabled="!eligibleScene(scene) || !band.band_unit_id || band.contract_errors.length > 0 || bandConsumedByLoadBatch(band)"
                     :data-testid="band.band_unit_id ? `band-unit-${band.band_unit_id}` : undefined"
                   >
-                    <span class="scene-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ bandDisplayLabel(band) }}<em v-if="ingestedGridLabel(band)">已入库 · {{ ingestedGridLabel(band) }}</em></span>
+                    <span class="scene-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ bandDisplayLabel(band) }}<em :class="bandStatusClass(band)">{{ bandStatusLabel(band) }}</em></span>
                   </el-checkbox>
                 </el-checkbox-group>
                   <small v-if="!bandsFor(scene, dataset.data_type).length" class="band-missing">波段信息未登记</small>
@@ -694,7 +726,12 @@ onBeforeUnmount(() => {
 .partition-scene-identity small { color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .scene-band-list { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 8px; padding-left: 25px; }
 .scene-band-list :deep(.el-checkbox) { height: auto; margin: 0; }
-.scene-band-chip em { margin-left: 6px; color: var(--el-color-success); font-size: 11px; font-style: normal; }
+.scene-band-chip em { margin-left: 6px; font-size: 11px; font-style: normal; }
+.scene-band-chip em.status-complete { color: var(--el-color-success); }
+.scene-band-chip em.status-ready { color: #1769aa; }
+.scene-band-chip em.status-running { color: #9a6700; }
+.scene-band-chip em.status-failed { color: var(--el-color-danger); }
+.scene-band-chip em.status-pending { color: var(--el-text-color-secondary); }
 .scene-band-chip { display: flex; flex-direction: column; padding: 3px 7px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
 .scene-band-chip small { color: var(--el-text-color-secondary); font-size: 10px; }
 .band-missing { color: #a16a1c !important; }

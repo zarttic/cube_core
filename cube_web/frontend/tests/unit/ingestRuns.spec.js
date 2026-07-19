@@ -8,9 +8,10 @@ vi.mock('@/api/client', () => ({
   requestPost: vi.fn(),
 }));
 
-import { requestPost } from '@/api/client';
+import { requestGet, requestPost } from '@/api/client';
 import { useIngestRunsStore } from '@/stores/ingestRuns';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
+import IngestView from '@/views/IngestView.vue';
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -101,5 +102,56 @@ describe('ingest runs store', () => {
     await action;
 
     expect(requestPost).toHaveBeenCalledWith('/v1/ingest-runs/ingest-a/cancel', { reason: 'operator request' });
+  });
+});
+
+describe('manual ingest selection', () => {
+  it('shows selectable data as dataset, scene, and readable band hierarchy', async () => {
+    const collection = {
+      partition_run_id: 'partition-run-a', dataset_count: 1, scene_count: 1, quality_pass_count: 2, ingested_count: 0,
+      units: [
+        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-a', band_code: 'B04', band_name: '红光', band_type: 'spectral', display_order: 1, quality_status: 'pass', ingest_status: 'pending' },
+        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-b', band_code: 'B08', band_name: '近红外', band_type: 'spectral', display_order: 2, quality_status: 'warn', ingest_status: 'pending' },
+      ],
+    };
+    requestGet.mockImplementation((url) => Promise.resolve(url.startsWith('/v1/ingest-runs?')
+      ? { items: [], total: 0, page: 1, page_size: 20 }
+      : { items: [collection] }));
+    const wrapper = mount(IngestView, {
+      global: {
+        stubs: {
+          AppTable: { template: '<div><slot /></div>' },
+          StatusTag: { template: '<span />' },
+          IngestRunDetailDrawer: { template: '<div />' },
+          'el-icon': { template: '<span><slot /></span>' },
+          'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+          'el-form': { template: '<form><slot /></form>' },
+          'el-form-item': { template: '<div><slot /></div>' },
+          'el-select': { template: '<div><slot /></div>' },
+          'el-option': { template: '<div><slot /></div>' },
+          'el-checkbox-group': { template: '<div><slot /></div>' },
+          'el-checkbox': { template: '<label><slot /></label>' },
+          'el-dialog': { template: '<div><slot /><slot name="footer" /></div>' },
+          'el-alert': { template: '<div />' },
+          'el-progress': { template: '<div />' },
+          'el-table-column': { template: '<div />' },
+          'el-input': { template: '<input />' },
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(wrapper.findAll('button').some((button) => button.text() === '选择数据入库')).toBe(true));
+    await wrapper.findAll('button').find((button) => button.text() === '选择数据入库').trigger('click');
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="manual-ingest-tree"]')).toBeTruthy());
+
+    expect(wrapper.text()).toContain('光学遥感样例');
+    expect(wrapper.text()).toContain('LC08_120029_20240622');
+    expect(wrapper.text()).toContain('B04 · 红光');
+    expect(wrapper.text()).toContain('B08 · 近红外');
+    expect(wrapper.findAll('.manual-select-all')).toHaveLength(2);
+    expect(wrapper.text()).toContain('全选数据集');
+    expect(wrapper.text()).toContain('全选该景');
+    expect(wrapper.text()).not.toContain('band-internal-a');
+    expect(wrapper.text()).not.toContain('scene-internal');
   });
 });

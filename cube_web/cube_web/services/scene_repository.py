@@ -24,7 +24,13 @@ class OpenGaussSceneRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT pr.partition_run_id, pr.status, pr.source_load_batch_ids, pr.error_message,
+                    SELECT pr.partition_run_id, pr.status, pr.source_load_batch_ids,
+                           COALESCE((
+                               SELECT json_agg(COALESCE(lb.batch_name, source_batch.load_batch_id) ORDER BY source_batch.ordinality)
+                               FROM jsonb_array_elements_text(pr.source_load_batch_ids) WITH ORDINALITY AS source_batch(load_batch_id, ordinality)
+                               LEFT JOIN load_batches lb ON lb.load_batch_id=source_batch.load_batch_id
+                           ), '[]'::json) AS source_load_batch_names,
+                           pr.error_message,
                            pr.created_at, pr.started_at, pr.completed_at,
                            count(DISTINCT prs.dataset_id) AS dataset_count,
                            count(DISTINCT prs.scene_id) AS scene_count,
@@ -105,7 +111,13 @@ class OpenGaussSceneRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT pr.partition_run_id, pr.status, pr.source_load_batch_ids, pr.error_message,
+                    SELECT pr.partition_run_id, pr.status, pr.source_load_batch_ids,
+                           COALESCE((
+                               SELECT json_agg(COALESCE(lb.batch_name, source_batch.load_batch_id) ORDER BY source_batch.ordinality)
+                               FROM jsonb_array_elements_text(pr.source_load_batch_ids) WITH ORDINALITY AS source_batch(load_batch_id, ordinality)
+                               LEFT JOIN load_batches lb ON lb.load_batch_id=source_batch.load_batch_id
+                           ), '[]'::json) AS source_load_batch_names,
+                           pr.error_message,
                            pr.created_at, pr.started_at, pr.completed_at
                     FROM partition_runs pr WHERE pr.partition_run_id=%s
                     """,
@@ -118,12 +130,14 @@ class OpenGaussSceneRepository:
                     """
                     SELECT prs.dataset_id, d.dataset_code, d.dataset_title, d.data_type, d.product_type,
                            prs.scene_id, s.scene_key, s.acquisition_time, prs.source_load_batch_id,
+                           source_lb.batch_name AS source_load_batch_name,
                            sb.band_unit_id, sb.band_code, sb.band_name, sb.band_type, sb.unit, sb.display_order,
                            g.grid_type, g.grid_level, g.partition_status, g.quality_status, g.ingest_status,
                            g.output_version, g.attempt_no, g.error_message
                     FROM partition_run_scenes prs
                     JOIN datasets d ON d.dataset_id=prs.dataset_id
                     JOIN scenes s ON s.scene_id=prs.scene_id
+                    LEFT JOIN load_batches source_lb ON source_lb.load_batch_id=prs.source_load_batch_id
                     JOIN scene_bands sb ON sb.scene_id=prs.scene_id
                     JOIN scene_assets sa ON sa.scene_id=sb.scene_id AND sa.asset_id=sb.asset_id AND sa.asset_role='data'
                     LEFT JOIN partition_data_unit_grid_status g ON g.partition_run_id=prs.partition_run_id
@@ -174,6 +188,7 @@ class OpenGaussSceneRepository:
                     "scene_name": row["scene_key"],
                     "acquisition_time": row["acquisition_time"],
                     "source_load_batch_id": row["source_load_batch_id"],
+                    "source_load_batch_name": row.get("source_load_batch_name"),
                     "bands": [],
                 },
             )
@@ -241,6 +256,15 @@ class OpenGaussSceneRepository:
         if not isinstance(source_batches, list):
             source_batches = []
         value["source_load_batch_ids"] = [str(item) for item in source_batches]
+        source_names = value.get("source_load_batch_names")
+        if isinstance(source_names, str):
+            try:
+                source_names = json.loads(source_names)
+            except json.JSONDecodeError:
+                source_names = []
+        if not isinstance(source_names, list):
+            source_names = []
+        value["source_load_batch_names"] = [str(item) for item in source_names]
         for key in (
             "dataset_count", "scene_count", "band_count", "partitioned_count", "partition_failed_count",
             "quality_pass_count", "quality_failed_count", "ingested_count", "ingest_failed_count",

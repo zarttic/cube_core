@@ -1,0 +1,14 @@
+<h2 id="base">基础地址和请求规范</h2>
+<p>本地 API：<code>http://localhost:50039</code>。所有业务接口以 <code>/v1</code> 开头；健康检查是 <code>/health</code>。接口返回 JSON，异步提交通常返回 HTTP 202。</p>
+<div class="callout"><span class="callout-icon">i</span><p>不要让调用方直接依赖数据库表。Web API 是 Dataset、Scene、质量、入库和发布状态的业务边界。</p></div>
+<h2 id="auth">认证和公开入口</h2>
+<p>认证开启时，除 <code>POST /v1/partition/schemas/import</code> 外，<code>/v1/*</code> 默认要求 Bearer Token：</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>curl -H 'Authorization: Bearer &lt;your-token&gt;' \
+  http://localhost:50039/v1/partition/load-batches</code></pre></div>
+<p>前端非管理员只显示公共编码入口，直接访问剖分页会回门户首页；这不是后端授权的替代品。</p>
+<h2 id="endpoint-map">按业务任务查接口</h2>
+<table class="grid-table"><thead><tr><th>任务</th><th>接口</th><th>成功后记录</th></tr></thead><tbody><tr><td>导入</td><td><code>POST /v1/partition/schemas/import</code></td><td>load_batch_id</td></tr><tr><td>查批次</td><td><code>GET /v1/partition/load-batches</code><br><code>GET /v1/partition/load-batches/{id}/scenes</code></td><td>Dataset / Scene / BandUnit</td></tr><tr><td>剖分</td><td><code>POST /v1/partition/runs</code></td><td>partition_run_id、task_id</td></tr><tr><td>任务控制</td><td><code>GET /v1/partition/tasks/{id}</code><br><code>POST .../cancel</code><br><code>POST .../retry</code></td><td>状态、attempt、错误</td></tr><tr><td>质检</td><td><code>POST /v1/partition/runs/{id}/quality</code><br><code>GET /v1/quality/records/{id}/errors</code></td><td>quality_run_id、状态、finding</td></tr><tr><td>入库</td><td><code>GET /v1/ingest-runs/collections</code><br><code>POST /v1/ingest-runs/collections/{id}/ingest</code></td><td>ingest_run_id、波段状态</td></tr><tr><td>编码</td><td><code>POST /v1/grid/locate</code><br><code>POST /v1/grid/cover</code></td><td>格网地址和覆盖</td></tr></tbody></table>
+<h2 id="errors">常见 HTTP 状态</h2>
+<table class="grid-table"><thead><tr><th>状态码</th><th>含义</th><th>处理方式</th></tr></thead><tbody><tr><td>401</td><td>缺少或无效 token</td><td>重新获取身份 token</td></tr><tr><td>403</td><td>角色没有权限</td><td>联系管理员，不要关闭认证</td></tr><tr><td>404</td><td>业务对象不存在</td><td>核对 ID 是否来自最新查询</td></tr><tr><td>409</td><td>状态机或并发冲突</td><td>刷新详情，按当前状态操作</td></tr><tr><td>422</td><td>请求契约不合法</td><td>看 detail，修正字段后重试</td></tr><tr><td>503</td><td>后端依赖未配置或不可用</td><td>检查 OpenGauss、Ray、MinIO 和服务配置</td></tr></tbody></table>
+<h2 id="sdk">格网 SDK 入口</h2>
+<p>Web 的 locate、cover、topology、code 接口调用进程内 <code>CubeEncoderSDK</code>，不需要另起 encoder HTTP 服务。其他包不得复制格网逻辑；调用方只使用 geohash、mgrs、isea4h。</p>

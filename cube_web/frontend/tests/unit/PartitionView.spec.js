@@ -237,9 +237,9 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual([
       '#2f73d9', '#16836f', '#d97706',
     ]);
-    expect(wrapper.text()).toContain('经纬度格网 · 第 6 级');
-    expect(wrapper.text()).toContain('平面格网 · 第 2 级');
-    expect(wrapper.text()).toContain('六边形格网 · 第 6 级');
+    expect(wrapper.text()).toContain('经纬度格网 · 层级 6');
+    expect(wrapper.text()).toContain('平面格网 · 层级 2');
+    expect(wrapper.text()).toContain('六边形格网 · 层级 6');
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
   });
 
@@ -338,7 +338,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('5001');
   });
 
-  it('exposes product, quality, ingest and task pages as peer modules', async () => {
+  it('exposes product, quality and ingest pages as peer modules', async () => {
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -355,7 +355,8 @@ describe('PartitionView map workspace', () => {
       },
     });
 
-    expect(wrapper.findAll('.module-tab')).toHaveLength(7);
+    expect(wrapper.findAll('.module-tab')).toHaveLength(6);
+    expect(wrapper.find('[data-testid="partition-module-tasks"]').exists()).toBe(false);
     expect(wrapper.find('.partition-module-nav').exists()).toBe(false);
     await wrapper.get('[data-testid="partition-module-quality"]').trigger('click');
     expect(wrapper.get('[data-testid="quality-view-stub"]').exists()).toBe(true);

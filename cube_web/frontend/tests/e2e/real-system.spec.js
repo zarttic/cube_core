@@ -47,9 +47,7 @@ test('real system exposes the complete production workflow without route mocks',
   await page.goto('/partition');
   await page.getByTestId('partition-module-ingest').click();
   await expect(page.locator('body')).toContainText(`${prefix}-carbon-standard`);
-  await page.getByTestId('partition-module-tasks').click();
-  await expect(page.locator('body')).toContainText(`${prefix}-batch-isea4h`);
-  await expect(page.locator('body')).toContainText('已完成');
+  await expect(page.getByTestId('partition-module-tasks')).toHaveCount(0);
 
   expect(consoleErrors).toEqual([]);
   expect(failedResponses).toEqual([]);

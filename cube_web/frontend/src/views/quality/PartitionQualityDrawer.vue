@@ -18,6 +18,9 @@ const title = computed(() => props.detail ? `剖分批次 ${props.detail.partiti
 const summary = computed(() => props.detail?.summary || {});
 const canRequestQuality = computed(() => Number(summary.value.partitioned_count || 0) > Number(summary.value.quality_pass_count || 0));
 const hasFailedPartition = computed(() => Number(summary.value.partition_failed_count || 0) > 0);
+const sourceLoadBatchLabels = computed(() => props.detail?.source_load_batch_names?.length
+  ? props.detail.source_load_batch_names
+  : (props.detail?.source_load_batch_ids || []));
 
 function workflowAdvice(band) {
   if (band.partition_status === 'failed') return '剖分失败，重试该波段的原剖分批次';
@@ -38,7 +41,7 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
     key: `scene:${scene.scene_id}`,
     kind: 'scene',
     label: scene.scene_name || scene.scene_id,
-    sourceLoadBatchId: scene.source_load_batch_id,
+    sourceLoadBatchId: scene.source_load_batch_name || scene.source_load_batch_id,
     children: (scene.bands || []).map((band) => ({
       key: `band:${band.band_unit_id}`,
       kind: 'band',
@@ -54,7 +57,7 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
     <div class="drawer-close-row"><el-button link type="primary" @click="emit('close')">关闭</el-button></div>
     <template v-if="detail">
       <section class="batch-overview">
-        <div><span>来源载入批次</span><strong>{{ (detail.source_load_batch_ids || []).join('、') || '-' }}</strong></div>
+        <div><span>来源载入批次</span><strong>{{ sourceLoadBatchLabels.join('、') || '-' }}</strong></div>
         <div><span>数据集 / 景 / 波段</span><strong>{{ detail.summary?.band_count || 0 }} 个波段</strong></div>
         <div><span>剖分状态</span><StatusTag domain="partition" :value="detail.status" size="small" /></div>
       </section>

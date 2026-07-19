@@ -1,0 +1,57 @@
+<h2 id="purpose">导入到底做了什么</h2>
+<p>导入接口只登记 <strong>LoadBatch、Dataset、Scene、资产和波段</strong>，不会自动启动剖分。它把外部载入系统交付的内容变成 Cube 能长期追踪的业务对象。导入成功后，才可以在剖分页面选择数据。</p>
+<h2 id="data-hierarchy">先按四层组织数据</h2>
+<div class="flow"><div class="flow-item"><b>LoadBatch</b><span>一次载入动作</span></div><div class="flow-item"><b>Dataset</b><span>长期管理主记录</span></div><div class="flow-item"><b>Scene</b><span>一次观测/场景</span></div><div class="flow-item"><b>Asset + Band</b><span>文件和业务数据单元</span></div><div class="flow-item"><b>Output</b><span>剖分版本</span></div></div>
+<p>不要把所有资产平铺在顶层，也不要用旧的 <code>batch_id</code>、顶层 <code>data_type</code>、<code>assets</code> 或 <code>observations</code> 代替 Dataset 结构。生产导入契约要求顶层 <code>datasets</code> 非空。</p>
+<h2 id="payload">完整导入请求示例</h2>
+<p>下面是一个包含两个波段的光学 Dataset。实际请求还应补齐每个资产的时间、checksum 和源系统需要的属性。</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>{
+  "schema_version": "1.0",
+  "load_batch_id": "LOAD_20260719_001",
+  "batch_name": "华东光学样例",
+  "source_system": "ard-loader",
+  "loaded_at": "2026-07-19T08:00:00Z",
+  "datasets": [{
+    "dataset_id": "GF1-EAST-2020",
+    "dataset_code": "GF1-EAST-ARD",
+    "dataset_title": "华东 GF1 地表反射率",
+    "data_type": "optical",
+    "product_type": "surface_reflectance",
+    "scenes": [{
+      "scene_id": "GF1-EAST-20200710",
+      "scene_key": "GF1-EAST-20200710",
+      "acquisition_time": "2020-07-10T02:30:00Z",
+      "bbox": [114.75, 33.85, 122.77, 38.50],
+      "assets": [{
+        "asset_id": "GF1-EAST-20200710-COG",
+        "source_uri": "s3://cube/cube/source/optocal/GF1-EAST-20200710.tif",
+        "cog_uri": "s3://cube/cube/source/optocal/GF1-EAST-20200710.tif",
+        "source_kind": "cog",
+        "source_format": "cog",
+        "checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "crs": "EPSG:4326",
+        "resolution_m": 16,
+        "bands": [
+          {"band_code":"B01","band_name":"Blue","band_type":"spectral","display_order":0},
+          {"band_code":"B02","band_name":"Green","band_type":"spectral","display_order":1}
+        ]
+      }]
+    }]
+  }]
+}</code></pre></div>
+<h2 id="fields">字段怎么填写</h2>
+<table class="grid-table"><thead><tr><th>字段</th><th>必须</th><th>填写规则</th></tr></thead><tbody><tr><td><code>load_batch_id</code></td><td>是</td><td>由载入系统生成的稳定 ID；校验失败后用同一 ID 重试。</td></tr><tr><td><code>dataset_id</code></td><td>是</td><td>长期稳定的业务身份，不要每次重传都随机生成。</td></tr><tr><td><code>scene_id</code></td><td>是</td><td>同一 Dataset 内唯一，后续剖分和入库按景追踪。</td></tr><tr><td><code>data_type</code></td><td>是</td><td>只能是 optical、radar、product、carbon。</td></tr><tr><td><code>checksum</code></td><td>是</td><td>64 位小写 SHA-256；先对本地文件计算，再与 MinIO 对象核对。</td></tr><tr><td><code>bands</code></td><td>是</td><td>非空；band_code 是身份，band_name 只用于展示。</td></tr></tbody></table>
+<h2 id="type-differences">四种数据类型的差异</h2>
+<table class="grid-table"><thead><tr><th>类型</th><th>源文件</th><th>band_type</th><th>额外注意</th></tr></thead><tbody><tr><td><code>optical</code></td><td>COG</td><td>spectral</td><td>COG 必须有 bbox、CRS 和可读波段</td></tr><tr><td><code>radar</code></td><td>COG</td><td>polarization</td><td>典型 VV、VH、HH、HV</td></tr><tr><td><code>product</code></td><td>COG</td><td>variable</td><td>变量含义由产品定义，不由前端猜测</td></tr><tr><td><code>carbon</code></td><td>NetCDF/HDF5 原始文件</td><td>variable</td><td>只能使用 source_uri；不得传 cog_uri</td></tr></tbody></table>
+<h2 id="stat">提交前检查 MinIO 对象</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>from minio import Minio
+
+client = Minio("10.3.100.179:9000", access_key="&lt;key&gt;", secret_key="&lt;secret&gt;", secure=False)
+stat = client.stat_object("cube", "cube/source/optocal/GF1-EAST-20200710.tif")
+print(stat.size, stat.etag)</code></pre></div>
+<p>生产脚本应在发送 manifest 前完成 stat，并在对象不存在、大小不符或 checksum 不符时停止。不要把 access key 和 secret 放进 Ray task 参数。</p>
+<h2 id="send">发送请求与判断结果</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>curl -X POST http://localhost:50039/v1/partition/schemas/import \
+  -H 'Content-Type: application/json' \
+  --data-binary @load-batch.json</code></pre></div>
+<ul><li><strong>2xx：</strong>批次登记成功；记录返回的批次身份，下一步查询 load-batches。</li><li><strong>422：</strong>领域契约错误，修正原 manifest 后使用相同 load_batch_id 重试。</li><li><strong>401/403：</strong>认证或角色问题。schema import 在认证开启时仍是公开导入入口，但网关可能有额外限制。</li><li><strong>5xx/503：</strong>后端依赖或领域存储未配置；先查服务日志和 OpenGauss，不要反复提交。</li></ul>

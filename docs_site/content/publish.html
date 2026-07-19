@@ -1,0 +1,19 @@
+<h2 id="meaning">发布是什么</h2>
+<p>发布把一个 Dataset 的指定 output_version 与 quality_run_id 绑定，创建面向下游服务的 publication 记录。发布不重新剖分、不重新质检，也不等于“文件上传完成”。</p>
+<div class="callout warning"><span class="callout-icon">!</span><p>只有当前输出、质量门禁和目标波段都满足策略时，发布才有意义。不要绕过质量状态直接写发布表。</p></div>
+<h2 id="preconditions">发布前检查清单</h2>
+<ol><li>Dataset 存在 current_output_version。</li><li>使用当前 output 对应的 quality_run_id；历史 output 需要管理员权限和明确理由。</li><li>质量状态为 pass；如果是 warn，先完成 warn approval，并保留批准人、时间和理由。</li><li>如果指定发布 targets，source_asset_id 和 band_code 必须属于该 Dataset，且该波段在 output 中已有 partition index。</li><li>确认下游服务版本或 service_version_id 的目标配置。</li></ol>
+<h2 id="ui-location">在哪里操作</h2>
+<p>发布属于数据集管理和服务侧能力，不应混入“重新剖分”按钮。若当前部署前端没有显示发布入口，使用后端数据集路由或由门户的剖分数据服务完成发布；不要自行改数据库表。</p>
+<h2 id="api">相关 API</h2>
+<p>数据集路由的具体路径以当前 FastAPI OpenAPI 为准。常见操作包括：读取 Dataset 详情、提交 PublishRequest、读取 publication、撤回 publication。先访问 <code>/docs</code> 或由部署方提供的 API schema，确认实际路径和请求字段。</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code># 先查看 API 文档，而不是猜路径
+curl -s http://localhost:50039/openapi.json | python3.11 -m json.tool
+
+# 生产调用必须携带 Bearer Token
+curl -H 'Authorization: Bearer &lt;token&gt;' \
+  http://localhost:50039/v1/datasets/&lt;dataset_id&gt;</code></pre></div>
+<h2 id="states">发布状态</h2>
+<table class="grid-table"><thead><tr><th>状态</th><th>含义</th></tr></thead><tbody><tr><td>publishing</td><td>已请求，等待发布 worker 或目标服务确认</td></tr><tr><td>active</td><td>当前版本已对下游生效</td></tr><tr><td>failed</td><td>发布失败；读取 failure 并修复目标或门禁问题</td></tr><tr><td>withdrawing</td><td>正在撤回</td></tr><tr><td>withdrawn</td><td>已撤回，不再作为当前服务版本</td></tr></tbody></table>
+<h2 id="withdraw">撤回与版本切换</h2>
+<p>撤回需要 publication_id、Dataset 身份和理由。已被下游引用的输出不能用删除对象的方式清理；先撤回服务状态，再根据对象生命周期策略处理物理产物。发布历史必须保留，便于知道哪个质量运行曾经支撑过哪个版本。</p>

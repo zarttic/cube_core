@@ -1,0 +1,29 @@
+<h2 id="who">先确认你属于哪种使用方式</h2>
+<table class="grid-table"><thead><tr><th>使用方式</th><th>你需要启动什么</th><th>适合谁</th></tr></thead><tbody><tr><td>只看文档</td><td>只启动本手册站</td><td>业务人员、培训人员</td></tr><tr><td>本地页面开发</td><td>Web API + Vue 前端；可以关闭认证</td><td>前端开发、接口联调</td></tr><tr><td>真实生产运行</td><td>Web API + 前端 + OpenGauss + Ray + MinIO + 认证</td><td>实施和平台操作人员</td></tr></tbody></table>
+<div class="callout warning"><span class="callout-icon">!</span><p>本地页面能打开，不代表生产链路可运行。真正执行剖分必须检查 OpenGauss、Ray worker、MinIO 对象和认证。</p></div>
+<h2 id="prerequisites">前置检查</h2>
+<ol><li>使用 Python 3.11：<code>python3.11 --version</code>。</li><li>确认仓库根目录下存在 <code>cube_encoder/</code>、<code>cube_split/</code>、<code>cube_web/</code>。</li><li>准备一个可以被 MinIO 读取的源对象。生产路径必须是 <code>s3://cube/...</code>，不要用某台机器的 <code>/tmp</code> 或本地绝对路径。</li><li>向管理员确认 OpenGauss、Ray、MinIO 和认证系统的运行时地址。地址属于部署配置，不要写到 manifest 或业务配置表。</li></ol>
+<h2 id="env-file">创建 .cube_web.env</h2>
+<p>把下面模板复制到仓库根目录，再替换尖括号内容。文件已被 Git 忽略；不要执行 <code>git add -f .cube_web.env</code>，也不要把完整文件贴到工单或聊天记录。</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>CUBE_WEB_POSTGRES_DSN=postgresql://&lt;user&gt;:&lt;password&gt;@10.3.100.180:15400/postgres?client_encoding=UTF8
+CUBE_WEB_RAY_ADDRESS=10.3.100.182:6379
+CUBE_WEB_MINIO_ENDPOINT=10.3.100.179:9000
+CUBE_WEB_MINIO_BUCKET=cube
+CUBE_WEB_MINIO_ACCESS_KEY=&lt;access-key&gt;
+CUBE_WEB_MINIO_SECRET_KEY=&lt;secret-key&gt;</code></pre></div>
+<p>读取顺序是：进程环境变量 → <code>CUBE_WEB_ENV_FILE</code> 指定文件 → 当前工作目录或仓库根目录的 <code>.cube_web.env</code> → 代码默认值。<code>CUBE_WEB_POSTGRES_DSN</code> 只是兼容变量名，实际目标是 OpenGauss。</p>
+<h2 id="start-api">启动后端</h2>
+<p>从仓库根目录启动，保持这个终端运行：</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>PYTHONPATH=cube_encoder:cube_split:cube_web \
+python3.11 -m uvicorn cube_web.app:app \
+  --host 0.0.0.0 --port 50039</code></pre></div>
+<p>另开终端检查健康接口：</p>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>curl -i http://127.0.0.1:50039/health</code></pre></div>
+<p>收到 HTTP 200 只说明 API 进程存活。若后续页面报数据库、Ray 或 MinIO 错误，继续检查对应依赖，不要把健康检查当成全链路验收。</p>
+<h2 id="start-frontend">启动前端</h2>
+<div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>cd cube_web/frontend
+npm install
+npm run dev</code></pre></div>
+<p>前端默认运行在 <code>http://localhost:50040</code>，会把 <code>/v1</code>、<code>/api</code> 和 <code>/health</code> 代理到 50039。</p>
+<h2 id="auth-mode">认证模式</h2>
+<table class="grid-table"><thead><tr><th>配置</th><th>行为</th><th>建议</th></tr></thead><tbody><tr><td>未设置或 true</td><td>前端按统一认证跳转；大多数 <code>/v1/*</code> 需要 Bearer Token</td><td>生产必须使用</td></tr><tr><td><code>CUBE_WEB_AUTH_REQUIRED=0</code></td><td>受控本地测试可以直接访问页面</td><td>只用于本地测试，不要部署到生产</td></tr></tbody></table>
