@@ -93,3 +93,40 @@ def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
     assert row["grid_type"] == "isea4h"
     assert row["grid_level"] == 5
     assert row["st_code"].startswith("i4h:5:")
+
+
+def test_run_carbon_partition_normalizes_tansat_alias_in_rows_and_report(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    (input_dir / "tansat.jsonl").write_text(
+        json.dumps(
+            {
+                "satellite": "TanSat",
+                "observation_id": "exposure-1",
+                "acq_time": "2026-04-24T00:00:00Z",
+                "lon": 116.391,
+                "lat": 39.907,
+                "xco2": 420.5,
+                "quality_flag": "0",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = run_carbon_partition(
+        SimpleNamespace(
+            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=5,
+            time_granularity="day", product_type="tansat_xco2", max_observations=0,
+            partition_chunk_size=1000, partition_workers=1, partition_backend="process",
+            ray_address="", ray_parallelism=0,
+        )
+    )
+
+    run_dir = Path(summary["run_dir"])
+    row = json.loads((run_dir / "carbon_observation_rows.jsonl").read_text(encoding="utf-8"))
+    report = json.loads((run_dir / "job_report.json").read_text(encoding="utf-8"))
+    assert row["product_type"] == "tansat"
+    assert summary["product_type"] == "tansat"
+    assert report["product_type"] == "tansat"

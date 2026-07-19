@@ -7,6 +7,7 @@ from typing import Any
 from grid_core.sdk import CubeEncoderSDK
 
 from cube_split import runtime_config
+from cube_split.partition.carbon_products import normalize_carbon_product_type
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,6 +59,7 @@ def query_carbon_observations(
     cube_version: str = "v1",
     limit: int = 10000,
 ) -> list[dict[str, Any]]:
+    normalized_product_type = normalize_carbon_product_type(product_type)
     sdk = CubeEncoderSDK()
     cells = sdk.cover_compact(
         grid_type=grid_type,
@@ -104,7 +106,7 @@ def query_carbon_observations(
         int(grid_level),
         str(time_start),
         str(time_end),
-        product_type,
+        normalized_product_type,
         cube_version,
         space_codes,
     ]

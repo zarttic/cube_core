@@ -1152,6 +1152,25 @@ def test_carbon_ray_source_slice_planning_supports_tansat(monkeypatch):
     ]
 
 
+def test_carbon_ray_source_slice_rejects_non_tansat_observations(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._load_oco2_lite_observation_slice",
+        lambda *args, **kwargs: [
+            CarbonSatelliteObservation(
+                satellite="OCO2", observation_id="snd-1", acq_time="2026-04-24T00:00:00Z",
+                lon=116.391, lat=39.907, xco2=420.5,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="TanSat product requires TanSat observations"):
+        _partition_source_slice_chunk(
+            CarbonObservationSourceSlice("s3://cube/cube/source/carbon/tansat.h5", 0, 1),
+            CarbonPartitionConfig(product_type="tansat", partition_backend="ray"),
+            resolved_source_path="/tmp/tansat.h5",
+        )
+
+
 @pytest.mark.filterwarnings("ignore:numpy.ndarray size changed.*:RuntimeWarning")
 def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
     sample_path = Path(__file__).parents[1] / "oco2_LtCO2_201231_B11014Ar_220729012824s(1).nc4"
