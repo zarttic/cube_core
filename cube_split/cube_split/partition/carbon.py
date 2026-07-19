@@ -207,6 +207,17 @@ def _load_xco2_observations_from_file(
     raise ValueError(f"Unsupported carbon observation input file: {path}")
 
 
+def _load_tansat_observations_from_file(
+    path: Path,
+    max_observations: int | None = None,
+) -> list[CarbonSatelliteObservation]:
+    observations = _load_xco2_observations_from_file(path, max_observations=max_observations)
+    unsupported = sorted({observation.satellite for observation in observations if observation.satellite.casefold() != "tansat"})
+    if unsupported:
+        raise ValueError(f"TanSat product requires TanSat observations, found: {', '.join(unsupported)}")
+    return observations
+
+
 def _is_valid_measurement(*values: float) -> bool:
     return all(math.isfinite(value) and value > -999000 for value in values)
 
@@ -696,7 +707,7 @@ def _plan_oco2_lite_source_slices(
 ) -> list[CarbonObservationSourceSlice] | None:
     if config.partition_backend != "ray":
         return None
-    if normalize_carbon_product_type(config.product_type) != "xco2":
+    if normalize_carbon_product_type(config.product_type) not in {"xco2", "tansat"}:
         return None
     if config.selected_source_indexes:
         return None
@@ -791,6 +802,10 @@ def _partition_source_slice_chunk(
         chunk.stop_index,
         source_uri=chunk.source_uri,
     )
+    if normalize_carbon_product_type(config.product_type) == "tansat":
+        unsupported = sorted({observation.satellite for observation in observations if observation.satellite.casefold() != "tansat"})
+        if unsupported:
+            raise ValueError(f"TanSat product requires TanSat observations, found: {', '.join(unsupported)}")
     return _partition_observation_chunk(observations, config)
 
 
@@ -819,7 +834,9 @@ def _load_observation_chunks(
                 return load_observations_from_file(source, max_observations=max_observations)
             return load_observations_from_file(source, max_observations=max_observations, product_type=config.product_type)
         resolved = _resolve_oco2_lite_source_path(source)
-        return load_oco2_lite_observations(resolved, max_observations=max_observations)
+        if normalized_product_type == "xco2":
+            return load_oco2_lite_observations(resolved, max_observations=max_observations)
+        return load_observations_from_file(resolved, max_observations=max_observations, product_type=config.product_type)
 
     def select_observations(observations: list[CarbonSatelliteObservation]) -> list[CarbonSatelliteObservation]:
         if not selected_source_indexes:
