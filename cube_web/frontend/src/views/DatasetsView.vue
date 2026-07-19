@@ -116,7 +116,7 @@ onUnmounted(() => store.dispose());
       @update-metadata="(payload) => store.updateMetadata(payload).catch(() => {})"
       @reassign-scene="({ scene_id, target_dataset_id, reason }) => store.reassignScene(scene_id, target_dataset_id, reason).catch(() => {})"
       @rerun-quality="store.rerunQuality().catch(() => {})"
-      @retry-scene-ingest="(sceneId) => store.retrySceneIngest(sceneId).catch(() => {})"
+      @retry-band-ingest="(bandUnitId) => store.retryBandIngest(bandUnitId).catch(() => {})"
       @queue-partition="queuePartition"
       @withdraw="(publicationId) => store.withdraw(publicationId).catch(() => {})"
       @archive="(reason) => store.archive(reason).catch(() => {})"

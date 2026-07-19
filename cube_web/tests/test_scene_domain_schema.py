@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-19-scene-domain-v7"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-19-scene-domain-v8"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",

@@ -57,9 +57,9 @@
 
 剖分重试允许的原任务状态只有 `failed`、`cancelled`、`manual_required`，并且只能重试同一业务批次的最新任务。
 
-- 数据集级执行失败：当前可回退到数据集粒度，问题是粒度过粗；执行器应始终产出景/波段 outcome。
-- 部分景失败：当前只重试失败景；同景内单波段失败仍可能扩大为整景，需补充波段 outcome。
-- 取消：当前以 `unfinished_units` 重试未完成景，成功景不动；取消历史尚未在数据管理页形成时间线。
+- 数据集执行按波段独立产出 outcome；已有明确失败波段时只重试这些波段。
+- 部分失败：当前只重试失败波段；同景的成功波段保持完成。
+- 取消：当前以 `unfinished_units` 重试未完成波段，成功波段不动；取消历史尚未在数据管理页形成时间线。
 - `manual_required`：当前允许人工重试失败单元，但页面没有按错误来源显示下一动作。
 - 活动任务、已完成任务、非最新失败任务：返回 409，不重复提交或使用旧 payload。
 - 不存在任务：返回 404。
@@ -72,16 +72,16 @@
 
 入库只接受质检 `pass`，或显式允许的 `warn`；`fail`、`error`、`pending`、`running`、`cancelled` 不得进入候选。
 
-- 部分失败：运行状态 `partial_failure`，成功景保持 `completed`，只重试失败景。
-- 全部失败：运行状态 `failed`，可重试全部失败景或指定失败景。
-- 指定单景：只把该失败景置为 `queued`，其他失败景保持失败。
-- 混入已完成、排队或运行中的景：返回 409，原子拒绝，不修改任何景。
-- 不存在或不属于该 run 的景：返回 404。
-- 已经重新排队的失败景再次重试：返回 409。
+- 部分失败：运行状态 `partial_failure`，成功波段保持 `completed`，只重试失败波段。
+- 全部失败：运行状态 `failed`，可重试全部失败波段或指定失败波段。
+- 指定波段：只把该失败波段置为 `queued`，其他失败波段保持失败。
+- 混入已完成、排队或运行中的波段：返回 409，原子拒绝，不修改任何波段。
+- 不存在或不属于该 run 的波段：返回 404。
+- 已经重新排队的失败波段再次重试：返回 409。
 - 开始/完成/失败不符合状态机：返回状态转换错误，不写入终态。
-- 取消运行：未完成景置为 `cancelled`，已完成景不变；终态运行不可再次取消。
+- 取消运行：未完成波段置为 `cancelled`，已完成波段不变；终态运行不可再次取消。
 
-当前会把 `retry_history` 写入景 provenance，但数据入库页面还没有完整的景级重试时间线，也没有统一的 cancelled 单元恢复入口。
+当前会把 `retry_history` 写入波段 provenance，但数据入库页面还没有完整的波段级重试时间线，也没有统一的 cancelled 单元恢复入口。
 
 ## 6. `OPEN_ISSUES.md` 未闭环项
 
@@ -103,8 +103,8 @@
 - 质检规则和终态：`cube_web/tests/test_quality_rules.py`。
 - OpenGauss 质量租约、历史输出和异常完成：`cube_web/tests/test_quality_repository_opengauss.py`。
 - 质检入库门禁：`cube_web/tests/test_quality_ingest_bridge.py`。
-- 剖分部分失败、取消、景级重试：`cube_web/tests/test_partition_dataset_workflow.py`。
-- 入库状态机、部分失败、取消和指定景重试：`cube_web/tests/test_ingest_service.py`、`cube_web/tests/test_ingest_api.py`。
+- 剖分部分失败、取消、波段级重试：`cube_web/tests/test_partition_dataset_workflow.py`。
+- 入库状态机、部分失败、取消和指定波段重试：`cube_web/tests/test_ingest_service.py`、`cube_web/tests/test_ingest_api.py`。
 - 规则、错误码和恢复建议的前端展示：`cube_web/frontend/tests/unit/qualityLabels.spec.js`。
 
 自动化测试证明的是当前实现的状态机和约束，不代表上述两个 `OPEN_ISSUES` 已修复；它们仍需按第 6 节的验收标准单独开发。

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 IngestRunStatus = Literal[
     "pending",
@@ -27,9 +27,16 @@ class IngestSceneInput(FrozenModel):
     output_version: str = Field(min_length=1)
     quality_run_id: str = Field(min_length=1)
     source_load_batch_ids: tuple[str, ...] = ()
-    # An empty tuple is retained only for pre-v5 compatibility. New managed
-    # requests always materialize the exact selected band units.
-    band_unit_ids: tuple[str, ...] = ()
+    # `ingest_run_scenes` is a legacy table name. Each new record represents
+    # one concrete band unit, keeping ingest and retry state independent.
+    band_unit_ids: tuple[str, ...] = Field(min_length=1, max_length=1)
+
+    @field_validator("band_unit_ids")
+    @classmethod
+    def require_one_band_unit(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value[0].strip():
+            raise ValueError("band_unit_ids must contain a non-empty band unit id")
+        return value
 
 
 class CreateIngestRun(FrozenModel):
@@ -39,8 +46,8 @@ class CreateIngestRun(FrozenModel):
     requested_by: str = Field(default="system", min_length=1)
 
 
-class RetryIngestScenes(FrozenModel):
-    scene_ids: tuple[str, ...] = Field(min_length=1)
+class RetryIngestBandUnits(FrozenModel):
+    band_unit_ids: tuple[str, ...] = Field(min_length=1)
 
 
 class ManualCollectionIngest(FrozenModel):
@@ -69,7 +76,7 @@ class IngestRunScene(FrozenModel):
     error_message: str | None
     quality_run_id: str | None
     source_load_batch_ids: tuple[str, ...]
-    band_unit_ids: tuple[str, ...] = ()
+    band_unit_ids: tuple[str, ...] = Field(min_length=1, max_length=1)
     retry_history: tuple[IngestRetryEvent, ...] = ()
     created_at: datetime
     updated_at: datetime
@@ -96,12 +103,27 @@ class IngestRun(FrozenModel):
 
     @computed_field
     @property
+    def band_count(self) -> int:
+        return len(self.scenes)
+
+    @computed_field
+    @property
     def completed_scene_count(self) -> int:
         return sum(scene.status == "completed" for scene in self.scenes)
 
     @computed_field
     @property
+    def completed_band_count(self) -> int:
+        return sum(scene.status == "completed" for scene in self.scenes)
+
+    @computed_field
+    @property
     def failed_scene_count(self) -> int:
+        return sum(scene.status == "failed" for scene in self.scenes)
+
+    @computed_field
+    @property
+    def failed_band_count(self) -> int:
         return sum(scene.status == "failed" for scene in self.scenes)
 
 
@@ -110,6 +132,21 @@ class IngestSummary(FrozenModel):
     scene_count: int
     completed_scene_count: int
     failed_scene_count: int
+
+    @computed_field
+    @property
+    def band_count(self) -> int:
+        return self.scene_count
+
+    @computed_field
+    @property
+    def completed_band_count(self) -> int:
+        return self.completed_scene_count
+
+    @computed_field
+    @property
+    def failed_band_count(self) -> int:
+        return self.failed_scene_count
 
 
 class IngestPage(FrozenModel, Generic[T]):

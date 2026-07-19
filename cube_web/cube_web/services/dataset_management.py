@@ -58,7 +58,7 @@ class DatasetManagementRepository(Protocol):
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
     ) -> dict[str, Any]: ...
 
-    def retry_failed_scene_ingest(self, dataset_id: str, scene_id: str, *, actor: str) -> dict[str, Any]: ...
+    def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]: ...
 
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]: ...
 
@@ -142,9 +142,9 @@ class DatasetManagementService:
             raise DatasetManagementConflict("managed quality is not available for this dataset")
         return self.quality_hook(target_id, actor)
 
-    def retry_failed_scene_ingest(self, dataset_id: str, scene_id: str, *, actor: str) -> dict[str, Any]:
+    def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]:
         self.get_dataset(dataset_id)
-        return self.repository.retry_failed_scene_ingest(dataset_id, scene_id, actor=actor)
+        return self.repository.retry_failed_band_ingest(dataset_id, band_unit_id, actor=actor)
 
     def request_ingest(self, dataset_id: str, actor: Any) -> dict[str, Any]:
         self.get_dataset(dataset_id)
@@ -283,14 +283,14 @@ class InMemoryDatasetManagementRepository:
             self.scene_audit.append(audit)
             return copy.deepcopy(audit)
 
-    def retry_failed_scene_ingest(self, dataset_id: str, scene_id: str, *, actor: str) -> dict[str, Any]:
+    def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]:
         with self._lock:
             rows = self.details.get(dataset_id, {}).get("ingest-records", [])
-            row = next((item for item in reversed(rows) if item.get("scene_id") == scene_id), None)
+            row = next((item for item in reversed(rows) if band_unit_id in item.get("band_unit_ids", [])), None)
             if row is None:
-                raise ManagedSceneNotFound(scene_id)
+                raise ManagedSceneNotFound(band_unit_id)
             if row.get("status") != "failed":
-                raise DatasetManagementConflict("only a failed scene ingest can be retried")
+                raise DatasetManagementConflict("only a failed band ingest can be retried")
             row.update(status="queued", error_message=None, updated_at=_now_text(), requested_by=actor)
             return copy.deepcopy(row)
 
@@ -515,22 +515,22 @@ class OpenGaussDatasetManagementRepository:
             result = self._normalize(cursor.fetchone())
         return result
 
-    def retry_failed_scene_ingest(self, dataset_id: str, scene_id: str, *, actor: str) -> dict[str, Any]:
+    def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "SELECT irs.ingest_run_id,irs.status FROM ingest_run_scenes irs JOIN ingest_runs ir ON ir.ingest_run_id=irs.ingest_run_id "
-                "WHERE ir.dataset_id=%s AND irs.scene_id=%s ORDER BY irs.updated_at DESC LIMIT 1 FOR UPDATE",
-                (dataset_id, scene_id),
+                "WHERE ir.dataset_id=%s AND irs.band_unit_ids ? %s ORDER BY irs.updated_at DESC LIMIT 1 FOR UPDATE",
+                (dataset_id, band_unit_id),
             )
             row = cursor.fetchone()
             if row is None:
-                raise ManagedSceneNotFound(scene_id)
+                raise ManagedSceneNotFound(band_unit_id)
             if row["status"] != "failed":
-                raise DatasetManagementConflict("only a failed scene ingest can be retried")
+                raise DatasetManagementConflict("only a failed band ingest can be retried")
             cursor.execute(
                 "UPDATE ingest_run_scenes SET status='queued',error_message=NULL,updated_at=now(),provenance=provenance || %s "
-                "WHERE ingest_run_id=%s AND scene_id=%s RETURNING *",
-                (Jsonb({"retried_by": actor, "retried_at": _now_text()}), row["ingest_run_id"], scene_id),
+                "WHERE ingest_run_id=%s AND band_unit_ids ? %s RETURNING *",
+                (Jsonb({"retried_by": actor, "retried_at": _now_text()}), row["ingest_run_id"], band_unit_id),
             )
             result = self._normalize(cursor.fetchone())
             cursor.execute("UPDATE ingest_runs SET status='queued',error_message=NULL,completed_at=NULL WHERE ingest_run_id=%s", (row["ingest_run_id"],))

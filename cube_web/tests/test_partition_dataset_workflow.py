@@ -12,7 +12,7 @@ from cube_web.services.partition_job_store import InMemoryPartitionJobStore, Par
 from cube_web.services.partition_service import PartitionService, PartitionTask
 from cube_web.services.partition_workflow import (
     PartitionWorkflowService,
-    _failed_scene_ids,
+    _failed_band_unit_ids,
     _filter_retry_datasets,
     _merge_scene_rows,
 )
@@ -274,9 +274,10 @@ def test_same_dataset_tracks_scene_partial_failure_and_commits_successful_scene(
     assert result["status"] == "partial_failure"
     assert result["datasets"][0]["status"] == "partial_failure"
     assert result["datasets"][0]["scenes"] == [
-        {"scene_id": "scene-ok", "status": "completed"},
+        {"scene_id": "scene-ok", "band_unit_id": "asset-dataset-ok:B01", "status": "completed"},
         {
             "scene_id": "scene-fail",
+            "band_unit_id": "asset-scene-fail:B01",
             "status": "failed",
             "error": {"code": "partition_execution_failed", "message": "scene source unreadable"},
         },
@@ -572,9 +573,10 @@ def test_retry_same_dataset_keeps_only_failed_scene_assets_and_bands() -> None:
     assert first_attempt is not None
     assert first_attempt["status"] == "manual_required"
     assert first_attempt["runner_result"]["datasets"][0]["scenes"] == [
-        {"scene_id": "scene-ok", "status": "completed"},
+        {"scene_id": "scene-ok", "band_unit_id": "asset-scene-ok:B01", "status": "completed"},
         {
             "scene_id": "scene-fail",
+            "band_unit_id": "asset-scene-fail:B02",
             "status": "failed",
             "error": {"code": "partition_execution_failed", "message": "temporary scene failure"},
         },
@@ -615,23 +617,23 @@ def test_retry_same_dataset_keeps_only_failed_scene_assets_and_bands() -> None:
     ]
 
 
-def test_failed_scene_selector_excludes_pending_cancelled_and_completed_scenes() -> None:
+def test_failed_band_selector_excludes_pending_cancelled_and_completed_bands() -> None:
     attempt = {
         "runner_result": {
             "datasets": [{
                 "dataset_id": "dataset-a",
                 "status": "partial_failure",
                 "scenes": [
-                    {"scene_id": "scene-failed", "status": "failed"},
-                    {"scene_id": "scene-pending", "status": "pending"},
-                    {"scene_id": "scene-cancelled", "status": "cancelled"},
-                    {"scene_id": "scene-completed", "status": "completed"},
+                    {"scene_id": "scene-failed", "band_unit_id": "band-failed", "status": "failed"},
+                    {"scene_id": "scene-pending", "band_unit_id": "band-pending", "status": "pending"},
+                    {"scene_id": "scene-cancelled", "band_unit_id": "band-cancelled", "status": "cancelled"},
+                    {"scene_id": "scene-completed", "band_unit_id": "band-completed", "status": "completed"},
                 ],
             }],
         }
     }
 
-    assert _failed_scene_ids(attempt) == {"dataset-a": {"scene-failed"}}
+    assert _failed_band_unit_ids(attempt) == {"dataset-a": {"band-failed"}}
 
 
 def test_failed_unit_filter_does_not_expand_an_explicit_empty_scene_set() -> None:

@@ -147,7 +147,7 @@ def plan_ingest_requests(
     if dataset.status != "active" or (not manual and not dataset.auto_ingest_allowed) or dataset.current_output_version is None:
         return ()
 
-    grouped: dict[str, list[IngestSceneInput]] = {}
+    grouped: dict[tuple[str, str], list[IngestSceneInput]] = {}
     for row in partition_scenes:
         if (
             row.dataset_id != dataset.dataset_id
@@ -155,15 +155,16 @@ def plan_ingest_requests(
             or row.status != "completed"
         ):
             continue
-        grouped.setdefault(row.partition_run_id, []).append(
-            IngestSceneInput(
-                scene_id=row.scene_id,
-                output_version=dataset.current_output_version,
-                quality_run_id=quality_run_id,
-                source_load_batch_ids=tuple(sorted(set(row.source_load_batch_ids))),
-                band_unit_ids=tuple(sorted(set(row.band_unit_ids))),
+        for band_unit_id in sorted(set(row.band_unit_ids)):
+            grouped.setdefault((row.partition_run_id, band_unit_id), []).append(
+                IngestSceneInput(
+                    scene_id=row.scene_id,
+                    output_version=dataset.current_output_version,
+                    quality_run_id=quality_run_id,
+                    source_load_batch_ids=tuple(sorted(set(row.source_load_batch_ids))),
+                    band_unit_ids=(band_unit_id,),
+                )
             )
-        )
 
     return tuple(
         CreateIngestRun(
@@ -172,7 +173,7 @@ def plan_ingest_requests(
             scenes=tuple(sorted(scenes, key=lambda scene: scene.scene_id)),
             requested_by="system:quality-gate",
         )
-        for partition_run_id, scenes in sorted(grouped.items())
+        for (partition_run_id, _band_unit_id), scenes in sorted(grouped.items())
         if scenes
     )
 
@@ -277,10 +278,13 @@ def create_ingest_runs_after_quality(
         for source in cur.fetchall():
             source_batches.setdefault(str(source["scene_id"]), []).append(str(source["load_batch_id"]))
 
-        grouped_rows: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        grouped_rows: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
         for item in completed_rows:
-            key = (str(item["partition_run_id"]), str(item["scene_id"]), str(item["dataset_id"]), str(item["output_version"]), str(item["status"]))
-            grouped_rows.setdefault(key, {**item, "band_unit_ids": []})["band_unit_ids"].append(str(item["band_unit_id"]))
+            key = (
+                str(item["partition_run_id"]), str(item["scene_id"]), str(item["dataset_id"]),
+                str(item["output_version"]), str(item["status"]), str(item["band_unit_id"]),
+            )
+            grouped_rows.setdefault(key, {**item, "band_unit_ids": [str(item["band_unit_id"])]})
         candidates = [
             PartitionSceneOutput(
                 partition_run_id=str(item["partition_run_id"]),

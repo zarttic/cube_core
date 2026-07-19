@@ -26,6 +26,7 @@ def request(*scene_ids: str) -> CreateIngestRun:
                 output_version="output-v1",
                 quality_run_id=f"quality-{scene_id}",
                 source_load_batch_ids=("load-batch-1",),
+                band_unit_ids=(f"band-{scene_id}",),
             )
             for scene_id in scene_ids
         ),
@@ -46,7 +47,7 @@ def test_quality_gate_and_generated_run_id() -> None:
     assert run.scenes[0].source_load_batch_ids == ("load-batch-1",)
 
 
-def test_scene_level_partial_failure_retry_and_idempotent_completion() -> None:
+def test_band_level_partial_failure_retry_and_idempotent_completion() -> None:
     repository = InMemoryIngestRepository({"scene-a": "dataset-a", "scene-b": "dataset-a"})
     svc = IngestRunService(repository)
     run = svc.schedule_after_quality(request("scene-a", "scene-b"), quality_passed=True)
@@ -65,13 +66,13 @@ def test_scene_level_partial_failure_retry_and_idempotent_completion() -> None:
     assert svc.complete_scene(run.ingest_run_id, "scene-b").status == "completed"
 
 
-def test_retry_can_target_one_failed_scene_and_list_by_dataset() -> None:
+def test_retry_can_target_one_failed_band_and_list_by_dataset() -> None:
     svc = service("scene-a", "scene-b")
     run = svc.schedule_after_quality(request("scene-a", "scene-b"), quality_passed=True)
     for scene_id in ("scene-a", "scene-b"):
         svc.start_scene(run.ingest_run_id, scene_id)
         svc.fail_scene(run.ingest_run_id, scene_id, f"failed {scene_id}")
-    retried = svc.retry_failed(run.ingest_run_id, ("scene-a",))
+    retried = svc.retry_failed(run.ingest_run_id, ("band-scene-a",))
     assert {scene.scene_id: scene.status for scene in retried.scenes} == {"scene-a": "queued", "scene-b": "failed"}
     assert svc.list_runs(dataset_id="dataset-a").items[0].ingest_run_id == run.ingest_run_id
     assert svc.list_runs(dataset_id="dataset-other").items == ()
@@ -86,7 +87,7 @@ def test_failed_scene_without_error_message_can_be_retried_and_read() -> None:
     run = svc.schedule_after_quality(request("scene-a"), quality_passed=True)
     repository.runs[run.ingest_run_id]["scenes"]["scene-a"].update(status="failed", error_message=None)
     repository.runs[run.ingest_run_id]["status"] = "failed"
-    retried = svc.retry_failed(run.ingest_run_id, ("scene-a",))
+    retried = svc.retry_failed(run.ingest_run_id, ("band-scene-a",))
     assert retried.scenes[0].retry_history[0].error_message is None
     assert svc.get(run.ingest_run_id).scenes[0].status == "queued"
 

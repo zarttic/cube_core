@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from cube_web.routes.auth import current_actor, require_admin
-from cube_web.services.ingest_contracts import CancelIngestRun, ManualCollectionIngest, RetryIngestScenes
+from cube_web.services.ingest_contracts import CancelIngestRun, ManualCollectionIngest, RetryIngestBandUnits
 from cube_web.services.ingest_repository import (
     IngestRunNotFound,
     IngestSceneNotFound,
@@ -63,10 +63,10 @@ def create_ingest_runs_router(service: IngestRunService) -> APIRouter:
             raise _not_found(exc) from exc
 
     @router.post("/{ingest_run_id}/retry")
-    def retry_ingest_scenes(ingest_run_id: str, payload: RetryIngestScenes, request: Request) -> dict:
+    def retry_ingest_band_units(ingest_run_id: str, payload: RetryIngestBandUnits, request: Request) -> dict:
         actor = require_admin(current_actor(request))
         try:
-            return service.retry_failed(ingest_run_id, payload.scene_ids, requested_by=actor.username).model_dump(mode="json")
+            return service.retry_failed(ingest_run_id, payload.band_unit_ids, requested_by=actor.username).model_dump(mode="json")
         except (IngestRunNotFound, IngestSceneNotFound) as exc:
             raise _not_found(exc) from exc
         except InvalidIngestTransition as exc:

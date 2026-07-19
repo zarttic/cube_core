@@ -70,8 +70,8 @@ class IngestRunService:
     def fail_scene(self, ingest_run_id: str, scene_id: str, error_message: str) -> IngestRun:
         return self.repository.fail_scene(ingest_run_id, scene_id, error_message)
 
-    def retry_failed(self, ingest_run_id: str, scene_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
-        return self.repository.retry_failed(ingest_run_id, scene_ids, requested_by=requested_by)
+    def retry_failed(self, ingest_run_id: str, band_unit_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
+        return self.repository.retry_failed(ingest_run_id, band_unit_ids, requested_by=requested_by)
 
     def cancel(self, ingest_run_id: str, reason: str = "") -> IngestRun:
         return self.repository.cancel(ingest_run_id, reason)

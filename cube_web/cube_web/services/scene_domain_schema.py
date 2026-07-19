@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-19-scene-domain-v7"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-19-scene-domain-v8"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -224,6 +224,8 @@ def schema_statements() -> tuple[str, ...]:
           PRIMARY KEY (ingest_run_id, scene_id)
         )""",
         """ALTER TABLE ingest_run_scenes ADD COLUMN IF NOT EXISTS band_unit_ids JSONB NOT NULL DEFAULT '[]'::jsonb""",
+        """CREATE INDEX IF NOT EXISTS idx_ingest_run_scenes_band_unit
+           ON ingest_run_scenes ((band_unit_ids->>0), status, updated_at)""",
         """CREATE TABLE IF NOT EXISTS scene_dataset_audit (
           audit_id TEXT PRIMARY KEY,
           scene_id TEXT NOT NULL REFERENCES scenes(scene_id),
@@ -381,6 +383,78 @@ def backfill_scene_band_unit_ids(connection: Any, *, commit: bool = True) -> int
     return updated
 
 
+def split_legacy_ingest_band_units(connection: Any, *, commit: bool = True) -> int:
+    """Split pre-v8 multi-band ingest rows without discarding their history.
+
+    New execution records have exactly one band unit. A legacy parent keeps its
+    first unit and additional units receive deterministic sibling ingest runs.
+    """
+    from hashlib import sha256
+
+    updated = 0
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT ingest_run_id,scene_id,partition_run_id,output_version,band_unit_ids,status,"
+                "attempt_count,error_message,provenance FROM ingest_run_scenes "
+                "WHERE jsonb_array_length(band_unit_ids) <> 1 ORDER BY created_at,ingest_run_id,scene_id"
+            )
+            rows = cursor.fetchall()
+            for ingest_run_id, scene_id, partition_run_id, output_version, raw_bands, status, attempt_count, error_message, provenance in rows:
+                bands = raw_bands if isinstance(raw_bands, list) else json.loads(raw_bands or "[]")
+                bands = [str(value) for value in bands if str(value).strip()]
+                if not bands:
+                    cursor.execute(
+                        "SELECT band_unit_id FROM scene_bands WHERE scene_id=%s AND band_unit_id IS NOT NULL ORDER BY band_unit_id",
+                        (scene_id,),
+                    )
+                    bands = [str(row[0]) for row in cursor.fetchall()]
+                if not bands:
+                    raise RuntimeError(f"cannot split legacy ingest row without a band unit: {ingest_run_id}/{scene_id}")
+                cursor.execute("SELECT dataset_id FROM ingest_runs WHERE ingest_run_id=%s", (ingest_run_id,))
+                owner = cursor.fetchone()
+                if owner is None:
+                    raise RuntimeError(f"legacy ingest row has no parent run: {ingest_run_id}")
+                dataset_id = str(owner[0])
+                for index, band_unit_id in enumerate(dict.fromkeys(bands)):
+                    idempotency_key = sha256(
+                        f"{dataset_id}\0{scene_id}\0{output_version}\0{band_unit_id}".encode("utf-8")
+                    ).hexdigest()
+                    suffix_identity = f"{scene_id}\0{band_unit_id}".encode("utf-8")
+                    target_run_id = str(ingest_run_id) if index == 0 else (
+                        f"{ingest_run_id}-band-{sha256(suffix_identity).hexdigest()[:12]}"
+                    )
+                    if index:
+                        cursor.execute(
+                            "INSERT INTO ingest_runs (ingest_run_id,partition_run_id,dataset_id,status,requested_by,error_message,attributes,created_at,started_at,completed_at) "
+                            "SELECT %s,partition_run_id,dataset_id,status,requested_by,error_message,attributes,created_at,started_at,completed_at "
+                            "FROM ingest_runs WHERE ingest_run_id=%s "
+                            "AND NOT EXISTS (SELECT 1 FROM ingest_runs WHERE ingest_run_id=%s)",
+                            (target_run_id, ingest_run_id, target_run_id),
+                        )
+                        cursor.execute("SELECT 1 FROM ingest_run_scenes WHERE idempotency_key=%s", (idempotency_key,))
+                        if cursor.fetchone() is None:
+                            cursor.execute(
+                                "INSERT INTO ingest_run_scenes (ingest_run_id,scene_id,partition_run_id,output_version,band_unit_ids,status,idempotency_key,attempt_count,error_message,provenance) "
+                                "VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s::jsonb)",
+                                (target_run_id, scene_id, partition_run_id, output_version, json.dumps([band_unit_id]), status,
+                                 idempotency_key, attempt_count, error_message, json.dumps(provenance or {})),
+                            )
+                    else:
+                        cursor.execute(
+                            "UPDATE ingest_run_scenes SET band_unit_ids=%s::jsonb,idempotency_key=%s,updated_at=now() "
+                            "WHERE ingest_run_id=%s AND scene_id=%s",
+                            (json.dumps([band_unit_id]), idempotency_key, ingest_run_id, scene_id),
+                        )
+                    updated += 1
+        if commit:
+            connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return updated
+
+
 def backfill_partition_grid_status(connection: Any, *, commit: bool = True) -> int:
     """Create per-band grid state rows for existing scene partition runs."""
     updated = 0
@@ -424,15 +498,15 @@ def backfill_partition_grid_status(connection: Any, *, commit: bool = True) -> i
                 quality_row = cursor.fetchone()
                 if quality_row is not None:
                     quality_status = str(quality_row[0])
-                cursor.execute(
-                    "SELECT status FROM ingest_run_scenes WHERE scene_id=%s AND output_version=%s "
-                    "ORDER BY updated_at DESC LIMIT 1",
-                    (scene_id, output_version),
-                )
-                ingest_row = cursor.fetchone()
-                if ingest_row is not None:
-                    ingest_status = str(ingest_row[0])
             for band_unit_id in band_unit_ids:
+                if output_version:
+                    cursor.execute(
+                        "SELECT status FROM ingest_run_scenes WHERE scene_id=%s AND output_version=%s "
+                        "AND band_unit_ids ? %s ORDER BY updated_at DESC LIMIT 1",
+                        (scene_id, output_version, band_unit_id),
+                    )
+                    ingest_row = cursor.fetchone()
+                    ingest_status = str(ingest_row[0]) if ingest_row is not None else "pending"
                 cursor.execute(
                     """MERGE INTO partition_data_unit_grid_status target USING (
                       SELECT %s::text dataset_id,%s::text scene_id,%s::text band_unit_id,%s::text grid_type,%s::int grid_level

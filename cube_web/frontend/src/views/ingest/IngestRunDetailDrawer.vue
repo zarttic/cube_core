@@ -10,12 +10,12 @@ const props = defineProps({
   visible: Boolean, runId: { type: String, default: '' }, detail: { type: Object, default: null },
   loading: Boolean, actionLoading: Boolean, writeEnabled: { type: Boolean, default: true },
 });
-const emit = defineEmits(['close', 'retry-scenes', 'cancel']);
+const emit = defineEmits(['close', 'retry-band-units', 'cancel']);
 const cancelDialog = ref(false);
 const cancelReason = ref('');
 const title = computed(() => props.detail?.ingest_run_id || props.runId || '数据入库详情');
-const scenes = computed(() => props.detail?.scenes || []);
-const failedSceneIds = computed(() => scenes.value.filter((scene) => scene.status === 'failed').map((scene) => scene.scene_id));
+const bandUnits = computed(() => props.detail?.scenes || []);
+const failedBandUnitIds = computed(() => bandUnits.value.filter((unit) => unit.status === 'failed').flatMap((unit) => unit.band_unit_ids || []));
 const cancellable = computed(() => ['pending', 'queued', 'running'].includes(props.detail?.status));
 
 watch(() => props.runId, () => {
@@ -32,7 +32,7 @@ function confirmCancel() {
 <template>
   <DetailDrawer :visible="visible" :title="title" :loading="loading" test-id="ingest-run-detail-drawer" size="820px" @update:visible="(value) => !value && emit('close')" @closed="emit('close')">
     <div class="drawer-actions">
-      <el-button v-if="writeEnabled && failedSceneIds.length" type="primary" plain :loading="actionLoading" @click="emit('retry-scenes', failedSceneIds)">重试全部失败景</el-button>
+      <el-button v-if="writeEnabled && failedBandUnitIds.length" type="primary" plain :loading="actionLoading" @click="emit('retry-band-units', failedBandUnitIds)">重试全部失败波段</el-button>
       <el-button v-if="writeEnabled && cancellable" type="danger" plain :loading="actionLoading" @click="cancelDialog = true">取消运行</el-button>
       <el-button data-testid="ingest-detail-close" link type="primary" @click="emit('close')">关闭</el-button>
     </div>
@@ -46,16 +46,16 @@ function confirmCancel() {
         <el-descriptions-item label="完成时间">{{ formatShanghaiTime(detail.completed_at) }}</el-descriptions-item>
         <el-descriptions-item label="错误" :span="2">{{ detail.error_message || '-' }}</el-descriptions-item>
       </el-descriptions>
-      <h3>景与波段入库明细</h3>
-      <AppTable :data="scenes" :pagination="false" row-key="scene_id">
-        <el-table-column prop="scene_id" label="景 ID" min-width="170" show-overflow-tooltip />
-        <el-table-column label="波段数据" min-width="180"><template #default="{ row }">{{ (row.band_unit_ids || []).join(', ') || '全部波段（历史记录）' }}</template></el-table-column>
+      <h3>波段入库明细</h3>
+      <AppTable :data="bandUnits" :pagination="false" row-key="idempotency_key">
+        <el-table-column prop="scene_id" label="景" min-width="170" show-overflow-tooltip />
+        <el-table-column label="波段数据" min-width="180"><template #default="{ row }">{{ row.band_unit_ids?.[0] || '-' }}</template></el-table-column>
         <el-table-column prop="output_version" label="输出版本" min-width="130" show-overflow-tooltip />
         <el-table-column label="状态" width="110"><template #default="{ row }"><StatusTag domain="ingest" :value="row.status" size="small" /></template></el-table-column>
         <el-table-column prop="attempt_count" label="尝试" width="75" />
         <el-table-column prop="error_message" label="错误" min-width="180" show-overflow-tooltip />
         <el-table-column label="来源批次" min-width="180"><template #default="{ row }">{{ (row.source_load_batch_ids || []).join(', ') || '-' }}</template></el-table-column>
-        <el-table-column v-if="writeEnabled" label="操作" width="80" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" link type="primary" @click="emit('retry-scenes', [row.scene_id])">重试</el-button></template></el-table-column>
+        <el-table-column v-if="writeEnabled" label="操作" width="80" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed' && row.band_unit_ids?.length === 1" link type="primary" @click="emit('retry-band-units', row.band_unit_ids)">重试</el-button></template></el-table-column>
       </AppTable>
     </template>
     <el-empty v-else description="正在加载数据入库" />

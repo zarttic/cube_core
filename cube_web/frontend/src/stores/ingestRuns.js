@@ -97,8 +97,8 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
     }
   }
 
-  function retryFailedScenes(sceneIds = []) {
-    return runAction('retry', { scene_ids: sceneIds });
+  function retryFailedBandUnits(bandUnitIds = []) {
+    return runAction('retry', { band_unit_ids: bandUnitIds });
   }
 
   function cancelRun(reason = '') {
@@ -149,7 +149,7 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
 
   return {
     filters, pageState, records, summary, loading, error, selectedRunId, detailVisible, detail,
-    detailLoading, actionLoading, manualCandidates, manualCandidatesLoading, loadList, openDetail, retryFailedScenes, cancelRun,
+    detailLoading, actionLoading, manualCandidates, manualCandidatesLoading, loadList, openDetail, retryFailedBandUnits, cancelRun,
     requestManualCollection, loadManualCandidates, closeDetail, dispose,
   };
 });

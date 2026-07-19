@@ -201,7 +201,7 @@ class PartitionWorkflowService:
         source_task_id: str | None = None,
         retry_strategy: str | None = None,
         failure_reason: str | None = None,
-        retry_scene_ids: dict[str, set[str]] | None = None,
+        retry_band_unit_ids: dict[str, set[str]] | None = None,
     ) -> PartitionTask:
         """Persist and queue a strict request under its batch-level data type."""
         if self.dataset_runner is None:
@@ -247,8 +247,8 @@ class PartitionWorkflowService:
             )
             if not pending_datasets:
                 raise HTTPException(status_code=409, detail=f"All requested partition dataset configurations already completed: {request.batch_id}")
-            if retry_scene_ids:
-                pending_datasets = _filter_retry_datasets(pending_datasets, retry_scene_ids)
+            if retry_band_unit_ids:
+                pending_datasets = _filter_retry_datasets(pending_datasets, retry_band_unit_ids)
             execution_request = request.model_copy(update={"datasets": pending_datasets})
             payload = execution_request.model_dump(mode="json")
             payload["strict_partition_request"] = True
@@ -380,7 +380,7 @@ class PartitionWorkflowService:
                 source_task_id=task_id,
                 retry_strategy="unfinished_units" if cancelled else "failed_units",
                 failure_reason=_text_or_none(attempt.get("error_message")) or _text_or_none(batch.get("last_error")),
-                retry_scene_ids=_unfinished_scene_ids(attempt) if cancelled else _failed_scene_ids(attempt),
+                retry_band_unit_ids=_unfinished_band_unit_ids(attempt) if cancelled else _failed_band_unit_ids(attempt),
             )
         raise HTTPException(status_code=409, detail="Partition task payload is not a normalized production request")
 
@@ -578,15 +578,15 @@ def _dataset_result_statuses(attempt: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _failed_scene_ids(attempt: dict[str, Any]) -> dict[str, set[str]]:
-    return _scene_ids_with_status(attempt, lambda status: status == "failed")
+def _failed_band_unit_ids(attempt: dict[str, Any]) -> dict[str, set[str]]:
+    return _band_unit_ids_with_status(attempt, lambda status: status == "failed")
 
 
-def _unfinished_scene_ids(attempt: dict[str, Any]) -> dict[str, set[str]]:
-    return _scene_ids_with_status(attempt, lambda status: status != "completed")
+def _unfinished_band_unit_ids(attempt: dict[str, Any]) -> dict[str, set[str]]:
+    return _band_unit_ids_with_status(attempt, lambda status: status != "completed")
 
 
-def _scene_ids_with_status(
+def _band_unit_ids_with_status(
     attempt: dict[str, Any], include_status: Callable[[str], bool]
 ) -> dict[str, set[str]]:
     result = attempt.get("runner_result") if isinstance(attempt.get("runner_result"), dict) else {}
@@ -594,26 +594,29 @@ def _scene_ids_with_status(
     for dataset in result.get("datasets", []):
         if not isinstance(dataset, dict) or not dataset.get("dataset_id") or dataset.get("status") == "completed":
             continue
-        scene_outcomes = [item for item in dataset.get("scenes", ()) if isinstance(item, dict) and item.get("scene_id")]
-        if scene_outcomes:
+        band_outcomes = [item for item in dataset.get("scenes", ()) if isinstance(item, dict) and item.get("band_unit_id")]
+        if band_outcomes:
             selected[str(dataset["dataset_id"])] = {
-                str(item["scene_id"]) for item in scene_outcomes if include_status(str(item.get("status") or ""))
+                str(item["band_unit_id"]) for item in band_outcomes if include_status(str(item.get("status") or ""))
             }
     return selected
 
 
-def _filter_retry_datasets(datasets: tuple[DatasetInput, ...], retry_scene_ids: dict[str, set[str]]) -> tuple[DatasetInput, ...]:
+def _filter_retry_datasets(datasets: tuple[DatasetInput, ...], retry_band_unit_ids: dict[str, set[str]]) -> tuple[DatasetInput, ...]:
     filtered = []
     for dataset in datasets:
-        if dataset.dataset_id not in retry_scene_ids:
+        if dataset.dataset_id not in retry_band_unit_ids:
             filtered.append(dataset)
             continue
-        scene_ids = retry_scene_ids[dataset.dataset_id]
-        if not scene_ids:
+        band_unit_ids = retry_band_unit_ids[dataset.dataset_id]
+        if not band_unit_ids:
             continue
-        assets = tuple(asset for asset in dataset.assets if str((asset.attributes or {}).get("scene_id") or "") in scene_ids)
-        asset_ids = {asset.source_asset_id for asset in assets}
-        bands = tuple(band for band in dataset.bands if band.source_asset_id in asset_ids)
+        bands = tuple(
+            band for band in dataset.bands
+            if _band_unit_id(band) in band_unit_ids
+        )
+        asset_ids = {band.source_asset_id for band in bands}
+        assets = tuple(asset for asset in dataset.assets if asset.source_asset_id in asset_ids)
         if assets and bands:
             filtered.append(dataset.model_copy(update={"assets": assets, "bands": bands}))
     if not filtered:
@@ -726,36 +729,38 @@ class _ScenePartitionFailure(RuntimeError):
 
 
 def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[PartitionDatasetResult, list[dict[str, Any]] | None]:
-    grouped: dict[str, list[Any]] = {}
-    for asset in dataset.assets:
-        scene_id = str((asset.attributes or {}).get("scene_id") or "").strip()
-        if not scene_id:
+    """Run each selected band independently while retaining scene context."""
+    grouped: dict[str, tuple[str, Any]] = {}
+    assets_by_id = {asset.source_asset_id: asset for asset in dataset.assets}
+    for band in dataset.bands:
+        band_unit_id = _band_unit_id(band)
+        asset = assets_by_id.get(band.source_asset_id)
+        scene_id = str((asset.attributes or {}).get("scene_id") or "").strip() if asset is not None else ""
+        if not band_unit_id or not scene_id or asset is None:
             raw = _run_dataset_runner(runner, dataset=dataset, **kwargs)
             return PartitionDatasetResult.model_validate(raw), None
-        grouped.setdefault(scene_id, []).append(asset)
-    if len(grouped) <= 1:
-        raw = _run_dataset_runner(runner, dataset=dataset, **kwargs)
-        return PartitionDatasetResult.model_validate(raw), None
+        grouped[band_unit_id] = (scene_id, band)
 
     results: list[PartitionDatasetResult] = []
     outcomes: list[dict[str, Any]] = []
-    for scene_id, assets in grouped.items():
-        asset_ids = {asset.source_asset_id for asset in assets}
-        scene_dataset = dataset.model_copy(
+    for band_unit_id, (scene_id, band) in grouped.items():
+        asset = assets_by_id[band.source_asset_id]
+        band_dataset = dataset.model_copy(
             update={
-                "assets": tuple(assets),
-                "bands": tuple(band for band in dataset.bands if band.source_asset_id in asset_ids),
+                "assets": (asset,),
+                "bands": (band,),
             }
         )
         try:
-            raw = _run_dataset_runner(runner, dataset=scene_dataset, **kwargs)
+            raw = _run_dataset_runner(runner, dataset=band_dataset, **kwargs)
             result = PartitionDatasetResult.model_validate(raw)
             results.append(result)
-            outcomes.append({"scene_id": scene_id, "status": "completed"})
+            outcomes.append({"scene_id": scene_id, "band_unit_id": band_unit_id, "status": "completed"})
         except Exception as exc:
             outcomes.append(
                 {
                     "scene_id": scene_id,
+                    "band_unit_id": band_unit_id,
                     "status": "failed",
                     "error": {"code": "partition_execution_failed", "message": _safe_dataset_error(exc)},
                 }
@@ -771,6 +776,12 @@ def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[
         }
     )
     return combined, outcomes
+
+
+def _band_unit_id(band: Any) -> str:
+    """Use the registered id, with a deterministic fallback for legacy input."""
+    registered = str((band.attributes or {}).get("band_unit_id") or "").strip()
+    return registered or f"{band.source_asset_id}:{band.band_code}"
 
 
 def _merge_scene_rows(results: list[PartitionDatasetResult], field: str) -> tuple[dict[str, Any], ...]:

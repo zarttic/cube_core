@@ -69,7 +69,7 @@ class IngestRepository(Protocol):
 
     def fail_scene(self, ingest_run_id: str, scene_id: str, error_message: str) -> IngestRun: ...
 
-    def retry_failed(self, ingest_run_id: str, scene_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun: ...
+    def retry_failed(self, ingest_run_id: str, band_unit_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun: ...
 
     def cancel(self, ingest_run_id: str, reason: str = "") -> IngestRun: ...
 
@@ -227,21 +227,22 @@ class InMemoryIngestRepository:
             raise ValueError("error_message must not be empty")
         return self._finish_scene(ingest_run_id, scene_id, status="failed", error_message=error_message)
 
-    def retry_failed(self, ingest_run_id: str, scene_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
+    def retry_failed(self, ingest_run_id: str, band_unit_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
         with self._lock:
             run = self._run(ingest_run_id)
-            selected = set(scene_ids) if scene_ids is not None else None
-            if selected is not None and (not selected or selected - run["scenes"].keys()):
-                raise IngestSceneNotFound(",".join(sorted(selected - run["scenes"].keys())))
+            selected = set(band_unit_ids) if band_unit_ids is not None else None
+            known = {band for scene in run["scenes"].values() for band in scene["band_unit_ids"]}
+            if selected is not None and (not selected or selected - known):
+                raise IngestSceneNotFound(",".join(sorted(selected - known)))
             failed = [
                 scene
                 for scene in run["scenes"].values()
-                if scene["status"] == "failed" and (selected is None or scene["scene_id"] in selected)
+                if scene["status"] == "failed" and (selected is None or any(band in selected for band in scene["band_unit_ids"]))
             ]
             if selected is not None and len(failed) != len(selected):
-                raise InvalidIngestTransition("only failed scenes can be retried")
+                raise InvalidIngestTransition("only failed band units can be retried")
             if not failed:
-                raise InvalidIngestTransition("ingest run has no failed scenes to retry")
+                raise InvalidIngestTransition("ingest run has no failed band units to retry")
             now = _now()
             for scene in failed:
                 scene["retry_history"].append(
@@ -564,7 +565,6 @@ class OpenGaussIngestRepository:
                     "UPDATE ingest_runs SET status='running',started_at=COALESCE(started_at,now()),completed_at=NULL WHERE ingest_run_id=%s",
                     (ingest_run_id,),
                 )
-                cur.execute("UPDATE scenes SET status='ingesting',updated_at=now() WHERE scene_id=%s", (scene_id,))
         return self.get(ingest_run_id)
 
     def complete_scene(self, ingest_run_id: str, scene_id: str) -> IngestRun:
@@ -575,28 +575,29 @@ class OpenGaussIngestRepository:
             raise ValueError("error_message must not be empty")
         return self._finish_scene(ingest_run_id, scene_id, "failed", error_message)
 
-    def retry_failed(self, ingest_run_id: str, scene_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
+    def retry_failed(self, ingest_run_id: str, band_unit_ids: tuple[str, ...] | None = None, *, requested_by: str = "system") -> IngestRun:
         with self.pool.connection() as connection, connection.cursor() as cur:
             self._lock_run(cur, ingest_run_id)
-            if scene_ids is not None and not scene_ids:
+            if band_unit_ids is not None and not band_unit_ids:
                 raise IngestSceneNotFound("")
-            selected_sql = " AND scene_id=ANY(%s)" if scene_ids is not None else ""
-            params: tuple[Any, ...] = (ingest_run_id, list(scene_ids)) if scene_ids is not None else (ingest_run_id,)
+            selected_sql = " AND band_unit_ids ?| %s::text[]" if band_unit_ids is not None else ""
+            params: tuple[Any, ...] = (ingest_run_id, list(band_unit_ids)) if band_unit_ids is not None else (ingest_run_id,)
             cur.execute(
-                f"SELECT scene_id,status,error_message,attempt_count,provenance FROM ingest_run_scenes WHERE ingest_run_id=%s{selected_sql} FOR UPDATE",
+                f"SELECT scene_id,band_unit_ids,status,error_message,attempt_count,provenance FROM ingest_run_scenes WHERE ingest_run_id=%s{selected_sql} FOR UPDATE",
                 params,
             )
             selected = cur.fetchall()
-            if scene_ids is not None:
-                if len(selected) != len(set(scene_ids)):
-                    raise IngestSceneNotFound(",".join(scene_ids))
-                if any(row[1] != "failed" for row in selected):
-                    raise InvalidIngestTransition("only failed scenes can be retried")
-            failed = [row for row in selected if row[1] == "failed"]
+            if band_unit_ids is not None:
+                selected_band_units = {band for row in selected for band in _json_array(row[1])}
+                if selected_band_units != set(band_unit_ids):
+                    raise IngestSceneNotFound(",".join(sorted(set(band_unit_ids) - selected_band_units)))
+                if any(row[2] != "failed" for row in selected):
+                    raise InvalidIngestTransition("only failed band units can be retried")
+            failed = [row for row in selected if row[2] == "failed"]
             if not failed:
-                raise InvalidIngestTransition("ingest run has no failed scenes to retry")
+                raise InvalidIngestTransition("ingest run has no failed band units to retry")
             now = _now()
-            for scene_id, _status, error_message, attempt_count, raw_provenance in failed:
+            for scene_id, _bands, _status, error_message, attempt_count, raw_provenance in failed:
                 provenance = _json_object(raw_provenance)
                 history = list(provenance.get("retry_history") or ())
                 history.append(
@@ -613,7 +614,7 @@ class OpenGaussIngestRepository:
                     (Jsonb(provenance), ingest_run_id, scene_id),
                 )
                 if cur.rowcount != 1:
-                    raise InvalidIngestTransition(f"failed scene changed while retrying: {scene_id}")
+                    raise InvalidIngestTransition(f"failed band unit changed while retrying: {scene_id}")
             cur.execute(
                 "UPDATE ingest_runs SET status='queued',error_message=NULL,completed_at=NULL WHERE ingest_run_id=%s", (ingest_run_id,)
             )
@@ -727,7 +728,6 @@ class OpenGaussIngestRepository:
                     "WHERE ingest_run_id=%s AND scene_id=%s",
                     (item["ingest_run_id"], item["scene_id"]),
                 )
-                cur.execute("UPDATE scenes SET status='available',updated_at=now() WHERE scene_id=%s", (item["scene_id"],))
                 cur.execute(
                     "UPDATE partition_data_unit_grid_status SET ingest_status='completed',error_message=NULL,updated_at=now() "
                     "WHERE dataset_id=%s AND scene_id=%s AND output_version=%s AND quality_status IN ('pass','warn') "
@@ -754,7 +754,6 @@ class OpenGaussIngestRepository:
                 )
                 if cur.rowcount:
                     run_ids.add(item["ingest_run_id"])
-                    cur.execute("UPDATE scenes SET status='failed',updated_at=now() WHERE scene_id=%s", (item["scene_id"],))
                     cur.execute(
                         "UPDATE partition_data_unit_grid_status SET ingest_status='failed',error_message=%s,updated_at=now() "
                         "WHERE dataset_id=%s AND scene_id=%s AND output_version=%s "
@@ -780,10 +779,6 @@ class OpenGaussIngestRepository:
                 else:
                     self._raise_scene_transition(cur, ingest_run_id, scene_id, "finish")
             if not already_completed:
-                cur.execute(
-                    "UPDATE scenes SET status=%s,updated_at=now() WHERE scene_id=%s",
-                    ("available" if status == "completed" else "failed", scene_id),
-                )
                 cur.execute(
                     "UPDATE partition_data_unit_grid_status SET ingest_status=%s,error_message=%s,updated_at=now() "
                     "WHERE scene_id=%s AND output_version=(SELECT output_version FROM ingest_run_scenes "

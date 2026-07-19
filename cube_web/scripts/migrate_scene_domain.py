@@ -23,6 +23,7 @@ from cube_web.services.scene_domain_schema import (  # noqa: E402
     SCENE_DOMAIN_SCHEMA_VERSION,
     apply_scene_domain_schema,
     backfill_scene_band_unit_ids,
+    split_legacy_ingest_band_units,
     backfill_partition_grid_status,
     backfill_scene_resolution_metadata,
     record_scene_domain_install,
@@ -65,17 +66,20 @@ def main() -> int:
         report = apply_scene_domain_schema(connection, commit=False, record_version=False)
         resolution_rows_updated = backfill_scene_resolution_metadata(connection, commit=False)
         band_unit_rows_updated = backfill_scene_band_unit_ids(connection, commit=False)
+        ingest_band_rows_split = split_legacy_ingest_band_units(connection, commit=False)
         partition_grid_rows_updated = backfill_partition_grid_status(connection, commit=False)
         record_scene_domain_install(connection, {
             **asdict(report),
             "resolution_rows_updated": resolution_rows_updated,
             "band_unit_rows_updated": band_unit_rows_updated,
+            "ingest_band_rows_split": ingest_band_rows_split,
             "partition_grid_rows_updated": partition_grid_rows_updated,
         })
     PostgresConfigStore(dsn).ensure_schema()
     print(json.dumps({
         **asdict(report),
         "band_unit_rows_updated": band_unit_rows_updated,
+        "ingest_band_rows_split": ingest_band_rows_split,
         "resolution_rows_updated": resolution_rows_updated,
         "partition_grid_rows_updated": partition_grid_rows_updated,
         "status": "completed",

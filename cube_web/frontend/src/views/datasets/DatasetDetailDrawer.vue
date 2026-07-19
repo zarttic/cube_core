@@ -17,7 +17,7 @@ const props = defineProps({
 });
 const emit = defineEmits([
   'close', 'tab-change', 'tab-page-change', 'tab-page-size-change', 'update-metadata',
-  'reassign-scene', 'rerun-quality', 'retry-scene-ingest', 'queue-partition', 'archive',
+  'reassign-scene', 'rerun-quality', 'retry-band-ingest', 'queue-partition', 'archive',
 ]);
 
 const tabs = [
@@ -334,7 +334,7 @@ function sceneCollapsed(sceneId) {
             <el-table-column v-if="writeEnabled && ['scenes', 'ingest-records'].includes(key)" label="操作" width="130" fixed="right">
               <template #default="{ row }">
                 <el-button v-if="key === 'scenes'" link type="primary" @click="openReassign(row)">修正归属</el-button>
-                <el-button v-else-if="writeEnabled && key === 'ingest-records' && row.status === 'failed'" link type="primary" @click="emit('retry-scene-ingest', row.scene_id)">重试</el-button>
+                <el-button v-else-if="writeEnabled && key === 'ingest-records' && row.status === 'failed' && row.band_unit_ids?.length === 1" link type="primary" @click="emit('retry-band-ingest', row.band_unit_ids[0])">重试</el-button>
               </template>
             </el-table-column>
           </AppTable>

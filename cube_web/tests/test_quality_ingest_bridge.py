@@ -38,8 +38,9 @@ def _scene(
     output: str | None = "output-v2",
     status: str = "completed",
     batches: tuple[str, ...] = ("load-a",),
+    bands: tuple[str, ...] | None = None,
 ):
-    return PartitionSceneOutput(run, scene_id, dataset_id, output, status, batches)
+    return PartitionSceneOutput(run, scene_id, dataset_id, output, status, batches, bands or (f"band-{scene_id}",))
 
 
 def _plan(quality_status: str, *, dataset=None, scenes=None, allow_warn: bool = False):
@@ -52,7 +53,7 @@ def _plan(quality_status: str, *, dataset=None, scenes=None, allow_warn: bool = 
     )
 
 
-def test_pass_creates_scene_level_requests_for_completed_current_output_only() -> None:
+def test_pass_creates_band_level_requests_for_completed_current_output_only() -> None:
     requests = _plan(
         "pass",
         scenes=(
@@ -70,7 +71,7 @@ def test_pass_creates_scene_level_requests_for_completed_current_output_only() -
     assert requests[0].scenes[0].quality_run_id == "quality-a"
 
 
-def test_ingest_request_preserves_selected_band_units_per_scene() -> None:
+def test_ingest_request_creates_one_request_per_band_unit() -> None:
     requests = _plan(
         "pass",
         scenes=(
@@ -81,7 +82,8 @@ def test_ingest_request_preserves_selected_band_units_per_scene() -> None:
         ),
     )
 
-    assert requests[0].scenes[0].band_unit_ids == ("band-a-b01", "band-a-b02")
+    assert len(requests) == 2
+    assert [request.scenes[0].band_unit_ids for request in requests] == [("band-a-b01",), ("band-a-b02",)]
 
 
 def test_terminal_gate_defaults_to_pass_and_warn_requires_explicit_policy() -> None:
@@ -108,9 +110,9 @@ def test_repeated_dispatch_is_idempotent() -> None:
     second = bridge.dispatch(planned)
 
     assert second == first
-    assert len(second) == 1
-    assert len(second[0].scenes) == 2
-    assert second[0].requested_by == "system:quality-gate"
+    assert len(second) == 2
+    assert all(len(request.scenes) == 1 for request in second)
+    assert all(request.requested_by == "system:quality-gate" for request in second)
 
 
 class _FakeConnection:
@@ -143,7 +145,7 @@ def test_concurrent_scene_owner_is_accepted_without_escaping_savepoint() -> None
     request = CreateIngestRun(
         partition_run_id="partition-run-a",
         dataset_id="dataset-a",
-        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a"),),
+        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a", band_unit_ids=("band-scene-a",)),),
     )
     cursor = _DuplicateSceneCursor()
 
@@ -172,7 +174,7 @@ def test_all_concurrently_owned_scenes_roll_back_new_empty_parent(monkeypatch) -
     request = CreateIngestRun(
         partition_run_id="partition-run-a",
         dataset_id="dataset-a",
-        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a"),),
+        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a", band_unit_ids=("band-scene-a",)),),
     )
     monkeypatch.setattr(bridge_module, "_ensure_ingest_run", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(bridge_module, "_ensure_ingest_scene", lambda *_args, **_kwargs: "concurrent-run")
@@ -200,7 +202,7 @@ def test_terminal_parent_cannot_receive_new_queued_scenes() -> None:
     request = CreateIngestRun(
         partition_run_id="partition-run-a",
         dataset_id="dataset-a",
-        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a"),),
+        scenes=(IngestSceneInput(scene_id="scene-a", output_version="output-v2", quality_run_id="quality-a", band_unit_ids=("band-scene-a",)),),
     )
 
     with pytest.raises(RuntimeError, match="cannot append scenes"):
