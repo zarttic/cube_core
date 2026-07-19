@@ -336,6 +336,12 @@ def _dataset_time_iso(value: Any, time_var: Any) -> str:
             dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
+    # Some TanSat files store Unix seconds without a CF ``units`` attribute.
+    # Handle the numeric value before converting it to text for ISO parsing.
+    if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+        dt = datetime.fromtimestamp(float(raw), tz=UTC)
+        return dt.isoformat().replace("+00:00", "Z")
+
     text = _scalar_text(raw)
     if text:
         normalized = text.replace(" ", "T")

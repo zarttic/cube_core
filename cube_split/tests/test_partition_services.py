@@ -17,6 +17,7 @@ from cube_split.partition.carbon import (
     CarbonPartitionConfig,
     CarbonSatelliteObservation,
     _load_oco2_lite_observation_slice,
+    _dataset_time_iso,
     _partition_chunks,
     _partition_observation_chunk,
     _partition_source_slice_chunk,
@@ -36,6 +37,10 @@ def test_partition_registry_separates_optical_and_carbon_services():
     assert isinstance(get_partition_service("carbon"), CarbonSatellitePartitionService)
     assert isinstance(get_partition_service("carbon_satellite"), CarbonSatellitePartitionService)
     assert isinstance(get_partition_service("radar"), RadarPartitionService)
+
+
+def test_carbon_dataset_time_accepts_unix_seconds_without_units():
+    assert _dataset_time_iso(1522210622.4899948, SimpleNamespace()) == "2018-03-28T04:17:02.489995Z"
 
 
 def test_cancel_ray_refs_force_cancels_all_refs():
