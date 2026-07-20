@@ -84,16 +84,32 @@ class CodeService:
         items: list[dict],
         time_granularity: TimeGranularity,
     ) -> list[str]:
-        st_codes: list[str] = []
-        for item in items:
-            address = GridAddress(grid_type=grid_type.value, grid_level=grid_level, space_code=item["space_code"])
-            result = self.generate_st_code(
-                address=address,
-                timestamp=item["timestamp"],
-                time_granularity=time_granularity,
-            )
-            st_codes.append(result.st_code)
-        return st_codes
+        return self.build_st_code_strings(
+            grid_type=grid_type,
+            grid_level=grid_level,
+            space_codes=[str(item["space_code"]) for item in items],
+            timestamps=[item["timestamp"] for item in items],
+            time_granularity=time_granularity,
+        )
+
+    def build_st_code_strings(
+        self,
+        grid_type: GridType,
+        grid_level: int,
+        space_codes: list[str],
+        timestamps: list[datetime],
+        time_granularity: TimeGranularity,
+    ) -> list[str]:
+        """Build homogeneous ST code strings without transient response models."""
+        if len(space_codes) != len(timestamps):
+            raise ValidationError("space_codes and timestamps must have the same length")
+        if grid_type not in PREFIX_MAP:
+            raise ValidationError(f"Unsupported grid_type: {grid_type}")
+        prefix = PREFIX_MAP[grid_type]
+        return [
+            f"{prefix}:{grid_level}:{space_code}:{to_time_code(timestamp, time_granularity)}"
+            for space_code, timestamp in zip(space_codes, timestamps)
+        ]
 
     @staticmethod
     def _validate_time_code(time_code: str) -> None:

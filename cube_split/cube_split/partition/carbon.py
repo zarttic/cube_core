@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import repeat
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from grid_core.sdk import CubeEncoderSDK
 
@@ -26,6 +26,10 @@ from cube_split.partition.carbon_products import (
 )
 
 UTC = timezone.utc
+_AUTO_PARTITION_CHUNK_SIZE = 0
+_MIN_AUTO_PARTITION_CHUNK_SIZE = 1_000
+_MAX_AUTO_PARTITION_CHUNK_SIZE = 5_000
+_AUTO_CHUNKS_PER_WORKER = 8
 
 
 @dataclass(frozen=True)
@@ -36,7 +40,7 @@ class CarbonPartitionConfig:
     product_type: str = "xco2"
     max_observations: int | None = None
     selected_source_indexes: tuple[int, ...] | None = None
-    partition_chunk_size: int = 1000
+    partition_chunk_size: int = _AUTO_PARTITION_CHUNK_SIZE
     partition_backend: str = "process"
     ray_address: str = ""
     source_uris: tuple[str, ...] | None = None
@@ -65,7 +69,14 @@ class CarbonObservationSourceSlice:
     stop_index: int
 
 
-CarbonPartitionChunk = list[CarbonSatelliteObservation] | CarbonObservationSourceSlice
+@dataclass(frozen=True)
+class CarbonObservationSourceSliceGroup:
+    """Source slices combined into one Ray task when automatic chunking spans files."""
+
+    slices: tuple[CarbonObservationSourceSlice, ...]
+
+
+CarbonPartitionChunk = list[CarbonSatelliteObservation] | CarbonObservationSourceSlice | CarbonObservationSourceSliceGroup
 
 
 def _parse_time(value: str) -> datetime:
@@ -73,7 +84,10 @@ def _parse_time(value: str) -> datetime:
 
 
 def _time_bucket(value: str, granularity: str) -> str:
-    dt = _parse_time(value)
+    return _time_bucket_from_datetime(_parse_time(value), granularity)
+
+
+def _time_bucket_from_datetime(value: datetime, granularity: str) -> str:
     formats = {
         "month": "%Y%m",
         "day": "%Y%m%d",
@@ -83,7 +97,7 @@ def _time_bucket(value: str, granularity: str) -> str:
     }
     if granularity not in formats:
         raise ValueError(f"Unsupported time_granularity: {granularity}")
-    return dt.strftime(formats[granularity])
+    return value.strftime(formats[granularity])
 
 
 def _footprint_geojson(observation: CarbonSatelliteObservation) -> dict[str, Any]:
@@ -101,14 +115,15 @@ def partition_observation(
     sdk: CubeEncoderSDK | None = None,
 ) -> dict[str, Any]:
     encoder = sdk or CubeEncoderSDK()
-    cell = encoder.locate(
+    address = encoder.locate_space_code(
         grid_type=config.grid_type,
         requested_grid_level=config.grid_level,
         point=[observation.lon, observation.lat],
     )
+    timestamp = _parse_time(observation.acq_time)
     st_code = encoder.generate_st_code(
-        address=cell,
-        timestamp=_parse_time(observation.acq_time),
+        address=address,
+        timestamp=timestamp,
         time_granularity=config.time_granularity,
     ).st_code
     return {
@@ -117,10 +132,10 @@ def partition_observation(
         "product_type": normalize_carbon_product_type(config.product_type),
         "observation_id": observation.observation_id,
         "acq_time": observation.acq_time,
-        "time_bucket": _time_bucket(observation.acq_time, config.time_granularity),
+        "time_bucket": _time_bucket_from_datetime(timestamp, config.time_granularity),
         "grid_type": config.grid_type,
-        "grid_level": int(cell.grid_level),
-        "space_code": cell.space_code,
+        "grid_level": int(address.grid_level),
+        "space_code": address.space_code,
         "st_code": st_code,
         "xco2": float(observation.xco2),
         "quality_flag": observation.quality_flag,
@@ -707,10 +722,43 @@ def _oco2_lite_observation_count_for_source(source_uri: str) -> int | None:
     return _oco2_lite_observation_count(_resolve_oco2_lite_source_path(source_uri))
 
 
+def _resolve_partition_chunk_size(requested_chunk_size: int, total_observations: int, worker_count: int) -> int:
+    """Resolve an explicit chunk size or size auto chunks for the available workers."""
+    if requested_chunk_size > 0:
+        return requested_chunk_size
+    if requested_chunk_size != _AUTO_PARTITION_CHUNK_SIZE:
+        raise ValueError("partition_chunk_size must be >= 0")
+    target_chunks = max(1, worker_count) * _AUTO_CHUNKS_PER_WORKER
+    estimated_size = math.ceil(max(1, total_observations) / target_chunks)
+    return min(_MAX_AUTO_PARTITION_CHUNK_SIZE, max(_MIN_AUTO_PARTITION_CHUNK_SIZE, estimated_size))
+
+
+def _group_source_slices(
+    slices: list[CarbonObservationSourceSlice],
+    chunk_size: int,
+) -> list[CarbonPartitionChunk]:
+    """Combine small source slices so automatic chunking applies globally."""
+    chunks: list[CarbonPartitionChunk] = []
+    group: list[CarbonObservationSourceSlice] = []
+    group_size = 0
+    for source_slice in slices:
+        slice_size = source_slice.stop_index - source_slice.start_index
+        if group and group_size + slice_size > chunk_size:
+            chunks.append(group[0] if len(group) == 1 else CarbonObservationSourceSliceGroup(tuple(group)))
+            group = []
+            group_size = 0
+        group.append(source_slice)
+        group_size += slice_size
+    if group:
+        chunks.append(group[0] if len(group) == 1 else CarbonObservationSourceSliceGroup(tuple(group)))
+    return chunks
+
+
 def _plan_oco2_lite_source_slices(
     source_uris: list[str],
     config: CarbonPartitionConfig,
-) -> list[CarbonObservationSourceSlice] | None:
+    worker_count: int = 1,
+) -> list[CarbonPartitionChunk] | None:
     if config.partition_backend != "ray":
         return None
     if normalize_carbon_product_type(config.product_type) not in {"xco2", "tansat"}:
@@ -722,7 +770,7 @@ def _plan_oco2_lite_source_slices(
     if _netcdf4_dataset_class() is None:
         return None
 
-    slices: list[CarbonObservationSourceSlice] = []
+    source_limits: list[tuple[str, int]] = []
     remaining = config.max_observations
     for source_uri in source_uris:
         if remaining is not None and remaining <= 0:
@@ -731,8 +779,19 @@ def _plan_oco2_lite_source_slices(
         if count is None:
             return None
         limit = count if remaining is None else min(count, remaining)
-        for start_index in range(0, limit, config.partition_chunk_size):
-            stop_index = min(start_index + config.partition_chunk_size, limit)
+        source_limits.append((source_uri, limit))
+        if remaining is not None:
+            remaining -= limit
+
+    chunk_size = _resolve_partition_chunk_size(
+        config.partition_chunk_size,
+        sum(limit for _, limit in source_limits),
+        worker_count,
+    )
+    slices: list[CarbonObservationSourceSlice] = []
+    for source_uri, limit in source_limits:
+        for start_index in range(0, limit, chunk_size):
+            stop_index = min(start_index + chunk_size, limit)
             slices.append(
                 CarbonObservationSourceSlice(
                     source_uri=source_uri,
@@ -740,8 +799,8 @@ def _plan_oco2_lite_source_slices(
                     stop_index=stop_index,
                 )
             )
-        if remaining is not None:
-            remaining -= limit
+    if config.partition_chunk_size == _AUTO_PARTITION_CHUNK_SIZE:
+        return _group_source_slices(slices, chunk_size)
     return slices
 
 
@@ -759,26 +818,51 @@ def _partition_observation_chunk(
     config: CarbonPartitionConfig,
 ) -> list[dict[str, Any]]:
     sdk = CubeEncoderSDK()
-    rows: list[dict[str, Any]] = []
-    for observation in observations:
-        address = sdk.locate(
+    product_type = normalize_carbon_product_type(config.product_type)
+    points = [[observation.lon, observation.lat] for observation in observations]
+    locate_many = getattr(sdk, "locate_space_codes", None)
+    addresses = (
+        locate_many(config.grid_type, config.grid_level, points)
+        if locate_many is not None
+        else [
+            sdk.locate_space_code(
+                grid_type=config.grid_type,
+                requested_grid_level=config.grid_level,
+                point=point,
+            )
+            for point in points
+        ]
+    )
+    timestamps = [_parse_time(observation.acq_time) for observation in observations]
+    generate_many = getattr(sdk, "generate_st_codes", None)
+    st_codes = (
+        generate_many(
             grid_type=config.grid_type,
-            requested_grid_level=config.grid_level,
-            point=[observation.lon, observation.lat],
-        )
-        st_code = sdk.generate_st_code(
-            address=address,
-            timestamp=_parse_time(observation.acq_time),
+            grid_level=config.grid_level,
+            space_codes=[address.space_code for address in addresses],
+            timestamps=timestamps,
             time_granularity=config.time_granularity,
-        ).st_code
+        )
+        if generate_many is not None
+        else [
+            sdk.generate_st_code(
+                address=address,
+                timestamp=timestamp,
+                time_granularity=config.time_granularity,
+            ).st_code
+            for address, timestamp in zip(addresses, timestamps)
+        ]
+    )
+    rows: list[dict[str, Any]] = []
+    for observation, address, timestamp, st_code in zip(observations, addresses, timestamps, st_codes):
         rows.append(
             {
                 "data_type": "carbon",
                 "satellite": observation.satellite,
-                "product_type": normalize_carbon_product_type(config.product_type),
+                "product_type": product_type,
                 "observation_id": observation.observation_id,
                 "acq_time": observation.acq_time,
-                "time_bucket": _time_bucket(observation.acq_time, config.time_granularity),
+                "time_bucket": _time_bucket_from_datetime(timestamp, config.time_granularity),
                 "grid_type": config.grid_type,
                 "grid_level": int(address.grid_level),
                 "space_code": address.space_code,
@@ -821,6 +905,11 @@ def _partition_chunk(
 ) -> list[dict[str, Any]]:
     if isinstance(chunk, CarbonObservationSourceSlice):
         return _partition_source_slice_chunk(chunk, config)
+    if isinstance(chunk, CarbonObservationSourceSliceGroup):
+        rows: list[dict[str, Any]] = []
+        for source_slice in chunk.slices:
+            rows.extend(_partition_source_slice_chunk(source_slice, config))
+        return rows
     return _partition_observation_chunk(chunk, config)
 
 
@@ -829,7 +918,7 @@ def _load_observation_chunks(
     config: CarbonPartitionConfig,
     worker_count: int,
 ) -> list[list[CarbonSatelliteObservation]]:
-    chunks: list[list[CarbonSatelliteObservation]] = []
+    observation_groups: list[list[CarbonSatelliteObservation]] = []
     normalized_product_type = normalize_carbon_product_type(config.product_type)
     selected_source_indexes = set(config.selected_source_indexes or ())
     source_uris = tuple(str(source_uri).strip() for source_uri in (config.source_uris or ()) if str(source_uri).strip())
@@ -855,39 +944,62 @@ def _load_observation_chunks(
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             for observations in pool.map(load_one, sources):
                 observations = select_observations(observations)
-                chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
-        return chunks
+                observation_groups.append(observations)
+    else:
+        remaining = config.max_observations
+        for source in sources:
+            if remaining is not None and remaining <= 0:
+                break
+            observations = load_one(
+                source,
+                max_observations=None if selected_source_indexes else remaining,
+            )
+            observations = select_observations(observations)
+            if remaining is not None:
+                observations = observations[:remaining]
+                remaining -= len(observations)
+            observation_groups.append(observations)
 
-    remaining = config.max_observations
-    for source in sources:
-        if remaining is not None and remaining <= 0:
-            break
-        observations = load_one(source, max_observations=remaining)
-        observations = select_observations(observations)
-        if remaining is not None:
-            observations = observations[:remaining]
-            remaining -= len(observations)
-        chunks.extend(_chunk_observations(observations, config.partition_chunk_size))
-    return chunks
+    chunk_size = _resolve_partition_chunk_size(
+        config.partition_chunk_size,
+        sum(len(observations) for observations in observation_groups),
+        worker_count,
+    )
+    if config.partition_chunk_size > 0:
+        return [
+            chunk
+            for observations in observation_groups
+            for chunk in _chunk_observations(observations, chunk_size)
+        ]
+    observations = [observation for group in observation_groups for observation in group]
+    return _chunk_observations(observations, chunk_size)
 
 
 def _partition_chunks(
     chunks: list[CarbonPartitionChunk],
     config: CarbonPartitionConfig,
     worker_count: int,
+    on_chunk: Callable[[int, list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     if not chunks:
         return []
     worker_config = replace(config, cancellation_check=None)
     if config.partition_backend == "ray":
-        return _partition_chunks_with_ray(chunks, config, worker_count)
+        return _partition_chunks_with_ray(chunks, config, worker_count, on_chunk=on_chunk)
 
     rows: list[dict[str, Any]] = []
+
+    def consume(chunk_index: int, part: list[dict[str, Any]]) -> None:
+        if on_chunk is None:
+            rows.extend(part)
+        else:
+            on_chunk(chunk_index, part)
+
     if worker_count == 1 or len(chunks) <= 1:
-        for chunk in chunks:
+        for chunk_index, chunk in enumerate(chunks):
             if config.cancellation_check is not None and config.cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            rows.extend(_partition_chunk(chunk, worker_config))
+            consume(chunk_index, _partition_chunk(chunk, worker_config))
         return rows
 
     if config.partition_backend == "process":
@@ -898,10 +1010,10 @@ def _partition_chunks(
         raise ValueError("partition_backend must be 'process', 'thread', or 'ray'")
 
     with executor_cls(max_workers=worker_count) as pool:
-        for part in pool.map(_partition_chunk, chunks, repeat(worker_config)):
+        for chunk_index, part in enumerate(pool.map(_partition_chunk, chunks, repeat(worker_config))):
             if config.cancellation_check is not None and config.cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            rows.extend(part)
+            consume(chunk_index, part)
     return rows
 
 
@@ -947,7 +1059,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "cube_web/frontend/dist/**",
         ],
         "env_vars": {
-            "CUBE_CARBON_RUNTIME_ENV_REV": "20260620",
+            "CUBE_CARBON_RUNTIME_ENV_REV": "20260720-grid-v8",
             "CUBE_PROJECT_ROOT": ".",
             "CUBE_WEB_MINIO_ENDPOINT": minio.endpoint,
             "CUBE_WEB_MINIO_ACCESS_KEY": minio.access_key,
@@ -1028,6 +1140,8 @@ def _partition_chunks_with_ray_once(
     worker_count: int,
     *,
     prefer_head: bool = False,
+    on_chunk: Callable[[int, list[dict[str, Any]]], None] | None = None,
+    emitted_chunk_indexes: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     parallelism = max(1, min(worker_count, len(chunks)))
     worker_config = replace(config, cancellation_check=None)
@@ -1078,7 +1192,16 @@ def _partition_chunks_with_ray_once(
             return _partition_chunk(chunk, cfg)
 
     rows: list[dict[str, Any]] = []
-    pending: list[Any] = []
+    pending: list[tuple[int, Any]] = []
+
+    def consume(chunk_index: int, part: list[dict[str, Any]]) -> None:
+        if on_chunk is None:
+            rows.extend(part)
+        elif emitted_chunk_indexes is None or chunk_index not in emitted_chunk_indexes:
+            on_chunk(chunk_index, part)
+            if emitted_chunk_indexes is not None:
+                emitted_chunk_indexes.add(chunk_index)
+
     try:
         actor_cls = CarbonChunkProcessor.options(**_ray_actor_options(ray, prefer_head=prefer_head))
         actors = [actor_cls.remote() for _ in range(parallelism)]
@@ -1087,32 +1210,35 @@ def _partition_chunks_with_ray_once(
                 actors[idx % parallelism].process_chunk.remote(chunk, worker_config)
                 for idx, chunk in enumerate(chunks)
             ]
-            for part in ray.get(futures):
-                rows.extend(part)
+            for chunk_index, part in enumerate(ray.get(futures)):
+                consume(chunk_index, part)
             return rows
         next_idx = 0
         while next_idx < len(chunks) and len(pending) < parallelism:
             if config.cancellation_check is not None and config.cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            pending.append(actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config))
+            pending.append((next_idx, actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config)))
             next_idx += 1
         while pending:
             if config.cancellation_check is not None and config.cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
-            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            ready, pending_refs = ray.wait([ref for _, ref in pending], num_returns=1, timeout=1.0)
             if not ready:
                 continue
-            rows.extend(ray.get(ready[0]))
+            ready_ref = ready[0]
+            chunk_index = next(index for index, ref in pending if ref == ready_ref)
+            pending = [(index, ref) for index, ref in pending if ref in pending_refs]
+            consume(chunk_index, ray.get(ready_ref))
             while next_idx < len(chunks) and len(pending) < parallelism:
                 if config.cancellation_check is not None and config.cancellation_check():
                     raise PartitionCancelledError("Partition task cancelled")
-                pending.append(actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config))
+                pending.append((next_idx, actors[next_idx % parallelism].process_chunk.remote(chunks[next_idx], worker_config)))
                 next_idx += 1
     except PartitionCancelledError:
-        cancel_ray_refs(ray, pending)
+        cancel_ray_refs(ray, [ref for _, ref in pending])
         raise
     except Exception:
-        cancel_ray_refs(ray, pending)
+        cancel_ray_refs(ray, [ref for _, ref in pending])
         raise
     return rows
 
@@ -1121,10 +1247,13 @@ def _partition_chunks_with_ray(
     chunks: list[CarbonPartitionChunk],
     config: CarbonPartitionConfig,
     worker_count: int,
+    *,
+    on_chunk: Callable[[int, list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     ray = _load_ray()
     ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     last_exc: Exception | None = None
+    emitted_chunk_indexes: set[int] | None = set() if on_chunk is not None else None
     for prefer_head in (False, True):
         if prefer_head and last_exc is None:
             break
@@ -1136,6 +1265,8 @@ def _partition_chunks_with_ray(
                 config,
                 worker_count,
                 prefer_head=prefer_head,
+                on_chunk=on_chunk,
+                emitted_chunk_indexes=emitted_chunk_indexes,
             )
         except PartitionCancelledError:
             raise
@@ -1177,21 +1308,31 @@ class CarbonSatellitePartitionService:
         worker_count = max(1, workers)
         if cfg.cancellation_check is not None and cfg.cancellation_check():
             raise PartitionCancelledError("Partition task cancelled")
-        ray_source_slices = _plan_oco2_lite_source_slices(source_uris, cfg)
+        ray_source_slices = _plan_oco2_lite_source_slices(source_uris, cfg, worker_count)
         if ray_source_slices is not None:
             chunks: list[CarbonPartitionChunk] = ray_source_slices
         else:
             chunks = _load_observation_chunks(files, cfg, worker_count)
         if cfg.cancellation_check is not None and cfg.cancellation_check():
             raise PartitionCancelledError("Partition task cancelled")
-        rows = _partition_chunks(chunks, cfg, worker_count)
-        if cfg.cancellation_check is not None and cfg.cancellation_check():
-            raise PartitionCancelledError("Partition task cancelled")
-
         output_dir.mkdir(parents=True, exist_ok=True)
         rows_path = output_dir / "carbon_observation_rows.jsonl"
-        with rows_path.open("w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        temporary_rows_path = rows_path.with_suffix(f"{rows_path.suffix}.part")
+        total_rows = 0
+        try:
+            with temporary_rows_path.open("w", encoding="utf-8") as fh:
+                def write_chunk(_chunk_index: int, rows: list[dict[str, Any]]) -> None:
+                    nonlocal total_rows
+                    for row in rows:
+                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    total_rows += len(rows)
 
-        return PartitionResult(data_type=self.data_type, rows_path=rows_path, total_rows=len(rows))
+                _partition_chunks(chunks, cfg, worker_count, on_chunk=write_chunk)
+            if cfg.cancellation_check is not None and cfg.cancellation_check():
+                raise PartitionCancelledError("Partition task cancelled")
+            temporary_rows_path.replace(rows_path)
+        except Exception:
+            temporary_rows_path.unlink(missing_ok=True)
+            raise
+
+        return PartitionResult(data_type=self.data_type, rows_path=rows_path, total_rows=total_rows)

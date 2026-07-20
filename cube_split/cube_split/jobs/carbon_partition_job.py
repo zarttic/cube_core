@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-granularity", default="day", choices=["month", "day", "hour", "minute", "second"])
     parser.add_argument("--product-type", default="xco2", help="Carbon product type")
     parser.add_argument("--max-observations", type=int, default=0, help="Maximum observations to process; 0 means all")
-    parser.add_argument("--partition-chunk-size", type=int, default=1000, help="Observations per partition chunk")
+    parser.add_argument("--partition-chunk-size", type=int, default=0, help="Observations per partition chunk; 0 sizes chunks automatically")
     parser.add_argument("--partition-workers", type=int, default=0, help="Parallel workers for partition stage; 0 means auto")
     parser.add_argument(
         "--partition-backend",

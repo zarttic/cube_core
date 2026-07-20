@@ -673,8 +673,20 @@ class OpenGaussDatasetManagementRepository:
                 ORDER BY created_at DESC
             """,
             "tiles": """
-                SELECT t.output_id,t.output_version,t.space_code,t.tile_uri,t.status,t.created_at,'partition_tile' AS source_kind,NULL::jsonb AS provenance
-                  FROM partition_tiles t JOIN datasets d ON d.dataset_id=t.dataset_id WHERE d.dataset_id=%s
+                SELECT t.output_id,t.output_version,t.space_code,t.tile_uri,t.status,t.created_at,
+                       st.st_code,'partition_tile' AS source_kind,NULL::jsonb AS provenance
+                  FROM partition_tiles t
+                  LEFT JOIN LATERAL (
+                    SELECT i.st_code
+                      FROM partition_indexes i
+                     WHERE i.dataset_id=t.dataset_id AND i.output_version=t.output_version
+                       AND i.source_asset_id=t.source_asset_id AND i.band_code=t.band_code
+                       AND i.grid_type=t.grid_type AND i.grid_level=t.grid_level
+                       AND i.space_code=t.space_code AND i.time_bucket=t.time_bucket
+                     ORDER BY (i.tile_output_id=t.output_id) DESC, i.created_at DESC, i.output_id
+                     LIMIT 1
+                  ) st ON TRUE
+                  JOIN datasets d ON d.dataset_id=t.dataset_id WHERE d.dataset_id=%s
                 ORDER BY created_at DESC
             """,
             "indexes": """

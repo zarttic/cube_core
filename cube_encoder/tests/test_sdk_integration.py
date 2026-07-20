@@ -53,6 +53,57 @@ def test_locate_returns_grid_cell(sdk: CubeEncoderSDK, grid_type: GridType) -> N
 
 
 @pytest.mark.parametrize("grid_type", [GridType.GEOHASH, GridType.MGRS, GridType.ISEA4H])
+def test_locate_space_code_matches_full_locate_address(sdk: CubeEncoderSDK, grid_type: GridType) -> None:
+    level = LEVELS[grid_type]
+    address = sdk.locate_space_code(grid_type=grid_type, requested_grid_level=level, point=POINT)
+    cell = sdk.locate(grid_type=grid_type, requested_grid_level=level, point=POINT)
+
+    assert isinstance(address, GridAddress)
+    assert address.grid_type == cell.grid_type
+    assert address.grid_level == cell.grid_level
+    assert address.space_code == cell.space_code
+
+
+@pytest.mark.parametrize("grid_type", [GridType.GEOHASH, GridType.MGRS, GridType.ISEA4H])
+def test_locate_space_codes_matches_single_lookup(sdk: CubeEncoderSDK, grid_type: GridType) -> None:
+    level = LEVELS[grid_type]
+    points = [POINT, [POINT[0] + 0.01, POINT[1] + 0.01]]
+
+    addresses = sdk.locate_space_codes(grid_type=grid_type, requested_grid_level=level, points=points)
+
+    assert [address.space_code for address in addresses] == [
+        sdk.locate_space_code(grid_type=grid_type, requested_grid_level=level, point=point).space_code
+        for point in points
+    ]
+
+
+@pytest.mark.parametrize("grid_type", [GridType.GEOHASH, GridType.MGRS, GridType.ISEA4H])
+def test_locate_space_codes_accepts_empty_points(sdk: CubeEncoderSDK, grid_type: GridType) -> None:
+    assert sdk.locate_space_codes(grid_type=grid_type, requested_grid_level=LEVELS[grid_type], points=[]) == []
+
+
+@pytest.mark.parametrize("grid_type", [GridType.GEOHASH, GridType.MGRS, GridType.ISEA4H])
+def test_generate_st_codes_matches_single_generation(sdk: CubeEncoderSDK, grid_type: GridType) -> None:
+    level = LEVELS[grid_type]
+    points = [POINT, [POINT[0] + 0.01, POINT[1] + 0.01]]
+    addresses = sdk.locate_space_codes(grid_type=grid_type, requested_grid_level=level, points=points)
+    timestamps = [datetime(2026, 4, 24, 3, 4, 5, tzinfo=timezone.utc), datetime(2026, 4, 25, tzinfo=timezone.utc)]
+
+    st_codes = sdk.generate_st_codes(
+        grid_type=grid_type,
+        grid_level=level,
+        space_codes=[address.space_code for address in addresses],
+        timestamps=timestamps,
+        time_granularity=TimeGranularity.DAY,
+    )
+
+    assert st_codes == [
+        sdk.generate_st_code(address, timestamp, TimeGranularity.DAY).st_code
+        for address, timestamp in zip(addresses, timestamps)
+    ]
+
+
+@pytest.mark.parametrize("grid_type", [GridType.GEOHASH, GridType.MGRS, GridType.ISEA4H])
 def test_cover_returns_grid_cells(sdk: CubeEncoderSDK, grid_type: GridType) -> None:
     level = LEVELS[grid_type]
     cells = sdk.cover(

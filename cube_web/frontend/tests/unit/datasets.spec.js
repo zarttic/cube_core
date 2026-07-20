@@ -120,7 +120,7 @@ describe('DatasetDetailDrawer', () => {
           AppTable: { template: '<div><slot /></div>' },
           'el-tabs': { template: '<div><slot /></div>' },
           'el-tab-pane': { template: '<section><slot name="label" /><slot /></section>' },
-          'el-table-column': { template: '<div><slot :row="{}" /></div>' },
+          'el-table-column': { props: ['label'], template: '<div>{{ label }}<slot :row="{}" /></div>' },
           'el-button': { template: '<button><slot /></button>' },
           'el-tooltip': { template: '<span><slot /></span>' },
           'el-form': { template: '<form><slot /></form>' },
@@ -141,6 +141,7 @@ describe('DatasetDetailDrawer', () => {
     expect(wrapper.text()).toContain('数据');
     expect(wrapper.text()).toContain('剖分版本');
     expect(wrapper.text()).toContain('瓦片');
+    expect(wrapper.text()).toContain('时空编码');
     expect(wrapper.text()).not.toContain('索引');
     expect(wrapper.text()).toContain('经纬度格网');
     expect(wrapper.text()).toContain('质检');

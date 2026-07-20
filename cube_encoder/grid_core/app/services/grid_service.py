@@ -30,6 +30,31 @@ class GridService:
             raise ValidationError("Point latitude must be in [-90, 90]")
         return engine.locate_space_code(lon=lon, lat=lat, requested_grid_level=requested_grid_level)
 
+    def locate_space_codes(
+        self,
+        grid_type: GridType,
+        requested_grid_level: int,
+        points: list[list[float]],
+    ) -> list[GridAddress]:
+        engine = self._registry.get_engine(grid_type)
+        normalized_points: list[list[float]] = []
+        for point in points:
+            if len(point) != 2:
+                raise ValidationError("Point must be [lon, lat]")
+            lon, lat = float(point[0]), float(point[1])
+            if lon < -180.0 or lon > 180.0:
+                raise ValidationError("Point longitude must be in [-180, 180]")
+            if lat < -90.0 or lat > 90.0:
+                raise ValidationError("Point latitude must be in [-90, 90]")
+            normalized_points.append([lon, lat])
+        locate_many = getattr(engine, "locate_space_codes", None)
+        if locate_many is not None:
+            return locate_many(normalized_points, requested_grid_level)
+        return [
+            engine.locate_space_code(lon=point[0], lat=point[1], requested_grid_level=requested_grid_level)
+            for point in normalized_points
+        ]
+
     def cover(
         self,
         grid_type: GridType,

@@ -16,6 +16,13 @@ def test_carbon_partition_config_defaults_to_isea4h_level5():
 
     assert config.grid_type == "isea4h"
     assert config.grid_level == 5
+    assert config.partition_chunk_size == 0
+
+
+def test_carbon_partition_job_defaults_to_automatic_chunking(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["carbon_partition_job"])
+
+    assert parse_args().partition_chunk_size == 0
 
 
 def test_carbon_partition_job_auto_backend_selects_ray_when_address_is_set():

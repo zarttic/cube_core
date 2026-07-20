@@ -259,6 +259,8 @@ def test_opengauss_provenance_uses_formal_domain_relations() -> None:
     output_sql, _ = OpenGaussDatasetManagementRepository._detail_sql("outputs", "dataset-a")
     assert "'executor-' || md5(o.task_id)" in output_sql
     assert "migration_lineage" not in tile_sql
+    assert "st.st_code" in tile_sql
+    assert "i.time_bucket=t.time_bucket" in tile_sql
     assert "migration_lineage" not in index_sql
 
 

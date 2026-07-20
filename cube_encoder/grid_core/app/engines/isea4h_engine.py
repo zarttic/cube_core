@@ -20,6 +20,7 @@ from grid_core.app.engines.base import BaseGridEngine
 from grid_core.app.engines.isea4h.addressing import (
     cell_count,
     locate_cell,
+    locate_cells,
     q2di_to_seqnum,
     validate_seqnum,
 )
@@ -177,6 +178,10 @@ class ISEA4HEngine(BaseGridEngine):
         quad, i, j = locate_cell(lon, lat, res)
         seqnum = q2di_to_seqnum(quad, i, j, res)
         return _make_address(seqnum, res)
+
+    def locate_space_codes(self, points: list[list[float]], requested_grid_level: int) -> list[GridAddress]:
+        res = _validate_level(requested_grid_level)
+        return [_make_address(q2di_to_seqnum(quad, i, j, res), res) for quad, i, j in locate_cells(points, res)]
 
     # ------------------------------------------------------------------
     # Cover

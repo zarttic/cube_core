@@ -40,6 +40,22 @@ _120 = 120.0 * _D2R
 _240 = 240.0 * _D2R
 _180 = 180.0 * _D2R
 
+# The nearest face has the largest dot product with the point's unit vector.
+# Keeping the triangle centres in Cartesian form avoids 20 angular-distance
+# calculations for every point location.
+_TRICEN_CARTESIAN = tuple(
+    (
+        math.cos(lat) * math.cos(lon),
+        math.cos(lat) * math.sin(lon),
+        math.sin(lat),
+    )
+    for lat, lon in TRICEN
+)
+_TRICEN_FORWARD = tuple(
+    (math.sin(lat), math.cos(lat), lon, DAZH[index])
+    for index, (lat, lon) in enumerate(TRICEN)
+)
+
 
 def _gc_dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     """Great-circle central angle between two (lat, lon) radian points."""
@@ -55,14 +71,44 @@ def which_icosa_tri(lat: float, lon: float) -> int:
 
     Port of ``DgSphIcosa::whichIcosaTri``.
     """
-    min_face = 0
-    min_dist = _gc_dist(TRICEN[0], (lat, lon))
-    for i in range(1, 20):
-        d = _gc_dist(TRICEN[i], (lat, lon))
-        if d < min_dist:
-            min_dist = d
-            min_face = i
-    return min_face
+    cos_lat = math.cos(lat)
+    px = cos_lat * math.cos(lon)
+    py = cos_lat * math.sin(lon)
+    pz = math.sin(lat)
+    best_face = 0
+    cx, cy, cz = _TRICEN_CARTESIAN[0]
+    best_dot = px * cx + py * cy + pz * cz
+    for index, (cx, cy, cz) in enumerate(_TRICEN_CARTESIAN[1:], start=1):
+        dot = px * cx + py * cy + pz * cz
+        if dot > best_dot:
+            best_dot = dot
+            best_face = index
+    return best_face
+
+
+def which_icosa_tris(latitudes: list[float], longitudes: list[float]) -> list[int]:
+    """Vectorized nearest-face lookup with a scalar fallback for SDK-only installs."""
+    if len(latitudes) != len(longitudes):
+        raise ValueError("latitudes and longitudes must have the same length")
+    if not latitudes:
+        return []
+    try:
+        import numpy as np
+    except ModuleNotFoundError:
+        return [which_icosa_tri(lat, lon) for lat, lon in zip(latitudes, longitudes)]
+
+    latitude_values = np.asarray(latitudes, dtype=float)
+    longitude_values = np.asarray(longitudes, dtype=float)
+    cos_latitudes = np.cos(latitude_values)
+    points = np.column_stack(
+        (
+            cos_latitudes * np.cos(longitude_values),
+            cos_latitudes * np.sin(longitude_values),
+            np.sin(latitude_values),
+        )
+    )
+    centres = np.asarray(_TRICEN_CARTESIAN)
+    return [int(index) for index in np.argmax(points @ centres.T, axis=1)]
 
 
 def sllxy(lat: float, lon: float, n_tri: int) -> tuple[float, float]:
@@ -71,20 +117,19 @@ def sllxy(lat: float, lon: float, n_tri: int) -> tuple[float, float]:
     Port of ``sllxy`` in DgProjISEA.cpp. Returns (x, y) in DgProjTriCoord
     units (divided by ICOSA_EDGE).
     """
-    clat, clon = TRICEN[n_tri]
-    sin_lat_c = math.sin(clat)
-    cos_lat_c = math.cos(clat)
+    sin_lat_c, cos_lat_c, clon, dazh = _TRICEN_FORWARD[n_tri]
     cos_lat = math.cos(lat)
     sin_lat = math.sin(lat)
-    dazh = DAZH[n_tri]
+    delta_lon = lon - clon
+    cos_delta_lon = math.cos(delta_lon)
 
-    tmp = sin_lat_c * sin_lat + cos_lat_c * cos_lat * math.cos(lon - clon)
+    tmp = sin_lat_c * sin_lat + cos_lat_c * cos_lat * cos_delta_lon
     tmp = max(-1.0, min(1.0, tmp))
     z = math.acos(tmp)
 
     azh = math.atan2(
-        cos_lat * math.sin(lon - clon),
-        cos_lat_c * sin_lat - sin_lat_c * cos_lat * math.cos(lon - clon),
+        cos_lat * math.sin(delta_lon),
+        cos_lat_c * sin_lat - sin_lat_c * cos_lat * cos_delta_lon,
     ) - dazh
 
     if azh < 0.0:
@@ -113,6 +158,56 @@ def sllxy(lat: float, lon: float, n_tri: int) -> tuple[float, float]:
     x = (ph * math.sin(azh1) + ORIGIN_X_OFF) / ICOSA_EDGE
     y = (ph * math.cos(azh1) + ORIGIN_Y_OFF) / ICOSA_EDGE
     return (x, y)
+
+
+def sllxys(
+    latitudes: list[float],
+    longitudes: list[float],
+    triangles: list[int],
+) -> list[tuple[float, float]]:
+    """Batch ISEA forward projection with a scalar fallback for SDK-only installs."""
+    if not (len(latitudes) == len(longitudes) == len(triangles)):
+        raise ValueError("latitudes, longitudes and triangles must have the same length")
+    if not latitudes:
+        return []
+    try:
+        import numpy as np
+    except ModuleNotFoundError:
+        return [sllxy(lat, lon, triangle) for lat, lon, triangle in zip(latitudes, longitudes, triangles)]
+
+    latitude_values = np.asarray(latitudes, dtype=float)
+    longitude_values = np.asarray(longitudes, dtype=float)
+    triangle_values = np.asarray(triangles, dtype=int)
+    triangle_parameters = np.asarray(_TRICEN_FORWARD)[triangle_values]
+    sin_lat_c, cos_lat_c, center_longitudes, dazhs = triangle_parameters.T
+    cos_lat = np.cos(latitude_values)
+    sin_lat = np.sin(latitude_values)
+    delta_lon = longitude_values - center_longitudes
+    cos_delta_lon = np.cos(delta_lon)
+    tmp = np.clip(sin_lat_c * sin_lat + cos_lat_c * cos_lat * cos_delta_lon, -1.0, 1.0)
+    z = np.arccos(tmp)
+    azh = np.arctan2(
+        cos_lat * np.sin(delta_lon),
+        cos_lat_c * sin_lat - sin_lat_c * cos_lat * cos_delta_lon,
+    ) - dazhs
+    azh = np.where(azh < 0.0, azh + M_2PI, azh)
+    azh0 = azh
+    azh = np.where((_120 <= azh) & (azh <= _240), azh - _120, azh)
+    azh = np.where(azh > _240, azh - _240, azh)
+
+    cos_azh = np.cos(azh)
+    sin_azh = np.sin(azh)
+    dz = np.arctan2(TAN_DH, cos_azh + COT30 * sin_azh)
+    h = np.arccos(sin_azh * SIN_GH * COS_DH - cos_azh * COS_GH)
+    ag = azh + (36.0 * _D2R) + h - _180
+    azh1 = np.arctan2(2.0 * ag, R1S * TAN_DH * TAN_DH - 2.0 * ag * COT30)
+    fh = TAN_DH / (2.0 * (np.cos(azh1) + COT30 * np.sin(azh1)) * np.sin(dz / 2.0))
+    ph = 2.0 * R1 * fh * np.sin(z / 2.0)
+    azh1 = np.where((_120 <= azh0) & (azh0 < _240), azh1 + _120, azh1)
+    azh1 = np.where(azh0 >= _240, azh1 + _240, azh1)
+    xs = (ph * np.sin(azh1) + ORIGIN_X_OFF) / ICOSA_EDGE
+    ys = (ph * np.cos(azh1) + ORIGIN_Y_OFF) / ICOSA_EDGE
+    return list(zip(xs.tolist(), ys.tolist()))
 
 
 def snyder_fwd(lat: float, lon: float) -> tuple[int, float, float]:

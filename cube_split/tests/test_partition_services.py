@@ -5,20 +5,28 @@ import json
 import shutil
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from grid_core.app.models.grid_address import GridAddress
+from grid_core.sdk import CubeEncoderSDK
+
 from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, RadarPartitionService, get_partition_service
 from cube_split.partition.carbon import (
     CarbonObservationSourceSlice,
+    CarbonObservationSourceSliceGroup,
     CarbonPartitionConfig,
     CarbonSatelliteObservation,
+    _load_observation_chunks,
     _load_oco2_lite_observation_slice,
     _dataset_time_iso,
+    _partition_chunk,
     _partition_chunks,
+    _resolve_partition_chunk_size,
     _partition_observation_chunk,
     _partition_source_slice_chunk,
     _plan_oco2_lite_source_slices,
@@ -41,6 +49,61 @@ def test_partition_registry_separates_optical_and_carbon_services():
 
 def test_carbon_dataset_time_accepts_unix_seconds_without_units():
     assert _dataset_time_iso(1522210622.4899948, SimpleNamespace()) == "2018-03-28T04:17:02.489995Z"
+
+
+def test_carbon_auto_partition_chunk_size_scales_with_workload_and_workers():
+    assert _resolve_partition_chunk_size(0, total_observations=4_000, worker_count=4) == 1_000
+    assert _resolve_partition_chunk_size(0, total_observations=400_000, worker_count=4) == 5_000
+    assert _resolve_partition_chunk_size(250, total_observations=400_000, worker_count=4) == 250
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _resolve_partition_chunk_size(-1, total_observations=4_000, worker_count=4)
+
+
+def test_carbon_auto_chunking_splits_one_loaded_source_for_all_workers(monkeypatch, tmp_path: Path):
+    observations = [
+        CarbonSatelliteObservation(
+            satellite="OCO2",
+            observation_id=f"snd-{index}",
+            acq_time="2026-04-24T00:00:00Z",
+            lon=116.391,
+            lat=39.907,
+            xco2=420.5,
+        )
+        for index in range(4_000)
+    ]
+    monkeypatch.setattr("cube_split.partition.carbon.load_observations_from_file", lambda *_args, **_kwargs: observations)
+
+    chunks = _load_observation_chunks(
+        [tmp_path / "oco2.jsonl"],
+        CarbonPartitionConfig(partition_chunk_size=0),
+        worker_count=4,
+    )
+
+    assert [len(chunk) for chunk in chunks] == [1_000, 1_000, 1_000, 1_000]
+
+
+def test_carbon_selected_indexes_apply_before_max_observations(monkeypatch, tmp_path: Path):
+    observations = [
+        CarbonSatelliteObservation(
+            satellite="OCO2",
+            observation_id=f"snd-{index}",
+            acq_time="2026-04-24T00:00:00Z",
+            lon=116.391,
+            lat=39.907,
+            xco2=420.5,
+            source_index=index,
+        )
+        for index in range(9)
+    ]
+    monkeypatch.setattr("cube_split.partition.carbon.load_observations_from_file", lambda *_args, **_kwargs: observations)
+
+    chunks = _load_observation_chunks(
+        [tmp_path / "oco2.jsonl"],
+        CarbonPartitionConfig(partition_chunk_size=0, selected_source_indexes=(7, 8), max_observations=2),
+        worker_count=4,
+    )
+
+    assert [observation.observation_id for chunk in chunks for observation in chunk] == ["snd-7", "snd-8"]
 
 
 def test_cancel_ray_refs_force_cancels_all_refs():
@@ -112,6 +175,59 @@ def test_carbon_observation_partition_outputs_observation_fact():
     assert json.loads(row["metadata_json"]) == {"orbit": 42}
 
 
+@pytest.mark.parametrize(
+    ("grid_type", "grid_level"),
+    [("geohash", 6), ("mgrs", 3), ("isea4h", 5)],
+)
+@pytest.mark.parametrize("time_granularity", ["month", "day", "hour", "minute", "second"])
+def test_carbon_partition_chunk_preserves_full_lookup_address_and_st_code(
+    grid_type: str,
+    grid_level: int,
+    time_granularity: str,
+) -> None:
+    observation = CarbonSatelliteObservation(
+        satellite="OCO2",
+        observation_id="snd-compat",
+        acq_time="2026-04-24T03:04:05Z",
+        lon=116.391,
+        lat=39.907,
+        xco2=421.25,
+    )
+    config = CarbonPartitionConfig(
+        grid_type=grid_type,
+        grid_level=grid_level,
+        time_granularity=time_granularity,
+    )
+
+    row = _partition_observation_chunk([observation], config)[0]
+    full_cell = CubeEncoderSDK().locate(grid_type, grid_level, [observation.lon, observation.lat])
+    full_address = GridAddress(
+        grid_type=full_cell.grid_type,
+        grid_level=full_cell.grid_level,
+        space_code=full_cell.space_code,
+        topology_code=full_cell.topology_code,
+    )
+    expected_st_code = CubeEncoderSDK().generate_st_code(
+        full_address,
+        datetime.fromisoformat(observation.acq_time.replace("Z", "+00:00")),
+        time_granularity=time_granularity,
+    ).st_code
+
+    assert (row["grid_type"], row["grid_level"], row["space_code"]) == (
+        full_address.grid_type,
+        full_address.grid_level,
+        full_address.space_code,
+    )
+    assert row["st_code"] == expected_st_code
+    assert row["time_bucket"] == {
+        "month": "202604",
+        "day": "20260424",
+        "hour": "2026042403",
+        "minute": "202604240304",
+        "second": "20260424030405",
+    }[time_granularity]
+
+
 def test_carbon_time_bucket_matches_frozen_sdk_granularities():
     value = "2026-04-24T03:04:05Z"
 
@@ -155,6 +271,40 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     row = json.loads(rows_path.read_text(encoding="utf-8"))
     assert row["data_type"] == "carbon"
     assert row["satellite"] == "OCO2"
+
+
+def test_carbon_service_removes_partial_rows_file_when_chunk_processing_fails(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+    (input_dir / "oco2.jsonl").write_text(
+        json.dumps(
+            {
+                "satellite": "OCO2",
+                "observation_id": "snd-1",
+                "acq_time": "2026-04-24T00:00:00Z",
+                "lon": 116.391,
+                "lat": 39.907,
+                "xco2": 420.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fail_after_first_chunk(chunks, config, worker_count, *, on_chunk=None):
+        _ = chunks, config, worker_count
+        assert on_chunk is not None
+        on_chunk(0, [{"data_type": "carbon", "observation_id": "partial"}])
+        raise RuntimeError("chunk failed")
+
+    monkeypatch.setattr("cube_split.partition.carbon._partition_chunks", fail_after_first_chunk)
+
+    with pytest.raises(RuntimeError, match="chunk failed"):
+        CarbonSatellitePartitionService().run(input_dir, output_dir)
+
+    assert not (output_dir / "carbon_observation_rows.jsonl").exists()
+    assert not (output_dir / "carbon_observation_rows.jsonl.part").exists()
 
 
 def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
@@ -340,7 +490,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
     thread_ids: set[int] = set()
 
     class FakeSDK:
-        def locate(self, **kwargs):
+        def locate_space_code(self, **kwargs):
             thread_ids.add(threading.get_ident())
             time.sleep(0.02)
             return SimpleNamespace(
@@ -426,7 +576,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
     thread_ids: set[int] = set()
 
     class FakeSDK:
-        def locate(self, **kwargs):
+        def locate_space_code(self, **kwargs):
             thread_ids.add(threading.get_ident())
             time.sleep(0.02)
             return SimpleNamespace(
@@ -510,7 +660,7 @@ def test_carbon_partition_chunk_uses_frozen_sdk_address_calls(monkeypatch):
     generated: list[tuple[object, object, object]] = []
 
     class FakeSDK:
-        def locate(self, grid_type, requested_grid_level, point):
+        def locate_space_code(self, grid_type, requested_grid_level, point):
             calls.append(
                 {
                     "grid_type": grid_type,
@@ -764,6 +914,64 @@ def test_carbon_ray_source_slice_planning_uses_source_uris(monkeypatch):
     ]
 
 
+def test_carbon_ray_source_slice_planning_auto_chunks_one_source_for_workers(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._oco2_lite_observation_count_for_source",
+        lambda _source_uri: 4_000,
+    )
+
+    slices = _plan_oco2_lite_source_slices(
+        ["s3://cube/cube/source/carbon/a.nc4"],
+        CarbonPartitionConfig(partition_backend="ray", partition_chunk_size=0),
+        worker_count=4,
+    )
+
+    assert slices == [
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 0, 1_000),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 1_000, 2_000),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 2_000, 3_000),
+        CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 3_000, 4_000),
+    ]
+
+
+def test_carbon_ray_auto_chunking_groups_small_sources(monkeypatch):
+    source_uris = [f"s3://cube/cube/source/carbon/{index}.nc4" for index in range(100)]
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._oco2_lite_observation_count_for_source",
+        lambda _source_uri: 100,
+    )
+
+    chunks = _plan_oco2_lite_source_slices(
+        source_uris,
+        CarbonPartitionConfig(partition_backend="ray", partition_chunk_size=0),
+        worker_count=4,
+    )
+
+    assert len(chunks) == 10
+    assert all(isinstance(chunk, CarbonObservationSourceSliceGroup) for chunk in chunks)
+    assert [sum(item.stop_index - item.start_index for item in chunk.slices) for chunk in chunks] == [1_000] * 10
+
+
+def test_carbon_source_slice_group_processes_its_slices(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._partition_source_slice_chunk",
+        lambda source_slice, _config: [{"source_uri": source_slice.source_uri}],
+    )
+    group = CarbonObservationSourceSliceGroup(
+        (
+            CarbonObservationSourceSlice("s3://cube/cube/source/carbon/a.nc4", 0, 100),
+            CarbonObservationSourceSlice("s3://cube/cube/source/carbon/b.nc4", 0, 100),
+        )
+    )
+
+    rows = _partition_chunk(group, CarbonPartitionConfig())
+
+    assert rows == [
+        {"source_uri": "s3://cube/cube/source/carbon/a.nc4"},
+        {"source_uri": "s3://cube/cube/source/carbon/b.nc4"},
+    ]
+
+
 def test_carbon_partition_ray_retries_on_head_when_runtime_env_disk_is_full(monkeypatch):
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -814,7 +1022,7 @@ def test_carbon_partition_ray_retries_on_head_when_runtime_env_disk_is_full(monk
             if isinstance(ref, list):
                 return [self.get(item) for item in ref]
             _, prefer_head, chunk, cfg = ref
-            if not prefer_head:
+            if not prefer_head and chunk[0].observation_id == "snd-b":
                 raise RuntimeEnvSetupError("No space left on device")
             processed.extend(observation.observation_id for observation in chunk)
             return [
@@ -858,17 +1066,30 @@ def test_carbon_partition_ray_retries_on_head_when_runtime_env_disk_is_full(monk
                 lat=39.907,
                 xco2=420.5,
             )
+        ],
+        [
+            CarbonSatelliteObservation(
+                satellite="OCO2",
+                observation_id="snd-b",
+                acq_time="2026-04-24T00:00:00Z",
+                lon=116.392,
+                lat=39.908,
+                xco2=421.5,
+            )
         ]
     ]
+    streamed: list[dict] = []
 
     rows = _partition_chunks(
         chunks,
         CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
         worker_count=1,
+        on_chunk=lambda _chunk_index, part: streamed.extend(part),
     )
 
-    assert [row["observation_id"] for row in rows] == ["snd-a"]
-    assert processed == ["snd-a"]
+    assert rows == []
+    assert [row["observation_id"] for row in streamed] == ["snd-a", "snd-b"]
+    assert processed == ["snd-a", "snd-a", "snd-b"]
     assert len(init_calls) == 2
     assert len(shutdown_calls) == 2
     assert "scheduling_strategy" not in option_calls[0]
@@ -896,7 +1117,7 @@ def test_carbon_ray_runtime_env_ships_project_code(monkeypatch):
 
     assert runtime_env is not None
     assert Path(runtime_env["working_dir"]).resolve() == Path(__file__).resolve().parents[2]
-    assert runtime_env["env_vars"]["CUBE_CARBON_RUNTIME_ENV_REV"] == "20260620"
+    assert runtime_env["env_vars"]["CUBE_CARBON_RUNTIME_ENV_REV"] == "20260720-grid-v8"
     assert runtime_env["env_vars"]["CUBE_WEB_MINIO_ENDPOINT"] == "10.3.100.179:9000"
     assert runtime_env["env_vars"]["CUBE_WEB_MINIO_ACCESS_KEY"] == "minio-access"
     assert runtime_env["env_vars"]["CUBE_WEB_MINIO_SECRET_KEY"] == "minio-secret"
@@ -913,14 +1134,16 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
     input_dir.mkdir()
     planned = [CarbonObservationSourceSlice("s3://cube/cube/source/carbon/oco2.nc4", 0, 1)]
 
-    monkeypatch.setattr("cube_split.partition.carbon._plan_oco2_lite_source_slices", lambda source_uris, config: planned)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._plan_oco2_lite_source_slices",
+        lambda source_uris, config, worker_count: planned,
+    )
     monkeypatch.setattr(
         "cube_split.partition.carbon._load_observation_chunks",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected local load")),
     )
-    monkeypatch.setattr(
-        "cube_split.partition.carbon._partition_chunks",
-        lambda chunks, config, worker_count: [
+    def fake_partition_chunks(chunks, config, worker_count, *, on_chunk=None):
+        rows = [
             {
                 "data_type": "carbon",
                 "satellite": "OCO2",
@@ -931,8 +1154,12 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
                 "st_code": "i4h:5:cell-a:20260424",
                 "source_uri": "s3://cube/cube/source/carbon/oco2.nc4",
             }
-        ],
-    )
+        ]
+        assert on_chunk is not None
+        on_chunk(0, rows)
+        return []
+
+    monkeypatch.setattr("cube_split.partition.carbon._partition_chunks", fake_partition_chunks)
 
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
@@ -957,7 +1184,10 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
     input_dir.mkdir()
     loaded_sources: list[str] = []
 
-    monkeypatch.setattr("cube_split.partition.carbon._plan_oco2_lite_source_slices", lambda source_uris, config: None)
+    monkeypatch.setattr(
+        "cube_split.partition.carbon._plan_oco2_lite_source_slices",
+        lambda source_uris, config, worker_count: None,
+    )
     monkeypatch.setattr("cube_split.partition.carbon._resolve_oco2_lite_source_path", lambda source_uri: Path("/resolved") / Path(source_uri).name)
 
     def fake_load_oco2_lite_observations(path: Path, max_observations=None):
@@ -976,9 +1206,8 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
         ]
 
     monkeypatch.setattr("cube_split.partition.carbon.load_oco2_lite_observations", fake_load_oco2_lite_observations)
-    monkeypatch.setattr(
-        "cube_split.partition.carbon._partition_chunks",
-        lambda chunks, config, worker_count: [
+    def fake_partition_chunks(chunks, config, worker_count, *, on_chunk=None):
+        rows = [
             {
                 "data_type": "carbon",
                 "satellite": "OCO2",
@@ -989,8 +1218,12 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
                 "st_code": "i4h:5:cell-a:20260424",
                 "source_uri": chunks[0][0].source_uri,
             }
-        ],
-    )
+        ]
+        assert on_chunk is not None
+        on_chunk(0, rows)
+        return []
+
+    monkeypatch.setattr("cube_split.partition.carbon._partition_chunks", fake_partition_chunks)
 
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,

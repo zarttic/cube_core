@@ -30,7 +30,7 @@ from grid_core.app.engines.isea4h.constants import (
     M_SIN60,
     M_SQRT3,
 )
-from grid_core.app.engines.isea4h.projection import snyder_fwd, snyder_inv
+from grid_core.app.engines.isea4h.projection import sllxys, snyder_fwd, snyder_inv, which_icosa_tris
 
 # ---------------------------------------------------------------------------
 # Lookup tables (ported verbatim from DgIDGGutil.cpp)
@@ -425,6 +425,10 @@ def q2dix_to_q2di(q: int, i: int, j: int, num_d: int) -> tuple[int, int, int]:
 def geo_to_q2di(lat: float, lon: float, res: int) -> tuple[int, int, int]:
     """(lat, lon) radians -> canonical Q2DI (quad, i, j) at *res*."""
     tri, x, y = snyder_fwd(lat, lon)
+    return _projected_tri_to_q2di(tri, x, y, res)
+
+
+def _projected_tri_to_q2di(tri: int, x: float, y: float, res: int) -> tuple[int, int, int]:
     quad, tx, ty, rot60 = _TRI_TABLE[tri]
     # projTri -> vertex2DD: rotate(rot60*60); -= trans
     px, py = _rotate(x, y, rot60 * 60.0)
@@ -434,6 +438,17 @@ def geo_to_q2di(lat: float, lon: float, res: int) -> tuple[int, int, int]:
     mag = 2 ** res
     i, j = _quantify(px * mag, py * mag)
     return _resolve_overage(quad, i, j, mag)
+
+
+def geo_to_q2dis(latitudes: list[float], longitudes: list[float], res: int) -> list[tuple[int, int, int]]:
+    """Batch geodetic lookup, accelerating only the independent face selection."""
+    if not latitudes:
+        return []
+    triangles = which_icosa_tris(latitudes, longitudes)
+    return [
+        _projected_tri_to_q2di(triangle, *projected_point, res)
+        for triangle, projected_point in zip(triangles, sllxys(latitudes, longitudes, triangles))
+    ]
 
 
 def q2di_to_geo(quad: int, i: int, j: int, res: int) -> tuple[float, float]:
@@ -473,6 +488,13 @@ def locate_cell(lon_deg: float, lat_deg: float, res: int) -> tuple[int, int, int
     Degrees in; canonical Q2DI out. Thin wrapper over :func:`geo_to_q2di`.
     """
     return geo_to_q2di(lat_deg * math.pi / 180.0, lon_deg * math.pi / 180.0, res)
+
+
+def locate_cells(points: list[list[float]], res: int) -> list[tuple[int, int, int]]:
+    """Locate multiple WGS84 degree points at one resolution."""
+    latitudes = [float(point[1]) * math.pi / 180.0 for point in points]
+    longitudes = [float(point[0]) * math.pi / 180.0 for point in points]
+    return geo_to_q2dis(latitudes, longitudes, res)
 
 
 def locate_seqnum(lon_deg: float, lat_deg: float, res: int) -> int:

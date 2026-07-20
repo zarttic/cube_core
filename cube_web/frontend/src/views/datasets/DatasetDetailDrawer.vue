@@ -329,6 +329,7 @@ function sceneCollapsed(sceneId) {
             <el-table-column v-if="key === 'scenes'" label="采集时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.acquisition_time) }}</template></el-table-column>
             <el-table-column v-if="key === 'provenance'" prop="relation_type" label="关系" width="130" />
             <el-table-column label="状态" min-width="110"><template #default="{ row }"><StatusTag v-if="row.status" :domain="key === 'quality' ? 'quality' : key === 'scenes' ? 'scene' : 'ingest'" :value="row.status" size="small" /><span v-else>-</span></template></el-table-column>
+            <el-table-column v-if="key === 'tiles'" prop="st_code" label="时空编码" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.st_code || '-' }}</template></el-table-column>
             <el-table-column label="来源或错误" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ sourceOrError(row) }}</template></el-table-column>
             <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
             <el-table-column v-if="writeEnabled && ['scenes', 'ingest-records'].includes(key)" label="操作" width="130" fixed="right">

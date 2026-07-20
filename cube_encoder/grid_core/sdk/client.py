@@ -63,6 +63,32 @@ class CubeEncoderSDK:
             point=point,
         )
 
+    def locate_space_code(
+        self,
+        grid_type: str | GridType,
+        requested_grid_level: int,
+        point: list[float],
+    ) -> GridAddress:
+        """Locate a point when downstream processing only needs its grid address."""
+        return self._grid_service.locate_space_code(
+            grid_type=self._as_grid_type(grid_type),
+            requested_grid_level=requested_grid_level,
+            point=point,
+        )
+
+    def locate_space_codes(
+        self,
+        grid_type: str | GridType,
+        requested_grid_level: int,
+        points: list[list[float]],
+    ) -> list[GridAddress]:
+        """Locate multiple points when downstream processing only needs grid addresses."""
+        return self._grid_service.locate_space_codes(
+            grid_type=self._as_grid_type(grid_type),
+            requested_grid_level=requested_grid_level,
+            points=points,
+        )
+
     def cover(
         self,
         grid_type: str | GridType,
@@ -136,6 +162,23 @@ class CubeEncoderSDK:
         return self._code_service.generate_st_code(
             address=address,
             timestamp=timestamp,
+            time_granularity=self._as_time_granularity(time_granularity),
+        )
+
+    def generate_st_codes(
+        self,
+        grid_type: str | GridType,
+        grid_level: int,
+        space_codes: list[str],
+        timestamps: list[datetime],
+        time_granularity: str | TimeGranularity = TimeGranularity.MINUTE,
+    ) -> list[str]:
+        """Build ST code strings for addresses with one grid type and level."""
+        return self._code_service.build_st_code_strings(
+            grid_type=self._as_grid_type(grid_type),
+            grid_level=grid_level,
+            space_codes=space_codes,
+            timestamps=timestamps,
             time_granularity=self._as_time_granularity(time_granularity),
         )
 

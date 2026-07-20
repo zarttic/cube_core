@@ -7,7 +7,8 @@ import random
 from shapely.geometry import shape
 
 from grid_core.app.engines.isea4h.addressing import cell_count, q2di_to_seqnum, seqnum_to_q2di
-from grid_core.app.engines.isea4h.projection import snyder_fwd, snyder_inv
+from grid_core.app.engines.isea4h.constants import TRICEN
+from grid_core.app.engines.isea4h.projection import _gc_dist, snyder_fwd, snyder_inv, which_icosa_tri
 from grid_core.app.engines.isea4h.topology import cell_children, cell_neighbors, cell_parent
 from grid_core.app.engines.isea4h_engine import ISEA4HEngine
 from grid_core.app.models.grid_address import GridAddress
@@ -39,6 +40,37 @@ def test_snyder_forward_inverse_is_stable_for_fixed_non_singular_samples() -> No
         restored_lat, restored_lon = snyder_inv(triangle, x, y)
         assert abs(restored_lat - lat) < 1e-10
         assert _angular_error(restored_lon, lon) < 1e-10
+
+
+def test_triangle_selection_matches_angular_distance_reference() -> None:
+    rng = random.Random(20_260_720)
+    for _ in range(2_000):
+        lon = rng.uniform(-math.pi, math.pi)
+        lat = rng.uniform(-math.pi / 2, math.pi / 2)
+        expected = min(range(len(TRICEN)), key=lambda index: _gc_dist(TRICEN[index], (lat, lon)))
+        assert which_icosa_tri(lat, lon) == expected
+
+
+def test_batch_isea4h_lookup_matches_scalar_lookup() -> None:
+    rng = random.Random(20_260_721)
+    points = [[rng.uniform(-180.0, 180.0), rng.uniform(-90.0, 90.0)] for _ in range(2_000)]
+
+    addresses = ENGINE.locate_space_codes(points, 6)
+
+    assert [address.space_code for address in addresses] == [
+        ENGINE.locate_space_code(point[0], point[1], 6).space_code for point in points
+    ]
+
+
+def test_batch_isea4h_lookup_matches_scalar_lookup_for_large_random_sample() -> None:
+    rng = random.Random(20_260_720)
+    points = [[rng.uniform(-180.0, 180.0), rng.uniform(-89.9999, 89.9999)] for _ in range(10_000)]
+
+    addresses = ENGINE.locate_space_codes(points, 6)
+
+    assert [address.space_code for address in addresses] == [
+        ENGINE.locate_space_code(point[0], point[1], 6).space_code for point in points
+    ]
 
 
 def test_public_geometries_are_closed_valid_and_local_through_resolution_four() -> None:
