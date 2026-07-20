@@ -99,32 +99,6 @@ const activeGridType = computed(() => {
   return topology.value.gridType;
 });
 
-const activeGridBadge = computed(() => formatGridType(activeGridType.value));
-
-const contextualMapHint = computed(() => {
-  if (activeModule.value === 'division') {
-    if (division.value.gridType === 'mgrs') {
-      return division.value.inputType === 'draw'
-        ? '平面格网会按覆盖范围展示单元；拖拽圈画后会自动聚焦。'
-        : '点击地图后会自动定位到当前平面格网单元并放大显示。';
-    }
-    return division.value.inputType === 'draw'
-      ? '选择“圈画”后按住拖拽绘制范围'
-      : '选择“点”后点击地图选点';
-  }
-  if (activeModule.value === 'operations') {
-    return topology.value.gridType === 'mgrs'
-      ? '点击地图选择平面格网基准点；结果会按格网单元展示。'
-      : '点击地图选择基准点';
-  }
-  if (encoding.value.operation === 'decode') {
-    return '输入完整编码后执行解码';
-  }
-  return encoding.value.gridType === 'mgrs'
-    ? '点击地图选择平面格网编码点；结果会展示空间编码。'
-    : '点击地图选择编码点';
-});
-
 const legendItems = computed(() => {
   if (activeModule.value === 'encoding') return [];
   const primaryLabel = activeGridType.value === 'mgrs'
@@ -770,15 +744,6 @@ async function runDemo() {
 
             <div class="workspace-main">
               <div class="map-panel">
-                <div class="panel-header">
-                  <div class="panel-header-main">
-                    <h3>{{ activeModule === 'division' ? '地图可视化' : activeModule === 'encoding' ? '编码地图展示' : '拓扑关系地图展示' }}</h3>
-                    <span class="grid-type-badge" :class="`grid-type-badge--${activeGridType}`">{{ activeGridBadge }}</span>
-                  </div>
-                  <span class="map-hint">
-                    {{ contextualMapHint }}
-                  </span>
-                </div>
                 <div class="map-canvas-wrap">
                   <GlobeMap
                     :markers="markers"
