@@ -49,6 +49,7 @@ function authRedirectUri() {
 export function useSubUserStore() {
   const username = computed(() => state.userInfo.username || '');
   const role = computed(() => state.userInfo.role || '普通用户');
+  const isAdmin = computed(() => ['admin', 'administrator', '管理员'].includes(String(role.value).trim().toLowerCase()) || String(role.value).trim() === 'ADMIN');
   const avatarUrl = computed(() => state.userInfo.avatarUrl || state.userInfo.avatar_url || '');
   const isAuthenticated = computed(() => Boolean(state.token));
 
@@ -101,6 +102,7 @@ export function useSubUserStore() {
     state,
     username,
     role,
+    isAdmin,
     avatarUrl,
     isAuthenticated,
     persistToken,

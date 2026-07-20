@@ -6,7 +6,7 @@ import { navItems } from '@/data/navigation';
 import { useSubUserStore } from '@/stores/subUser';
 
 const userStore = useSubUserStore();
-const showAdminNavigation = computed(() => !authRequired() || userStore.role.value === '管理员');
+const showAdminNavigation = computed(() => !authRequired() || userStore.isAdmin.value);
 
 async function handleLogout() {
   await userStore.logout();

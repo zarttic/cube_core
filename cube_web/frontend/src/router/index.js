@@ -61,7 +61,7 @@ const router = createRouter({
 installGuards(router, {
   ready: () => applicationAuthReady,
   authenticated: () => !authRequired() || useSubUserStore().isAuthenticated.value,
-  admin: () => !authRequired() || useSubUserStore().role.value === '管理员',
+  admin: () => !authRequired() || useSubUserStore().isAdmin.value,
   redirectToAuth: (target) => useSubUserStore().redirectToAuth(target),
   portalHomeUrl,
 });

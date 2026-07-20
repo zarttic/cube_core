@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from cube_web.services import auth_service, runtime_config
+from cube_web.services.access_control import is_admin_role
 
 PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
 
@@ -25,7 +26,7 @@ def current_actor(request: Request) -> Actor:
 
 
 def require_admin(actor: Actor) -> Actor:
-    if actor.role.strip().lower() not in {"admin", "administrator", "管理员"}:
+    if not is_admin_role(actor.role):
         raise HTTPException(status_code=403, detail="Administrator role is required")
     return actor
 

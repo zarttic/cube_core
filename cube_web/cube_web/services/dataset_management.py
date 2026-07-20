@@ -11,6 +11,7 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from cube_web.services.access_control import is_admin_role, viewer_role as canonical_viewer_role
 from cube_web.services.db_pool import _PostgresPool
 
 
@@ -44,9 +45,13 @@ class ManagedDatasetQuery:
 
 
 class DatasetManagementRepository(Protocol):
-    def list_datasets(self, query: ManagedDatasetQuery) -> dict[str, Any]: ...
+    def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]: ...
 
-    def get_dataset(self, dataset_id: str) -> dict[str, Any] | None: ...
+    def get_dataset(self, dataset_id: str, *, viewer_role: str | None = None) -> dict[str, Any] | None: ...
+
+    def list_hidden_roles(self, dataset_id: str) -> list[str]: ...
+
+    def replace_hidden_roles(self, dataset_id: str, roles: tuple[str, ...], *, actor: str) -> list[str]: ...
 
     def action_dataset_id(self, dataset_id: str) -> str | None: ...
 
@@ -100,19 +105,27 @@ class DatasetManagementService:
         self.publish_hook = publish_hook
         self.withdraw_hook = withdraw_hook
 
-    def list_datasets(self, query: ManagedDatasetQuery) -> dict[str, Any]:
+    def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]:
         if query.sort_by not in SORT_COLUMNS or query.sort_order not in {"asc", "desc"}:
             raise ValueError("unsupported dataset sort")
-        return self.repository.list_datasets(query)
+        return self.repository.list_datasets(query, viewer_role=viewer_role)
 
-    def get_dataset(self, dataset_id: str) -> dict[str, Any]:
-        dataset = self.repository.get_dataset(dataset_id)
+    def get_dataset(self, dataset_id: str, *, viewer_role: str | None = None) -> dict[str, Any]:
+        dataset = self.repository.get_dataset(dataset_id, viewer_role=viewer_role)
         if dataset is None:
             raise ManagedDatasetNotFound(dataset_id)
         return dataset
 
-    def list_detail(self, dataset_id: str, detail: str, *, page: int, page_size: int) -> dict[str, Any]:
+    def list_hidden_roles(self, dataset_id: str) -> list[str]:
         self.get_dataset(dataset_id)
+        return self.repository.list_hidden_roles(dataset_id)
+
+    def replace_hidden_roles(self, dataset_id: str, roles: tuple[str, ...], *, actor: str) -> list[str]:
+        self.get_dataset(dataset_id)
+        return self.repository.replace_hidden_roles(dataset_id, roles, actor=actor)
+
+    def list_detail(self, dataset_id: str, detail: str, *, page: int, page_size: int, viewer_role: str | None = None) -> dict[str, Any]:
+        self.get_dataset(dataset_id, viewer_role=viewer_role)
         if detail not in DETAILS:
             raise ValueError(f"unknown dataset detail: {detail}")
         items, total = self.repository.list_detail(
@@ -197,18 +210,19 @@ class InMemoryDatasetManagementRepository:
         self.details = copy.deepcopy(details or {})
         self.metadata_audit: list[dict[str, Any]] = []
         self.scene_audit: list[dict[str, Any]] = []
+        self.hidden_roles: dict[str, set[str]] = {}
         self._lock = RLock()
 
-    def list_datasets(self, query: ManagedDatasetQuery) -> dict[str, Any]:
+    def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]:
         with self._lock:
-            rows = [self._overview(dataset_id) for dataset_id in self.datasets]
+            rows = [self._overview(dataset_id) for dataset_id in self.datasets if self._visible(dataset_id, viewer_role)]
             rows = [row for row in rows if self._matches(row, query)]
             reverse = query.sort_order == "desc"
             rows.sort(key=lambda row: (row.get(query.sort_by) is not None, row.get(query.sort_by), row["dataset_id"]), reverse=reverse)
             total = len(rows)
             start = (query.page - 1) * query.page_size
             page = rows[start : start + query.page_size]
-            all_rows = [self._overview(dataset_id) for dataset_id in self.datasets]
+            all_rows = [self._overview(dataset_id) for dataset_id in self.datasets if self._visible(dataset_id, viewer_role)]
             return {
                 "items": page,
                 "total": total,
@@ -222,9 +236,20 @@ class InMemoryDatasetManagementRepository:
                 },
             }
 
-    def get_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+    def get_dataset(self, dataset_id: str, *, viewer_role: str | None = None) -> dict[str, Any] | None:
         with self._lock:
-            return self._overview(dataset_id) if dataset_id in self.datasets else None
+            return self._overview(dataset_id) if dataset_id in self.datasets and self._visible(dataset_id, viewer_role) else None
+
+    def list_hidden_roles(self, dataset_id: str) -> list[str]:
+        with self._lock:
+            self._dataset(dataset_id)
+            return sorted(self.hidden_roles.get(dataset_id, set()))
+
+    def replace_hidden_roles(self, dataset_id: str, roles: tuple[str, ...], *, actor: str) -> list[str]:
+        with self._lock:
+            self._dataset(dataset_id)
+            self.hidden_roles[dataset_id] = set(roles)
+            return sorted(self.hidden_roles[dataset_id])
 
     def action_dataset_id(self, dataset_id: str) -> str | None:
         with self._lock:
@@ -312,6 +337,9 @@ class InMemoryDatasetManagementRepository:
         except KeyError as exc:
             raise ManagedDatasetNotFound(dataset_id) from exc
 
+    def _visible(self, dataset_id: str, viewer_role: str | None) -> bool:
+        return viewer_role is None or is_admin_role(viewer_role) or canonical_viewer_role(viewer_role) not in self.hidden_roles.get(dataset_id, set())
+
     def _overview(self, dataset_id: str) -> dict[str, Any]:
         row = copy.deepcopy(self._dataset(dataset_id))
         scenes = self.details.get(dataset_id, {}).get("scenes", [])
@@ -365,8 +393,11 @@ class OpenGaussDatasetManagementRepository:
         self.dsn = dsn
         self.connection_factory = connection_factory
 
-    def list_datasets(self, query: ManagedDatasetQuery) -> dict[str, Any]:
+    def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]:
         where, params = self._filters(query)
+        visibility, visibility_params = self._visibility_filter(viewer_role)
+        where = " AND ".join(part for part in (where, visibility) if part)
+        params = (*params, *visibility_params)
         base = self._overview_sql(where)
         sort = SORT_COLUMNS[query.sort_by]
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
@@ -379,16 +410,34 @@ class OpenGaussDatasetManagementRepository:
                 "count(s.scene_id) FILTER (WHERE s.status='available') AS ready_scene_count, "
                 "count(s.scene_id) FILTER (WHERE s.status='failed') AS failed_scene_count "
                 "FROM datasets d LEFT JOIN scenes s ON s.dataset_id=d.dataset_id "
-                f"WHERE {self._canonical_dataset_filter('d')}"
+                f"WHERE {self._canonical_dataset_filter('d')} AND ({visibility or 'TRUE'})",
+                visibility_params,
             )
             summary = self._normalize(cursor.fetchone())
         return {"items": items, "total": total, "page": query.page, "page_size": query.page_size, "summary": summary}
 
-    def get_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+    def get_dataset(self, dataset_id: str, *, viewer_role: str | None = None) -> dict[str, Any] | None:
+        visibility, visibility_params = self._visibility_filter(viewer_role)
+        where = " AND ".join(part for part in ("d.dataset_id = %s", visibility) if part)
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(f"SELECT * FROM ({self._overview_sql('d.dataset_id = %s')}) managed", (dataset_id,))
+            cursor.execute(f"SELECT * FROM ({self._overview_sql(where)}) managed", (dataset_id, *visibility_params))
             row = cursor.fetchone()
             return None if row is None else self._normalize(row)
+
+    def list_hidden_roles(self, dataset_id: str) -> list[str]:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT role FROM dataset_role_restrictions WHERE dataset_id=%s ORDER BY role", (dataset_id,))
+            return [str(row["role"]) for row in cursor.fetchall()]
+
+    def replace_hidden_roles(self, dataset_id: str, roles: tuple[str, ...], *, actor: str) -> list[str]:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("DELETE FROM dataset_role_restrictions WHERE dataset_id=%s", (dataset_id,))
+            if roles:
+                cursor.executemany(
+                    "INSERT INTO dataset_role_restrictions (dataset_id,role,created_by) VALUES (%s,%s,%s)",
+                    [(dataset_id, role, actor) for role in roles],
+                )
+        return list(roles)
 
     def action_dataset_id(self, dataset_id: str) -> str | None:
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
@@ -610,6 +659,13 @@ class OpenGaussDatasetManagementRepository:
     @staticmethod
     def _canonical_dataset_filter(alias: str) -> str:
         return "TRUE"
+
+    @staticmethod
+    def _visibility_filter(viewer_role: str | None) -> tuple[str, tuple[Any, ...]]:
+        if viewer_role is None or is_admin_role(viewer_role):
+            return "", ()
+        role = canonical_viewer_role(viewer_role)
+        return "NOT EXISTS (SELECT 1 FROM dataset_role_restrictions dr WHERE dr.dataset_id=d.dataset_id AND dr.role=%s)", (role,)
 
     @staticmethod
     def _filters(query: ManagedDatasetQuery) -> tuple[str, tuple[Any, ...]]:

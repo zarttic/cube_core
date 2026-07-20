@@ -30,6 +30,8 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const loading = ref(false);
   const error = ref('');
   const actionLoading = ref(false);
+  const hiddenRoles = ref([]);
+  const roleRestrictionsLoading = ref(false);
   const selectedDatasetId = ref('');
   const detailVisible = ref(false);
   const detailLoading = ref(false);
@@ -38,6 +40,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const tabPages = reactive(emptyTabPages());
   const listScope = createRequestScope();
   const detailScope = createRequestScope();
+  const roleRestrictionsScope = createRequestScope();
   const tabScopes = Object.fromEntries(paginatedTabs.map((tab) => [tab, createRequestScope()]));
   let detailGeneration = 0;
 
@@ -79,12 +82,15 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   function resetDetail(nextDatasetId = '') {
     detailScope.cancel();
+    roleRestrictionsScope.cancel();
     Object.values(tabScopes).forEach((scope) => scope.cancel());
     detailGeneration += 1;
     selectedDatasetId.value = nextDatasetId;
     detailVisible.value = Boolean(nextDatasetId);
     activeTab.value = 'overview';
     detail.value = emptyDetail();
+    hiddenRoles.value = [];
+    roleRestrictionsLoading.value = false;
     Object.assign(tabPages, emptyTabPages());
   }
 
@@ -99,6 +105,20 @@ export const useDatasetsStore = defineStore('datasets', () => {
       const overview = await requestGet(`/v1/datasets/${encodeURIComponent(datasetId)}`, { signal: request.signal });
       if (selectedDatasetId.value !== datasetId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
       detail.value.overview = overview;
+      const restrictionRequest = roleRestrictionsScope.begin();
+      roleRestrictionsLoading.value = true;
+      try {
+        const restrictions = await requestGet(`/v1/datasets/${encodeURIComponent(datasetId)}/role-restrictions`, { signal: restrictionRequest.signal });
+        if (selectedDatasetId.value === datasetId && generation === detailGeneration && roleRestrictionsScope.isCurrent(restrictionRequest.token)) {
+          hiddenRoles.value = restrictions.hidden_roles || [];
+        }
+      } catch (requestError) {
+        if (!restrictionRequest.signal.aborted && selectedDatasetId.value === datasetId && generation === detailGeneration && roleRestrictionsScope.isCurrent(restrictionRequest.token)) {
+          error.value = requestError.message || '数据集权限加载失败';
+        }
+      } finally {
+        if (selectedDatasetId.value === datasetId && generation === detailGeneration && roleRestrictionsScope.isCurrent(restrictionRequest.token)) roleRestrictionsLoading.value = false;
+      }
     } catch (requestError) {
       if (request.signal.aborted || selectedDatasetId.value !== datasetId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
       error.value = requestError.message || '数据集详情加载失败';
@@ -173,6 +193,24 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${id}`, payload, 'PATCH');
   }
 
+  async function updateRoleRestrictions(roles) {
+    if (!selectedDatasetId.value) return;
+    actionLoading.value = true;
+    error.value = '';
+    try {
+      const response = await requestJson(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/role-restrictions`, {
+        hidden_roles: roles,
+      }, { method: 'PUT' });
+      hiddenRoles.value = response.hidden_roles || [];
+      return response;
+    } catch (requestError) {
+      error.value = requestError.message || '数据集权限保存失败';
+      throw requestError;
+    } finally {
+      actionLoading.value = false;
+    }
+  }
+
   function reassignScene(sceneId, targetDatasetId, reason) {
     const id = encodeURIComponent(selectedDatasetId.value);
     return runAction(`/v1/datasets/${id}/scenes/${encodeURIComponent(sceneId)}/reassign`, {
@@ -215,9 +253,9 @@ export const useDatasetsStore = defineStore('datasets', () => {
   }
 
   return {
-    filters, pageState, records, summary, loading, error, actionLoading, selectedDatasetId, selectedDataset,
+    filters, pageState, records, summary, loading, error, actionLoading, hiddenRoles, roleRestrictionsLoading, selectedDatasetId, selectedDataset,
     detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
-    setActiveTab, setTabPage, setTabPageSize, updateMetadata, reassignScene, rerunQuality, requestIngest,
+    setActiveTab, setTabPage, setTabPageSize, updateMetadata, updateRoleRestrictions, reassignScene, rerunQuality, requestIngest,
     retryBandIngest, publish, withdraw, archive, closeDetail, dispose,
   };
 });

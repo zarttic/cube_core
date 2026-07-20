@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cube_web.routes.auth import current_actor, require_admin
+from cube_web.services.access_control import HIDEABLE_DATASET_ROLES, normalize_role
 from cube_web.services.dataset_management import (
     DETAILS,
     DatasetManagementConflict,
@@ -63,12 +64,17 @@ class PublishRequestPayload(StrictPayload):
     targets: list[dict[str, str]] = Field(default_factory=list)
 
 
+class RoleRestrictionsPayload(StrictPayload):
+    hidden_roles: list[str] = Field(default_factory=list, max_length=len(HIDEABLE_DATASET_ROLES))
+
+
 def create_datasets_router(service: DatasetManagementService | None = None) -> APIRouter:
     service = service or _production_service()
     router = APIRouter(prefix="/datasets", tags=["datasets"])
 
     @router.get("")
     def list_datasets(
+        request: Request,
         keyword: str | None = None,
         data_type: str | None = None,
         product_type: str | None = None,
@@ -84,19 +90,36 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
         sort_order: str = "desc",
     ) -> dict:
         try:
+            actor = current_actor(request)
             return service.list_datasets(ManagedDatasetQuery(
                 keyword=keyword, data_type=data_type, product_type=product_type,
                 ingest_status=ingest_status, quality_status=quality_status,
                 publish_status=publish_status, archived=archived,
                 time_start=time_start, time_end=time_end, page=page,
                 page_size=page_size, sort_by=sort_by, sort_order=sort_order,
-            ))
+            ), viewer_role=actor.role)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "invalid_dataset_query", "message": str(exc)}) from exc
 
     @router.get("/{dataset_id}")
-    def get_dataset(dataset_id: str) -> dict:
-        return _call(lambda: service.get_dataset(dataset_id))
+    def get_dataset(dataset_id: str, request: Request) -> dict:
+        return _call(lambda: service.get_dataset(dataset_id, viewer_role=current_actor(request).role))
+
+    @router.get("/{dataset_id}/role-restrictions")
+    def get_role_restrictions(dataset_id: str, request: Request) -> dict:
+        require_admin(current_actor(request))
+        return _call(lambda: {"hidden_roles": service.list_hidden_roles(dataset_id)})
+
+    @router.put("/{dataset_id}/role-restrictions")
+    def replace_role_restrictions(dataset_id: str, payload: RoleRestrictionsPayload, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        try:
+            roles = tuple(sorted({normalize_role(role) for role in payload.hidden_roles}))
+            if any(role not in HIDEABLE_DATASET_ROLES for role in roles):
+                raise ValueError("administrator visibility cannot be restricted")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_dataset_role", "message": str(exc)}) from exc
+        return _call(lambda: {"hidden_roles": service.replace_hidden_roles(dataset_id, roles, actor=actor.username)})
 
     @router.patch("/{dataset_id}")
     def update_dataset(dataset_id: str, payload: MetadataPatch, request: Request) -> dict:
@@ -151,10 +174,13 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
 def _detail_handler(service: DatasetManagementService, detail: str):
     def handler(
         dataset_id: str,
+        request: Request,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=500),
     ) -> dict:
-        return _call(lambda: service.list_detail(dataset_id, detail, page=page, page_size=page_size))
+        return _call(lambda: service.list_detail(
+            dataset_id, detail, page=page, page_size=page_size, viewer_role=current_actor(request).role
+        ))
 
     return handler
 

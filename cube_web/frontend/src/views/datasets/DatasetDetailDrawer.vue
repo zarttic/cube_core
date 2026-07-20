@@ -12,12 +12,14 @@ import { formatShanghaiRange, formatShanghaiTime } from '@/utils/time';
 const props = defineProps({
   testId: { type: String, default: '' }, visible: Boolean, datasetId: { type: String, default: '' },
   detail: { type: Object, default: () => ({}) }, loading: Boolean, actionLoading: Boolean,
+  hiddenRoles: { type: Array, default: () => [] }, roleRestrictionsLoading: Boolean,
   writeEnabled: { type: Boolean, default: true },
   activeTab: { type: String, default: 'overview' }, tabPages: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits([
   'close', 'tab-change', 'tab-page-change', 'tab-page-size-change', 'update-metadata',
   'reassign-scene', 'rerun-quality', 'retry-band-ingest', 'queue-partition', 'archive',
+  'update-role-restrictions',
 ]);
 
 const tabs = [
@@ -155,6 +157,7 @@ const selectedPartitionBandIds = ref([]);
 const repartitionGridType = ref('geohash');
 const repartitionGridLevel = ref(5);
 const repartitionGridLevelLocked = ref(true);
+const hiddenRoleSelection = ref([]);
 
 function resetLocalState() {
   editing.value = false;
@@ -168,6 +171,7 @@ function resetLocalState() {
   selectedPartitionBandIds.value = [];
   repartitionGridLevel.value = recommendedLevel();
   repartitionGridLevelLocked.value = true;
+  hiddenRoleSelection.value = [...props.hiddenRoles];
   const overview = props.detail?.overview || {};
   Object.assign(metadataForm, {
     dataset_title: overview.dataset_title || '',
@@ -176,7 +180,7 @@ function resetLocalState() {
   });
 }
 
-watch(() => [props.datasetId, props.detail?.overview, props.detail?.scenes], resetLocalState, { immediate: true });
+watch(() => [props.datasetId, props.detail?.overview, props.detail?.scenes, props.hiddenRoles], resetLocalState, { immediate: true });
 
 function collection(tab) { return props.detail?.[tab]?.items || []; }
 function page(tab) { return props.tabPages?.[tab] || { page: 1, pageSize: 20, total: 0 }; }
@@ -211,6 +215,10 @@ function saveMetadata() {
     keywords: metadataForm.keywords.split(',').map((item) => item.trim()).filter(Boolean),
   });
   editing.value = false;
+}
+
+function saveRoleRestrictions() {
+  emit('update-role-restrictions', [...new Set(hiddenRoleSelection.value)]);
 }
 
 function openReassign(row) {
@@ -273,6 +281,15 @@ function sceneCollapsed(sceneId) {
               <el-descriptions-item label="质检状态"><StatusTag domain="quality" :value="detail.overview.quality_status" size="small" /></el-descriptions-item>
               <el-descriptions-item label="描述" :span="2">{{ detail.overview.description || '-' }}</el-descriptions-item>
             </el-descriptions>
+            <section v-if="writeEnabled" class="dataset-access-control">
+              <h3>数据访问权限</h3>
+              <el-checkbox-group v-model="hiddenRoleSelection" :disabled="roleRestrictionsLoading || actionLoading">
+                <el-checkbox label="NORMAL">普通用户</el-checkbox>
+                <el-checkbox label="ADVANCED">高级用户</el-checkbox>
+                <el-checkbox label="SCIENTIST">科学家团队</el-checkbox>
+              </el-checkbox-group>
+              <el-button type="primary" size="small" :loading="actionLoading || roleRestrictionsLoading" @click="saveRoleRestrictions">保存</el-button>
+            </section>
           </template>
           <el-empty v-else description="正在加载数据集概览" />
         </template>
@@ -371,6 +388,9 @@ function sceneCollapsed(sceneId) {
 <style scoped>
 .drawer-actions, .section-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px; }
 .metadata-form { max-width: 680px; padding-top: 8px; }
+.dataset-access-control { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; margin-top: 16px; padding: 12px; border: 1px solid #dfe5ec; border-radius: 6px; background: #fbfcfd; }
+.dataset-access-control h3 { margin: 0; color: #344054; font-size: 13px; font-weight: 600; }
+.dataset-access-control :deep(.el-checkbox-group) { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .repartition-toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) max-content; gap: 10px 16px; margin-bottom: 14px; padding: 11px 13px; border: 1px solid #dfe5ec; border-radius: 6px; background: #fbfcfd; }
 .repartition-heading { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .repartition-heading strong { color: #263247; font-size: 13px; }

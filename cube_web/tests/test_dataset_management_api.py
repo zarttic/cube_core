@@ -113,6 +113,39 @@ def test_all_management_detail_domains_are_paginated() -> None:
     assert missing.json()["detail"]["code"] == "dataset_not_found"
 
 
+def test_dataset_visibility_restrictions_filter_list_detail_and_tiles() -> None:
+    client, repository, _ = _fixture()
+
+    repository.replace_hidden_roles("dataset-a", ("NORMAL", "SCIENTIST"), actor="admin")
+
+    normal_headers = {"x-test-role": "NORMAL"}
+    assert [row["dataset_id"] for row in client.get("/v1/datasets", headers=normal_headers).json()["items"]] == ["dataset-b"]
+    assert client.get("/v1/datasets/dataset-a", headers=normal_headers).status_code == 404
+    assert client.get("/v1/datasets/dataset-a/tiles", headers=normal_headers).status_code == 404
+    assert client.get("/v1/datasets/dataset-a", headers={"x-test-role": "ADVANCED"}).status_code == 200
+
+
+def test_admin_replaces_dataset_role_restrictions() -> None:
+    client, _, _ = _fixture()
+
+    saved = client.put("/v1/datasets/dataset-a/role-restrictions", json={"hidden_roles": ["普通用户", "SCIENTIST"]})
+    assert saved.status_code == 200
+    assert saved.json() == {"hidden_roles": ["NORMAL", "SCIENTIST"]}
+    assert client.get("/v1/datasets/dataset-a/role-restrictions").json() == saved.json()
+    invalid = client.put("/v1/datasets/dataset-a/role-restrictions", json={"hidden_roles": ["guest"]})
+    assert invalid.status_code == 422
+    assert client.put("/v1/datasets/dataset-a/role-restrictions", json={"hidden_roles": ["ADMIN"]}).status_code == 422
+    assert client.get("/v1/datasets/dataset-a/role-restrictions", headers={"x-test-role": "NORMAL"}).status_code == 403
+
+
+def test_opengauss_role_visibility_filter_uses_dataset_restrictions() -> None:
+    condition, params = OpenGaussDatasetManagementRepository._visibility_filter("普通用户")
+
+    assert "dataset_role_restrictions" in condition
+    assert params == ("NORMAL",)
+    assert OpenGaussDatasetManagementRepository._visibility_filter("ADMIN") == ("", ())
+
+
 def test_scene_detail_embeds_band_units_for_three_level_management() -> None:
     client, _, _ = _fixture()
 

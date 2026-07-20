@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-19-scene-domain-v8"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-20-scene-domain-v9"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -22,6 +22,7 @@ SCENE_DOMAIN_TABLES = {
     "ingest_runs",
     "ingest_run_scenes",
     "scene_dataset_audit",
+    "dataset_role_restrictions",
     "scene_domain_schema_version",
 }
 
@@ -77,6 +78,14 @@ def schema_statements() -> tuple[str, ...]:
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           UNIQUE (dataset_id, scene_key)
         )""",
+        """CREATE TABLE IF NOT EXISTS dataset_role_restrictions (
+          dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('NORMAL','ADVANCED','SCIENTIST','ADMIN')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          created_by TEXT NOT NULL,
+          PRIMARY KEY (dataset_id, role)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_dataset_role_restrictions_role ON dataset_role_restrictions(role, dataset_id)",
         """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_native DOUBLE PRECISION""",
         """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_unit TEXT""",
         """ALTER TABLE scenes ADD COLUMN IF NOT EXISTS resolution_m DOUBLE PRECISION""",
