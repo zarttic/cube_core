@@ -4,6 +4,7 @@ import { Refresh } from '@element-plus/icons-vue';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
+import { qualityRuleLabel } from '@/utils/qualityLabels';
 
 const props = defineProps({
   visible: Boolean,
@@ -21,6 +22,12 @@ const hasFailedPartition = computed(() => Number(summary.value.partition_failed_
 const sourceLoadBatchLabels = computed(() => props.detail?.source_load_batch_names?.length
   ? props.detail.source_load_batch_names
   : (props.detail?.source_load_batch_ids || []));
+const qualityRuns = computed(() => (props.detail?.datasets || []).flatMap((dataset) =>
+  (dataset.quality_runs || []).map((run) => ({
+    ...run,
+    datasetLabel: dataset.dataset_code || dataset.dataset_title || dataset.dataset_id,
+  }))
+));
 
 function workflowAdvice(band) {
   if (band.partition_status === 'failed') return '剖分失败，重试该波段的原剖分批次';
@@ -71,6 +78,20 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
         <el-button v-if="hasFailedPartition" :loading="submitting" @click="emit('retry-failed-partition')">重试失败剖分</el-button>
         <el-button type="primary" :icon="Refresh" :loading="submitting" :disabled="!canRequestQuality" @click="emit('request-quality')">提交批次质检</el-button>
       </div>
+      <section v-if="qualityRuns.length" class="quality-run-list" data-testid="partition-quality-items">
+        <h3>自动质检项</h3>
+        <article v-for="run in qualityRuns" :key="run.quality_run_id" class="quality-run-card">
+          <header><strong>{{ run.datasetLabel }}</strong><span>输出版本 {{ run.output_version }}</span><StatusTag domain="quality" :value="run.status" size="small" /></header>
+          <div v-if="run.items?.length" class="quality-item-list">
+            <div v-for="item in run.items" :key="item.rule_code" class="quality-item-row">
+              <span>{{ qualityRuleLabel(item.rule_code) }}</span>
+              <StatusTag domain="quality" :value="item.status" size="small" />
+              <small>{{ item.finding_count ? `${item.finding_count} 项发现` : '未发现问题' }}</small>
+            </div>
+          </div>
+          <small v-else class="quality-pending">{{ run.results_complete ? '暂无规则结果' : '质检项执行中，结果生成后自动显示' }}</small>
+        </article>
+      </section>
       <el-tree class="partition-quality-tree" :data="tree" :props="treeProps" node-key="key" :expand-on-click-node="false">
         <template #default="{ data }">
           <div class="quality-node" :class="`quality-node-${data.kind}`">
@@ -111,6 +132,15 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .batch-stats strong { color: #1f5f8b; }
 .batch-stats .failure { color: #a53b32; }
 .drawer-actions { display: flex; gap: 8px; margin: 12px 0; }
+.quality-run-list { display: grid; gap: 8px; margin: 14px 0; }
+.quality-run-list h3 { margin: 0; color: #344054; font-size: 14px; }
+.quality-run-card { border: 1px solid #dfe4ec; background: #fafbfd; padding: 9px 10px; }
+.quality-run-card header, .quality-item-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quality-run-card header > strong { color: #1f3b57; }
+.quality-run-card header > span, .quality-item-row small, .quality-pending { color: #667085; font-size: 12px; }
+.quality-item-list { display: grid; gap: 5px; margin-top: 8px; }
+.quality-item-row > span { flex: 1; min-width: 0; }
+.quality-item-row small { min-width: 82px; text-align: right; }
 .partition-quality-tree { border: 1px solid #dfe4ec; padding: 8px; max-height: 560px; overflow: auto; }
 .attempt-history { margin-top: 12px; border: 1px solid #dfe4ec; padding: 8px 10px; }
 .attempt-history summary { color: #344054; cursor: pointer; font-weight: 600; }

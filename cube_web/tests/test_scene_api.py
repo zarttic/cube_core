@@ -215,7 +215,15 @@ class _Repository:
             "partition_run_id": partition_run_id,
             "source_load_batch_ids": ["load-001", "load-002"],
             "summary": {"band_count": 2, "quality_pass_count": 1},
-            "datasets": [{"dataset_id": "dataset-optical", "scenes": [{"scene_id": "scene-optical", "bands": []}]}],
+            "datasets": [{
+                "dataset_id": "dataset-optical",
+                "scenes": [{"scene_id": "scene-optical", "bands": []}],
+                "quality_runs": [{
+                    "quality_run_id": "quality-run-001", "output_version": "output-001", "status": "pass",
+                    "results_complete": True,
+                    "items": [{"rule_code": "index_schema", "status": "pass", "finding_count": 0, "error_count": 0, "warning_count": 0}],
+                }],
+            }],
         }
 
     def list_partition_quality_targets(self, partition_run_id):
@@ -426,6 +434,7 @@ def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_qua
     assert listed.json()["items"][0]["partition_run_id"] == "partition-run-001"
     assert detail.json()["source_load_batch_ids"] == ["load-001", "load-002"]
     assert detail.json()["datasets"][0]["scenes"][0]["scene_id"] == "scene-optical"
+    assert detail.json()["datasets"][0]["quality_runs"][0]["items"][0]["rule_code"] == "index_schema"
     assert submitted.status_code == 202
     assert submitted.json()["quality_runs"] == [{
         "dataset_id": "dataset-optical", "output_version": "output-001", "requested_by": "admin",

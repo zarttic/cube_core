@@ -156,6 +156,25 @@ class OpenGaussSceneRepository:
                 rows = _all(cursor)
                 cursor.execute(
                     """
+                    WITH targets AS (
+                      SELECT DISTINCT dataset_id, output_version
+                      FROM partition_data_unit_grid_status
+                      WHERE partition_run_id=%s AND output_version IS NOT NULL
+                    )
+                    SELECT q.quality_run_id, q.dataset_id, q.output_version, q.status AS quality_status,
+                           q.result_complete, q.started_at, q.completed_at,
+                           r.rule_code, r.status AS rule_status, r.finding_count, r.error_count, r.warning_count
+                    FROM targets t
+                    JOIN partition_datasets d ON d.dataset_id=t.dataset_id AND d.current_output_version=t.output_version
+                    JOIN partition_quality_runs q ON q.quality_run_id=d.current_quality_run_id
+                    LEFT JOIN partition_quality_results r ON r.quality_run_id=q.quality_run_id
+                    ORDER BY q.dataset_id, q.output_version, r.rule_code
+                    """,
+                    (partition_run_id,),
+                )
+                quality_rows = _all(cursor)
+                cursor.execute(
+                    """
                     SELECT task_id, status, operation, attempt_no, retry_strategy, error_type,
                            error_message, failure_reason, source_task_id, created_at, started_at, finished_at
                     FROM partition_job_attempts WHERE batch_id=%s
@@ -165,6 +184,32 @@ class OpenGaussSceneRepository:
                 )
                 attempts = _all(cursor)
         batch = self._partition_quality_summary(run)
+        quality_runs: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in quality_rows:
+            dataset_id = str(row["dataset_id"])
+            output_version = str(row["output_version"])
+            quality_run = quality_runs.setdefault(
+                (dataset_id, output_version),
+                {
+                    "quality_run_id": str(row["quality_run_id"]),
+                    "output_version": output_version,
+                    "status": row["quality_status"],
+                    "results_complete": bool(row["result_complete"]),
+                    "started_at": row["started_at"],
+                    "completed_at": row["completed_at"],
+                    "items": [],
+                },
+            )
+            if row["rule_code"] is not None:
+                quality_run["items"].append(
+                    {
+                        "rule_code": row["rule_code"],
+                        "status": row["rule_status"],
+                        "finding_count": int(row["finding_count"] or 0),
+                        "error_count": int(row["error_count"] or 0),
+                        "warning_count": int(row["warning_count"] or 0),
+                    }
+                )
         datasets: dict[str, dict[str, Any]] = {}
         for row in rows:
             dataset_id = str(row["dataset_id"])
@@ -213,6 +258,10 @@ class OpenGaussSceneRepository:
             )
         for dataset in datasets.values():
             dataset.pop("_scenes", None)
+            dataset["quality_runs"] = [
+                quality_run for (dataset_id, _), quality_run in quality_runs.items()
+                if dataset_id == dataset["dataset_id"]
+            ]
         batch["datasets"] = list(datasets.values())
         batch["summary"] = _partition_batch_summary(rows)
         batch["attempts"] = attempts
