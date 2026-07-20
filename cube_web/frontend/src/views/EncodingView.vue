@@ -72,8 +72,8 @@ const emptyText = computed(() => {
 });
 
 const gridTypeLabels = {
-  geohash: 'GeoHash格网',
-  mgrs: 'MGRS格网',
+  geohash: '经纬度格网',
+  mgrs: '平面格网',
   isea4h: '六边形格网',
 };
 
@@ -604,7 +604,7 @@ async function runDemo() {
     <main class="main-content-area">
       <div class="container">
         <div class="module-content active">
-          <div class="workspace">
+          <div class="workspace encoding-workspace">
             <div class="workspace-sidebar">
               <div class="config-panel">
                 <template v-if="activeModule === 'division'">
@@ -619,8 +619,8 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <div class="radio-group">
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>GeoHash格网</span></label>
-                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>经纬度格网</span></label>
+                      <label class="radio-label"><input v-model="division.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>平面格网</span></label>
                       <label class="radio-label"><input v-model="division.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                     </div>
                   </div>
@@ -645,8 +645,8 @@ async function runDemo() {
                   <div class="form-group">
                     <label>格网类型</label>
                     <select v-model="encoding.gridType" class="form-select">
-                      <option value="geohash">GeoHash格网</option>
-                      <option value="mgrs">MGRS格网</option>
+                      <option value="geohash">经纬度格网</option>
+                      <option value="mgrs">平面格网</option>
                       <option value="isea4h">六边形格网</option>
                     </select>
                   </div>
@@ -689,8 +689,8 @@ async function runDemo() {
                     <div class="form-group">
                       <label>格网类型</label>
                       <div class="radio-group">
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>GeoHash格网</span></label>
-                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>MGRS格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="geohash"><span class="radio-custom"></span><span>经纬度格网</span></label>
+                        <label class="radio-label"><input v-model="topology.gridType" type="radio" value="mgrs"><span class="radio-custom"></span><span>平面格网</span></label>
                         <label class="radio-label"><input v-model="topology.gridType" type="radio" value="isea4h"><span class="radio-custom"></span><span>六边形格网</span></label>
                       </div>
                     </div>
@@ -779,14 +779,16 @@ async function runDemo() {
                     {{ contextualMapHint }}
                   </span>
                 </div>
-                <GlobeMap
-                  :markers="markers"
-                  :geometries="activeModule === 'division' || activeModule === 'operations' ? gridGeometries : []"
-                  :circle="activeModule === 'division' ? drawnCircle : null"
-                  :interaction-mode="activeModule === 'division' ? division.inputType : activeModule === 'encoding' && encoding.operation !== 'decode' ? 'point' : activeModule === 'operations' ? 'point' : 'none'"
-                  @point-selected="handleMapPointSelected"
-                  @circle-drawn="handleDivisionCircleDrawn"
-                />
+                <div class="map-canvas-wrap">
+                  <GlobeMap
+                    :markers="markers"
+                    :geometries="activeModule === 'division' || activeModule === 'operations' ? gridGeometries : []"
+                    :circle="activeModule === 'division' ? drawnCircle : null"
+                    :interaction-mode="activeModule === 'division' ? division.inputType : activeModule === 'encoding' && encoding.operation !== 'decode' ? 'point' : activeModule === 'operations' ? 'point' : 'none'"
+                    @point-selected="handleMapPointSelected"
+                    @circle-drawn="handleDivisionCircleDrawn"
+                  />
+                </div>
                 <div v-if="activeModule !== 'encoding'" class="visual-legend">
                   <div v-for="item in legendItems" :key="`${activeModule}-${item.colorClass}-${item.label}`" class="legend-item">
                     <span class="legend-color" :class="item.colorClass"></span>
@@ -853,3 +855,11 @@ async function runDemo() {
     </main>
   </section>
 </template>
+
+<style scoped>
+@media (min-width: 1201px) {
+  .encoding-workspace {
+    grid-template-columns: 280px minmax(0, 1fr) 300px;
+  }
+}
+</style>
