@@ -197,6 +197,7 @@ class SceneDomainService:
             raise ValueError(f"carbon scenes are not eligible in source_batch_ids: {missing}")
 
         items: list[dict[str, Any]] = []
+        unavailable_sources: list[dict[str, str]] = []
         truncated = False
         seen_sources: set[tuple[str, str]] = set()
         for source in sources:
@@ -207,25 +208,46 @@ class SceneDomainService:
             source_batch_id = str(source["load_batch_id"])
             source_uri = str(source.get("source_uri") or "").strip()
             if not source_uri:
-                raise ValueError(f"carbon scene has no source_uri: {scene_id}")
+                unavailable_sources.append({
+                    "scene_id": scene_id,
+                    "source_batch_id": source_batch_id,
+                    "reason": "missing_source_uri",
+                })
+                continue
             source_key = (source_uri, str(source.get("product_type") or "xco2"))
             if source_key in seen_sources:
                 continue
             seen_sources.add(source_key)
-            local_path = Path(resolve_asset_source_path(
-                source_uri,
-                {"source_cache_dir": "/tmp/cube_split_source_cache/preview"},
-            ))
-            remaining = request.limit - len(items)
-            observations = load_observations_from_file(
-                local_path,
-                max_observations=remaining,
-                product_type=source_key[1],
-            )
-            items.extend(_carbon_footprint_item(scene_id, source_batch_id, observation) for observation in observations)
+            try:
+                local_path = Path(resolve_asset_source_path(
+                    source_uri,
+                    {"source_cache_dir": "/tmp/cube_split_source_cache/preview"},
+                ))
+                remaining = request.limit - len(items)
+                observations = load_observations_from_file(
+                    local_path,
+                    max_observations=remaining,
+                    product_type=source_key[1],
+                )
+                source_items = [
+                    _carbon_footprint_item(scene_id, source_batch_id, observation)
+                    for observation in observations
+                ]
+            except Exception as exc:
+                unavailable_sources.append({
+                    "scene_id": scene_id,
+                    "source_batch_id": source_batch_id,
+                    "reason": _carbon_preview_source_error_reason(exc),
+                })
+                continue
+            items.extend(source_items)
             if len(observations) >= remaining:
                 truncated = True
-        return {"items": items, "truncated": truncated}
+        return {
+            "items": items,
+            "truncated": truncated,
+            "unavailable_sources": unavailable_sources,
+        }
 
     def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
         datasets = self.repository.materialize_partition_datasets(request)
@@ -375,6 +397,14 @@ def _carbon_footprint_item(
         "source_index": observation.source_index,
         "geometry": geometry,
     }
+
+
+def _carbon_preview_source_error_reason(exc: Exception) -> str:
+    if str(getattr(exc, "code", "")) in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+        return "source_not_found"
+    if isinstance(exc, FileNotFoundError):
+        return "source_not_found"
+    return "source_unreadable"
 
 
 def build_partition_execution_request(

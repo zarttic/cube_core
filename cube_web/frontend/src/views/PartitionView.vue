@@ -241,8 +241,13 @@ async function loadCarbonFootprints() {
     });
     if (generation !== carbonFootprintGeneration || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
+    const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
     const suffix = response.truncated ? '，已按上限截断' : '';
-    ElMessage.success(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}。`);
+    if (unavailableCount) {
+      ElMessage.warning(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}；${unavailableCount} 个源文件不可访问。`);
+    } else {
+      ElMessage.success(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}。`);
+    }
   } catch (error) {
     if (generation === carbonFootprintGeneration) ElMessage.error(error.message || '加载碳卫星足迹失败。');
   } finally {

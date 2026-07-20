@@ -298,6 +298,31 @@ def test_carbon_footprint_preview_reads_selected_source_scene(api, monkeypatch, 
             "geometry": {"type": "Point", "coordinates": [100.75, 20.25]},
         }],
         "truncated": False,
+        "unavailable_sources": [],
+    }
+
+
+def test_carbon_footprint_preview_skips_unavailable_source(api, monkeypatch) -> None:
+    client, _, _ = api
+
+    def missing_source(*_args, **_kwargs):
+        raise FileNotFoundError("source object is missing")
+
+    monkeypatch.setattr("cube_web.services.scene_service.resolve_asset_source_path", missing_source)
+
+    response = client.post("/v1/partition/carbon/footprints", json={
+        "source_batch_ids": ["load-001"], "scene_ids": ["scene-carbon"], "limit": 50,
+    })
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "truncated": False,
+        "unavailable_sources": [{
+            "scene_id": "scene-carbon",
+            "source_batch_id": "load-001",
+            "reason": "source_not_found",
+        }],
     }
 
 
