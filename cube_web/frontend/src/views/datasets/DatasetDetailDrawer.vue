@@ -157,7 +157,10 @@ const selectedPartitionBandIds = ref([]);
 const repartitionGridType = ref('geohash');
 const repartitionGridLevel = ref(5);
 const repartitionGridLevelLocked = ref(true);
-const hiddenRoleSelection = ref([]);
+const visibleRoleSelection = ref([]);
+const accessRoles = ['NORMAL', 'ADVANCED', 'SCIENTIST'];
+const allRolesSelected = computed(() => accessRoles.every((role) => visibleRoleSelection.value.includes(role)));
+const rolesPartiallySelected = computed(() => visibleRoleSelection.value.length > 0 && !allRolesSelected.value);
 
 function resetLocalState() {
   editing.value = false;
@@ -171,7 +174,7 @@ function resetLocalState() {
   selectedPartitionBandIds.value = [];
   repartitionGridLevel.value = recommendedLevel();
   repartitionGridLevelLocked.value = true;
-  hiddenRoleSelection.value = [...props.hiddenRoles];
+  visibleRoleSelection.value = accessRoles.filter((role) => !props.hiddenRoles.includes(role));
   const overview = props.detail?.overview || {};
   Object.assign(metadataForm, {
     dataset_title: overview.dataset_title || '',
@@ -218,7 +221,11 @@ function saveMetadata() {
 }
 
 function saveRoleRestrictions() {
-  emit('update-role-restrictions', [...new Set(hiddenRoleSelection.value)]);
+  emit('update-role-restrictions', accessRoles.filter((role) => !visibleRoleSelection.value.includes(role)));
+}
+
+function setAllVisibleRoles(checked) {
+  visibleRoleSelection.value = checked ? [...accessRoles] : [];
 }
 
 function openReassign(row) {
@@ -283,7 +290,8 @@ function sceneCollapsed(sceneId) {
             </el-descriptions>
             <section v-if="writeEnabled" class="dataset-access-control">
               <h3>数据访问权限</h3>
-              <el-checkbox-group v-model="hiddenRoleSelection" :disabled="roleRestrictionsLoading || actionLoading">
+              <el-checkbox :model-value="allRolesSelected" :indeterminate="rolesPartiallySelected" :disabled="roleRestrictionsLoading || actionLoading" @change="setAllVisibleRoles">全部角色</el-checkbox>
+              <el-checkbox-group v-model="visibleRoleSelection" :disabled="roleRestrictionsLoading || actionLoading">
                 <el-checkbox label="NORMAL">普通用户</el-checkbox>
                 <el-checkbox label="ADVANCED">高级用户</el-checkbox>
                 <el-checkbox label="SCIENTIST">科学家团队</el-checkbox>
