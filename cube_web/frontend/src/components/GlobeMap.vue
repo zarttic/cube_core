@@ -555,6 +555,7 @@ async function initViewer(generation) {
   }
 
   try {
+    const creditContainer = document.createElement('div');
     viewer = new Viewer(mapEl.value, {
       animation: false,
       baseLayer: createNaturalEarthLayer(),
@@ -569,6 +570,7 @@ async function initViewer(generation) {
       sceneMode: SceneMode.SCENE3D,
       timeline: false,
       terrainProvider: new EllipsoidTerrainProvider(),
+      creditContainer,
     });
   } catch (error) {
     console.warn('Cesium viewer initialization failed, falling back to static globe.', error);
