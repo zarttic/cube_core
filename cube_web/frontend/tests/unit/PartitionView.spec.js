@@ -210,6 +210,39 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });
 
+  it('loads carbon footprint coverage cells when loading the map', async () => {
+    const store = usePartitionStore();
+    store.form.datasets = [{
+      dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
+      scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
+      assets: [], partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+    }];
+    requestJson.mockResolvedValue({
+      items: [{ observation_id: 'obs-1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } }],
+      cells: [{ space_code: 'H5', grid_level: 5, geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } }],
+      cell_limit_reached: false,
+      unavailable_sources: [],
+    });
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true, BatchAssetsPanel: true,
+          QualityView: true, DataManagementView: true, 'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/grid-preview', expect.objectContaining({
+      source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'],
+      grid_type: 'isea4h', requested_grid_level: 5,
+    }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+  });
+
   it('discards a carbon footprint response after the selected scenes change', async () => {
     const store = usePartitionStore();
     store.form.datasets = [{

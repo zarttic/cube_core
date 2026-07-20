@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from cube_web.routes.auth import current_actor, require_admin
 from cube_web.services.scene_contracts import (
     CarbonFootprintPreviewRequest,
+    CarbonGridPreviewRequest,
     PartitionDraftCreateRequest,
     PartitionDraftSubmittedRequest,
     ScenePartitionRunRequest,
@@ -48,6 +49,14 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
         require_admin(current_actor(request))
         try:
             return service.preview_carbon_footprints(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/carbon/grid-preview")
+    def preview_carbon_grid(payload: CarbonGridPreviewRequest, request: Request) -> dict:
+        require_admin(current_actor(request))
+        try:
+            return service.preview_carbon_grid(payload)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -7,10 +7,11 @@ from uuid import uuid4
 
 from cube_split.jobs.ray_partition_core import resolve_asset_source_path
 from cube_split.partition.carbon import CarbonSatelliteObservation, load_observations_from_file
+from grid_core.sdk import CubeEncoderSDK
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
-from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
+from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
 
 
 class SceneRepository(Protocol):
@@ -247,6 +248,45 @@ class SceneDomainService:
             "items": items,
             "truncated": truncated,
             "unavailable_sources": unavailable_sources,
+        }
+
+    def preview_carbon_grid(self, request: CarbonGridPreviewRequest) -> dict[str, Any]:
+        footprint_preview = self.preview_carbon_footprints(request)
+        encoder = CubeEncoderSDK()
+        cells: dict[tuple[str, int, str, str | None], dict[str, Any]] = {}
+        cell_limit_reached = False
+        for item in footprint_preview["items"]:
+            geometry = item["geometry"]
+            if geometry.get("type") == "Point":
+                cells_for_observation = [encoder.locate(
+                    grid_type=request.grid_type,
+                    requested_grid_level=request.requested_grid_level,
+                    point=geometry["coordinates"],
+                )]
+            else:
+                cells_for_observation = encoder.cover(
+                    grid_type=request.grid_type,
+                    requested_grid_level=request.requested_grid_level,
+                    cover_mode="intersect",
+                    boundary_type="polygon",
+                    geometry=geometry,
+                    bbox=None,
+                    crs="EPSG:4326",
+                )
+            for cell in cells_for_observation:
+                key = (cell.grid_type, int(cell.grid_level), cell.space_code, cell.topology_code)
+                if key in cells:
+                    continue
+                if len(cells) >= request.max_cells:
+                    cell_limit_reached = True
+                    break
+                cells[key] = cell.model_dump(mode="json")
+            if cell_limit_reached:
+                break
+        return {
+            **footprint_preview,
+            "cells": list(cells.values()),
+            "cell_limit_reached": cell_limit_reached,
         }
 
     def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:

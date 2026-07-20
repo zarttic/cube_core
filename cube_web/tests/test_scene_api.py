@@ -326,6 +326,35 @@ def test_carbon_footprint_preview_skips_unavailable_source(api, monkeypatch) -> 
     }
 
 
+def test_carbon_grid_preview_covers_observation_footprints(api, monkeypatch, tmp_path) -> None:
+    client, _, _ = api
+    source_path = tmp_path / "tansat.nc"
+    source_path.write_bytes(b"fixture")
+    monkeypatch.setattr("cube_web.services.scene_service.resolve_asset_source_path", lambda *_args, **_kwargs: str(source_path))
+    monkeypatch.setattr(
+        "cube_web.services.scene_service.load_observations_from_file",
+        lambda *_args, **_kwargs: [
+            CarbonSatelliteObservation(
+                satellite="TanSat", observation_id="obs-1", acq_time="2026-07-01T00:00:00Z",
+                lon=100.5, lat=20.5, xco2=420.0,
+                footprint=[[100.0, 20.0], [101.0, 20.0], [100.5, 21.0]], source_index=3,
+            ),
+        ],
+    )
+
+    response = client.post("/v1/partition/carbon/grid-preview", json={
+        "source_batch_ids": ["load-001"], "scene_ids": ["scene-carbon"],
+        "grid_type": "isea4h", "requested_grid_level": 1,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"][0]["geometry"]["type"] == "Polygon"
+    assert body["cells"]
+    assert body["cells"][0]["grid_type"] == "isea4h"
+    assert body["cell_limit_reached"] is False
+
+
 def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None:
     client, repository, workflow = api
 

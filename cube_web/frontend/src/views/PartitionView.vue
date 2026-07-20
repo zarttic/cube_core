@@ -330,9 +330,85 @@ async function loadGridPreview(partition, bbox) {
   return (response.cells || []).map((cell) => ({ ...cell, preview_grid_type: partition.grid_type }));
 }
 
+function renderGridCells(cells) {
+  const uniqueKeys = new Set();
+  const rendered = new Map();
+  cells.forEach((cell) => {
+    const geometry = cell.geometry || bboxGeometry(cell.bbox);
+    if (!geometry || !cell.space_code) return;
+    const key = [cell.preview_grid_type, cell.grid_level, cell.space_code].join(':');
+    if (uniqueKeys.has(key)) return;
+    uniqueKeys.add(key);
+    rendered.set(key, {
+      geometry,
+      label: cell.space_code,
+      color: gridPreviewColors[cell.preview_grid_type] || '#7c3aed',
+      fillColor: gridPreviewColors[cell.preview_grid_type] || '#7c3aed',
+      fillOpacity: 0.07,
+      weight: 1.5,
+    });
+  });
+  return { geometries: [...rendered.values()], total: uniqueKeys.size };
+}
+
+async function loadCarbonGridPreview() {
+  const sceneIds = selectedCarbonSceneIds();
+  if (!sceneIds.length || !selectedSourceBatchIds.value.length) {
+    ElMessage.warning('请先选择碳卫星数据集和景。');
+    return;
+  }
+  const partition = activeDatasets.value[0]?.partition || {
+    grid_type: formModel.value.gridType,
+    requested_grid_level: Number(formModel.value.requestedGridLevel),
+  };
+  const generation = ++gridPreviewGeneration;
+  carbonFootprintGeneration += 1;
+  gridPreviewLoading.value = true;
+  carbonFootprintLoading.value = true;
+  setModuleGridPreview('carbon', []);
+  try {
+    const response = await requestJson('/v1/partition/carbon/grid-preview', {
+      source_batch_ids: selectedSourceBatchIds.value,
+      scene_ids: sceneIds,
+      grid_type: partition.grid_type,
+      requested_grid_level: Number(partition.requested_grid_level),
+      limit: 2000,
+      max_cells: 5000,
+    });
+    if (generation !== gridPreviewGeneration || activeModule.value !== 'carbon') return;
+    carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
+    const rendered = renderGridCells((response.cells || []).map((cell) => ({
+      ...cell,
+      preview_grid_type: partition.grid_type,
+    })));
+    setModuleGridPreview('carbon', rendered.geometries, {
+      limited: Boolean(response.cell_limit_reached),
+      total: rendered.total,
+    });
+    const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
+    const suffix = response.cell_limit_reached ? '，格网已按上限截断' : '';
+    if (unavailableCount) {
+      ElMessage.warning(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}；${unavailableCount} 个源文件不可访问。`);
+    } else {
+      ElMessage.success(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}。`);
+    }
+  } catch (error) {
+    if (generation === gridPreviewGeneration) ElMessage.error(error.message || '加载碳卫星格网预览失败。');
+  } finally {
+    if (generation === gridPreviewGeneration) {
+      gridPreviewLoading.value = false;
+      carbonFootprintLoading.value = false;
+    }
+  }
+}
+
 async function loadMap() {
   if (!activeDatasets.value.length) {
     ElMessage.warning('请先选择' + (activeProduct.value?.label || '') + '数据集。');
+    return;
+  }
+  if (activeModule.value === 'carbon') {
+    await loadCarbonGridPreview();
     return;
   }
   if (!selectedGeometries.value.length) {
@@ -365,31 +441,14 @@ async function loadMap() {
     const successful = settled.filter((item) => item.status === 'fulfilled').map((item) => item.value);
     const failures = settled.filter((item) => item.status === 'rejected');
     if (!successful.length && failures.length) throw failures[0].reason;
-    const cells = successful.flat();
-    const uniqueKeys = new Set();
-    const rendered = new Map();
-    cells.forEach((cell) => {
-      const geometry = cell.geometry || bboxGeometry(cell.bbox);
-      if (!geometry || !cell.space_code) return;
-      const key = [cell.preview_grid_type, cell.grid_level, cell.space_code].join(':');
-      if (uniqueKeys.has(key)) return;
-      uniqueKeys.add(key);
-      rendered.set(key, {
-        geometry,
-        label: cell.space_code,
-        color: gridPreviewColors[cell.preview_grid_type] || '#7c3aed',
-        fillColor: gridPreviewColors[cell.preview_grid_type] || '#7c3aed',
-        fillOpacity: 0.07,
-        weight: 1.5,
-      });
-    });
-    const geometries = [...rendered.values()];
+    const rendered = renderGridCells(successful.flat());
+    const geometries = rendered.geometries;
     const limited = requests.size > previewRequests.length;
-    setModuleGridPreview(moduleName, geometries, { limited, total: uniqueKeys.size });
+    setModuleGridPreview(moduleName, geometries, { limited, total: rendered.total });
     if (failures.length) {
       ElMessage.warning(`已加载 ${geometries.length} 个格网单元，${failures.length} 个范围加载失败。`);
     } else {
-      ElMessage.success('已加载 ' + geometries.length + ' 个格网单元' + (limited ? `（总计 ${uniqueKeys.size} 个）` : '') + '。');
+      ElMessage.success('已加载 ' + geometries.length + ' 个格网单元' + (limited ? `（总计 ${rendered.total} 个）` : '') + '。');
     }
   } catch (error) {
     if (generation !== gridPreviewGeneration) return;

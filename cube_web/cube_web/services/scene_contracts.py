@@ -84,6 +84,12 @@ class CarbonFootprintPreviewRequest(SceneStrictModel):
         return self
 
 
+class CarbonGridPreviewRequest(CarbonFootprintPreviewRequest):
+    grid_type: Literal["geohash", "mgrs", "isea4h"]
+    requested_grid_level: int = Field(ge=1, le=15)
+    max_cells: int = Field(default=5000, ge=1, le=10000)
+
+
 class PartitionDraftCreateRequest(SceneStrictModel):
     data_type: Literal["optical", "radar", "product", "carbon"]
     draft_name: str = Field(min_length=1, max_length=160)
