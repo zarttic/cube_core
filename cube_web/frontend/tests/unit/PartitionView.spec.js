@@ -176,7 +176,7 @@ describe('PartitionView map workspace', () => {
 
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     expect(wrapper.text()).toContain('地图');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
   });
 
   it('loads selected carbon source footprints onto the map', async () => {
@@ -343,7 +343,7 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
   });
 
-  it('retains grid layers while switching between product pages', async () => {
+  it('clears every preview layer while switching between product pages', async () => {
     requestJson.mockImplementation(async (_path, payload) => ({
       cells: [{
         space_code: `${payload.grid_type}-${payload.requested_grid_level}`,
@@ -394,10 +394,11 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="load-map"]').trigger('click');
     await flushPromises();
 
-    expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual(['#2f73d9', '#16836f', '#d97706']);
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
+    expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual(['#d97706']);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
     await wrapper.get('[data-testid="partition-module-optical"]').trigger('click');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
+    expect(wrapper.vm.gridGeometries).toEqual([]);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
   });
 
   it('renders every cell returned for a large recommended-level preview', async () => {
@@ -607,7 +608,8 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     resolvePreview({ cells: [{ space_code: 'old-grid', grid_level: 6, bbox: [100, 20, 101, 21] }] });
     await flushPromises();
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    expect(wrapper.vm.gridGeometries).toEqual([]);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
   });
 
   it('allows selections accumulated from different loader batches', async () => {

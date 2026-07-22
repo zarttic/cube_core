@@ -713,7 +713,7 @@ def test_partition_projection_does_not_regress_terminal_run() -> None:
     assert not any("UPDATE partition_run_scenes" in sql for sql, _ in statements)
 
 
-def test_scene_contract_rejects_legacy_batch_id_and_duplicate_scene() -> None:
+def test_scene_contract_rejects_legacy_batch_id_and_allows_separate_source_selections() -> None:
     payload = _payload()
     payload["batch_id"] = "load-001"
 
@@ -724,9 +724,25 @@ def test_scene_contract_rejects_legacy_batch_id_and_duplicate_scene() -> None:
     assert any(error["type"] == "extra_forbidden" and error["loc"] == ("batch_id",) for error in errors)
 
     duplicate_payload = _payload()
-    duplicate_payload["datasets"][1]["scene_ids"] = ["scene-optical"]
-    with pytest.raises(ValidationError, match="selected once"):
-        ScenePartitionRunRequest.model_validate(duplicate_payload)
+    duplicate_payload["source_batch_ids"] = ["load-001", "load-002"]
+    duplicate_payload["datasets"] = [
+        {
+            "selection_id": "load-001:geohash",
+            "source_batch_id": "load-001",
+            "dataset_id": "dataset-optical",
+            "scene_ids": ["scene-optical"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        },
+        {
+            "selection_id": "load-002:mgrs",
+            "source_batch_id": "load-002",
+            "dataset_id": "dataset-optical",
+            "scene_ids": ["scene-optical"],
+            "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
+        },
+    ]
+    request = ScenePartitionRunRequest.model_validate(duplicate_payload)
+    assert len(request.datasets) == 2
 
 
 @pytest.mark.parametrize(
@@ -737,12 +753,11 @@ def test_scene_contract_rejects_legacy_batch_id_and_duplicate_scene() -> None:
     ],
     ids=("different-grid-type", "different-grid-level"),
 )
-def test_scene_contract_rejects_mixed_grid_configuration_in_one_run(partition_override) -> None:
+def test_scene_contract_allows_mixed_grid_configuration_in_one_run(partition_override) -> None:
     payload = _payload()
     payload["datasets"][1]["partition"].update(partition_override)
 
-    with pytest.raises(ValidationError, match="same grid type and level"):
-        ScenePartitionRunRequest.model_validate(payload)
+    assert ScenePartitionRunRequest.model_validate(payload).datasets[1].partition.grid_type == partition_override["grid_type"]
 
 
 def test_execution_request_does_not_copy_source_batch_ids_into_dataset_identity() -> None:

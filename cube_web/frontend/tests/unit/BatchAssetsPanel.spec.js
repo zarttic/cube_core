@@ -232,23 +232,31 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     ]));
   });
 
-  it('merges a dataset across batches and deduplicates the same scene while retaining provenance', async () => {
+  it('keeps a dataset selection separate for each source batch', async () => {
     const wrapper = mountPanel();
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a', 'load-b']);
 
-    const datasetA = wrapper.vm.availableDatasets.find((item) => item.dataset_id === 'dataset-a');
-    expect(datasetA.scenes.map((item) => item.scene_id)).toEqual(['scene-shared', 'scene-a', 'scene-b']);
-    expect(datasetA.scenes.find((item) => item.scene_id === 'scene-shared').source_batch_ids).toEqual(['load-a', 'load-b']);
+    const datasetASelections = wrapper.vm.availableDatasets.filter((item) => item.dataset_id === 'dataset-a');
+    expect(datasetASelections).toHaveLength(2);
+    expect(datasetASelections.find((item) => item.source_batch_id === 'load-a').scenes.map((item) => item.scene_id))
+      .toEqual(['scene-shared', 'scene-a']);
+    expect(datasetASelections.find((item) => item.source_batch_id === 'load-b').scenes.map((item) => item.scene_id))
+      .toEqual(['scene-shared', 'scene-b']);
     expect(wrapper.vm.availableBatchGroups.map((item) => item.load_batch_id)).toEqual(['load-a', 'load-b']);
     expect(wrapper.vm.availableBatchGroups[0].datasets[0].scenes[0].load_status).toBe('succeeded');
     expect(wrapper.vm.availableBatchGroups[1].datasets[0].scenes[0].load_status).toBe('duplicate');
 
-    wrapper.vm.updateBandSelection(['band-scene-shared-B08', 'band-scene-b-B08']);
+    const loadA = datasetASelections.find((item) => item.source_batch_id === 'load-a');
+    const loadB = datasetASelections.find((item) => item.source_batch_id === 'load-b');
+    wrapper.vm.updateBandSelection([
+      wrapper.vm.bandSelectionId(loadA, 'band-scene-shared-B08'),
+      wrapper.vm.bandSelectionId(loadB, 'band-scene-b-B08'),
+    ]);
     const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
-    expect(emitted).toHaveLength(1);
-    expect(emitted[0].dataset_id).toBe('dataset-a');
-    expect(emitted[0].scenes).toHaveLength(2);
+    expect(emitted).toHaveLength(2);
+    expect(emitted.map((item) => item.source_batch_id).sort()).toEqual(['load-a', 'load-b']);
+    expect(emitted.map((item) => item.dataset_id)).toEqual(['dataset-a', 'dataset-a']);
   });
 
   it('refreshes available batches without discarding selected bands or expanded nodes', async () => {

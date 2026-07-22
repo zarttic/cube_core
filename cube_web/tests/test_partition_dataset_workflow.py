@@ -368,6 +368,32 @@ def test_duplicate_dataset_is_rejected_before_attempt_creation() -> None:
     assert domain_store.outputs == {}
 
 
+def test_workflow_executes_same_dataset_selections_with_distinct_grids_in_one_task() -> None:
+    payload = _request().model_dump(mode="json")
+    geohash = _dataset("dataset-ok")
+    geohash.update({
+        "selection_id": "load-geohash:dataset-ok",
+        "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+    })
+    mgrs = deepcopy(geohash)
+    mgrs.update({
+        "selection_id": "load-mgrs:dataset-ok",
+        "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
+    })
+    payload["datasets"] = [geohash, mgrs]
+    request = StrictPartitionRequest.model_validate(payload)
+
+    domain_store = FakeDomainStore()
+    result = _workflow(domain_store, FakeRunner(), FakeJobStore()).run(task_id="task-one", request=request)
+
+    assert result["status"] == "completed"
+    assert [item["selection_id"] for item in result["datasets"]] == [
+        "load-geohash:dataset-ok", "load-mgrs:dataset-ok",
+    ]
+    assert len({item["output_version"] for item in result["datasets"]}) == 2
+    assert {item["grid_type"] for item in domain_store.completed} == {"geohash", "mgrs"}
+
+
 def test_failed_output_does_not_mutate_sibling_rows() -> None:
     request = _request_with_datasets("dataset-ok", "dataset-fail")
     domain_store = FakeDomainStore()

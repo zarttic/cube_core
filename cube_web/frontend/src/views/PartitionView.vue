@@ -33,6 +33,7 @@ const activeModule = ref('optical');
 const datasetDrawerVisible = ref(false);
 const gridPreviewLoading = ref(false);
 const carbonFootprintLoading = ref(false);
+const mapPreviewVisible = ref(true);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
 const carbonFootprintsByModule = ref({});
@@ -155,7 +156,7 @@ function bboxGeometry(bbox) {
   };
 }
 
-const selectedGeometries = computed(() => store.form.datasets.flatMap((dataset, datasetIndex) => (
+const selectedGeometries = computed(() => activeDatasets.value.flatMap((dataset, datasetIndex) => (
   (dataset.assets || []).map((asset, assetIndex) => {
     const geometry = bboxGeometry(asset.bbox);
     if (!geometry) return null;
@@ -190,13 +191,15 @@ const sourcePreviewGeometries = computed(() => (
 // Carbon source scenes are organized as observation footprints. A bbox is only
 // used until the raw source footprints have been loaded.
 const mapGeometries = computed(() => (
-  gridGeometries.value.length
-    ? [...gridGeometries.value, ...(activeModule.value === 'carbon' ? carbonFootprintGeometries.value : [])]
+  !mapPreviewVisible.value
+    ? []
+    : activeGridGeometries.value.length
+    ? [...activeGridGeometries.value, ...(activeModule.value === 'carbon' ? carbonFootprintGeometries.value : [])]
     : sourcePreviewGeometries.value
 ));
 const activeGridLegends = computed(() => {
   const legends = new Map();
-  store.form.datasets.forEach((dataset) => {
+  activeDatasets.value.forEach((dataset) => {
     const partition = dataset.partition;
     if (!partition?.grid_type) return;
     const key = `${partition.grid_type}:${partition.requested_grid_level}`;
@@ -225,9 +228,19 @@ function selectedCarbonSceneIds() {
 }
 
 function selectModule(moduleName) {
+  const moduleChanged = activeModule.value !== moduleName;
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
-  gridPreviewLoading.value = false;
+  if (moduleChanged) {
+    gridPreviewGeneration += 1;
+    carbonFootprintGeneration += 1;
+    gridPreviewLoading.value = false;
+    carbonFootprintLoading.value = false;
+    mapPreviewVisible.value = false;
+    gridGeometriesByModule.value = {};
+    gridPreviewMetaByModule.value = {};
+    carbonFootprintsByModule.value = {};
+  }
 }
 
 async function loadCarbonFootprints() {
@@ -245,6 +258,7 @@ async function loadCarbonFootprints() {
     });
     if (generation !== carbonFootprintGeneration || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
+    mapPreviewVisible.value = true;
     const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
     const suffix = response.truncated ? '，已按上限截断' : '';
     if (unavailableCount) {
@@ -277,6 +291,7 @@ function selectDraft(draft) {
     requestedGridLevel: Number(partition.requested_grid_level),
   };
   datasetDrawerVisible.value = false;
+  mapPreviewVisible.value = true;
   gridPreviewGeneration += 1;
   setModuleGridPreview(draft.data_type, []);
   if (draft.data_type === 'carbon') resetCarbonFootprints();
@@ -400,6 +415,7 @@ async function loadCarbonGridPreview() {
     });
     if (generation !== gridPreviewGeneration || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
+    mapPreviewVisible.value = true;
     const rendered = renderGridCells((response.cells || []).map((cell) => ({
       ...cell,
       preview_grid_type: partition.grid_type,
@@ -456,6 +472,7 @@ async function loadMap() {
   });
 
   gridPreviewLoading.value = true;
+  mapPreviewVisible.value = true;
   setModuleGridPreview(moduleName, []);
   try {
     const previewRequests = [...requests.values()].slice(0, 30);
@@ -489,6 +506,7 @@ function resetGridPreview() {
 
 function updateDatasets(datasets) {
   store.form.datasets = datasets;
+  mapPreviewVisible.value = true;
   const partitions = datasets
     .filter((dataset) => dataset.data_type === activeModule.value && dataset.partition)
     .map((dataset) => dataset.partition);

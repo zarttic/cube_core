@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-20-scene-domain-v9"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-22-scene-domain-v10"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -173,6 +173,7 @@ def schema_statements() -> tuple[str, ...]:
         """ALTER TABLE partition_drafts ADD COLUMN IF NOT EXISTS draft_name TEXT NOT NULL DEFAULT '待剖分批次'""",
         """CREATE TABLE IF NOT EXISTS partition_run_scenes (
           partition_run_id TEXT NOT NULL REFERENCES partition_runs(partition_run_id),
+          selection_id TEXT NOT NULL,
           scene_id TEXT NOT NULL REFERENCES scenes(scene_id),
           dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
           source_load_batch_id TEXT REFERENCES load_batches(load_batch_id),
@@ -184,7 +185,7 @@ def schema_statements() -> tuple[str, ...]:
           error_message TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          PRIMARY KEY (partition_run_id, scene_id),
+          PRIMARY KEY (partition_run_id, selection_id),
           UNIQUE (partition_run_id, idempotency_key)
         )""",
         """CREATE TABLE IF NOT EXISTS partition_data_unit_grid_status (
@@ -203,8 +204,15 @@ def schema_statements() -> tuple[str, ...]:
           attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          PRIMARY KEY (band_unit_id, grid_type)
+          PRIMARY KEY (band_unit_id, grid_type, grid_level)
         )""",
+        """ALTER TABLE partition_run_scenes ADD COLUMN IF NOT EXISTS selection_id TEXT""",
+        """UPDATE partition_run_scenes SET selection_id=idempotency_key WHERE selection_id IS NULL""",
+        """ALTER TABLE partition_run_scenes ALTER COLUMN selection_id SET NOT NULL""",
+        """ALTER TABLE partition_run_scenes DROP CONSTRAINT IF EXISTS partition_run_scenes_pkey""",
+        """ALTER TABLE partition_run_scenes ADD PRIMARY KEY (partition_run_id, selection_id)""",
+        """ALTER TABLE partition_data_unit_grid_status DROP CONSTRAINT IF EXISTS partition_data_unit_grid_status_pkey""",
+        """ALTER TABLE partition_data_unit_grid_status ADD PRIMARY KEY (band_unit_id, grid_type, grid_level)""",
         """CREATE TABLE IF NOT EXISTS ingest_runs (
           ingest_run_id TEXT PRIMARY KEY,
           partition_run_id TEXT NOT NULL REFERENCES partition_runs(partition_run_id),

@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-20-scene-domain-v9"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-22-scene-domain-v10"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -55,7 +55,7 @@ def test_partition_data_unit_grid_status_enforces_band_grid_identity_and_lifecyc
 
     assert "dataset_id text not null references datasets(dataset_id)" in table_sql
     assert "scene_id text not null references scenes(scene_id)" in table_sql
-    assert "primary key (band_unit_id, grid_type)" in table_sql
+    assert "primary key (band_unit_id, grid_type, grid_level)" in table_sql
     assert "grid_type text not null check (grid_type in ('geohash','mgrs','isea4h'))" in table_sql
     assert "grid_level int not null check (grid_level >= 0)" in table_sql
     assert "attempt_no int not null default 0 check (attempt_no >= 0)" in table_sql

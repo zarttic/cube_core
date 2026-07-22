@@ -53,7 +53,7 @@ class DatasetPartitionConfig(StrictModel):
 
     Missing fields inherit the batch-level strict request configuration.  The
     resolved combination is validated by ``resolve_dataset_partition``. Grid
-    type and level must still be uniform across the whole batch.
+    Each normalized dataset can select its own valid grid configuration.
     """
 
     grid_type: GridType | None = None
@@ -66,6 +66,7 @@ class DatasetPartitionConfig(StrictModel):
 
 
 class DatasetInput(StrictModel):
+    selection_id: str | None = Field(default=None, min_length=1)
     dataset_id: str = Field(min_length=1)
     dataset_code: str = Field(min_length=1)
     dataset_title: str = Field(min_length=1)
@@ -125,10 +126,8 @@ class StrictPartitionRequest(StrictModel):
     def validate_grid_contract(self) -> "StrictPartitionRequest":
         validate_requested_grid_level(EncoderGridType(self.grid_type), self.requested_grid_level)
         validate_partition_method(self.grid_type, self.partition_method)
-        resolved = [resolve_dataset_partition(self, dataset) for dataset in self.datasets]
-        grid_configs = {(item.grid_type, item.requested_grid_level) for item in resolved}
-        if len(grid_configs) != 1:
-            raise ValueError("all datasets in one partition batch must use the same grid type and level")
+        for dataset in self.datasets:
+            resolve_dataset_partition(self, dataset)
         return self
 
 
@@ -173,9 +172,10 @@ def validate_partition_method(grid_type: GridType, supplied: PartitionMethod) ->
 def group_datasets(request: StrictPartitionRequest) -> dict[str, DatasetInput]:
     grouped: dict[str, DatasetInput] = {}
     for dataset in request.datasets:
-        if dataset.dataset_id in grouped:
+        key = dataset.selection_id or dataset.dataset_id
+        if key in grouped:
             raise ValueError(f"duplicate dataset_id: {dataset.dataset_id}")
-        grouped[dataset.dataset_id] = dataset
+        grouped[key] = dataset
     return grouped
 
 

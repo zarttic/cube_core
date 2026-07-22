@@ -71,8 +71,11 @@ function buildDatasetSelection(dataset) {
     || new Set(bandUnitIds).size !== bandUnitIds.length)) {
     throw invalidRequest('数据集包含无效或重复的波段数据单元。');
   }
+  const sourceBatchId = String(dataset.source_batch_id || normalizeSceneBatchIds(dataset.scenes[0])[0] || '').trim();
   return {
+    selection_id: String(dataset.selection_id || `${sourceBatchId}:${dataset.dataset_id}`).trim(),
     dataset_id: dataset.dataset_id,
+    source_batch_id: sourceBatchId,
     scene_ids: sceneIds,
     ...(bandUnitIds ? { band_unit_ids: bandUnitIds } : {}),
     partition: Object.fromEntries(Object.entries(partition).filter(([key, value]) => partitionFields.has(key) && value != null)),
@@ -109,15 +112,21 @@ export const usePartitionStore = defineStore('partition', () => {
     if (!runId) throw invalidRequest('缺少剖分执行 ID。');
     if (!Array.isArray(form.datasets) || !form.datasets.length) throw invalidRequest('请至少选择一个数据单元。');
     const datasets = form.datasets.map(buildDatasetSelection);
-    const gridConfigs = new Set(datasets.map((dataset) => `${dataset.partition.grid_type}:${dataset.partition.requested_grid_level}`));
-    if (gridConfigs.size !== 1) throw invalidRequest('同一剖分批次中的数据必须使用相同格网类型和层级。');
-    const allSceneIds = datasets.flatMap((dataset) => dataset.scene_ids);
-    if (new Set(allSceneIds).size !== allSceneIds.length) throw invalidRequest('同一数据单元不能重复归入多个数据集。');
-    const allBandUnitIds = datasets.flatMap((dataset) => dataset.band_unit_ids || []);
-    if (new Set(allBandUnitIds).size !== allBandUnitIds.length) throw invalidRequest('同一波段数据单元不能重复归入多个数据集。');
+    if (datasets.some((dataset) => !dataset.selection_id || !dataset.source_batch_id)) {
+      throw invalidRequest('每项剖分选择必须绑定来源载入批次。');
+    }
+    if (new Set(datasets.map((dataset) => dataset.selection_id)).size !== datasets.length) {
+      throw invalidRequest('存在重复的剖分选择。');
+    }
+    const sceneDatasets = new Map();
+    datasets.forEach((dataset) => dataset.scene_ids.forEach((sceneId) => {
+      const owner = sceneDatasets.get(sceneId);
+      if (owner && owner !== dataset.dataset_id) throw invalidRequest('同一数据单元不能重复归入多个数据集。');
+      sceneDatasets.set(sceneId, dataset.dataset_id);
+    }));
     const sourceBatchIds = [...new Set(form.datasets.flatMap((dataset) => (
-      dataset.scenes.flatMap(normalizeSceneBatchIds)
-    )))];
+      [dataset.source_batch_id, ...dataset.scenes.flatMap(normalizeSceneBatchIds)]
+    )).filter(Boolean))];
     if (!sourceBatchIds.length) throw invalidRequest('所选数据单元缺少来源载入批次。');
     if (sourceBatchIds.includes(runId)) throw invalidRequest('剖分执行 ID 不能复用载入批次 ID。');
     const selectionSource = form.datasets.every((dataset) => dataset.selection_source === 'dataset')

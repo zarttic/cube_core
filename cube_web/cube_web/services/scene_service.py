@@ -445,13 +445,16 @@ def build_partition_execution_request(
     """
     if not datasets:
         raise ValueError("partition run must resolve at least one dataset")
-    selections = {selection.dataset_id: selection for selection in request.datasets}
     resolved: list[DatasetInput] = []
-    for dataset in datasets:
-        selection = selections.get(dataset.dataset_id)
-        if selection is None:
+    if len(datasets) != len(request.datasets):
+        raise ValueError("resolved partition selections do not match request")
+    for dataset, selection in zip(datasets, request.datasets, strict=True):
+        if dataset.dataset_id != selection.dataset_id:
             raise ValueError(f"resolved unexpected dataset: {dataset.dataset_id}")
-        resolved.append(dataset.model_copy(update={"partition": selection.partition}))
+        resolved.append(dataset.model_copy(update={
+            "selection_id": selection.selection_id,
+            "partition": selection.partition,
+        }))
     first = request.datasets[0].partition
     missing = [
         name

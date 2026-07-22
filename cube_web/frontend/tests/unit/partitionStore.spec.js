@@ -51,18 +51,22 @@ describe('partition store scene request', () => {
     expect(body.source_batch_ids).toEqual(['load-a', 'load-b']);
     expect(body.selection_source).toBe('load_batch');
     expect(body.source_batch_ids).not.toContain(body.partition_run_id);
-    expect(body.datasets).toEqual([
-      {
+    expect(body.datasets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
         dataset_id: 'dataset-optical',
+        source_batch_id: 'load-a',
+        selection_id: 'load-a:dataset-optical',
         scene_ids: ['scene-shared', 'scene-a'],
         partition: expect.objectContaining({ grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' }),
-      },
-      {
+      }),
+      expect.objectContaining({
         dataset_id: 'dataset-carbon',
+        source_batch_id: 'load-b',
+        selection_id: 'load-b:dataset-carbon',
         scene_ids: ['scene-carbon'],
         partition: expect.objectContaining({ grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' }),
-      },
-    ]);
+      }),
+    ]));
     expect(JSON.stringify(body)).not.toContain('/tasks/run');
     expect(body).not.toHaveProperty('batch_id');
     expect(body.datasets[0]).not.toHaveProperty('assets');

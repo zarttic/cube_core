@@ -93,20 +93,22 @@ class PartitionWorkflowService:
             raise RuntimeError("partition domain store is required")
 
         results: list[dict[str, Any]] = []
-        for dataset_id, dataset in datasets.items():
-            output_version = make_output_version(dataset_id, task_id)
+        for selection_key, dataset in datasets.items():
+            dataset_id = dataset.dataset_id
+            execution_task_id = task_id if dataset.selection_id is None else f"{task_id}:{dataset.selection_id}"
+            output_version = make_output_version(dataset_id, execution_task_id)
             effective_request = effective_dataset_request(request, dataset)
             effective_partition = resolve_dataset_partition(request, dataset)
             started = False
             try:
-                started_version = selected_domain_store.start_output(effective_request, dataset, task_id)
+                started_version = selected_domain_store.start_output(effective_request, dataset, execution_task_id)
                 started = True
                 if started_version != output_version:
                     raise ValueError("domain store returned a non-deterministic output version")
                 result, scene_outcomes = _run_dataset_by_scene(
                     selected_runner,
                     dataset=dataset,
-                    task_id=task_id,
+                    task_id=execution_task_id,
                     output_version=output_version,
                     grid_type=effective_request.grid_type,
                     requested_grid_level=effective_request.requested_grid_level,
@@ -120,10 +122,12 @@ class PartitionWorkflowService:
                     self.after_ray()
                 if _is_cancelled(selected_job_store, task_id):
                     raise PartitionCancelledError("Partition task cancelled")
-                if result.dataset_id != dataset_id or result.output_version != output_version or result.task_id != task_id:
+                if result.dataset_id != dataset_id or result.output_version != output_version or result.task_id != execution_task_id:
                     raise ValueError("dataset result identity does not match the active attempt")
                 committed = selected_domain_store.complete_output(result)
                 completed_result = _completed_dataset_result(result, committed)
+                if dataset.selection_id is not None:
+                    completed_result["selection_id"] = dataset.selection_id
                 if scene_outcomes is not None:
                     completed_result["scenes"] = scene_outcomes
                     if any(item["status"] != "completed" for item in scene_outcomes):
@@ -137,7 +141,12 @@ class PartitionWorkflowService:
                         error_code="partition_cancelled",
                         error_message="Partition task cancelled",
                     )
-                results.append({"dataset_id": dataset_id, "output_version": output_version, "status": "cancelled"})
+                results.append({
+                    "dataset_id": dataset_id,
+                    "output_version": output_version,
+                    "status": "cancelled",
+                    **({"selection_id": dataset.selection_id} if dataset.selection_id is not None else {}),
+                })
             except Exception as exc:
                 message = _safe_dataset_error(exc)
                 if started:
@@ -153,6 +162,8 @@ class PartitionWorkflowService:
                         "status": "failed",
                         "error": {"code": "partition_execution_failed", "message": message},
                     }
+                if dataset.selection_id is not None:
+                    failed_result["selection_id"] = dataset.selection_id
                 if isinstance(exc, _ScenePartitionFailure):
                     failed_result["scenes"] = exc.outcomes
                 results.append(failed_result)

@@ -254,15 +254,15 @@ def test_dataset_partition_overrides_resolve_and_validate_independently() -> Non
     ],
     ids=("different-grid-type", "different-grid-level"),
 )
-def test_strict_request_rejects_mixed_grid_configuration_across_datasets(second_partition) -> None:
+def test_strict_request_allows_mixed_grid_configuration_across_datasets(second_partition) -> None:
     payload = normalized_request()
     second = deepcopy(payload["datasets"][0])
     second.update({"dataset_id": "dataset-b", "dataset_code": "DS-B", "dataset_title": "Dataset B"})
     second["partition"] = second_partition
     payload["datasets"].append(second)
 
-    with pytest.raises(ValidationError, match="same grid type and level"):
-        StrictPartitionRequest.model_validate(payload)
+    request = StrictPartitionRequest.model_validate(payload)
+    assert resolve_dataset_partition(request, request.datasets[1]).grid_type == second_partition["grid_type"]
 
 
 def test_max_observations_is_carbon_only_and_resolves_per_dataset() -> None:

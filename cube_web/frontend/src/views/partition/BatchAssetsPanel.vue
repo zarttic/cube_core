@@ -44,6 +44,20 @@ function sceneSourceBatchIds(scene) {
 
 function batchGroupKey(batch) { return String(batch.load_batch_id); }
 function datasetGroupKey(batch, dataset) { return `${batch.load_batch_id}:${dataset.dataset_id}`; }
+function selectionKey(dataset) {
+  if (dataset?.selection_id) return String(dataset.selection_id);
+  return dataset?.source_batch_id ? `${dataset.source_batch_id}:${dataset.dataset_id}` : String(dataset?.dataset_id || '');
+}
+function bandSelectionId(dataset, bandUnitId) {
+  const matchingSelections = availableDatasets.value.filter((item) => item.scenes.some((scene) => (
+    bandsFor(scene, item.data_type).some((band) => band.band_unit_id === bandUnitId)
+  )));
+  return matchingSelections.length > 1 ? `${selectionKey(dataset)}:${bandUnitId}` : bandUnitId;
+}
+function datasetTestId(prefix, batch, dataset) {
+  const count = availableDatasets.value.filter((item) => item.dataset_id === dataset.dataset_id).length;
+  return count === 1 ? `${prefix}-${dataset.dataset_id}` : `${prefix}-${batch.load_batch_id}-${dataset.dataset_id}`;
+}
 function toggleBatchGroup(batch) {
   const key = batchGroupKey(batch);
   const next = new Set(collapsedBatches.value);
@@ -185,31 +199,19 @@ function mergeBatchDatasets(responses) {
   const datasets = new Map();
   responses.forEach(({ batchId, response }) => {
     (response?.datasets || []).forEach((dataset) => {
-      const existing = datasets.get(dataset.dataset_id) || { ...dataset, scenes: new Map() };
-      const incomingResolution = Number(dataset.resolution_m);
-      const existingResolution = Number(existing.resolution_m);
-      if (Number.isFinite(incomingResolution) && incomingResolution > 0
-          && (!Number.isFinite(existingResolution) || existingResolution <= 0 || incomingResolution < existingResolution)) {
-        existing.resolution_m = incomingResolution;
-        existing.resolution_native = dataset.resolution_native;
-        existing.resolution_unit = dataset.resolution_unit;
-        existing.crs = dataset.crs;
-        existing.suggested_grid_type = dataset.suggested_grid_type;
-        existing.suggested_grid_levels = dataset.suggested_grid_levels;
-      }
+      const key = `${batchId}:${dataset.dataset_id}`;
+      const queueBatch = queueBatches.value.find((batch) => batch.load_batch_id === batchId);
+      const draftSourceBatchIds = queueBatch?.partition_draft?.source_load_batch_ids || [];
+      const sourceBatchIdsForResponse = queueBatch?.partition_draft ? draftSourceBatchIds : [batchId];
+      const existing = datasets.get(key) || {
+        ...dataset,
+        source_batch_id: sourceBatchIdsForResponse[0] || batchId,
+        selection_id: key,
+        scenes: new Map(),
+      };
       (dataset.scenes || []).forEach((scene) => {
-        const queueBatch = queueBatches.value.find((batch) => batch.load_batch_id === batchId);
-        const draftSourceBatchIds = queueBatch?.partition_draft?.source_load_batch_ids || [];
-        const sourceBatchIdsForResponse = queueBatch?.partition_draft ? draftSourceBatchIds : [batchId];
         const prior = existing.scenes.get(scene.scene_id);
-        if (prior && prior.dataset_id && scene.dataset_id && prior.dataset_id !== scene.dataset_id) {
-          throw new Error(`数据单元 ${scene.scene_id} 在不同数据集中重复出现。`);
-        }
-        const sourceBatchIds = [...new Set([
-          ...sceneSourceBatchIds(prior),
-          ...sceneSourceBatchIds(scene),
-          ...sourceBatchIdsForResponse,
-        ])];
+        const sourceBatchIds = sourceBatchIdsForResponse;
         const sourceLoadStatuses = {
           ...(prior?.source_load_statuses || {}),
           ...Object.fromEntries(sourceBatchIdsForResponse.map((sourceBatchId) => [
@@ -228,34 +230,22 @@ function mergeBatchDatasets(responses) {
           source_load_statuses: sourceLoadStatuses,
         });
       });
-      datasets.set(dataset.dataset_id, existing);
+      datasets.set(key, existing);
     });
   });
   return [...datasets.values()].map((dataset) => ({ ...dataset, scenes: [...dataset.scenes.values()] }));
 }
 
 function buildBatchGroups(responses, mergedDatasets) {
-  const mergedScenes = new Map(mergedDatasets.flatMap((dataset) => (
-    dataset.scenes.map((scene) => [scene.scene_id, scene])
-  )));
+  const datasetsByKey = new Map(mergedDatasets.map((dataset) => [selectionKey(dataset), dataset]));
   const batchesById = new Map(queueBatches.value.map((batch) => [batch.load_batch_id, batch]));
   return responses.map(({ batchId, response }) => ({
     ...(batchesById.get(batchId) || {}),
     ...(response?.load_batch || {}),
     load_batch_id: batchId,
-    datasets: (response?.datasets || []).map((dataset) => ({
-      ...dataset,
-      scenes: (dataset.scenes || []).map((scene) => {
-        const merged = mergedScenes.get(scene.scene_id);
-        return merged ? {
-          ...merged,
-          ...scene,
-          source_batch_ids: merged.source_batch_ids,
-          eligible_source_batch_ids: merged.eligible_source_batch_ids,
-          source_load_statuses: merged.source_load_statuses,
-        } : scene;
-      }),
-    })),
+    datasets: (response?.datasets || []).map((dataset) => (
+      datasetsByKey.get(`${batchId}:${dataset.dataset_id}`) || dataset
+    )),
   }));
 }
 
@@ -312,18 +302,18 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
       : new Set(sceneKeys);
     const bands = availableDatasets.value.flatMap((dataset) => dataset.scenes.flatMap((scene) => (
       bandsFor(scene, dataset.data_type).map((band) => ({
-        ...band, scene_id: scene.scene_id, target_partition: targetPartition(dataset),
+        ...band, scene_id: scene.scene_id, selection_band_id: bandSelectionId(dataset, band.band_unit_id), target_partition: targetPartition(dataset),
       }))
     )));
     const availableBandUnitIds = new Set(bands
       .filter((band) => !bandConsumedByLoadBatch(band, band.target_partition))
-      .map((band) => band.band_unit_id)
+      .map((band) => band.selection_band_id)
       .filter(Boolean));
     if (!selectedBandUnitIds.value.length && selectedSceneIds.value.length) {
       const legacySceneIds = new Set(selectedSceneIds.value);
       selectedBandUnitIds.value = bands
         .filter((band) => legacySceneIds.has(band.scene_id) && band.band_unit_id && !bandConsumedByLoadBatch(band, band.target_partition))
-        .map((band) => band.band_unit_id);
+        .map((band) => band.selection_band_id);
     } else {
       selectedBandUnitIds.value = selectedBandUnitIds.value.filter((bandUnitId) => availableBandUnitIds.has(bandUnitId));
     }
@@ -362,10 +352,10 @@ function scenePreviewAsset(scene) {
 function updateBandSelection(bandUnitIds) {
   selectedBandUnitIds.value = [...new Set(bandUnitIds)];
   const selectedBands = new Set(selectedBandUnitIds.value);
-  selectedSceneIds.value = availableDatasets.value.flatMap((dataset) => dataset.scenes)
-    .filter((scene) => bandsFor(scene, availableDatasets.value.find((dataset) => dataset.dataset_id === scene.dataset_id)?.data_type)
-      .some((band) => selectedBands.has(band.band_unit_id)))
-    .map((scene) => scene.scene_id);
+  selectedSceneIds.value = availableDatasets.value.flatMap((dataset) => dataset.scenes
+    .filter((scene) => bandsFor(scene, dataset.data_type)
+      .some((band) => selectedBands.has(bandSelectionId(dataset, band.band_unit_id))))
+    .map((scene) => scene.scene_id));
   selectedSceneIds.value = [...new Set(selectedSceneIds.value)];
   if (
     selectedBatchIds.value.length === committedBatchState.batchIds.length
@@ -377,19 +367,21 @@ function updateBandSelection(bandUnitIds) {
       bandUnitIds: [...selectedBandUnitIds.value],
     };
   }
-  const existingById = new Map(props.modelValue.map((dataset) => [dataset.dataset_id, dataset]));
+  const existingById = new Map(props.modelValue.map((dataset) => [selectionKey(dataset), dataset]));
   const retained = props.dataTypeFilter
     ? props.modelValue.filter((dataset) => dataset.data_type !== props.dataTypeFilter)
     : [];
   const current = availableDatasets.value.flatMap((dataset) => {
     const datasetBandUnitIds = dataset.scenes.flatMap((scene) => bandsFor(scene, dataset.data_type))
       .map((band) => band.band_unit_id)
-      .filter((bandUnitId) => bandUnitId && selectedBands.has(bandUnitId));
+      .filter((bandUnitId) => bandUnitId && selectedBands.has(bandSelectionId(dataset, bandUnitId)));
     const scenes = dataset.scenes.filter((scene) => bandsFor(scene, dataset.data_type)
-      .some((band) => selectedBands.has(band.band_unit_id)));
+      .some((band) => selectedBands.has(bandSelectionId(dataset, band.band_unit_id))));
     if (!scenes.length) return [];
-    const existing = existingById.get(dataset.dataset_id);
+    const existing = existingById.get(selectionKey(dataset));
     return [{
+      selection_id: selectionKey(dataset),
+      source_batch_id: dataset.source_batch_id,
       dataset_id: dataset.dataset_id,
       dataset_code: dataset.dataset_code,
       dataset_title: dataset.dataset_title,
@@ -416,7 +408,7 @@ function updateBandSelection(bandUnitIds) {
 }
 
 const selectedCount = computed(() => selectedBandUnitIds.value.length);
-const selectedDatasetsById = computed(() => new Map(props.modelValue.map((dataset) => [dataset.dataset_id, dataset])));
+const selectedDatasetsById = computed(() => new Map(props.modelValue.map((dataset) => [selectionKey(dataset), dataset])));
 const visibleBatchGroups = computed(() => availableBatchGroups.value.map((batch) => ({
   ...batch,
   datasets: batch.datasets.map((dataset) => ({
@@ -495,7 +487,9 @@ function bandConsumedByLoadBatch(band, partition = null) {
 }
 
 function targetPartition(dataset) {
-  return selectedDatasetsById.value.get(dataset?.dataset_id)?.partition || dataset?.partition || null;
+  return selectedDatasetsById.value.get(selectionKey(dataset))?.partition
+    || props.modelValue.find((item) => item.dataset_id === dataset?.dataset_id)?.partition
+    || dataset?.partition || null;
 }
 
 function selectableBandIdsForScene(scene, dataType, dataset = null) {
@@ -503,11 +497,10 @@ function selectableBandIdsForScene(scene, dataType, dataset = null) {
   const partition = targetPartition(dataset);
   return bandsFor(scene, dataType)
     .filter((band) => band.band_unit_id && band.contract_errors.length === 0 && (!dataset || !bandConsumedByLoadBatch(band, partition)))
-    .map((band) => band.band_unit_id);
+    .map((band) => bandSelectionId(dataset, band.band_unit_id));
 }
 
-function selectableBandIdsForDataset(datasetId) {
-  const dataset = availableDatasets.value.find((item) => item.dataset_id === datasetId);
+function selectableBandIdsForDataset(dataset) {
   return dataset ? dataset.scenes.flatMap((scene) => selectableBandIdsForScene(scene, dataset.data_type, dataset)) : [];
 }
 
@@ -523,37 +516,48 @@ function toggleBandGroup(bandUnitIds, checked) {
   updateBandSelection([...next]);
 }
 
-function toggleDatasetSelection(datasetId, checked) {
-  toggleBandGroup(selectableBandIdsForDataset(datasetId), checked);
+function toggleDatasetSelection(dataset, checked) {
+  if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset);
+  toggleBandGroup(selectableBandIdsForDataset(dataset), checked);
 }
 
-function toggleSceneSelection(scene, dataType, checked) {
-  const dataset = availableDatasets.value.find((item) => item.scenes.some((candidate) => candidate.scene_id === scene.scene_id));
+function toggleSceneSelection(scene, dataType, dataset, checked) {
+  if (typeof dataset === 'boolean') {
+    checked = dataset;
+    dataset = availableDatasets.value.find((item) => item.scenes.some((candidate) => candidate.scene_id === scene.scene_id));
+  }
   toggleBandGroup(selectableBandIdsForScene(scene, dataType, dataset), checked);
 }
 
 function partitionFor(dataset) {
-  const partition = selectedDatasetsById.value.get(dataset.dataset_id)?.partition;
+  const partition = selectedDatasetsById.value.get(selectionKey(dataset))?.partition
+    || props.modelValue.find((item) => item.dataset_id === dataset?.dataset_id)?.partition;
   return partition ? withFixedPartitionOptions(partition) : defaultPartition(dataset);
 }
 
-function gridLevelLocked(datasetId) {
-  return selectedDatasetsById.value.has(datasetId)
-    && selectedDatasetsById.value.get(datasetId)?.grid_level_unlocked !== true;
+function gridLevelLocked(dataset) {
+  if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
+  return selectedDatasetsById.value.has(selectionKey(dataset))
+    && selectedDatasetsById.value.get(selectionKey(dataset))?.grid_level_unlocked !== true;
 }
 
 function isGridConfigLocked(dataset) {
   return dataset?.grid_config_locked === true || dataset?.selection_source === 'dataset';
 }
 
-function gridConfigLocked(datasetId) {
-  return isGridConfigLocked(selectedDatasetsById.value.get(datasetId));
+function gridConfigLocked(dataset) {
+  if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
+  return isGridConfigLocked(selectedDatasetsById.value.get(selectionKey(dataset)));
 }
 
-function unlockGridLevel(datasetId) {
-  if (gridConfigLocked(datasetId)) return;
-  if (!props.modelValue.some((dataset) => dataset.dataset_id === datasetId)) return;
-  emit('update:modelValue', props.modelValue.map((dataset) => ({ ...dataset, grid_level_unlocked: true })));
+function unlockGridLevel(dataset) {
+  if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
+  if (gridConfigLocked(dataset)) return;
+  const key = selectionKey(dataset);
+  if (!props.modelValue.some((item) => selectionKey(item) === key)) return;
+  emit('update:modelValue', props.modelValue.map((item) => (
+    selectionKey(item) === key ? { ...item, grid_level_unlocked: true } : item
+  )));
 }
 
 function levelOptions(gridType) {
@@ -562,9 +566,11 @@ function levelOptions(gridType) {
   return Array.from({ length: definition.maxLevel - definition.minLevel + 1 }, (_, index) => definition.minLevel + index);
 }
 
-function updatePartition(datasetId, patch) {
+function updatePartition(dataset, patch) {
+  if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
   if (props.modelValue.some(isGridConfigLocked)) return;
-  const sourceDataset = props.modelValue.find((dataset) => dataset.dataset_id === datasetId);
+  const key = selectionKey(dataset);
+  const sourceDataset = props.modelValue.find((item) => selectionKey(item) === key);
   if (!sourceDataset) return;
   let sharedPatch = { ...patch };
   const sourcePartition = { ...partitionFor(sourceDataset), ...patch };
@@ -574,12 +580,13 @@ function updatePartition(datasetId, patch) {
     sourcePartition.partition_method = derivedPartitionMethod(sourcePartition.grid_type);
     sharedPatch = sourcePartition;
   }
-  emit('update:modelValue', props.modelValue.map((dataset) => {
-    if (patch.requested_grid_level !== undefined && gridLevelLocked(datasetId)) return dataset;
-    const partition = { ...partitionFor(dataset), ...sharedPatch };
-    let gridLevelUnlocked = props.modelValue.every((item) => item.grid_level_unlocked === true);
+  emit('update:modelValue', props.modelValue.map((item) => {
+    if (selectionKey(item) !== key) return item;
+    if (patch.requested_grid_level !== undefined && gridLevelLocked(item)) return item;
+    const partition = { ...partitionFor(item), ...sharedPatch };
+    let gridLevelUnlocked = item.grid_level_unlocked === true;
     if (patch.grid_type) gridLevelUnlocked = false;
-    return { ...dataset, partition, grid_level_unlocked: gridLevelUnlocked };
+    return { ...item, partition, grid_level_unlocked: gridLevelUnlocked };
   }));
 }
 
@@ -651,31 +658,31 @@ onBeforeUnmount(() => {
               <el-checkbox
                 class="dataset-select-all"
                 @click.stop
-                :model-value="groupSelectionState(selectableBandIdsForDataset(dataset.dataset_id)).checked"
-                :indeterminate="groupSelectionState(selectableBandIdsForDataset(dataset.dataset_id)).indeterminate"
-                :disabled="selectableBandIdsForDataset(dataset.dataset_id).length === 0"
-                :data-testid="`select-dataset-${dataset.dataset_id}`"
-                @change="toggleDatasetSelection(dataset.dataset_id, $event)"
+                :model-value="groupSelectionState(selectableBandIdsForDataset(dataset)).checked"
+                :indeterminate="groupSelectionState(selectableBandIdsForDataset(dataset)).indeterminate"
+                :disabled="selectableBandIdsForDataset(dataset).length === 0"
+                :data-testid="datasetTestId('select-dataset', batch, dataset)"
+                @change="toggleDatasetSelection(dataset, $event)"
               >全选数据集</el-checkbox>
-              <div v-if="selectedDatasetsById.has(dataset.dataset_id)" class="partition-dataset-grid" @click.stop>
+              <div v-if="selectedDatasetsById.has(selectionKey(dataset))" class="partition-dataset-grid" @click.stop>
                 <el-select
-                  :data-testid="`dataset-grid-${dataset.dataset_id}`"
+                  :data-testid="datasetTestId('dataset-grid', batch, dataset)"
                   :model-value="partitionFor(dataset).grid_type"
-                  :disabled="gridConfigLocked(dataset.dataset_id)"
-                  @update:model-value="updatePartition(dataset.dataset_id, { grid_type: $event })"
+                  :disabled="gridConfigLocked(dataset)"
+                  @update:model-value="updatePartition(dataset, { grid_type: $event })"
                 >
                   <el-option v-for="grid in gridDefinitions" :key="grid.value" :label="grid.label" :value="grid.value" />
                 </el-select>
                 <el-select
-                  :data-testid="`dataset-grid-level-${dataset.dataset_id}`"
-                  :disabled="gridConfigLocked(dataset.dataset_id) || gridLevelLocked(dataset.dataset_id)"
+                  :data-testid="datasetTestId('dataset-grid-level', batch, dataset)"
+                  :disabled="gridConfigLocked(dataset) || gridLevelLocked(dataset)"
                   :model-value="Number(partitionFor(dataset).requested_grid_level)"
-                  @update:model-value="updatePartition(dataset.dataset_id, { requested_grid_level: Number($event) })"
+                  @update:model-value="updatePartition(dataset, { requested_grid_level: Number($event) })"
                 >
                   <el-option v-for="level in levelOptions(partitionFor(dataset).grid_type)" :key="level" :label="nativeLevelLabel(partitionFor(dataset).grid_type, level)" :value="level" />
                 </el-select>
-                <el-tooltip v-if="gridLevelLocked(dataset.dataset_id) && !gridConfigLocked(dataset.dataset_id)" content="解锁格网层级" placement="top">
-                  <el-button :data-testid="`unlock-grid-level-${dataset.dataset_id}`" :icon="Unlock" aria-label="解锁格网层级" @click="unlockGridLevel(dataset.dataset_id)" />
+                <el-tooltip v-if="gridLevelLocked(dataset) && !gridConfigLocked(dataset)" content="解锁格网层级" placement="top">
+                  <el-button :data-testid="datasetTestId('unlock-grid-level', batch, dataset)" :icon="Unlock" aria-label="解锁格网层级" @click="unlockGridLevel(dataset)" />
                 </el-tooltip>
               </div>
             </div>
@@ -694,7 +701,7 @@ onBeforeUnmount(() => {
                     :indeterminate="groupSelectionState(selectableBandIdsForScene(scene, dataset.data_type, dataset)).indeterminate"
                     :disabled="selectableBandIdsForScene(scene, dataset.data_type, dataset).length === 0"
                     :data-testid="`select-scene-${scene.scene_id}`"
-                    @change="toggleSceneSelection(scene, dataset.data_type, $event)"
+                    @change="toggleSceneSelection(scene, dataset.data_type, dataset, $event)"
                   >全选该景</el-checkbox>
                 </div>
                 <el-checkbox-group
@@ -706,7 +713,7 @@ onBeforeUnmount(() => {
                   <el-checkbox
                     v-for="(band, bandIndex) in bandsFor(scene, dataset.data_type)"
                     :key="`${scene.scene_id}-${band.band_unit_id || band.band_code || 'invalid'}-${band.display_order}-${bandIndex}`"
-                    :value="band.band_unit_id"
+                    :value="bandSelectionId(dataset, band.band_unit_id)"
                     :disabled="!eligibleScene(scene) || !band.band_unit_id || band.contract_errors.length > 0 || bandConsumedByLoadBatch(band, targetPartition(dataset))"
                     :data-testid="band.band_unit_id ? `band-unit-${band.band_unit_id}` : undefined"
                   >

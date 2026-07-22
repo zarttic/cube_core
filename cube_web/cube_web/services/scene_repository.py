@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
-from cube_web.services.scene_contracts import ScenePartitionRunRequest
+from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest
 
 
 class OpenGaussSceneRepository:
@@ -793,7 +793,14 @@ class OpenGaussSceneRepository:
 
         materialized: list[DatasetInput] = []
         for selection in request.datasets:
+            selection_batch_id = selection.source_batch_id
             scene_rows = [by_scene[scene_id] for scene_id in selection.scene_ids]
+            if selection_batch_id:
+                unavailable = [scene_id for scene_id in selection.scene_ids if selection_batch_id not in batches_by_scene[scene_id]]
+                if unavailable:
+                    raise ValueError(
+                        f"scenes are not eligible in source_batch_id={selection_batch_id}: {unavailable}"
+                    )
             mismatched = [row["scene_id"] for row in scene_rows if str(row["dataset_id"]) != selection.dataset_id]
             if mismatched:
                 raise ValueError(f"scenes do not belong to dataset {selection.dataset_id}: {mismatched}")
@@ -825,7 +832,7 @@ class OpenGaussSceneRepository:
                         "WHERE g.band_unit_id=ANY(%s::text[]) AND prs.source_load_batch_id=ANY(%s::text[]) "
                         "AND g.partition_status='completed' AND g.ingest_status='completed' "
                         "ORDER BY g.band_unit_id,g.grid_type,g.grid_level",
-                        (sorted(selected_for_grid), list(request.source_batch_ids)),
+                        (sorted(selected_for_grid), [selection_batch_id] if selection_batch_id else list(request.source_batch_ids)),
                     )
                     if ingested_rows:
                         labels = [
@@ -838,8 +845,12 @@ class OpenGaussSceneRepository:
                         )
                 completed_rows = self._read(
                     "SELECT band_unit_id FROM partition_data_unit_grid_status "
-                    "WHERE band_unit_id=ANY(%s::text[]) AND grid_type=%s AND partition_status='completed'",
-                    (sorted(selected_for_grid), selection.partition.grid_type),
+                    "WHERE band_unit_id=ANY(%s::text[]) AND grid_type=%s AND grid_level=%s "
+                    "AND partition_status='completed'",
+                    (
+                        sorted(selected_for_grid), selection.partition.grid_type,
+                        selection.partition.requested_grid_level,
+                    ),
                 )
                 completed = sorted(str(item["band_unit_id"]) for item in completed_rows)
                 if completed:
@@ -855,13 +866,14 @@ class OpenGaussSceneRepository:
                     row,
                     [item for item in assets_by_scene.get(scene_id, []) if str(item["asset_id"]) in selected_asset_ids],
                     selected_band_rows,
-                    batches_by_scene[scene_id],
+                    {selection_batch_id} if selection_batch_id else batches_by_scene[scene_id],
                 )
                 assets.extend(scene_assets)
                 bands.extend(scene_bands)
             first = scene_rows[0]
             materialized.append(
                 DatasetInput(
+                    selection_id=selection.selection_id,
                     dataset_id=selection.dataset_id,
                     dataset_code=str(first["dataset_code"]),
                     dataset_title=str(first["dataset_title"]),
@@ -869,7 +881,10 @@ class OpenGaussSceneRepository:
                     product_type=first.get("product_type"),
                     assets=tuple(assets),
                     bands=tuple(bands),
-                    attributes=_json_object(first.get("dataset_attributes")),
+                    attributes={
+                        **_json_object(first.get("dataset_attributes")),
+                        "source_load_batch_id": selection_batch_id,
+                    },
                     partition=selection.partition,
                 )
             )
@@ -944,6 +959,7 @@ class OpenGaussSceneRepository:
                     return {**run, "created": False}
                 for selection in request.datasets:
                     for scene_id in selection.scene_ids:
+                        selection_id = selection.selection_id or _partition_selection_id(selection, scene_id)
                         grid_config = selection.partition.model_dump(mode="json", exclude_none=True)
                         if selection.band_unit_ids:
                             cursor.execute(
@@ -964,36 +980,40 @@ class OpenGaussSceneRepository:
                             """
                             SELECT load_batch_id FROM load_batch_scenes
                             WHERE scene_id = %s AND load_batch_id = ANY(%s::text[])
+                              AND (%s::text IS NULL OR load_batch_id = %s)
                             ORDER BY load_batch_id LIMIT 1
                             """,
-                            (scene_id, list(request.source_batch_ids)),
+                            (scene_id, list(request.source_batch_ids), selection.source_batch_id, selection.source_batch_id),
                         )
                         source_row = cursor.fetchone()
                         if source_row is None:
                             raise ValueError(f"scene is not linked to a selected load batch: {scene_id}")
                         source_load_batch_id = str(source_row[0])
-                        identity = _partition_scene_idempotency_key(request.partition_run_id, scene_id, grid_config)
+                        identity = _partition_scene_idempotency_key(
+                            request.partition_run_id, scene_id, grid_config, source_load_batch_id,
+                        )
                         cursor.execute(
                             """
                             MERGE INTO partition_run_scenes target USING (
-                              SELECT %s::text AS partition_run_id, %s::text AS scene_id,
+                              SELECT %s::text AS partition_run_id, %s::text AS selection_id, %s::text AS scene_id,
                                 %s::text AS dataset_id, %s::text AS source_load_batch_id,
                                 %s::jsonb AS grid_config, %s::text AS idempotency_key
                             ) source ON (
                               target.partition_run_id = source.partition_run_id
-                              AND target.scene_id = source.scene_id
+                              AND target.selection_id = source.selection_id
                             )
                             WHEN NOT MATCHED THEN INSERT (
-                              partition_run_id, scene_id, dataset_id, source_load_batch_id,
+                              partition_run_id, selection_id, scene_id, dataset_id, source_load_batch_id,
                               status, grid_config, idempotency_key
                             ) VALUES (
-                              source.partition_run_id, source.scene_id, source.dataset_id,
+                              source.partition_run_id, source.selection_id, source.scene_id, source.dataset_id,
                               source.source_load_batch_id, 'pending', source.grid_config,
                               source.idempotency_key
                             )
                             """,
                             (
                                 request.partition_run_id,
+                                selection_id,
                                 scene_id,
                                 selection.dataset_id,
                                 source_load_batch_id,
@@ -1009,9 +1029,12 @@ class OpenGaussSceneRepository:
                                 MERGE INTO partition_data_unit_grid_status target USING (
                                   SELECT %s::text AS dataset_id, %s::text AS scene_id, %s::text AS band_unit_id,
                                          %s::text AS grid_type, %s::int AS grid_level, %s::text AS partition_run_id
-                                ) source ON (target.band_unit_id=source.band_unit_id AND target.grid_type=source.grid_type)
+                                ) source ON (
+                                  target.band_unit_id=source.band_unit_id
+                                  AND target.grid_type=source.grid_type
+                                  AND target.grid_level=source.grid_level
+                                )
                                 WHEN MATCHED THEN UPDATE SET partition_run_id=source.partition_run_id,
-                                  grid_level=source.grid_level,
                                   partition_status=CASE WHEN target.partition_status IN ('failed','cancelled') THEN 'pending' ELSE target.partition_status END,
                                   error_message=NULL, updated_at=now()
                                 WHEN NOT MATCHED THEN INSERT (dataset_id,scene_id,band_unit_id,grid_type,grid_level,partition_run_id)
@@ -1117,7 +1140,7 @@ class OpenGaussSceneRepository:
     def update_partition_task(self, task_id: str, status: str, result: dict[str, Any] | None = None) -> str | None:
         run_status = _partition_run_status(status, result)
         outcomes = {
-            str(item.get("dataset_id")): item
+            str(item.get("selection_id") or item.get("dataset_id")): item
             for item in (result or {}).get("datasets", [])
             if isinstance(item, dict) and item.get("dataset_id")
         }
@@ -1162,7 +1185,8 @@ class OpenGaussSceneRepository:
                     connection.commit()
                     return partition_run_id
                 if outcomes:
-                    for dataset_id, outcome in outcomes.items():
+                    for selection_key, outcome in outcomes.items():
+                        dataset_id = str(outcome.get("dataset_id") or "")
                         scene_status = _partition_scene_status(str(outcome.get("status") or "failed"))
                         error = outcome.get("error") if isinstance(outcome.get("error"), dict) else {}
                         scene_outcomes = [item for item in outcome.get("scenes", ()) if isinstance(item, dict) and item.get("scene_id")]
@@ -1176,10 +1200,11 @@ class OpenGaussSceneRepository:
                                       output_version = CASE WHEN %s = 'completed' THEN %s ELSE NULL END,
                                       error_message = %s, attempt_count = attempt_count + 1, updated_at = now()
                                     WHERE partition_run_id = %s AND dataset_id = %s AND scene_id = %s
+                                      AND (%s::text = dataset_id OR selection_id = %s)
                                     """,
                                     (
                                         item_status, item_status, outcome.get("output_version"), item_error.get("message"),
-                                        partition_run_id, dataset_id, scene_outcome["scene_id"],
+                                        partition_run_id, dataset_id, scene_outcome["scene_id"], selection_key, selection_key,
                                     ),
                                 )
                         else:
@@ -1188,10 +1213,11 @@ class OpenGaussSceneRepository:
                                 UPDATE partition_run_scenes SET status = %s, output_version = %s,
                                   error_message = %s, attempt_count = attempt_count + 1, updated_at = now()
                                 WHERE partition_run_id = %s AND dataset_id = %s
+                                  AND (%s::text = dataset_id OR selection_id = %s)
                                 """,
                                 (
                                     scene_status, outcome.get("output_version"), error.get("message"),
-                                    partition_run_id, dataset_id,
+                                    partition_run_id, dataset_id, selection_key, selection_key,
                                 ),
                             )
                         if str(outcome.get("status") or "") == "completed" and outcome.get("output_version"):
@@ -1230,6 +1256,8 @@ class OpenGaussSceneRepository:
                     FROM partition_run_scenes source
                     WHERE target.partition_run_id=source.partition_run_id
                       AND target.scene_id=source.scene_id
+                      AND target.grid_type=source.grid_config ->> 'grid_type'
+                      AND target.grid_level=(source.grid_config ->> 'requested_grid_level')::int
                       AND source.partition_run_id=%s
                     """,
                     (partition_run_id,),
@@ -1568,9 +1596,26 @@ def _band_unit_id(scene_id: str, asset_id: str, band_code: str) -> str:
     return f"band-{digest}"
 
 
-def _partition_scene_idempotency_key(partition_run_id: str, scene_id: str, grid_config: dict[str, Any]) -> str:
+def _partition_scene_idempotency_key(
+    partition_run_id: str,
+    scene_id: str,
+    grid_config: dict[str, Any],
+    source_load_batch_id: str = "",
+) -> str:
     canonical = json.dumps(grid_config, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return sha256(f"{partition_run_id}\0{scene_id}\0{canonical}".encode("utf-8")).hexdigest()
+    return sha256(
+        f"{partition_run_id}\0{source_load_batch_id}\0{scene_id}\0{canonical}".encode("utf-8")
+    ).hexdigest()
+
+
+def _partition_selection_id(selection: SceneDatasetSelection, scene_id: str) -> str:
+    """Stable fallback for clients that predate explicit selection IDs."""
+    partition = selection.partition.model_dump(mode="json", exclude_none=True)
+    canonical = json.dumps(partition, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    source_batch_id = selection.source_batch_id or "any"
+    return sha256(
+        f"{source_batch_id}\0{selection.dataset_id}\0{scene_id}\0{canonical}".encode("utf-8")
+    ).hexdigest()
 
 
 def _partition_run_status(task_status: str, result: dict[str, Any] | None) -> str:

@@ -12,7 +12,9 @@ class SceneStrictModel(BaseModel):
 
 
 class SceneDatasetSelection(SceneStrictModel):
+    selection_id: str | None = Field(default=None, min_length=1)
     dataset_id: str = Field(min_length=1)
+    source_batch_id: str | None = Field(default=None, min_length=1)
     scene_ids: tuple[str, ...] = Field(min_length=1)
     band_unit_ids: tuple[str, ...] | None = None
     partition: DatasetPartitionConfig
@@ -39,25 +41,12 @@ class ScenePartitionRunRequest(SceneStrictModel):
     def validate_identity(self) -> "ScenePartitionRunRequest":
         if len(set(self.source_batch_ids)) != len(self.source_batch_ids):
             raise ValueError("duplicate source_batch_id")
-        dataset_ids = [dataset.dataset_id for dataset in self.datasets]
-        if len(set(dataset_ids)) != len(dataset_ids):
-            raise ValueError("duplicate dataset_id")
-        selected_scenes = [scene_id for dataset in self.datasets for scene_id in dataset.scene_ids]
-        if len(set(selected_scenes)) != len(selected_scenes):
-            raise ValueError("a scene may only be selected once per partition run")
-        selected_band_units = [
-            band_unit_id
-            for dataset in self.datasets
-            for band_unit_id in (dataset.band_unit_ids or ())
-        ]
-        if len(set(selected_band_units)) != len(selected_band_units):
-            raise ValueError("a band unit may only be selected once per partition run")
-        grid_configs = {
-            (dataset.partition.grid_type, dataset.partition.requested_grid_level)
-            for dataset in self.datasets
-        }
-        if len(grid_configs) != 1:
-            raise ValueError("all datasets in one partition run must use the same grid type and level")
+        selection_ids = [dataset.selection_id for dataset in self.datasets if dataset.selection_id]
+        if len(set(selection_ids)) != len(selection_ids):
+            raise ValueError("duplicate selection_id")
+        for dataset in self.datasets:
+            if dataset.source_batch_id and dataset.source_batch_id not in self.source_batch_ids:
+                raise ValueError(f"selection source_batch_id is not selected: {dataset.source_batch_id}")
         return self
 
 
