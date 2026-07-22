@@ -320,6 +320,42 @@ def test_cancel_after_ray_before_commit_cannot_switch_pointer() -> None:
     assert domain_store.completed == []
 
 
+def test_restart_without_local_task_requires_manual_recovery() -> None:
+    store = InMemoryPartitionJobStore()
+    _seed_failed_retry_attempt(store, task_id="task-restart")
+    store.attempts["task-restart"]["status"] = "running"
+    store.batches["batch-01"]["status"] = "running"
+    workflow = _workflow(FakeDomainStore(), FakeRunner(), store)
+
+    workflow.reconcile_orphaned_tasks()
+
+    attempt = store.get_attempt("task-restart")
+    assert attempt is not None
+    assert attempt["status"] == "manual_required"
+    assert attempt["error_type"] == "local_worker_lost"
+    assert store.get_batch("batch-01")["status"] == "manual_required"
+
+
+def test_workflow_passes_cancellation_check_to_dataset_runner() -> None:
+    domain_store = FakeDomainStore()
+    job_store = FakeJobStore()
+
+    class CancellingRunner(FakeRunner):
+        def run_dataset(self, *, task_id, cancellation_check=None, **kwargs):
+            assert cancellation_check is not None
+            job_store.request_cancel(task_id)
+            if cancellation_check():
+                from cube_split.jobs.cancellation import PartitionCancelledError
+
+                raise PartitionCancelledError("Partition task cancelled")
+            return super().run_dataset(task_id=task_id, **kwargs)
+
+    result = _workflow(domain_store, CancellingRunner(), job_store).run(task_id="task-cancel", request=_request())
+
+    assert result["status"] == "cancelled"
+    assert domain_store.completed == []
+
+
 def test_duplicate_dataset_is_rejected_before_attempt_creation() -> None:
     request = _request()
     duplicate = request.model_copy(update={"datasets": (request.datasets[0], request.datasets[0])})

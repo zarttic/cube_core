@@ -15,6 +15,7 @@ from grid_core.app.engines.mgrs.address import (
 from grid_core.app.engines.mgrs.domain import GridDomain
 from grid_core.app.engines.mgrs.geometry import (
     cell_geometry_clipped,
+    decode_utm,
 )
 from grid_core.app.engines.mgrs.projection import cell_size_metres, projected_to_wgs84
 from grid_core.app.models.grid_address import GridAddress
@@ -101,8 +102,8 @@ def _collect_utm_candidates(
         return
 
     try:
-        zone, hemisphere, easting, northing = _converter.MGRSToUTM(code)
-    except Exception:
+        zone, hemisphere, easting, northing = decode_utm(code)
+    except ValidationError:
         return
 
     size_m = cell_size_metres(precision)
@@ -124,7 +125,7 @@ def _collect_utm_candidates(
                             MGRSPrecision=precision,
                         )
                         if precision_from_code(cand_code) == precision:
-                            out.add(cand_code)
+                            _add_valid_candidate(cand_code, precision, out)
                     except Exception:
                         pass
 
@@ -139,7 +140,7 @@ def _collect_utm_candidates(
                 if -90.0 < lat < 90.0:
                     mgrs_code = _converter.toMGRS(lat, lon, MGRSPrecision=precision)
                     canonical = mgrs_code.replace(" ", "").upper()
-                    out.add(canonical)
+                    _add_valid_candidate(canonical, precision, out)
             except Exception:
                 pass
 
@@ -179,7 +180,7 @@ def _collect_ups_candidates(
                 if -90.0 <= cand_lat <= 90.0:
                     cand_code = _converter.toMGRS(cand_lat, cand_lon, MGRSPrecision=precision)
                     canonical = cand_code.replace(" ", "").upper()
-                    out.add(canonical)
+                    _add_valid_candidate(canonical, precision, out)
             except Exception:
                 pass
 
@@ -197,6 +198,16 @@ def _candidate_zones(zone: int, dx: int) -> list[int]:
     if zone == 1 and dx < 0:
         zones.append(60)
     return zones
+
+
+def _add_valid_candidate(code: str, precision: int, out: set[str]) -> None:
+    """Add only candidates with positive geometry in their declared MGRS domain."""
+    try:
+        domain = _domain_for_address(code)
+        cell_geometry_clipped(code, precision, domain)
+    except ValidationError:
+        return
+    out.add(code)
 
 
 def _candidate_hemispheres(
@@ -257,15 +268,14 @@ def children_addresses(address: GridAddress, target_level: int) -> list[GridAddr
 @lru_cache(maxsize=32768)
 def _domain_for_address(code: str) -> GridDomain:
     """Derive the fixed UTM/UPS domain encoded by a standard MGRS code."""
-    try:
-        zone, hemisphere, _, _ = _converter.MGRSToUTM(code)
-        return GridDomain(kind="utm", zone=zone, hemisphere=hemisphere.lower())  # type: ignore[arg-type]
-    except Exception:
-        pass
-
-    first = canonicalize_mgrs(code)[0]
+    canonical = code.replace(" ", "").upper()
+    first = canonical[0] if canonical else ""
     if first in {"Y", "Z"}:
         return GridDomain(kind="ups", zone=None, hemisphere="n")
     if first in {"A", "B"}:
         return GridDomain(kind="ups", zone=None, hemisphere="s")
-    raise ValidationError(f"Cannot determine domain for MGRS code: {code!r}")
+    try:
+        zone, hemisphere, _, _ = decode_utm(canonical)
+        return GridDomain(kind="utm", zone=zone, hemisphere=hemisphere.lower())  # type: ignore[arg-type]
+    except ValidationError as exc:
+        raise ValidationError(f"Cannot determine domain for MGRS code: {code!r}") from exc

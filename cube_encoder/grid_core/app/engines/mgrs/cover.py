@@ -16,6 +16,7 @@ from grid_core.app.engines.mgrs.domain import (
 from grid_core.app.engines.mgrs.geometry import (
     cell_bbox,
     cell_geometry_clipped,
+    decode_utm,
 )
 from grid_core.app.engines.mgrs.topology import _domain_for_address
 from grid_core.app.models.compact_grid_cell import CompactGridCell
@@ -160,8 +161,8 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
 
     if domain.kind == "utm":
         try:
-            zone, hemisphere, easting, northing = _converter.MGRSToUTM(code)
-        except Exception:
+            zone, hemisphere, easting, northing = decode_utm(code)
+        except ValidationError:
             return []
 
         for dx in (-1, 0, 1):
@@ -175,7 +176,7 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
                         northing + dy * size_m,
                         MGRSPrecision=precision,
                     )
-                    candidates.add(cand.replace(" ", "").upper())
+                    _add_valid_neighbor(cand, precision, candidates)
                 except Exception:
                     pass
 
@@ -192,7 +193,7 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
                     )
                     if -90.0 < lat < 90.0:
                         cand = _converter.toMGRS(lat, lon, MGRSPrecision=precision)
-                        candidates.add(cand.replace(" ", "").upper())
+                        _add_valid_neighbor(cand, precision, candidates)
                 except Exception:
                     pass
     else:
@@ -216,11 +217,22 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
                     cand_lon, cand_lat = fwd.transform(cx + dx * size_m, cy + dy * size_m)
                     if -90.0 <= cand_lat <= 90.0:
                         cand = _converter.toMGRS(cand_lat, cand_lon, MGRSPrecision=precision)
-                        candidates.add(cand.replace(" ", "").upper())
+                        _add_valid_neighbor(cand, precision, candidates)
                 except Exception:
                     pass
 
     return list(candidates)
+
+
+def _add_valid_neighbor(code: str, precision: int, out: set[str]) -> None:
+    """Add only neighbor codes with positive geometry in their declared domain."""
+    canonical = code.replace(" ", "").upper()
+    try:
+        domain = _domain_for_address(canonical)
+        cell_geometry_clipped(canonical, precision, domain)
+    except ValidationError:
+        return
+    out.add(canonical)
 
 
 def _coarsen_minimal(

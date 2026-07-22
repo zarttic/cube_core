@@ -34,7 +34,7 @@ def test_three_grids_cover_real_raster_with_positive_windows() -> None:
         if width <= 0 or height <= 0:
             pytest.fail("real AOI raster has invalid WGS84 bounds")
         aoi = box(min_lon + width * 0.375, min_lat + height * 0.375, min_lon + width * 0.625, min_lat + height * 0.625)
-        specs = (("geohash", 6), ("mgrs", 2), ("isea4h", 6))
+        specs = (("geohash", 6), ("mgrs", 2), ("isea4h", 4))
         for grid_type, requested_grid_level in specs:
             cells = sdk.cover(
                 grid_type=grid_type,

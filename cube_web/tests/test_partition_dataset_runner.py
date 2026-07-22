@@ -1,12 +1,27 @@
 import pytest
 
 from cube_web.services.partition_dataset_runner import (
+    _wait_for_ray_result,
     _carbon_index_attributes,
     _consume_observation_budget,
     _record_asset_cell,
     _source_band_index,
     _normalize_wgs84_bbox,
 )
+
+
+class _FakeRay:
+    def __init__(self) -> None:
+        self.cancelled: list[tuple[object, bool]] = []
+
+    def cancel(self, ref, *, force: bool) -> None:
+        self.cancelled.append((ref, force))
+
+    def wait(self, *_args, **_kwargs):
+        return [], []
+
+    def get(self, ref):
+        return {"ref": ref}
 
 
 def test_normalize_wgs84_bbox_clamps_raster_edges() -> None:
@@ -20,6 +35,15 @@ def test_carbon_unique_cells_are_not_limited_per_asset() -> None:
     _record_asset_cell(cells, ("u4ps", 5, None), max_cells_per_asset=1)
 
     assert cells == {("u4pr", 5, None), ("u4ps", 5, None)}
+
+
+def test_ray_wait_cancels_active_remote_task() -> None:
+    ray = _FakeRay()
+
+    with pytest.raises(Exception, match="Partition task cancelled"):
+        _wait_for_ray_result(ray, "ray-ref", lambda: True)
+
+    assert ray.cancelled == [("ray-ref", True)]
 
 
 def test_carbon_observation_budget_is_shared_across_assets() -> None:

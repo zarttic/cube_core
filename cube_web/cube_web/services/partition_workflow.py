@@ -114,6 +114,7 @@ class PartitionWorkflowService:
                     max_cells_per_asset=effective_request.max_cells_per_asset,
                     time_granularity=effective_request.time_granularity,
                     max_observations=effective_partition.max_observations,
+                    cancellation_check=lambda: _is_cancelled(selected_job_store, task_id),
                 )
                 if self.after_ray is not None:
                     self.after_ray()
@@ -470,7 +471,11 @@ class PartitionWorkflowService:
         except HTTPException as exc:
             if exc.status_code != 404:
                 raise
-            self.store.mark_cancelled(task_id)
+            self.store.mark_result_manual_required(
+                task_id,
+                "Local partition worker is unavailable after restart; Ray execution requires manual recovery",
+                error_type="local_worker_lost",
+            )
             return
         if current.status == "cancelled":
             self.store.mark_cancelled(task_id)

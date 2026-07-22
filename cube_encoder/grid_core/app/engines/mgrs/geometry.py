@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import warnings
 
 import mgrs as mgrs_lib
 from pyproj import Transformer
@@ -19,6 +20,19 @@ _converter = mgrs_lib.MGRS()
 # Number of densification segments per projected edge (controls inverse-projection accuracy)
 _EDGE_SEGMENTS = 8
 _UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
+
+
+def decode_utm(code: str) -> tuple[int, str, float, float]:
+    """Decode a UTM MGRS code, rejecting latitude-band-inconsistent results."""
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            decoded = _converter.MGRSToUTM(code)
+    except Exception as exc:
+        raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
+    if any("Convert_MGRS_To_UTM" in str(warning.message) for warning in caught):
+        raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}")
+    return decoded
 
 
 def _utm_band_polygon(code: str) -> Polygon:
@@ -144,10 +158,7 @@ def cell_geometry_clipped(
     Raises ValidationError if the code cannot be decoded or the clipped result is empty.
     """
     if domain.kind == "utm":
-        try:
-            zone, hemisphere, easting, northing = _converter.MGRSToUTM(code)
-        except Exception as exc:
-            raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
+        zone, hemisphere, easting, northing = decode_utm(code)
         raw = _utm_raw_geometry(zone, hemisphere, easting, northing, precision)
         valid_domain = domain_polygon(domain).intersection(_utm_band_polygon(code))
     else:

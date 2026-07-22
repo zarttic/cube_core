@@ -165,4 +165,16 @@ describe('partition store scene request', () => {
     expect(requestGet).toHaveBeenCalledWith('/v1/partition/load-batches?limit=100&status=succeeded', expect.any(Object));
     expect(store.batches).toEqual([{ load_batch_id: 'load-a', status: 'succeeded' }]);
   });
+
+  it('cancels and retries a managed task through the formal task endpoints', async () => {
+    requestPost.mockResolvedValue({ task_id: 'task-a', status: 'cancel_requested' });
+    const store = usePartitionStore();
+
+    await store.cancelTask('task-a');
+    await store.retryTask('task-a');
+
+    expect(requestPost).toHaveBeenNthCalledWith(1, '/v1/partition/tasks/task-a/cancel', {});
+    expect(requestPost).toHaveBeenNthCalledWith(2, '/v1/partition/tasks/task-a/retry', {});
+    expect(requestGet).toHaveBeenCalledTimes(2);
+  });
 });

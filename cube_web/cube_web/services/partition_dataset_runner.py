@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from cube_split import runtime_config
@@ -82,7 +82,30 @@ def _carbon_index_attributes(row: dict[str, Any], *, source_index: int) -> dict[
     }
 
 
-def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
+def _wait_for_ray_result(ray: Any, ref: Any, cancellation_check: Callable[[], bool] | None) -> dict[str, Any]:
+    """Wait for one Ray task while allowing the web task to cancel it."""
+    if cancellation_check is None:
+        return ray.get(ref)
+    while True:
+        if cancellation_check():
+            try:
+                ray.cancel(ref, force=True)
+            except Exception:
+                # A disconnected driver must still prevent the completed result from committing.
+                pass
+            from cube_split.jobs.cancellation import PartitionCancelledError
+
+            raise PartitionCancelledError("Partition task cancelled")
+        ready, _ = ray.wait([ref], num_returns=1, timeout=1.0)
+        if ready:
+            return ray.get(ready[0])
+
+
+def _run_carbon_dataset_on_ray(
+    payload: dict[str, Any],
+    runtime_env: dict[str, Any] | None,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     """Run one carbon dataset from loader-owned NetCDF/HDF sources on Ray."""
     import ray
 
@@ -224,10 +247,14 @@ def _run_carbon_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, A
             logging_level=40,
             runtime_env=runtime_env,
         )
-    return ray.get(execute.remote(payload))
+    return _wait_for_ray_result(ray, execute.remote(payload), cancellation_check)
 
 
-def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | None) -> dict[str, Any]:
+def _run_dataset_on_ray(
+    payload: dict[str, Any],
+    runtime_env: dict[str, Any] | None,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     """Execute one normalized dataset on a configured Ray worker."""
     import ray
 
@@ -415,7 +442,7 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
             logging_level=40,
             runtime_env=runtime_env,
         )
-    return ray.get(execute.remote(payload))
+    return _wait_for_ray_result(ray, execute.remote(payload), cancellation_check)
 
 
 class NormalizedPartitionDatasetRunner:
@@ -433,6 +460,7 @@ class NormalizedPartitionDatasetRunner:
         max_cells_per_asset: int = 0,
         time_granularity: str = "day",
         max_observations: int | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         minio = runtime_config.minio_settings()
         from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
@@ -454,8 +482,8 @@ class NormalizedPartitionDatasetRunner:
             "ray_address": runtime_config.require_ray_address(),
         }
         if dataset.data_type == "carbon":
-            return _run_carbon_dataset_on_ray(payload, ray_runtime_env)
-        return _run_dataset_on_ray(payload, ray_runtime_env)
+            return _run_carbon_dataset_on_ray(payload, ray_runtime_env, cancellation_check)
+        return _run_dataset_on_ray(payload, ray_runtime_env, cancellation_check)
 def _normalize_wgs84_bbox(bbox: list[float] | tuple[float, ...]) -> list[float]:
     """Clamp raster-derived WGS84 bounds to the legal geographic range."""
     if len(bbox) != 4:

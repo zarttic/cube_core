@@ -1,7 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
-import { ElMessage } from 'element-plus';
-import { RefreshLeft } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { Refresh, RefreshLeft } from '@element-plus/icons-vue';
 
 import { requestGet, requestJson, requestPost } from '@/api/client';
 import router from '@/router';
@@ -12,6 +12,7 @@ import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
 import BatchAssetsPanel from '@/views/partition/BatchAssetsPanel.vue';
 import GridParameters from '@/views/partition/GridParameters.vue';
+import TaskQueuePanel from '@/views/partition/TaskQueuePanel.vue';
 
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
@@ -313,6 +314,26 @@ async function submit() {
   }
 }
 
+async function cancelTask(task) {
+  try {
+    await ElMessageBox.confirm(`确认取消剖分任务 ${task.task_id}？`, '取消剖分任务', { type: 'warning' });
+    await store.cancelTask(task.task_id);
+    ElMessage.success('已请求取消剖分任务。');
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || '取消剖分任务失败。');
+  }
+}
+
+async function retryTask(task) {
+  try {
+    await ElMessageBox.confirm(`确认重试剖分任务 ${task.task_id}？`, '重试剖分任务', { type: 'warning' });
+    await store.retryTask(task.task_id);
+    ElMessage.success('已提交剖分重试。');
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || '重试剖分任务失败。');
+  }
+}
+
 function reset() {
   const currentType = activeModule.value;
   store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== currentType);
@@ -498,6 +519,7 @@ onMounted(() => {
     };
   }
   store.loadBatches();
+  store.loadTasks();
   loadDrafts().then(() => {
     const requestedDraftId = String(router.currentRoute.value.query.draft_id || '');
     const draft = pendingSelection || pendingDrafts.value.find((item) => item.draft_id === requestedDraftId);
@@ -573,6 +595,22 @@ onMounted(() => {
                   </div>
                 </div>
               </div>
+              <section class="partition-task-panel" aria-label="剖分任务队列">
+                <div class="panel-header">
+                  <h3>剖分任务队列</h3>
+                  <el-button :icon="Refresh" circle title="刷新任务队列" :loading="store.loading.tasks" @click="store.loadTasks()" />
+                </div>
+                <TaskQueuePanel
+                  :tasks="store.tasks"
+                  :page="store.taskPage"
+                  :loading="store.loading.tasks"
+                  :active-task-action-id="store.activeTaskActionId"
+                  @page-change="store.loadTasks($event, store.taskPage.pageSize)"
+                  @page-size-change="store.loadTasks(1, $event)"
+                  @cancel="cancelTask"
+                  @retry="retryTask"
+                />
+              </section>
             </div>
           </div>
         </div>

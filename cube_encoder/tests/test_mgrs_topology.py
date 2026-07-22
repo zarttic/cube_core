@@ -4,7 +4,11 @@ from __future__ import annotations
 import pytest
 from shapely.geometry import shape
 
+from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs.address import parent_space_code
+from grid_core.app.engines.mgrs.domain import GridDomain
+from grid_core.app.engines.mgrs.geometry import cell_geometry_clipped
+from grid_core.app.engines.mgrs.topology import _add_valid_candidate
 from grid_core.app.engines.mgrs_engine import MGRSEngine
 
 # ---------------------------------------------------------------------------
@@ -162,6 +166,24 @@ def test_children_at_latitude_band_boundary_all_have_valid_geometry() -> None:
     assert 0 < len(children) < 100
     assert all(child.topology_code is None for child in children)
     assert all(shape(engine.code_to_geometry(child)).area > 0 for child in children)
+
+
+def test_invalid_latitude_band_candidate_is_rejected_before_collection() -> None:
+    candidates: set[str] = set()
+
+    _add_valid_candidate("32TPU85", 1, candidates)
+
+    assert candidates == set()
+    with pytest.raises(ValidationError, match="invalid latitude band"):
+        cell_geometry_clipped("32TPU85", 1, GridDomain(kind="utm", zone=32, hemisphere="n"))
+
+
+def test_valid_latitude_band_boundary_candidate_is_collected() -> None:
+    candidates: set[str] = set()
+
+    _add_valid_candidate("32TPU00", 1, candidates)
+
+    assert candidates == {"32TPU00"}
 
 
 def test_children_target_level_must_be_greater() -> None:

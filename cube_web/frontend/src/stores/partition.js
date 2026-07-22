@@ -92,7 +92,8 @@ export const usePartitionStore = defineStore('partition', () => {
   const taskPage = reactive({ page: 1, pageSize: 20, total: 0 });
   const result = ref(null);
   const error = ref('');
-  const loading = reactive({ batches: false, tasks: false, submit: false });
+  const loading = reactive({ batches: false, tasks: false, submit: false, taskAction: false });
+  const activeTaskActionId = ref('');
   const batchScope = createRequestScope();
   const taskScope = createRequestScope();
   const submitScope = createRequestScope();
@@ -190,5 +191,31 @@ export const usePartitionStore = defineStore('partition', () => {
     }
   }
 
-  return { form, batches, tasks, taskPage, result, error, loading, loadBatches, loadTasks, submit, resetForm, buildRequest };
+  async function runTaskAction(taskId, action) {
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) throw invalidRequest('缺少剖分任务 ID。');
+    activeTaskActionId.value = normalizedTaskId;
+    loading.taskAction = true;
+    try {
+      const response = await requestPost(`/v1/partition/tasks/${encodeURIComponent(normalizedTaskId)}/${action}`, {});
+      await loadTasks();
+      return response;
+    } finally {
+      loading.taskAction = false;
+      activeTaskActionId.value = '';
+    }
+  }
+
+  function cancelTask(taskId) {
+    return runTaskAction(taskId, 'cancel');
+  }
+
+  function retryTask(taskId) {
+    return runTaskAction(taskId, 'retry');
+  }
+
+  return {
+    form, batches, tasks, taskPage, result, error, loading, activeTaskActionId,
+    loadBatches, loadTasks, submit, resetForm, buildRequest, cancelTask, retryTask,
+  };
 });
