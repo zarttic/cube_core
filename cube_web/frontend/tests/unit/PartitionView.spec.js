@@ -39,48 +39,35 @@ describe('PartitionView map workspace', () => {
     });
   });
 
-  it('lists a pending partition draft and loads its saved band selection', async () => {
-    const draft = {
-      draft_id: 'partition-draft-a',
-      draft_name: '山东光学剖分批次',
+  it('loads a confirmed reload batch as a formal selection', async () => {
+    const reloadBatch = {
+      load_batch_id: 'dataset-reload-a',
+      batch_name: '山东光学重新载入',
       data_type: 'optical',
-      source_load_batch_ids: ['load-batch-a'],
       selection: {
         datasets: [{
           dataset_id: 'dataset-a',
           data_type: 'optical',
+          source_batch_id: 'dataset-reload-a',
           band_unit_ids: ['band-a'],
-          scenes: [{ scene_id: 'scene-a', source_batch_ids: ['load-batch-a'] }],
+          scenes: [{ scene_id: 'scene-a', source_batch_ids: ['dataset-reload-a'] }],
           partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
         }],
       },
-    };
-    requestGet.mockImplementation(async (path) => (
-      path === '/v1/partition/drafts?limit=100'
-        ? { items: [draft], total: 1 }
-        : { items: [], total: 0, page: 1, page_size: 20 }
-    ));
-    const BatchAssetsPanelStub = {
-      props: ['partitionDrafts'],
-      emits: ['activate-partition-draft'],
-      template: '<button v-for="draft in partitionDrafts" :key="draft.draft_id" data-testid="draft" @click="$emit(\'activate-partition-draft\', draft.draft_id)">{{ draft.draft_name }}</button>',
     };
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
           GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true,
-          BatchAssetsPanel: BatchAssetsPanelStub, TaskQueuePanel: true, QualityView: true, DataManagementView: true,
+          BatchAssetsPanel: true, TaskQueuePanel: true, QualityView: true, DataManagementView: true,
           'el-drawer': { template: '<div><slot /></div>' },
         },
       },
     });
 
-    await flushPromises();
-    expect(wrapper.get('[data-testid="draft"]').text()).toBe('山东光学剖分批次');
-    wrapper.vm.queueManagedPartition(draft);
-    expect(wrapper.vm.activeDraftId).toBe(draft.draft_id);
+    wrapper.vm.queueManagedPartition(reloadBatch);
     expect(wrapper.vm.datasetDrawerVisible).toBe(true);
-    expect(usePartitionStore().form.datasets).toEqual(draft.selection.datasets);
+    expect(usePartitionStore().form.datasets).toEqual(reloadBatch.selection.datasets);
   });
 
   it('splits a slightly out-of-bounds global product extent for Cesium', () => {

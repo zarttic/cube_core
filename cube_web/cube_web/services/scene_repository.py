@@ -106,6 +106,96 @@ class OpenGaussSceneRepository:
             connection.commit()
         return _partition_draft(row) if row else None
 
+    def create_dataset_reload_batch(
+        self,
+        *,
+        load_batch_id: str,
+        batch_name: str,
+        source_batch_ids: tuple[str, ...],
+        dataset_id: str,
+        scene_ids: tuple[str, ...],
+        selection: dict[str, Any],
+        created_by: str,
+    ) -> dict[str, Any]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT lbs.load_batch_id,lbs.scene_id,lbs.source_asset_id,lbs.source_uri,lbs.checksum
+                    FROM load_batch_scenes lbs
+                    JOIN scenes s ON s.scene_id=lbs.scene_id
+                    WHERE lbs.load_batch_id=ANY(%s::text[])
+                      AND s.dataset_id=%s
+                      AND lbs.scene_id=ANY(%s::text[])
+                      AND lbs.load_status IN ('succeeded','duplicate')
+                    ORDER BY lbs.scene_id,lbs.load_batch_id
+                    """,
+                    (list(source_batch_ids), dataset_id, list(scene_ids)),
+                )
+                source_rows = _all(cursor)
+                rows_by_scene: dict[str, dict[str, Any]] = {}
+                for row in source_rows:
+                    rows_by_scene.setdefault(str(row["scene_id"]), row)
+                missing_scenes = sorted(set(scene_ids) - set(rows_by_scene))
+                if missing_scenes:
+                    raise ValueError(f"reload scenes are not available in the selected load batches: {missing_scenes}")
+                cursor.execute(
+                    """
+                    INSERT INTO load_batches (
+                      load_batch_id,batch_name,source_system,source_type,created_by,status,attributes,loaded_at
+                    ) VALUES (%s,%s,'dataset-management','dataset_reload',%s,'succeeded',%s::jsonb,now())
+                    """,
+                    (
+                        load_batch_id,
+                        batch_name,
+                        created_by,
+                        json.dumps({
+                            "reload_selection": selection,
+                            "source_dataset_id": dataset_id,
+                            "source_batch_ids": sorted({str(row["load_batch_id"]) for row in source_rows}),
+                        }),
+                    ),
+                )
+                source_pairs = sorted({(str(row["load_batch_id"]), dataset_id) for row in source_rows})
+                for source_load_batch_id, source_dataset_id in source_pairs:
+                    cursor.execute(
+                        """
+                        INSERT INTO load_batch_sources (
+                          load_batch_id,source_load_batch_id,source_dataset_id,created_by
+                        ) VALUES (%s,%s,%s,%s)
+                        """,
+                        (load_batch_id, source_load_batch_id, source_dataset_id, created_by),
+                    )
+                for scene_id in scene_ids:
+                    source = rows_by_scene[scene_id]
+                    cursor.execute(
+                        """
+                        INSERT INTO load_batch_scenes (
+                          load_batch_id,scene_id,source_asset_id,source_uri,checksum,load_status,attributes
+                        ) VALUES (%s,%s,%s,%s,%s,'succeeded',%s::jsonb)
+                        """,
+                        (
+                            load_batch_id,
+                            scene_id,
+                            source.get("source_asset_id"),
+                            source["source_uri"],
+                            source.get("checksum"),
+                            json.dumps({
+                                "source_type": "dataset_reload",
+                                "source_load_batch_id": source["load_batch_id"],
+                            }),
+                        ),
+                    )
+            connection.commit()
+        return {
+            "load_batch_id": load_batch_id,
+            "batch_name": batch_name,
+            "source_type": "dataset_reload",
+            "status": "succeeded",
+            "dataset_count": 1,
+            "scene_count": len(scene_ids),
+        }
+
     def get_partition_quality_batch(self, partition_run_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:

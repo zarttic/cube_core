@@ -86,6 +86,10 @@ class PartitionDraftCreateRequest(SceneStrictModel):
     datasets: tuple[dict, ...] = Field(min_length=1)
 
 
+class DatasetReloadBatchRequest(PartitionDraftCreateRequest):
+    """Confirmed Dataset reload that becomes a formal load batch."""
+
+
 class PartitionDraftSubmittedRequest(SceneStrictModel):
     partition_run_id: str = Field(min_length=1)
 

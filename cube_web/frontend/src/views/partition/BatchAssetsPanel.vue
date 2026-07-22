@@ -13,10 +13,8 @@ const props = defineProps({
   defaultRequestedGridLevel: { type: Number, default: 4 },
   dataTypeFilter: { type: String, default: '' },
   dataTypeLabel: { type: String, default: '' },
-  partitionDrafts: { type: Array, default: () => [] },
-  activePartitionDraftId: { type: String, default: '' },
 });
-const emit = defineEmits(['update:modelValue', 'activate-partition-draft', 'refresh-partition-drafts']);
+const emit = defineEmits(['update:modelValue']);
 const loading = ref(false);
 const error = ref('');
 const availableBatches = ref([]);
@@ -124,7 +122,6 @@ function resolutionLabel(dataset) {
 }
 
 function selectedBatchesFromModel() {
-  if (props.activePartitionDraftId) return [props.activePartitionDraftId];
   return [...new Set(props.modelValue.flatMap((dataset) => (
     Array.isArray(dataset.scenes) ? dataset.scenes.flatMap(sceneSourceBatchIds) : []
   )))];
@@ -142,30 +139,7 @@ function selectedBandsFromModel() {
     .flatMap((dataset) => Array.isArray(dataset.band_unit_ids) ? dataset.band_unit_ids : []);
 }
 
-function draftDatasets(draft) {
-  return Array.isArray(draft?.selection?.datasets) ? draft.selection.datasets : [];
-}
-
-function draftBatch(draft) {
-  const datasets = draftDatasets(draft);
-  return {
-    load_batch_id: draft.draft_id,
-    batch_name: draft.draft_name || draft.draft_id,
-    status: 'succeeded',
-    dataset_count: datasets.length,
-    scene_count: datasets.reduce((count, dataset) => count + (dataset.scenes || []).length, 0),
-    partition_draft: draft,
-  };
-}
-
-const queueBatches = computed(() => [
-  ...props.partitionDrafts.map(draftBatch),
-  ...availableBatches.value,
-]);
-
-function draftForBatchId(batchId) {
-  return props.partitionDrafts.find((draft) => draft.draft_id === batchId) || null;
-}
+const queueBatches = computed(() => availableBatches.value);
 
 async function loadAvailable({ preserveSelection = false, preserveExpansion = false } = {}) {
   if (loading.value) return;
@@ -201,12 +175,16 @@ function mergeBatchDatasets(responses) {
     (response?.datasets || []).forEach((dataset) => {
       const key = `${batchId}:${dataset.dataset_id}`;
       const queueBatch = queueBatches.value.find((batch) => batch.load_batch_id === batchId);
-      const draftSourceBatchIds = queueBatch?.partition_draft?.source_load_batch_ids || [];
-      const sourceBatchIdsForResponse = queueBatch?.partition_draft ? draftSourceBatchIds : [batchId];
+      const reloadSelection = queueBatch?.attributes?.reload_selection?.datasets
+        ?.find((item) => item.dataset_id === dataset.dataset_id) || null;
+      const sourceBatchIdsForResponse = [batchId];
       const existing = datasets.get(key) || {
         ...dataset,
-        source_batch_id: sourceBatchIdsForResponse[0] || batchId,
+        source_batch_id: batchId,
         selection_id: key,
+        partition: reloadSelection?.partition,
+        grid_config_locked: reloadSelection?.grid_config_locked === true,
+        selection_source: reloadSelection?.selection_source || 'load_batch',
         scenes: new Map(),
       };
       (dataset.scenes || []).forEach((scene) => {
@@ -216,7 +194,7 @@ function mergeBatchDatasets(responses) {
           ...(prior?.source_load_statuses || {}),
           ...Object.fromEntries(sourceBatchIdsForResponse.map((sourceBatchId) => [
             sourceBatchId,
-            queueBatch?.partition_draft ? 'succeeded' : (scene.load_status || scene.status || 'pending'),
+            scene.load_status || scene.status || 'pending',
           ])),
         };
         const eligibleSourceBatchIds = sourceBatchIds.filter((sourceBatchId) => (
@@ -251,7 +229,6 @@ function buildBatchGroups(responses, mergedDatasets) {
 
 async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {}) {
   const ids = [...new Set(batchIds)];
-  const selectedDrafts = ids.map(draftForBatchId).filter(Boolean);
   const priorCollapsedBatches = new Set(collapsedBatches.value);
   const priorCollapsedDatasets = new Set(collapsedDatasets.value);
   const priorCollapsedScenes = new Set(collapsedScenes.value);
@@ -259,13 +236,6 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
   const priorDatasetKeys = new Set(availableBatchGroups.value.flatMap((batch) => batch.datasets.map((dataset) => datasetGroupKey(batch, dataset))));
   const priorSceneKeys = new Set(availableBatchGroups.value.flatMap((batch) => batch.datasets.flatMap((dataset) => dataset.scenes.map((scene) => sceneGroupKey(dataset, scene)))));
   selectedBatchIds.value = ids;
-  emit('activate-partition-draft', selectedDrafts.length ? selectedDrafts[0].draft_id : '');
-  if (selectedDrafts.length) {
-    selectedSceneIds.value = selectedDrafts.flatMap(draftDatasets).flatMap((dataset) => (
-      (dataset.scenes || []).map((scene) => scene.scene_id)
-    ));
-    selectedBandUnitIds.value = selectedDrafts.flatMap(draftDatasets).flatMap((dataset) => dataset.band_unit_ids || []);
-  }
   const generation = ++sceneRequestGeneration;
   sceneRequestController?.abort();
   sceneRequestController = new AbortController();
@@ -274,15 +244,12 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
   try {
     const query = props.dataTypeFilter ? `?data_type=${encodeURIComponent(props.dataTypeFilter)}` : '';
     const responses = await Promise.all(ids.map(async (batchId) => {
-      const draft = draftForBatchId(batchId);
       return {
         batchId,
-        response: draft
-          ? { load_batch: draftBatch(draft), datasets: draftDatasets(draft) }
-          : await requestGet(
-            `/v1/partition/load-batches/${encodeURIComponent(batchId)}/scenes${query}`,
-            { signal: sceneRequestController.signal },
-          ),
+        response: await requestGet(
+          `/v1/partition/load-batches/${encodeURIComponent(batchId)}/scenes${query}`,
+          { signal: sceneRequestController.signal },
+        ),
       };
     }));
     if (generation !== sceneRequestGeneration) return;
@@ -547,7 +514,7 @@ function isGridConfigLocked(dataset) {
 
 function gridConfigLocked(dataset) {
   if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
-  return isGridConfigLocked(selectedDatasetsById.value.get(selectionKey(dataset)));
+  return isGridConfigLocked(selectedDatasetsById.value.get(selectionKey(dataset)) || dataset);
 }
 
 function unlockGridLevel(dataset) {
@@ -596,8 +563,7 @@ function eligibleScene(scene) {
     : ['succeeded', 'duplicate'].includes(scene.load_status || 'succeeded');
 }
 
-function refreshAvailable({ refreshDrafts = false } = {}) {
-  if (refreshDrafts) emit('refresh-partition-drafts');
+function refreshAvailable() {
   return loadAvailable({ preserveSelection: true, preserveExpansion: true });
 }
 
@@ -616,7 +582,7 @@ onBeforeUnmount(() => {
   <section class="partition-data-list">
     <div class="partition-drawer-heading">
       <h3>{{ dataTypeLabel || '' }}待剖分数据</h3>
-      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="Refresh" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable({ refreshDrafts: true })" /></div>
+      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="Refresh" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable" /></div>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 

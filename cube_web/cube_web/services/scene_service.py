@@ -11,7 +11,7 @@ from grid_core.sdk import CubeEncoderSDK
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
-from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
+from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, DatasetReloadBatchRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
 
 
 class SceneRepository(Protocol):
@@ -64,6 +64,8 @@ class SceneRepository(Protocol):
     def get_partition_run_task_id(self, partition_run_id: str) -> str | None: ...
 
     def create_partition_draft(self, *, draft_id: str, draft_name: str, data_type: str, source_batch_ids: tuple[str, ...], selection: dict[str, Any], created_by: str) -> dict[str, Any]: ...
+
+    def create_dataset_reload_batch(self, *, load_batch_id: str, batch_name: str, source_batch_ids: tuple[str, ...], dataset_id: str, scene_ids: tuple[str, ...], selection: dict[str, Any], created_by: str) -> dict[str, Any]: ...
 
     def list_partition_drafts(self, *, data_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]: ...
 
@@ -386,6 +388,51 @@ class SceneDomainService:
             selection={"datasets": [dict(item) for item in payload.datasets]},
             created_by=str(getattr(actor, "username", actor) or "system"),
         )
+
+    def create_dataset_reload_batch(self, payload: DatasetReloadBatchRequest, actor: Any) -> dict[str, Any]:
+        if len(payload.datasets) != 1:
+            raise ValueError("dataset reload must contain exactly one dataset selection")
+        selection = dict(payload.datasets[0])
+        dataset_id = str(selection.get("dataset_id") or "").strip()
+        scene_ids = tuple(str(scene.get("scene_id") or "").strip() for scene in selection.get("scenes", ()))
+        if not dataset_id or not scene_ids or any(not scene_id for scene_id in scene_ids):
+            raise ValueError("dataset reload requires one dataset and one or more scenes")
+        request = ScenePartitionRunRequest.model_validate({
+            "partition_run_id": f"reload-validation-{uuid4().hex[:12]}",
+            "source_batch_ids": payload.source_batch_ids,
+            "selection_source": "dataset",
+            "datasets": [{
+                "dataset_id": dataset_id,
+                "scene_ids": scene_ids,
+                "band_unit_ids": selection.get("band_unit_ids"),
+                "partition": selection.get("partition"),
+            }],
+        })
+        resolved = self.repository.materialize_partition_datasets(request)
+        if {dataset.data_type for dataset in resolved} != {payload.data_type}:
+            raise ValueError("reload data_type must match the selected dataset")
+        load_batch_id = f"dataset-reload-{uuid4().hex[:12]}"
+        formal_selection = {
+            **selection,
+            "selection_id": f"{load_batch_id}:{dataset_id}",
+            "source_batch_id": load_batch_id,
+            "selection_source": "dataset_reload",
+            "grid_config_locked": True,
+            "scenes": [
+                {**dict(scene), "source_batch_ids": [load_batch_id], "load_batch_id": load_batch_id}
+                for scene in selection.get("scenes", ())
+            ],
+        }
+        batch = self.repository.create_dataset_reload_batch(
+            load_batch_id=load_batch_id,
+            batch_name=payload.draft_name.strip(),
+            source_batch_ids=payload.source_batch_ids,
+            dataset_id=dataset_id,
+            scene_ids=scene_ids,
+            selection={"datasets": [formal_selection]},
+            created_by=str(getattr(actor, "username", actor) or "system"),
+        )
+        return {**batch, "selection": {"datasets": [formal_selection]}}
 
     def list_partition_drafts(self, *, data_type: str | None = None, limit: int = 100) -> dict[str, Any]:
         items = self.repository.list_partition_drafts(data_type=data_type, limit=limit)

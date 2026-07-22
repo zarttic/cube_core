@@ -92,35 +92,37 @@ beforeEach(() => {
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
 
 describe('BatchAssetsPanel dataset, scene and band selection', () => {
-  it('shows created partition batches inside the pending-data queue', async () => {
-    const draft = {
-      draft_id: 'partition-draft-a',
-      draft_name: '山东光学剖分批次',
-      source_load_batch_ids: ['load-a'],
-      selection: {
-        datasets: [{
-          ...group('dataset-a', [scene('scene-a', 'load-a')]),
-          band_unit_ids: ['band-scene-a-B04'],
-          partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
-        }],
-      },
+  it('shows a confirmed reload as a formal load batch', async () => {
+    const reloadBatch = {
+      load_batch_id: 'dataset-reload-a', batch_name: '山东光学重新载入', scene_count: 1, status: 'succeeded',
+      attributes: { reload_selection: { datasets: [{
+        dataset_id: 'dataset-a', grid_config_locked: true, selection_source: 'dataset_reload',
+        partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+      }] } },
     };
-    const wrapper = mountPanel({ partitionDrafts: [draft] });
+    requestGet.mockImplementation((url) => {
+      if (url.includes('/load-batches?')) return Promise.resolve({ load_batches: [reloadBatch] });
+      return Promise.resolve({ load_batch: reloadBatch, datasets: [group('dataset-a', [scene('scene-a', 'dataset-reload-a')])] });
+    });
+    const selected = {
+      ...group('dataset-a', [scene('scene-a', 'dataset-reload-a')]),
+      source_batch_id: 'dataset-reload-a', selection_id: 'dataset-reload-a:dataset-a',
+      band_unit_ids: ['band-scene-a-B04'], grid_config_locked: true, selection_source: 'dataset_reload',
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    };
+    const wrapper = mountPanel({ modelValue: [selected] });
     await flushPromises();
 
-    expect(wrapper.text()).toContain('待剖分批次');
-    expect(wrapper.get('[data-testid="load-batch-partition-draft-a"]').text()).toContain('山东光学剖分批次');
-    await wrapper.vm.loadSelectedBatches(['partition-draft-a']);
-    expect(wrapper.emitted('activate-partition-draft')).toEqual([['partition-draft-a']]);
-    expect(wrapper.vm.availableBatchGroups.map((batch) => batch.load_batch_id)).toEqual(['partition-draft-a']);
+    expect(wrapper.get('[data-testid="load-batch-dataset-reload-a"]').text()).toContain('山东光学重新载入');
+    expect(wrapper.vm.availableBatchGroups.map((batch) => batch.load_batch_id)).toEqual(['dataset-reload-a']);
     expect(wrapper.emitted('update:modelValue').at(-1)[0][0]).toMatchObject({
       dataset_id: 'dataset-a',
       band_unit_ids: ['band-scene-a-B04'],
       partition: { grid_type: 'geohash', requested_grid_level: 4 },
     });
     const selectedScene = wrapper.emitted('update:modelValue').at(-1)[0][0].scenes[0];
-    expect(selectedScene.source_batch_ids).toEqual(['load-a']);
-    expect(selectedScene.eligible_source_batch_ids).toEqual(['load-a']);
+    expect(selectedScene.source_batch_ids).toEqual(['dataset-reload-a']);
+    expect(selectedScene.eligible_source_batch_ids).toEqual(['dataset-reload-a']);
   });
 
   it('locks an ingested load-batch band and displays its completed grid', async () => {
@@ -164,11 +166,17 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     selected.scenes[0].bands[0].grid_statuses = [{
       grid_type: 'geohash', grid_level: 2, partition_status: 'completed', ingest_status: 'completed',
     }];
-    const draft = { draft_id: 'draft-mgrs', draft_name: '平面格网重剖分', selection: { datasets: [selected] } };
-    const wrapper = mountPanel({ modelValue: [selected], partitionDrafts: [draft] });
+    const reloadBatch = { load_batch_id: 'dataset-reload-mgrs', batch_name: '平面格网重剖分', status: 'succeeded' };
+    requestGet.mockImplementation((url) => {
+      if (url.includes('/load-batches?')) return Promise.resolve({ load_batches: [reloadBatch] });
+      return Promise.resolve({ load_batch: reloadBatch, datasets: [selected] });
+    });
+    selected.source_batch_id = 'dataset-reload-mgrs';
+    selected.selection_id = 'dataset-reload-mgrs:dataset-a';
+    selected.scenes[0].source_batch_ids = ['dataset-reload-mgrs'];
+    const wrapper = mountPanel({ modelValue: [selected] });
 
     await flushPromises();
-    await wrapper.vm.loadSelectedBatches(['draft-mgrs']);
 
     const dataset = wrapper.vm.availableDatasets[0];
     const band = dataset.scenes[0].bands[0];
@@ -273,13 +281,13 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     expect(wrapper.vm.collapsedBatches.has('load-a')).toBe(false);
   });
 
-  it('refreshes pending dataset partition drafts on request', async () => {
+  it('refreshes formal load batches without requesting drafts', async () => {
     const wrapper = mountPanel();
     await flushPromises();
 
-    await wrapper.vm.refreshAvailable({ refreshDrafts: true });
+    await wrapper.vm.refreshAvailable();
 
-    expect(wrapper.emitted('refresh-partition-drafts')).toEqual([[]]);
+    expect(requestGet).not.toHaveBeenCalledWith('/v1/partition/drafts?limit=100');
   });
 
   it('selects and clears all bands by scene or by dataset', async () => {

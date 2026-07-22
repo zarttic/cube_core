@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-22-scene-domain-v10"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-23-scene-domain-v11"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -21,6 +21,7 @@ def test_schema_is_a_fresh_production_install() -> None:
         "scene_bands",
         "load_batches",
         "load_batch_scenes",
+        "load_batch_sources",
         "partition_runs",
         "partition_drafts",
         "partition_run_scenes",
@@ -44,6 +45,8 @@ def test_schema_is_a_fresh_production_install() -> None:
     assert "suggested_grid_type in ('geohash','mgrs','isea4h')" in sql
     assert "band_unit_id text" in sql
     assert "role text not null check (role in ('normal','advanced','scientist','admin'))" in sql
+    assert "source_type text not null default 'subsystem_import'" in sql
+    assert "create table if not exists load_batch_sources" in sql
 
 
 def test_partition_data_unit_grid_status_enforces_band_grid_identity_and_lifecycle_states() -> None:

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-22-scene-domain-v10"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-23-scene-domain-v11"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -15,6 +15,7 @@ SCENE_DOMAIN_TABLES = {
     "scene_bands",
     "load_batches",
     "load_batch_scenes",
+    "load_batch_sources",
     "partition_runs",
     "partition_drafts",
     "partition_run_scenes",
@@ -96,12 +97,18 @@ def schema_statements() -> tuple[str, ...]:
           load_batch_id TEXT PRIMARY KEY,
           batch_name TEXT NOT NULL,
           source_system TEXT,
+          source_type TEXT NOT NULL DEFAULT 'subsystem_import' CHECK (source_type IN ('subsystem_import','dataset_reload')),
+          created_by TEXT NOT NULL DEFAULT 'system',
           status TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed','cancelled','manual_required','archived','unknown')),
           attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           loaded_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )""",
+        """ALTER TABLE load_batches ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'subsystem_import'""",
+        """ALTER TABLE load_batches ADD COLUMN IF NOT EXISTS created_by TEXT NOT NULL DEFAULT 'system'""",
+        "ALTER TABLE load_batches DROP CONSTRAINT IF EXISTS load_batches_source_type_check",
+        "ALTER TABLE load_batches ADD CONSTRAINT load_batches_source_type_check CHECK (source_type IN ('subsystem_import','dataset_reload'))",
         """CREATE TABLE IF NOT EXISTS scene_assets (
           scene_id TEXT NOT NULL REFERENCES scenes(scene_id),
           asset_id TEXT NOT NULL,
@@ -146,6 +153,14 @@ def schema_statements() -> tuple[str, ...]:
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           PRIMARY KEY (load_batch_id, scene_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS load_batch_sources (
+          load_batch_id TEXT NOT NULL REFERENCES load_batches(load_batch_id) ON DELETE CASCADE,
+          source_load_batch_id TEXT NOT NULL REFERENCES load_batches(load_batch_id),
+          source_dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
+          created_by TEXT NOT NULL DEFAULT 'system',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (load_batch_id, source_load_batch_id, source_dataset_id)
         )""",
         """CREATE TABLE IF NOT EXISTS partition_runs (
           partition_run_id TEXT PRIMARY KEY,
@@ -265,6 +280,7 @@ def schema_statements() -> tuple[str, ...]:
         "CREATE INDEX IF NOT EXISTS idx_scene_assets_source_uri ON scene_assets(source_uri)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_scene_bands_unit_id ON scene_bands(band_unit_id)",
         "CREATE INDEX IF NOT EXISTS idx_load_batch_scenes_scene ON load_batch_scenes(scene_id, load_batch_id)",
+        "CREATE INDEX IF NOT EXISTS idx_load_batch_sources_source ON load_batch_sources(source_load_batch_id, source_dataset_id)",
         "CREATE INDEX IF NOT EXISTS idx_partition_run_scenes_dataset_status ON partition_run_scenes(dataset_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_partition_drafts_pending ON partition_drafts(data_type, status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_partition_grid_status_run ON partition_data_unit_grid_status(partition_run_id, partition_status)",

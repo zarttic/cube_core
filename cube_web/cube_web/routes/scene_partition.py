@@ -6,6 +6,7 @@ from cube_web.routes.auth import current_actor, require_admin
 from cube_web.services.scene_contracts import (
     CarbonFootprintPreviewRequest,
     CarbonGridPreviewRequest,
+    DatasetReloadBatchRequest,
     PartitionDraftCreateRequest,
     PartitionDraftSubmittedRequest,
     ScenePartitionRunRequest,
@@ -80,6 +81,14 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
         actor = require_admin(current_actor(request))
         try:
             return service.create_partition_draft(payload, actor)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/reload-batches", status_code=201)
+    def create_dataset_reload_batch(payload: DatasetReloadBatchRequest, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        try:
+            return service.create_dataset_reload_batch(payload, actor)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

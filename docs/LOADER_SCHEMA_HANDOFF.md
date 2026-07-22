@@ -15,10 +15,14 @@ LoadBatch N:M Scene N:1 Dataset
 ```
 
 - `LoadBatch` 表示一次载入动作，可以包含多个 Dataset 的 Scene。
+- `LoadBatch` 既可由载入子系统导入，也可由数据集页面确认重新载入产生；两者是同一
+  领域实体，区别只记录在来源和血缘元数据中。
 - `Dataset` 是长期管理、质检、入库和发布的主记录。
 - `Scene` 是载入、剖分和入库的最小数据单元。
 - 一个 Dataset 可以在多个 LoadBatch 中持续接收 Scene。
 - 波段属于 Scene；资产保存实际对象 URI 和校验信息。
+- 数据集重新载入复用已有 Scene 和资产时，只新增 LoadBatch 与 Scene 的关联，不复制
+  MinIO 对象或 `SceneAsset` 记录。
 
 ## 2. 导入接口
 

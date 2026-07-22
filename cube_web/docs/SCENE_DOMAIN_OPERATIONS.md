@@ -15,6 +15,13 @@ may contain scenes from several Datasets, and one Dataset may receive scenes in
 several load batches. `partition_run_id` is generated for each execution and is
 never reused as a load batch ID.
 
+`load_batches` has two equal producers: subsystem manifest import and confirmed
+Dataset reload. Both create formal LoadBatch-to-Scene relations and are selected
+from the same partition page. A Dataset reload normally reuses the existing
+SceneAsset and its MinIO `source_uri`; it creates a new asset only when the
+operator supplies a different source object. `partition_drafts` is reserved for
+unconfirmed editing state and is not a selectable load batch.
+
 ## Schema installation
 
 The installer creates the current Dataset, Scene, load-batch, partition-run and
@@ -46,8 +53,11 @@ There is no runtime mode switch. These APIs are the only production chain.
 - `GET /v1/partition/load-batches?data_type=<type>` lists load batches that
   actually contain a Scene of the requested product type.
 - `GET /v1/partition/load-batches/{id}/scenes` returns Scenes grouped by Dataset.
+- Confirmed Dataset reload creates a formal load batch with reload provenance;
+  the list endpoint returns it alongside subsystem-import batches.
 - `POST /v1/partition/runs` accepts Dataset-specific Scene selections and grid
-  settings, then creates a distinct PartitionRun.
+  settings, then creates one PartitionRun. Each selection may retain its own
+  source load batch and valid grid configuration.
 - `GET /v1/datasets` and its detail endpoints expose management, provenance,
   quality, publication, and current output state.
 - `/v1/ingest-runs` exposes ingest execution grouped by Scene, with explicit

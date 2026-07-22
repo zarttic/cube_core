@@ -3,7 +3,7 @@ import { ref } from 'vue';
 import { ElMessage } from 'element-plus';
 
 import router from '@/router';
-import { createPartitionDraft } from '@/api/partitionDrafts';
+import { createDatasetReloadBatch } from '@/api/partitionDrafts';
 import { queuePartitionSelection } from '@/stores/partitionTransfer';
 import DatasetsView from '@/views/DatasetsView.vue';
 import IngestView from '@/views/IngestView.vue';
@@ -15,15 +15,15 @@ const activeView = ref('datasets');
 
 async function queuePartition(dataset) {
   try {
-    const draft = await createPartitionDraft(dataset);
+    const reloadBatch = await createDatasetReloadBatch(dataset);
     if (props.embedded) {
-      emit('queue-partition', draft);
+      emit('queue-partition', reloadBatch);
       return;
     }
-    queuePartitionSelection(draft);
-    router.push({ name: 'partition', query: { module: draft.data_type, draft_id: draft.draft_id } });
+    queuePartitionSelection(reloadBatch);
+    router.push({ name: 'partition', query: { module: dataset.data_type, load_batch_id: reloadBatch.load_batch_id } });
   } catch (error) {
-    ElMessage.error(error.message || '创建待剖分批次失败');
+    ElMessage.error(error.message || '创建重新载入批次失败');
   }
 }
 </script>

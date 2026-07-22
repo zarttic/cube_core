@@ -7,8 +7,8 @@ function sourceBatchIds(selection) {
   ]).map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
-export function createPartitionDraft(selection) {
-  return requestPost('/v1/partition/drafts', {
+export function createDatasetReloadBatch(selection) {
+  return requestPost('/v1/partition/reload-batches', {
     data_type: selection.data_type,
     draft_name: selection.draft_name,
     source_batch_ids: sourceBatchIds(selection),

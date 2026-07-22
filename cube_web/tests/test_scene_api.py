@@ -122,6 +122,7 @@ class _Repository:
         self.existing_run = None
         self.failed_run = None
         self.drafts = {}
+        self.reload_batch = None
 
     def list_load_batches(self, **_kwargs):
         return [{"load_batch_id": "load-001", "batch_name": "Loader batch", "scene_count": 2}]
@@ -192,6 +193,14 @@ class _Repository:
             return None
         draft.update(status="submitted", submitted_partition_run_id=partition_run_id)
         return draft
+
+    def create_dataset_reload_batch(self, **kwargs):
+        self.reload_batch = kwargs
+        return {
+            "load_batch_id": kwargs["load_batch_id"], "batch_name": kwargs["batch_name"],
+            "source_type": "dataset_reload", "status": "succeeded", "dataset_count": 1,
+            "scene_count": len(kwargs["scene_ids"]),
+        }
 
     def create_partition_run(self, request):
         self.run_request = request
@@ -468,6 +477,29 @@ def test_data_management_selection_creates_a_pending_partition_draft(api) -> Non
     assert submitted.status_code == 200
     assert submitted.json()["status"] == "submitted"
     assert client.get("/v1/partition/drafts?data_type=optical").json()["items"] == []
+
+
+def test_confirmed_dataset_reload_creates_a_formal_load_batch(api) -> None:
+    client, repository, _ = api
+    payload = {
+        "data_type": "optical", "draft_name": "山东 MGRS 重新载入",
+        "source_batch_ids": ["load-001"],
+        "datasets": [{
+            "dataset_id": "dataset-optical", "band_unit_ids": ["band-scene-optical-b04"],
+            "scenes": [{"scene_id": "scene-optical", "source_batch_ids": ["load-001"]}],
+            "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
+        }],
+    }
+
+    response = client.post("/v1/partition/reload-batches", json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["load_batch_id"].startswith("dataset-reload-")
+    assert body["source_type"] == "dataset_reload"
+    assert body["selection"]["datasets"][0]["source_batch_id"] == body["load_batch_id"]
+    assert body["selection"]["datasets"][0]["grid_config_locked"] is True
+    assert repository.reload_batch["source_batch_ids"] == ("load-001",)
 
 
 def test_scene_partition_run_submission_failure_releases_claim(api) -> None:

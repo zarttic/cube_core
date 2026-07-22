@@ -106,8 +106,14 @@ PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 近期历史使用简短祈使句 commit message，有时带 `feat:`、`docs:` 或 `feat(partition):`
 等前缀。保持 commit 聚焦且用户可理解，例如 `Update cube web SDK backend and UI`。
 
+所有开发工作必须在 Linear 中有对应事项。开始实现前，使用 Linear MCP 查找已有事项；
+没有准确事项时创建一个，再将状态设为“进行中”。每个独立 Git 提交完成后都要在事项中
+记录提交 hash、变更范围和已执行验证。实现、迁移和约定测试全部完成后，补充最终验证结果，
+再将事项设为“结束”。不得把无关变更写入历史归档事项，也不得因为本地没有 `linear` CLI
+而跳过此流程；Linear 通过 MCP 工具访问。
+
 GitHub 发布使用 `gh` CLI。每次 push 前运行完整跨包 pytest，并在 PR 或交接说明中包含结果。
-PR 应包含摘要、影响路径、验证结果、UI 截图，以及可用的关联 issue 或说明。
+PR 应包含摘要、影响路径、验证结果、UI 截图和对应 Linear 事项。
 
 如果沙箱内 `gh` 认证或 GitHub CLI 访问失败，先在沙箱外提权重试同一个 `gh` 命令，再判断认证无效。
 

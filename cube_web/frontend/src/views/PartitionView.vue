@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, RefreshLeft } from '@element-plus/icons-vue';
 
-import { requestGet, requestJson, requestPost } from '@/api/client';
+import { requestGet, requestJson } from '@/api/client';
 import router from '@/router';
 import { usePartitionStore } from '@/stores/partition';
 import { takePartitionSelection } from '@/stores/partitionTransfer';
@@ -37,8 +37,6 @@ const mapPreviewVisible = ref(true);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
 const carbonFootprintsByModule = ref({});
-const pendingDrafts = ref([]);
-const activeDraftId = ref('');
 let gridPreviewGeneration = 0;
 let carbonFootprintGeneration = 0;
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
@@ -279,33 +277,27 @@ function resetCarbonFootprints() {
   carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: [] };
 }
 
-function selectDraft(draft) {
-  const datasets = draft?.selection?.datasets || [];
+function selectReloadBatch(reloadBatch) {
+  const datasets = reloadBatch?.selection?.datasets || [];
   if (!datasets.length) return;
   store.form.datasets = datasets;
-  activeDraftId.value = draft.draft_id;
-  activeModule.value = draft.data_type;
+  activeModule.value = reloadBatch.data_type || datasets[0]?.data_type || activeModule.value;
   const partition = datasets[0]?.partition;
-  moduleForms.value[draft.data_type] = {
+  moduleForms.value[activeModule.value] = {
     gridType: partition.grid_type,
     requestedGridLevel: Number(partition.requested_grid_level),
   };
   datasetDrawerVisible.value = false;
   mapPreviewVisible.value = true;
   gridPreviewGeneration += 1;
-  setModuleGridPreview(draft.data_type, []);
-  if (draft.data_type === 'carbon') resetCarbonFootprints();
-  ElMessage.success('已载入待剖分批次，请确认后提交。');
+  setModuleGridPreview(activeModule.value, []);
+  if (activeModule.value === 'carbon') resetCarbonFootprints();
+  ElMessage.success('已载入正式重新载入批次，请确认后提交。');
 }
 
-function queueManagedPartition(draft) {
-  selectDraft(draft);
+function queueManagedPartition(reloadBatch) {
+  selectReloadBatch(reloadBatch);
   datasetDrawerVisible.value = true;
-}
-
-async function loadDrafts() {
-  const response = await requestGet('/v1/partition/drafts?limit=100');
-  pendingDrafts.value = response.items || [];
 }
 
 function setModuleGridPreview(moduleName, geometries, meta = {}) {
@@ -317,12 +309,7 @@ async function submit() {
   const moduleName = activeModule.value;
   try {
     Object.assign(store.form, moduleForms.value[moduleName]);
-    const response = await store.submit();
-    if (activeDraftId.value) {
-      await requestPost(`/v1/partition/drafts/${encodeURIComponent(activeDraftId.value)}/submitted`, { partition_run_id: response.partition_run_id });
-      activeDraftId.value = '';
-      await loadDrafts();
-    }
+    await store.submit();
     ElMessage.success('剖分任务已提交。');
   } catch (error) {
     ElMessage.error(error.message || '提交剖分失败。');
@@ -538,11 +525,6 @@ onMounted(() => {
   }
   store.loadBatches();
   store.loadTasks();
-  loadDrafts().then(() => {
-    const requestedDraftId = String(router.currentRoute.value.query.draft_id || '');
-    const draft = pendingSelection || pendingDrafts.value.find((item) => item.draft_id === requestedDraftId);
-    if (draft) selectDraft(draft);
-  }).catch((error) => { ElMessage.error(error.message || '待剖分批次加载失败。'); });
 });
 </script>
 
@@ -647,11 +629,7 @@ onMounted(() => {
             :data-type-label="activeProduct.label"
             :default-grid-type="formModel.gridType"
             :default-requested-grid-level="Number(formModel.requestedGridLevel)"
-            :partition-drafts="pendingDrafts.filter((draft) => draft.data_type === activeModule)"
-            :active-partition-draft-id="activeDraftId"
             @update:model-value="updateDatasets"
-            @activate-partition-draft="activeDraftId = $event"
-            @refresh-partition-drafts="loadDrafts"
           />
         </el-drawer>
       </div>
