@@ -9,7 +9,6 @@ Base32 alphabet (lowercase):  0123456789bcdefghjkmnpqrstuvwxyz
 from __future__ import annotations
 
 import math
-import time
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
@@ -25,10 +24,6 @@ BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 BASE32_SET = frozenset(BASE32)
 _CHAR_TO_BITS: dict[str, int] = {ch: idx for idx, ch in enumerate(BASE32)}
 BITS5 = (16, 8, 4, 2, 1)
-
-MAX_CANDIDATE_CELLS = 250_000
-MAX_OUTPUT_CELLS = 100_000
-MAX_COVER_SECONDS = 30.0
 
 _MIN_PRECISION = 1
 _MAX_PRECISION = 12
@@ -69,33 +64,6 @@ _BORDER_MAP: dict[str, dict[str, str]] = {
 # neighbor tables directly from first principles using the encode/decode logic,
 # which is more reliable.  The lookup-table approach is optional optimisation;
 # for correctness we decode → shift → re-encode.
-
-
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
-class GridLimitExceededError(Exception):
-    """Raised when a cover computation exceeds a hard resource limit."""
-
-    def __init__(
-        self,
-        grid_type: str,
-        requested_grid_level: int,
-        limit_name: str,
-        limit: int | float,
-        observed: int | float,
-    ) -> None:
-        self.grid_type = grid_type
-        self.requested_grid_level = requested_grid_level
-        self.limit_name = limit_name
-        self.limit = limit
-        self.observed = observed
-        super().__init__(
-            f"{grid_type} cover exceeded {limit_name}: limit={limit}, observed={observed} "
-            f"(requested_grid_level={requested_grid_level})"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -534,29 +502,14 @@ class GeohashEngine(BaseGridEngine):
 
         aoi_bounds = aoi.bounds  # (minx, miny, maxx, maxy)
 
-        deadline = time.monotonic() + MAX_COVER_SECONDS
-        candidate_count = 0
-
         # Collect candidate codes at the requested level
         seed_codes = _cells_for_bbox(
             aoi_bounds[0], aoi_bounds[1], aoi_bounds[2], aoi_bounds[3],
             requested_grid_level,
         )
 
-        candidate_count += len(seed_codes)
-        if candidate_count > MAX_CANDIDATE_CELLS:
-            raise GridLimitExceededError(
-                "geohash", requested_grid_level, "MAX_CANDIDATE_CELLS",
-                MAX_CANDIDATE_CELLS, candidate_count,
-            )
-
         selected: list[str] = []
         for code in seed_codes:
-            if time.monotonic() > deadline:
-                raise GridLimitExceededError(
-                    "geohash", requested_grid_level, "MAX_COVER_SECONDS",
-                    MAX_COVER_SECONDS, time.monotonic() - deadline + MAX_COVER_SECONDS,
-                )
             cell_geom = _bbox_to_shapely(*_decode_bbox(code))
             intersection = cell_geom.intersection(aoi)
 
@@ -569,31 +522,18 @@ class GeohashEngine(BaseGridEngine):
             else:
                 raise ValidationError(f"Unknown cover_mode: {cover_mode!r}")
 
-            if len(selected) > MAX_OUTPUT_CELLS:
-                raise GridLimitExceededError(
-                    "geohash", requested_grid_level, "MAX_OUTPUT_CELLS",
-                    MAX_OUTPUT_CELLS, len(selected),
-                )
-
         if cover_mode == "minimal" and compact:
-            selected = self._compact(selected, aoi, requested_grid_level, deadline)
+            selected = self._compact(selected, aoi, requested_grid_level)
 
         return selected
 
-    def _compact(
-        self, codes: list[str], aoi, requested_grid_level: int, deadline: float
-    ) -> list[str]:
+    def _compact(self, codes: list[str], aoi, requested_grid_level: int) -> list[str]:
         """Replace groups of 32 siblings with their parent if the parent is
         fully covered by the AOI.  Works bottom-up from the deepest level."""
         code_set: set[str] = set(codes)
 
         # Work from longest codes upward
         for level in range(requested_grid_level, 1, -1):
-            if time.monotonic() > deadline:
-                raise GridLimitExceededError(
-                    "geohash", requested_grid_level, "MAX_COVER_SECONDS",
-                    MAX_COVER_SECONDS, MAX_COVER_SECONDS,
-                )
             # Group codes at this level by parent
             at_level = [c for c in code_set if len(c) == level]
             parent_to_children: dict[str, list[str]] = {}

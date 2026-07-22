@@ -121,6 +121,7 @@ function queuePartition() {
     data_type: props.detail?.overview?.data_type,
     product_type: props.detail?.overview?.product_type,
     selection_source: 'dataset',
+    grid_config_locked: true,
     draft_name: draftName.value.trim(),
     scenes,
     band_unit_ids: [...selected],
@@ -203,6 +204,52 @@ function sourceOrError(row) {
     return details === '{}' ? '-' : details;
   }
   return row?.source_load_batch_id || row?.load_batch_id || row?.provenance || '-';
+}
+
+function provenanceTypeLabel(type) {
+  return {
+    load_batch: '数据载入',
+    partition_run: '剖分处理',
+    ingest_run: '数据入库',
+    scene_reassignment: '数据归属调整',
+    dataset_audit: '数据集维护',
+  }[type] || type || '-';
+}
+
+function provenanceSubject(row) {
+  return row?.scene_id ? `景数据：${row.scene_id}` : '数据集';
+}
+
+function provenanceRecordLabel(row) {
+  const labels = {
+    load_batch: '载入批次',
+    partition_run: '剖分批次',
+    ingest_run: '入库批次',
+    scene_reassignment: '归属调整记录',
+    dataset_audit: '数据集维护记录',
+  };
+  return `${labels[row?.relation_type] || '处理记录'}：${row?.relation_id || '-'}`;
+}
+
+function provenanceDetails(row) {
+  if (row?.error_message) return `错误信息：${row.error_message}`;
+  const details = row?.provenance || row?.grid_config || row?.attributes || {};
+  if (row?.relation_type === 'ingest_run') {
+    const items = [];
+    if (details.source_load_batch_ids?.length) items.push(`来源载入批次：${details.source_load_batch_ids.join('、')}`);
+    if (details.quality_run_id) items.push(`质检记录：${details.quality_run_id}`);
+    if (details.band_unit_ids?.length) items.push(`数据单元：${details.band_unit_ids.join('、')}`);
+    return items.join('；') || '入库信息已记录';
+  }
+  if (row?.relation_type === 'partition_run') {
+    const grid = gridDefinition(details.grid_type)?.label || details.grid_type;
+    const level = details.requested_grid_level ?? details.grid_level;
+    return grid ? `格网类型：${grid}${level !== undefined ? `；格网层级：${level}` : ''}` : '剖分信息已记录';
+  }
+  if (row?.relation_type === 'load_batch') return details.source_uri ? `源文件：${details.source_uri}` : '载入信息已记录';
+  if (row?.relation_type === 'scene_reassignment') return details.reason ? `调整原因：${details.reason}` : '归属调整信息已记录';
+  if (row?.relation_type === 'dataset_audit') return '数据集维护信息已记录';
+  return '无补充信息';
 }
 
 function publicationTargets(row) {
@@ -349,13 +396,14 @@ function sceneCollapsed(sceneId) {
         </template>
         <template v-else>
           <AppTable :data="collection(key)" :page="page(key).page" :page-size="page(key).pageSize" :total="page(key).total" row-key="scene_id" @current-change="(value) => emit('tab-page-change', { tab: key, page: value })" @size-change="(value) => emit('tab-page-size-change', { tab: key, pageSize: value })">
-            <el-table-column label="标识" min-width="185"><template #default="{ row }">{{ rowId(row) }}</template></el-table-column>
+            <el-table-column :label="key === 'provenance' ? '数据对象' : '标识'" min-width="185"><template #default="{ row }">{{ key === 'provenance' ? provenanceSubject(row) : rowId(row) }}</template></el-table-column>
             <el-table-column v-if="key === 'scenes'" prop="scene_code" label="景编码" min-width="155" show-overflow-tooltip />
             <el-table-column v-if="key === 'scenes'" label="采集时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.acquisition_time) }}</template></el-table-column>
-            <el-table-column v-if="key === 'provenance'" prop="relation_type" label="关系" width="130" />
+            <el-table-column v-if="key === 'provenance'" label="处理环节" width="130"><template #default="{ row }">{{ provenanceTypeLabel(row.relation_type) }}</template></el-table-column>
+            <el-table-column v-if="key === 'provenance'" label="处理记录" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ provenanceRecordLabel(row) }}</template></el-table-column>
             <el-table-column label="状态" min-width="110"><template #default="{ row }"><StatusTag v-if="row.status" :domain="key === 'quality' ? 'quality' : key === 'scenes' ? 'scene' : 'ingest'" :value="row.status" size="small" /><span v-else>-</span></template></el-table-column>
             <el-table-column v-if="key === 'tiles'" prop="st_code" label="时空编码" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.st_code || '-' }}</template></el-table-column>
-            <el-table-column label="来源或错误" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ sourceOrError(row) }}</template></el-table-column>
+            <el-table-column :label="key === 'provenance' ? '关联信息' : '来源或错误'" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ key === 'provenance' ? provenanceDetails(row) : sourceOrError(row) }}</template></el-table-column>
             <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
             <el-table-column v-if="writeEnabled && ['scenes', 'ingest-records'].includes(key)" label="操作" width="130" fixed="right">
               <template #default="{ row }">

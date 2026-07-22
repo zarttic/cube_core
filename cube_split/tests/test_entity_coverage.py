@@ -62,7 +62,7 @@ def _entity_args(tmp_path: Path, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def test_entity_partition_passes_max_cells_per_asset_to_grid_builder(monkeypatch, tmp_path: Path):
+def test_entity_partition_disables_max_cells_per_asset(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     _write_tif(input_dir / "scene.tif")
@@ -126,20 +126,25 @@ def test_entity_partition_passes_max_cells_per_asset_to_grid_builder(monkeypatch
     report = entity_partition_job.run_entity_partition(_entity_args(tmp_path, max_cells_per_asset=7))
 
     rows = [json.loads(line) for line in Path(report["rows_path"]).read_text(encoding="utf-8").splitlines()]
-    assert captured["max_cells_per_asset"] == 7
+    assert captured["max_cells_per_asset"] == 0
     assert report["grid_task_count"] == 1
     assert report["entity_tile_count"] == 1
     assert rows[0]["partition_type"] == "entity"
 
 
-def test_entity_partition_rejects_negative_max_cells_per_asset(tmp_path: Path):
+def test_entity_partition_ignores_legacy_max_cells_per_asset(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     _write_tif(input_dir / "scene.tif")
 
-    try:
-        entity_partition_job.run_entity_partition(_entity_args(tmp_path, max_cells_per_asset=-1))
-    except ValueError as exc:
-        assert "max_cells_per_asset" in str(exc)
-    else:
-        raise AssertionError("negative max_cells_per_asset should fail")
+    captured: dict[str, object] = {}
+
+    def fake_build_grid_tasks_driver(**kwargs):
+        captured["max_cells_per_asset"] = kwargs["max_cells_per_asset"]
+        return []
+
+    monkeypatch.setattr(entity_partition_job, "build_grid_tasks_driver", fake_build_grid_tasks_driver)
+    report = entity_partition_job.run_entity_partition(_entity_args(tmp_path, max_cells_per_asset=-1))
+
+    assert captured["max_cells_per_asset"] == 0
+    assert report["grid_task_count"] >= 1

@@ -118,6 +118,9 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
       band_unit_ids: ['band-scene-a-B04'],
       partition: { grid_type: 'geohash', requested_grid_level: 4 },
     });
+    const selectedScene = wrapper.emitted('update:modelValue').at(-1)[0][0].scenes[0];
+    expect(selectedScene.source_batch_ids).toEqual(['load-a']);
+    expect(selectedScene.eligible_source_batch_ids).toEqual(['load-a']);
   });
 
   it('locks an ingested load-batch band and displays its completed grid', async () => {
@@ -134,6 +137,45 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     expect(wrapper.vm.ingestedGridLabel(target.bands[0])).toBe('平面格网 · 层级 1');
     expect(wrapper.vm.bandStatusLabel(target.bands[0])).toBe('已入库 · 平面格网 · 层级 1');
     expect(wrapper.vm.selectableBandIdsForScene(target, 'optical', dataset)).toEqual([]);
+  });
+
+  it('keeps a dataset-selected repartition grid unchanged', async () => {
+    const selected = {
+      ...group('dataset-a', [scene('scene-a', 'load-a')]),
+      band_unit_ids: ['band-scene-a-B04'],
+      selection_source: 'dataset',
+      partition: { grid_type: 'mgrs', requested_grid_level: 0, partition_method: 'logical' },
+    };
+    const wrapper = mountPanel({ modelValue: [selected] });
+
+    wrapper.vm.updatePartition('dataset-a', { grid_type: 'geohash' });
+
+    expect(wrapper.vm.gridConfigLocked('dataset-a')).toBe(true);
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined();
+  });
+
+  it('allows a locked repartition when only another grid has been ingested', async () => {
+    const selected = {
+      ...group('dataset-a', [scene('scene-a', 'load-a')]),
+      band_unit_ids: ['band-scene-a-B04'],
+      selection_source: 'dataset',
+      partition: { grid_type: 'mgrs', requested_grid_level: 0, partition_method: 'logical' },
+    };
+    selected.scenes[0].bands[0].grid_statuses = [{
+      grid_type: 'geohash', grid_level: 2, partition_status: 'completed', ingest_status: 'completed',
+    }];
+    const draft = { draft_id: 'draft-mgrs', draft_name: '平面格网重剖分', selection: { datasets: [selected] } };
+    const wrapper = mountPanel({ modelValue: [selected], partitionDrafts: [draft] });
+
+    await flushPromises();
+    await wrapper.vm.loadSelectedBatches(['draft-mgrs']);
+
+    const dataset = wrapper.vm.availableDatasets[0];
+    const band = dataset.scenes[0].bands[0];
+    const partition = wrapper.vm.targetPartition(dataset);
+    expect(wrapper.vm.bandConsumedByLoadBatch(band, partition)).toBe(false);
+    expect(wrapper.vm.bandStatusLabel(band, partition)).toBe('待剖分 · 平面格网 · 层级 0');
+    expect(wrapper.vm.selectedBandUnitIds).toEqual(['band-scene-a-B04']);
   });
 
   it('shows pending and running states for bands that remain in the queue', async () => {
@@ -221,6 +263,15 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     expect(wrapper.vm.selectedBatchIds).toEqual(['load-a']);
     expect(wrapper.vm.selectedBandUnitIds).toEqual(['band-scene-a-B04']);
     expect(wrapper.vm.collapsedBatches.has('load-a')).toBe(false);
+  });
+
+  it('refreshes pending dataset partition drafts on request', async () => {
+    const wrapper = mountPanel();
+    await flushPromises();
+
+    await wrapper.vm.refreshAvailable({ refreshDrafts: true });
+
+    expect(wrapper.emitted('refresh-partition-drafts')).toEqual([[]]);
   });
 
   it('selects and clears all bands by scene or by dataset', async () => {

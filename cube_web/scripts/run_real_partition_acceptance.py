@@ -301,7 +301,7 @@ def probe_task_cancellation(client: HttpClient, manifest: dict[str, Any], *, pol
         "datasets": [{
             "dataset_id": dataset["dataset_id"],
             "scene_ids": [dataset["scenes"][0]["scene_id"]],
-            "partition": {"grid_type": "geohash", "requested_grid_level": 1, "partition_method": "logical", "cover_mode": "intersect", "time_granularity": "day", "max_cells_per_asset": 50},
+            "partition": {"grid_type": "geohash", "requested_grid_level": 1, "partition_method": "logical", "cover_mode": "intersect", "time_granularity": "day", "max_cells_per_asset": 0},
         }],
     }
     submitted = client.request("POST", "/v1/partition/runs", payload)
@@ -391,7 +391,7 @@ def run_quality_probe(
         "datasets": [{
             "dataset_id": dataset["dataset_id"],
             "scene_ids": [scene["scene_id"]],
-            "partition": {"grid_type": "geohash", "requested_grid_level": 1, "partition_method": "logical", "cover_mode": "intersect", "time_granularity": "day", "max_cells_per_asset": 50},
+            "partition": {"grid_type": "geohash", "requested_grid_level": 1, "partition_method": "logical", "cover_mode": "intersect", "time_granularity": "day", "max_cells_per_asset": 0},
         }],
     }
     submitted = client.request("POST", "/v1/partition/runs", payload)

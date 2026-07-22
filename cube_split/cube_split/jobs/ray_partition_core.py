@@ -488,12 +488,6 @@ def build_grid_tasks_driver(
             )
             scene_cover_cache[scene_cover_key] = cells
 
-        if max_cells_per_asset > 0 and len(cells) > max_cells_per_asset:
-            raise RuntimeError(
-                "Cover cells exceed max limit for asset %s: %d > %d"
-                % (asset.path, len(cells), max_cells_per_asset)
-            )
-
         for cell, cb in cells:
             cache_key = cell.topology_code or f"{cell.grid_type}:{cell.grid_level}:{cell.space_code}"
             cell_geom = geometry_cache.get(cache_key)

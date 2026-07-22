@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cube_web.services.ingest_worker import process_queued_ingest_scenes
+from cube_web.services.ingest_worker import _verify_partition_output, process_queued_ingest_scenes
 
 
 class _Repository:
@@ -85,3 +85,69 @@ def test_worker_never_completes_scenes_when_rs_merge_fails() -> None:
     assert process_queued_ingest_scenes(repository=repository, verifier=lambda *_args: "partition-dataset-a", executor=fail) == 0
     assert repository.completed == []
     assert repository.failed == [("run-a", "scene-a", "RS MERGE failed")]
+
+
+class _VerifyCursor:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.rows = iter((
+            {
+                "output_dataset_id": "dataset-a",
+                "scene_partition_status": "completed",
+                "scene_output_version": "geohash-output",
+            },
+            {"status": "completed"},
+            {"index_count": 1, "tile_count": 1, "grid_cell_count": 1},
+        ))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, sql, _params):
+        self.queries.append(sql)
+
+    def fetchone(self):
+        return next(self.rows)
+
+
+class _VerifyConnection:
+    def __init__(self) -> None:
+        self.cursor_value = _VerifyCursor()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def cursor(self, **_kwargs):
+        return self.cursor_value
+
+
+class _VerifyPool:
+    def __init__(self) -> None:
+        self.connection_value = _VerifyConnection()
+
+    def connection(self):
+        return self.connection_value
+
+
+class _VerifyRepository:
+    def __init__(self) -> None:
+        self.pool = _VerifyPool()
+
+
+def test_worker_accepts_completed_output_from_another_grid() -> None:
+    repository = _VerifyRepository()
+
+    output_dataset_id = _verify_partition_output(repository, {
+        "dataset_id": "dataset-a",
+        "scene_id": "scene-a",
+        "output_version": "geohash-output",
+    })
+
+    assert output_dataset_id == "dataset-a"
+    assert "current_output_version" not in repository.pool.connection_value.cursor_value.queries[0]

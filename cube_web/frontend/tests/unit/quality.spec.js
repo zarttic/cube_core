@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 const deferred = [];
 vi.mock('@/api/client', () => ({
+  request: vi.fn(),
   requestGet: vi.fn(() => new Promise((resolve) => deferred.push(resolve))),
   requestPost: vi.fn(),
   download: vi.fn(),
@@ -41,17 +42,49 @@ describe('quality store', () => {
     expect(download.mock.calls[1][0]).not.toMatch(/(?:\?|&)page=|(?:\?|&)page_size=/);
   });
 
-  it('loads the rule catalog once and exports a record without page filters', async () => {
+  it('loads the rule catalog once, drops retired rules, and exports a record without page filters', async () => {
     setActivePinia(createPinia());
     const store = useQualityStore();
     const pending = store.loadRuleCatalog();
-    deferred.at(-1)({ rule_set_version: 'rules-v1', items: [{ code: 'asset_readability', mandatory: true }] });
+    deferred.at(-1)({
+      rule_set_version: 'rules-v1',
+      items: [
+        { code: 'asset_readability', mandatory: true },
+        { code: 'product_band_contract', mandatory: true },
+        { code: 'carbon_observation_duplicates', mandatory: true },
+        { code: 'carbon_footprints', mandatory: true },
+      ],
+    });
     await pending;
     await store.loadRuleCatalog();
+    expect(store.ruleCatalog.items.map((item) => item.code)).toEqual(['asset_readability']);
     await store.exportRunErrors({ quality_run_id: 'quality-run-a', dataset_code: 'DS-A' }, 'csv');
 
     const { download, requestGet } = await import('@/api/client');
     expect(requestGet.mock.calls.filter(([url]) => url === '/v1/quality/rules')).toHaveLength(1);
     expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-a/errors/export?format=csv');
+  });
+
+  it('persists one optional rule toggle and refreshes the catalog', async () => {
+    setActivePinia(createPinia());
+    const store = useQualityStore();
+    const { request } = await import('@/api/client');
+    request.mockResolvedValue({
+      rule_set_version: 'rules-v2',
+      enabled_optional_rules: ['carbon_schema'],
+      items: [
+        { code: 'asset_readability', mandatory: true, enabled: true },
+        { code: 'carbon_schema', mandatory: false, enabled: true },
+        { code: 'carbon_footprints', mandatory: false, enabled: false },
+      ],
+    });
+
+    await store.updateRuleSetting('carbon_schema', true);
+
+    expect(request).toHaveBeenCalledWith('/v1/quality/rules/carbon_schema/enabled', {
+      method: 'PUT', body: { enabled: true },
+    });
+    expect(store.ruleCatalog.items.map((item) => item.code)).toEqual(['asset_readability', 'carbon_schema']);
+    expect(store.ruleCatalog.items[1].enabled).toBe(true);
   });
 });

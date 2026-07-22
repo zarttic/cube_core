@@ -125,6 +125,7 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
     assert ("copy_row", "snd-postgres") in calls
     assert not any(call[0] == "executemany" for call in calls)
     assert not any("ON COMMIT DROP" in str(call[1]) for call in calls if call[0] == "execute")
+    assert any("CAST(target.satellite AS VARCHAR(128))" in str(call[1]) for call in calls if call[0] == "execute")
     assert len(captured) == 1
     assert captured[0].task_name == "cube.partition.carbon.ingest"
     assert captured[0].method_name == "merge.rs_carbon_observation_fact"

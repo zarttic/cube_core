@@ -304,7 +304,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
         grid_type=args.grid_type,
         grid_level=int(args.grid_level),
         cover_mode=args.cover_mode,
-        max_cells_per_asset=int(args.max_cells_per_asset),
+        max_cells_per_asset=0,
     )
     task_rows = _prepare_product_task_rows(grid_tasks, partition_prefix_len=int(args.partition_prefix_len))
     grouped_tasks = _group_tasks_for_local_processing(task_rows)

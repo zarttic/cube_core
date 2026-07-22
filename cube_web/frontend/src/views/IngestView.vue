@@ -8,6 +8,7 @@ import StatusTag from '@/components/StatusTag.vue';
 import { useIngestRunsStore } from '@/stores/ingestRuns';
 import { formatShanghaiTime } from '@/utils/time';
 import { bandDisplayLabel, dataUnitTypeLabel } from '@/utils/bands';
+import { gridDefinition, nativeLevelLabel } from '@/utils/grid';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 
 defineProps({ embedded: Boolean, title: { type: String, default: '数据入库' } });
@@ -18,11 +19,14 @@ const manualBandUnitIds = ref([]);
 const collapsedManualDatasets = ref(new Set());
 const collapsedManualScenes = ref(new Set());
 
-function refresh() { store.pageState.page = 1; return store.loadList(); }
+async function refresh() {
+  store.pageState.page = 1;
+  await Promise.all([store.loadList(), store.loadManualCandidates()]);
+}
 function setPage(page) { store.pageState.page = page; return store.loadList(); }
 function setPageSize(pageSize) { Object.assign(store.pageState, { page: 1, pageSize }); return store.loadList(); }
 
-onMounted(() => { refresh().catch(() => {}); store.loadManualCandidates().catch(() => {}); });
+onMounted(() => { refresh().catch(() => {}); });
 onUnmounted(() => store.dispose());
 
 const selectedCollection = computed(() => store.manualCandidates.find((item) => item.partition_run_id === manualCollectionId.value));
@@ -37,21 +41,29 @@ const manualDatasetGroups = computed(() => {
       dataset_code: unit.dataset_code,
       dataset_title: unit.dataset_title,
       data_type: unit.data_type,
+      grid_configs: new Map(),
       scenes: new Map(),
     };
     const scene = dataset.scenes.get(unit.scene_id) || {
       scene_id: unit.scene_id,
       scene_key: unit.scene_key,
+      grid_configs: new Map(),
       bands: [],
     };
+    const configKey = `${unit.grid_type}:${unit.grid_level}`;
+    const config = { grid_type: unit.grid_type, grid_level: unit.grid_level };
+    dataset.grid_configs.set(configKey, config);
+    scene.grid_configs.set(configKey, config);
     scene.bands.push(unit);
     dataset.scenes.set(unit.scene_id, scene);
     datasets.set(unit.dataset_id, dataset);
   });
   return [...datasets.values()].map((dataset) => ({
     ...dataset,
+    grid_configs: [...dataset.grid_configs.values()],
     scenes: [...dataset.scenes.values()].map((scene) => ({
       ...scene,
+      grid_configs: [...scene.grid_configs.values()],
       bands: scene.bands.sort((left, right) => Number(left.display_order || 0) - Number(right.display_order || 0)),
     })),
   }));
@@ -93,6 +105,29 @@ function manualBandLabel(unit) {
   return bandDisplayLabel(unit);
 }
 
+function gridConfigLabel(configs = []) {
+  return configs.filter(Boolean).map((config) => {
+    const gridType = config.grid_type;
+    const rawLevel = config.grid_level;
+    const grid = gridDefinition(gridType)?.label || gridType;
+    return grid ? `${grid} · ${nativeLevelLabel(gridType, rawLevel)}` : '';
+  }).filter(Boolean).join('；') || '格网信息缺失';
+}
+
+function collectionGridLabel(collection) {
+  const configs = collection?.grid_configs?.length
+    ? collection.grid_configs
+    : [...new Map((collection?.units || []).map((unit) => [
+      `${unit.grid_type}:${unit.grid_level}`,
+      { grid_type: unit.grid_type, grid_level: unit.grid_level },
+    ])).values()];
+  return gridConfigLabel(configs);
+}
+
+function unitGridLabel(unit) {
+  return gridConfigLabel([{ grid_type: unit.grid_type, grid_level: unit.grid_level }]);
+}
+
 function changeManualCollection() {
   manualBandUnitIds.value = [];
   collapsedManualDatasets.value = new Set();
@@ -129,7 +164,7 @@ async function openManualIngest(partitionRunId = '') {
       <div v-else-if="!store.manualCandidates.length" class="pending-state">暂无满足入库条件的剖分批次数据集合</div>
       <div v-else class="pending-ingest-list">
         <div v-for="collection in store.manualCandidates" :key="collection.partition_run_id" class="pending-ingest-row">
-          <div class="run-cell"><strong>{{ collection.partition_run_id }}</strong><span>{{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count - collection.ingested_count }} 个波段待入库</span></div>
+          <div class="run-cell"><strong>{{ collection.partition_run_id }}</strong><span>{{ collectionGridLabel(collection) }} · {{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count - collection.ingested_count }} 个波段待入库</span></div>
           <el-button type="primary" size="small" @click="openManualIngest(collection.partition_run_id)">选择数据入库</el-button>
         </div>
       </div>
@@ -164,16 +199,16 @@ async function openManualIngest(partitionRunId = '') {
     <el-dialog v-model="manualDialogVisible" title="手动入库" width="760px" append-to-body>
       <el-form label-width="92px" @submit.prevent="submitManualIngest">
         <el-form-item label="剖分集合"><el-select v-model="manualCollectionId" filterable clearable :loading="store.manualCandidatesLoading" placeholder="选择剖分批次数据集合" style="width: 100%" @change="changeManualCollection">
-          <el-option v-for="collection in store.manualCandidates" :key="collection.partition_run_id" :label="collection.partition_run_id" :value="collection.partition_run_id"><span>{{ collection.partition_run_id }}</span><small class="candidate-meta">{{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count }} 个质检通过</small></el-option>
+          <el-option v-for="collection in store.manualCandidates" :key="collection.partition_run_id" :label="collection.partition_run_id" :value="collection.partition_run_id"><span>{{ collection.partition_run_id }}</span><small class="candidate-meta">{{ collectionGridLabel(collection) }} · {{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count }} 个质检通过</small></el-option>
         </el-select></el-form-item>
         <el-form-item v-if="selectedCollection" label="入库数据">
           <div class="manual-ingest-tree" data-testid="manual-ingest-tree">
-            <div class="manual-tree-summary">{{ manualDatasetGroups.length }} 个数据集 · {{ selectableManualUnits.length }} 个可入库波段 · 已选 {{ manualBandUnitIds.length }} 个波段</div>
+            <div class="manual-tree-summary">{{ collectionGridLabel(selectedCollection) }} · {{ manualDatasetGroups.length }} 个数据集 · {{ selectableManualUnits.length }} 个可入库波段 · 已选 {{ manualBandUnitIds.length }} 个波段</div>
             <section v-for="dataset in manualDatasetGroups" :key="dataset.dataset_id" class="manual-dataset-tree">
               <div class="manual-tree-header-row">
                 <button type="button" class="manual-tree-header" :aria-expanded="!collapsedManualDatasets.has(dataset.dataset_id)" @click="toggleManualDataset(dataset.dataset_id)">
                   <el-icon><Collection /></el-icon>
-                  <span><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><small>{{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + scene.bands.length, 0) }} 个波段</small></span>
+                  <span><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><small>{{ gridConfigLabel(dataset.grid_configs) }} · {{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + scene.bands.length, 0) }} 个波段</small></span>
                 </button>
                 <el-checkbox
                   class="manual-select-all"
@@ -188,7 +223,7 @@ async function openManualIngest(partitionRunId = '') {
                 <section v-for="scene in dataset.scenes" :key="scene.scene_id" class="manual-scene-tree">
                   <div class="manual-scene-header-row">
                     <button type="button" class="manual-scene-header" :aria-expanded="!collapsedManualScenes.has(`${dataset.dataset_id}:${scene.scene_id}`)" @click="toggleManualScene(dataset, scene)">
-                      <el-icon><Picture /></el-icon><span>{{ scene.scene_key || scene.scene_id }}</span>
+                      <el-icon><Picture /></el-icon><span>{{ scene.scene_key || scene.scene_id }}<small>{{ gridConfigLabel(scene.grid_configs) }}</small></span>
                     </button>
                     <el-checkbox
                       class="manual-select-all"
@@ -201,7 +236,7 @@ async function openManualIngest(partitionRunId = '') {
                   </div>
                   <el-checkbox-group v-show="!collapsedManualScenes.has(`${dataset.dataset_id}:${scene.scene_id}`)" v-model="manualBandUnitIds" class="manual-band-list">
                     <el-checkbox v-for="unit in scene.bands" :key="unit.band_unit_id" :value="unit.band_unit_id" :data-testid="`manual-ingest-band-${unit.band_unit_id}`">
-                      <span class="manual-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ manualBandLabel(unit) }}</span>
+                      <span class="manual-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }} · {{ unitGridLabel(unit) }}</small>{{ manualBandLabel(unit) }}</span>
                     </el-checkbox>
                   </el-checkbox-group>
                 </section>
@@ -262,6 +297,8 @@ async function openManualIngest(partitionRunId = '') {
 .manual-scene-list { padding: 0 12px 10px 38px; }
 .manual-scene-tree + .manual-scene-tree { margin-top: 8px; }
 .manual-scene-header { padding: 5px 0; font-size: 13px; }
+.manual-scene-header span { display: flex; flex-direction: column; gap: 1px; }
+.manual-scene-header small { color: #8993a4; font-size: 11px; }
 .manual-scene-header .el-icon { color: #748095; }
 .manual-select-all { flex: none; margin-left: auto; }
 .manual-band-list { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 4px 0 0 24px; }

@@ -474,6 +474,7 @@ def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
     assert first_attempt is not None
     assert first_attempt["status"] == "manual_required"
     assert first_attempt["runner_result"]["status"] == "partial_failure"
+    assert first_attempt["error_message"] == "temporary radar failure"
     assert store.get_batch("batch-01")["status"] == "manual_required"
     assert {asset["data_type"]: asset["status"] for asset in store.list_assets("batch-01")} == {
         "optical": "succeeded",

@@ -7,8 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from cube_web.routes.auth import current_actor
-from cube_web.schemas import ManualQualityRunRequest
+from cube_web.routes.auth import current_actor, require_admin
+from cube_web.schemas import ManualQualityRunRequest, QualityRuleEnabledUpdate, QualityRuleSettingsUpdate
+from cube_web.services.config_store import (
+    get_enabled_optional_quality_rules,
+    set_enabled_optional_quality_rules,
+    set_optional_quality_rule_enabled,
+)
 from cube_web.services.quality_contracts import Page, QualityErrorFilter, page_offset, validate_sort
 from cube_web.services.quality_export import stream_quality_errors
 from cube_web.services.quality_repository import (
@@ -22,8 +27,40 @@ from cube_web.services.quality_repository import (
     list_quality_runs,
     require_open_gauss_domain_store,
 )
-from cube_web.services.quality_rules import DEFAULT_RULE_SET_VERSION, RULE_DESCRIPTIONS, default_rule_registry
+from cube_web.services.quality_rules import (
+    DEFAULT_RULE_SET_VERSION,
+    RULE_DESCRIPTIONS,
+    default_rule_registry,
+    is_rule_enabled,
+)
 from cube_web.services.quality_run_service import request_manual_quality_run
+
+
+def _enabled_optional_rules() -> tuple[str, ...]:
+    return get_enabled_optional_quality_rules()
+
+
+def _rule_catalog_payload() -> dict:
+    enabled = set(_enabled_optional_rules())
+    registry = default_rule_registry()
+    return {
+        "rule_set_version": DEFAULT_RULE_SET_VERSION,
+        "enabled_optional_rules": list(enabled),
+        "items": [
+            {
+                "code": rule.code,
+                "name": rule.name,
+                "description": RULE_DESCRIPTIONS.get(rule.code, ""),
+                "mandatory": rule.mandatory,
+                "toggleable": not rule.mandatory,
+                "enabled": is_rule_enabled(rule, enabled_optional_rules=enabled),
+                "applicability": dict(rule.applicability),
+                "parameters": dict(rule.parameters),
+                "implementation_version": rule.implementation_version,
+            }
+            for rule in registry.all()
+        ],
+    }
 
 
 def create_quality_router() -> APIRouter:
@@ -31,21 +68,43 @@ def create_quality_router() -> APIRouter:
 
     @router.get("/rules")
     def list_rules() -> dict:
-        return {
-            "rule_set_version": DEFAULT_RULE_SET_VERSION,
-            "items": [
-                {
-                    "code": rule.code,
-                    "name": rule.name,
-                    "description": RULE_DESCRIPTIONS.get(rule.code, ""),
-                    "mandatory": rule.mandatory,
-                    "applicability": dict(rule.applicability),
-                    "parameters": dict(rule.parameters),
-                    "implementation_version": rule.implementation_version,
-                }
-                for rule in default_rule_registry().all()
-            ],
-        }
+        return _rule_catalog_payload()
+
+    @router.put("/rules/settings")
+    def update_rule_settings(payload: QualityRuleSettingsUpdate, request: Request) -> dict:
+        require_admin(current_actor(request))
+        try:
+            enabled = set_enabled_optional_quality_rules(payload.enabled_optional_rules)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_rule_settings", "message": str(exc)}) from exc
+        catalog = _rule_catalog_payload()
+        catalog["enabled_optional_rules"] = list(enabled)
+        # Recompute enabled flags from the just-saved list in case catalog read races.
+        enabled_set = set(enabled)
+        catalog["items"] = [
+            {
+                **item,
+                "enabled": bool(item["mandatory"] or item["code"] in enabled_set),
+            }
+            for item in catalog["items"]
+        ]
+        return catalog
+
+    @router.put("/rules/{rule_code}/enabled")
+    def update_rule_enabled(rule_code: str, payload: QualityRuleEnabledUpdate, request: Request) -> dict:
+        require_admin(current_actor(request))
+        try:
+            enabled = set_optional_quality_rule_enabled(rule_code, payload.enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_rule_settings", "message": str(exc)}) from exc
+        catalog = _rule_catalog_payload()
+        enabled_set = set(enabled)
+        catalog["enabled_optional_rules"] = list(enabled)
+        catalog["items"] = [
+            {**item, "enabled": bool(item["mandatory"] or item["code"] in enabled_set)}
+            for item in catalog["items"]
+        ]
+        return catalog
 
     @router.get("/records")
     def list_records(

@@ -235,10 +235,10 @@ def upsert_carbon_facts_postgres(conn: Any, rows: list[CarbonObservationFact]) -
         MERGE INTO rs_carbon_observation_fact target
         USING tmp_carbon_observation_fact source
         ON (
-          target.satellite = source.satellite
-          AND target.observation_id = source.observation_id
-          AND target.product_type = source.product_type
-          AND target.cube_version = source.cube_version
+          CAST(target.satellite AS VARCHAR(128)) = CAST(source.satellite AS VARCHAR(128))
+          AND CAST(target.observation_id AS VARCHAR(256)) = CAST(source.observation_id AS VARCHAR(256))
+          AND CAST(target.product_type AS VARCHAR(128)) = CAST(source.product_type AS VARCHAR(128))
+          AND CAST(target.cube_version AS VARCHAR(128)) = CAST(source.cube_version AS VARCHAR(128))
         )
         WHEN MATCHED THEN UPDATE SET
           acq_time = source.acq_time,

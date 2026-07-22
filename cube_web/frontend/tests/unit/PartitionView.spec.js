@@ -77,9 +77,10 @@ describe('PartitionView map workspace', () => {
 
     await flushPromises();
     expect(wrapper.get('[data-testid="draft"]').text()).toBe('山东光学剖分批次');
-    await wrapper.get('[data-testid="draft"]').trigger('click');
+    wrapper.vm.queueManagedPartition(draft);
     expect(wrapper.vm.activeDraftId).toBe(draft.draft_id);
-    expect(wrapper.get('[data-testid="draft"]').exists()).toBe(true);
+    expect(wrapper.vm.datasetDrawerVisible).toBe(true);
+    expect(usePartitionStore().form.datasets).toEqual(draft.selection.datasets);
   });
 
   it('splits a slightly out-of-bounds global product extent for Cesium', () => {
@@ -205,7 +206,7 @@ describe('PartitionView map workspace', () => {
     await flushPromises();
 
     expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/footprints', expect.objectContaining({
-      source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'], limit: 2000,
+      source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'],
     }));
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
   });

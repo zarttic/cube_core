@@ -71,6 +71,19 @@ def test_pass_creates_band_level_requests_for_completed_current_output_only() ->
     assert requests[0].scenes[0].quality_run_id == "quality-a"
 
 
+def test_manual_ingest_accepts_a_quality_approved_noncurrent_grid_output() -> None:
+    requests = plan_ingest_requests(
+        quality_run_id="quality-a",
+        quality_status="pass",
+        dataset=_dataset(output="mgrs-output"),
+        partition_scenes=(_scene("scene-geohash", output="geohash-output"),),
+        manual=True,
+    )
+
+    assert len(requests) == 1
+    assert requests[0].scenes[0].output_version == "geohash-output"
+
+
 def test_ingest_request_creates_one_request_per_band_unit() -> None:
     requests = _plan(
         "pass",

@@ -16,7 +16,7 @@ const props = defineProps({
   partitionDrafts: { type: Array, default: () => [] },
   activePartitionDraftId: { type: String, default: '' },
 });
-const emit = defineEmits(['update:modelValue', 'activate-partition-draft']);
+const emit = defineEmits(['update:modelValue', 'activate-partition-draft', 'refresh-partition-drafts']);
 const loading = ref(false);
 const error = ref('');
 const availableBatches = ref([]);
@@ -199,6 +199,8 @@ function mergeBatchDatasets(responses) {
       }
       (dataset.scenes || []).forEach((scene) => {
         const queueBatch = queueBatches.value.find((batch) => batch.load_batch_id === batchId);
+        const draftSourceBatchIds = queueBatch?.partition_draft?.source_load_batch_ids || [];
+        const sourceBatchIdsForResponse = queueBatch?.partition_draft ? draftSourceBatchIds : [batchId];
         const prior = existing.scenes.get(scene.scene_id);
         if (prior && prior.dataset_id && scene.dataset_id && prior.dataset_id !== scene.dataset_id) {
           throw new Error(`数据单元 ${scene.scene_id} 在不同数据集中重复出现。`);
@@ -206,11 +208,14 @@ function mergeBatchDatasets(responses) {
         const sourceBatchIds = [...new Set([
           ...sceneSourceBatchIds(prior),
           ...sceneSourceBatchIds(scene),
-          batchId,
+          ...sourceBatchIdsForResponse,
         ])];
         const sourceLoadStatuses = {
           ...(prior?.source_load_statuses || {}),
-          [batchId]: queueBatch?.partition_draft ? 'succeeded' : (scene.load_status || scene.status || 'pending'),
+          ...Object.fromEntries(sourceBatchIdsForResponse.map((sourceBatchId) => [
+            sourceBatchId,
+            queueBatch?.partition_draft ? 'succeeded' : (scene.load_status || scene.status || 'pending'),
+          ])),
         };
         const eligibleSourceBatchIds = sourceBatchIds.filter((sourceBatchId) => (
           ['succeeded', 'duplicate'].includes(sourceLoadStatuses[sourceBatchId])
@@ -306,16 +311,18 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
       ? new Set(sceneKeys.filter((key) => !priorSceneKeys.has(key) || priorCollapsedScenes.has(key)))
       : new Set(sceneKeys);
     const bands = availableDatasets.value.flatMap((dataset) => dataset.scenes.flatMap((scene) => (
-      bandsFor(scene, dataset.data_type).map((band) => ({ ...band, scene_id: scene.scene_id }))
+      bandsFor(scene, dataset.data_type).map((band) => ({
+        ...band, scene_id: scene.scene_id, target_partition: targetPartition(dataset),
+      }))
     )));
     const availableBandUnitIds = new Set(bands
-      .filter((band) => !bandConsumedByLoadBatch(band))
+      .filter((band) => !bandConsumedByLoadBatch(band, band.target_partition))
       .map((band) => band.band_unit_id)
       .filter(Boolean));
     if (!selectedBandUnitIds.value.length && selectedSceneIds.value.length) {
       const legacySceneIds = new Set(selectedSceneIds.value);
       selectedBandUnitIds.value = bands
-        .filter((band) => legacySceneIds.has(band.scene_id) && band.band_unit_id && !bandConsumedByLoadBatch(band))
+        .filter((band) => legacySceneIds.has(band.scene_id) && band.band_unit_id && !bandConsumedByLoadBatch(band, band.target_partition))
         .map((band) => band.band_unit_id);
     } else {
       selectedBandUnitIds.value = selectedBandUnitIds.value.filter((bandUnitId) => availableBandUnitIds.has(bandUnitId));
@@ -394,6 +401,7 @@ function updateBandSelection(bandUnitIds) {
       crs: dataset.crs ?? null,
       suggested_grid_type: dataset.suggested_grid_type ?? null,
       suggested_grid_levels: dataset.suggested_grid_levels ?? {},
+      grid_config_locked: existing?.grid_config_locked === true,
       grid_level_unlocked: existing?.grid_level_unlocked === true,
       selection_source: existing?.selection_source || dataset.selection_source || 'load_batch',
       scenes,
@@ -421,14 +429,19 @@ function bandsFor(scene, dataType) {
   return sceneBands(scene, dataType);
 }
 
-function ingestedGridStatus(band) {
+function ingestedGridStatus(band, partition = null) {
   return (band.grid_statuses || []).find((status) => (
-    status.partition_status === 'completed' && status.ingest_status === 'completed'
+    status.partition_status === 'completed'
+    && status.ingest_status === 'completed'
+    && (!partition || (
+      status.grid_type === partition.grid_type
+      && Number(status.grid_level) === Number(partition.requested_grid_level)
+    ))
   )) || null;
 }
 
-function ingestedGridLabel(band) {
-  return gridStatusLabel(ingestedGridStatus(band));
+function ingestedGridLabel(band, partition = null) {
+  return gridStatusLabel(ingestedGridStatus(band, partition));
 }
 
 function gridStatusLabel(status) {
@@ -437,10 +450,21 @@ function gridStatusLabel(status) {
   return `${definition?.label || status.grid_type} · 层级 ${Number(status.grid_level)}`;
 }
 
-function bandStatusLabel(band) {
+function partitionGridLabel(partition) {
+  if (!partition) return '';
+  const definition = gridDefinition(partition.grid_type);
+  return definition ? `${definition.label} · 层级 ${Number(partition.requested_grid_level)}` : '';
+}
+
+function bandStatusLabel(band, partition = null) {
   const statuses = band.grid_statuses || [];
-  const status = statuses.find((item) => item.ingest_status === 'completed') || statuses[0];
-  if (!status) return '待剖分';
+  const status = partition
+    ? statuses.find((item) => item.grid_type === partition.grid_type && Number(item.grid_level) === Number(partition.requested_grid_level))
+    : statuses.find((item) => item.ingest_status === 'completed') || statuses[0];
+  if (!status) {
+    const gridLabel = partitionGridLabel(partition);
+    return gridLabel ? `待剖分 · ${gridLabel}` : '待剖分';
+  }
   const gridLabel = gridStatusLabel(status);
   const withGrid = (label) => gridLabel ? `${label} · ${gridLabel}` : label;
   if (status.ingest_status === 'completed') return withGrid('已入库');
@@ -457,8 +481,8 @@ function bandStatusLabel(band) {
   return withGrid('待剖分');
 }
 
-function bandStatusClass(band) {
-  const label = bandStatusLabel(band);
+function bandStatusClass(band, partition = null) {
+  const label = bandStatusLabel(band, partition);
   if (label === '已入库' || label.startsWith('已入库 ·')) return 'status-complete';
   if (label.includes('失败') || label === '质检未通过') return 'status-failed';
   if (label === '待入库') return 'status-ready';
@@ -466,14 +490,19 @@ function bandStatusClass(band) {
   return 'status-pending';
 }
 
-function bandConsumedByLoadBatch(band) {
-  return Boolean(ingestedGridStatus(band));
+function bandConsumedByLoadBatch(band, partition = null) {
+  return Boolean(ingestedGridStatus(band, partition));
+}
+
+function targetPartition(dataset) {
+  return selectedDatasetsById.value.get(dataset?.dataset_id)?.partition || dataset?.partition || null;
 }
 
 function selectableBandIdsForScene(scene, dataType, dataset = null) {
   if (!eligibleScene(scene)) return [];
+  const partition = targetPartition(dataset);
   return bandsFor(scene, dataType)
-    .filter((band) => band.band_unit_id && band.contract_errors.length === 0 && (!dataset || !bandConsumedByLoadBatch(band)))
+    .filter((band) => band.band_unit_id && band.contract_errors.length === 0 && (!dataset || !bandConsumedByLoadBatch(band, partition)))
     .map((band) => band.band_unit_id);
 }
 
@@ -513,7 +542,16 @@ function gridLevelLocked(datasetId) {
     && selectedDatasetsById.value.get(datasetId)?.grid_level_unlocked !== true;
 }
 
+function isGridConfigLocked(dataset) {
+  return dataset?.grid_config_locked === true || dataset?.selection_source === 'dataset';
+}
+
+function gridConfigLocked(datasetId) {
+  return isGridConfigLocked(selectedDatasetsById.value.get(datasetId));
+}
+
 function unlockGridLevel(datasetId) {
+  if (gridConfigLocked(datasetId)) return;
   if (!props.modelValue.some((dataset) => dataset.dataset_id === datasetId)) return;
   emit('update:modelValue', props.modelValue.map((dataset) => ({ ...dataset, grid_level_unlocked: true })));
 }
@@ -525,6 +563,7 @@ function levelOptions(gridType) {
 }
 
 function updatePartition(datasetId, patch) {
+  if (props.modelValue.some(isGridConfigLocked)) return;
   const sourceDataset = props.modelValue.find((dataset) => dataset.dataset_id === datasetId);
   if (!sourceDataset) return;
   let sharedPatch = { ...patch };
@@ -550,7 +589,8 @@ function eligibleScene(scene) {
     : ['succeeded', 'duplicate'].includes(scene.load_status || 'succeeded');
 }
 
-function refreshAvailable() {
+function refreshAvailable({ refreshDrafts = false } = {}) {
+  if (refreshDrafts) emit('refresh-partition-drafts');
   return loadAvailable({ preserveSelection: true, preserveExpansion: true });
 }
 
@@ -569,7 +609,7 @@ onBeforeUnmount(() => {
   <section class="partition-data-list">
     <div class="partition-drawer-heading">
       <h3>{{ dataTypeLabel || '' }}待剖分数据</h3>
-      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="Refresh" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable" /></div>
+      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="Refresh" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable({ refreshDrafts: true })" /></div>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 
@@ -621,19 +661,20 @@ onBeforeUnmount(() => {
                 <el-select
                   :data-testid="`dataset-grid-${dataset.dataset_id}`"
                   :model-value="partitionFor(dataset).grid_type"
+                  :disabled="gridConfigLocked(dataset.dataset_id)"
                   @update:model-value="updatePartition(dataset.dataset_id, { grid_type: $event })"
                 >
                   <el-option v-for="grid in gridDefinitions" :key="grid.value" :label="grid.label" :value="grid.value" />
                 </el-select>
                 <el-select
                   :data-testid="`dataset-grid-level-${dataset.dataset_id}`"
-                  :disabled="gridLevelLocked(dataset.dataset_id)"
+                  :disabled="gridConfigLocked(dataset.dataset_id) || gridLevelLocked(dataset.dataset_id)"
                   :model-value="Number(partitionFor(dataset).requested_grid_level)"
                   @update:model-value="updatePartition(dataset.dataset_id, { requested_grid_level: Number($event) })"
                 >
                   <el-option v-for="level in levelOptions(partitionFor(dataset).grid_type)" :key="level" :label="nativeLevelLabel(partitionFor(dataset).grid_type, level)" :value="level" />
                 </el-select>
-                <el-tooltip v-if="gridLevelLocked(dataset.dataset_id)" content="解锁格网层级" placement="top">
+                <el-tooltip v-if="gridLevelLocked(dataset.dataset_id) && !gridConfigLocked(dataset.dataset_id)" content="解锁格网层级" placement="top">
                   <el-button :data-testid="`unlock-grid-level-${dataset.dataset_id}`" :icon="Unlock" aria-label="解锁格网层级" @click="unlockGridLevel(dataset.dataset_id)" />
                 </el-tooltip>
               </div>
@@ -666,10 +707,10 @@ onBeforeUnmount(() => {
                     v-for="(band, bandIndex) in bandsFor(scene, dataset.data_type)"
                     :key="`${scene.scene_id}-${band.band_unit_id || band.band_code || 'invalid'}-${band.display_order}-${bandIndex}`"
                     :value="band.band_unit_id"
-                    :disabled="!eligibleScene(scene) || !band.band_unit_id || band.contract_errors.length > 0 || bandConsumedByLoadBatch(band)"
+                    :disabled="!eligibleScene(scene) || !band.band_unit_id || band.contract_errors.length > 0 || bandConsumedByLoadBatch(band, targetPartition(dataset))"
                     :data-testid="band.band_unit_id ? `band-unit-${band.band_unit_id}` : undefined"
                   >
-                    <span class="scene-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ bandDisplayLabel(band) }}<em :class="bandStatusClass(band)">{{ bandStatusLabel(band) }}</em></span>
+                    <span class="scene-band-chip"><small>{{ dataUnitTypeLabel(dataset.data_type) }}</small>{{ bandDisplayLabel(band) }}<em :class="bandStatusClass(band, targetPartition(dataset))">{{ bandStatusLabel(band, targetPartition(dataset)) }}</em></span>
                   </el-checkbox>
                 </el-checkbox-group>
                   <small v-if="!bandsFor(scene, dataset.data_type).length" class="band-missing">波段信息未登记</small>

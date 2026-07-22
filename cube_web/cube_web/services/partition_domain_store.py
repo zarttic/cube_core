@@ -402,14 +402,6 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
                     "grid_cells": output["grid_cell_count"],
                 }
                 dataset = self.datasets[dataset_id]
-                old = dataset.get("current_output_version")
-                if (
-                    old
-                    and old != version
-                    and (dataset_id, old) in self.outputs
-                    and self.outputs[(dataset_id, old)]["status"] == "completed"
-                ):
-                    self.outputs[(dataset_id, old)]["status"] = "superseded"
                 dataset.update(
                     {
                         "current_output_version": version,
@@ -1426,11 +1418,6 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 connection,
                 "UPDATE partition_output_versions SET status = 'completed', completed_at = now(), tile_count = %s, index_count = %s, grid_cell_count = %s, counts = %s::jsonb WHERE dataset_id = %s AND output_version = %s",
                 (counts["tiles"], counts["indexes"], counts["grid_cells"], json.dumps(counts), dataset_id, version),
-            )
-            self._execute(
-                connection,
-                "UPDATE partition_output_versions SET status = 'superseded' WHERE dataset_id = %s AND status = 'completed' AND output_version <> %s",
-                (dataset_id, version),
             )
             self._execute(
                 connection,

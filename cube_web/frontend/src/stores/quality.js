@@ -1,9 +1,10 @@
 import { reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 
-import { download, requestGet, requestPost } from '@/api/client';
+import { download, request, requestGet, requestPost } from '@/api/client';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
+import { filterActiveQualityRules } from '@/utils/qualityLabels';
 
 function emptyDetail() {
   return null;
@@ -46,6 +47,7 @@ export const useQualityStore = defineStore('quality', () => {
   const rerunning = ref(false);
   const ruleCatalog = ref(null);
   const ruleCatalogLoading = ref(false);
+  const ruleCatalogSaving = ref(false);
   const listScope = createRequestScope();
   const detailScope = createRequestScope();
   const resultsScope = createRequestScope();
@@ -103,15 +105,35 @@ export const useQualityStore = defineStore('quality', () => {
     }
   }
 
-  async function loadRuleCatalog() {
-    if (ruleCatalog.value) return ruleCatalog.value;
+  async function loadRuleCatalog({ force = false } = {}) {
+    if (ruleCatalog.value && !force) return ruleCatalog.value;
     ruleCatalogLoading.value = true;
     try {
       const response = await requestGet('/v1/quality/rules');
-      ruleCatalog.value = response;
-      return response;
+      ruleCatalog.value = {
+        ...response,
+        items: filterActiveQualityRules(response?.items || []),
+      };
+      return ruleCatalog.value;
     } finally {
       ruleCatalogLoading.value = false;
+    }
+  }
+
+  async function updateRuleSetting(ruleCode, enabled) {
+    ruleCatalogSaving.value = true;
+    try {
+      const response = await request(`/v1/quality/rules/${encodeURIComponent(ruleCode)}/enabled`, {
+        method: 'PUT',
+        body: { enabled },
+      });
+      ruleCatalog.value = {
+        ...response,
+        items: filterActiveQualityRules(response?.items || []),
+      };
+      return ruleCatalog.value;
+    } finally {
+      ruleCatalogSaving.value = false;
     }
   }
 
@@ -289,7 +311,9 @@ export const useQualityStore = defineStore('quality', () => {
     rerunning,
     ruleCatalog,
     ruleCatalogLoading,
+    ruleCatalogSaving,
     loadList,
+    updateRuleSetting,
     openDetail,
     loadResults,
     loadErrors,

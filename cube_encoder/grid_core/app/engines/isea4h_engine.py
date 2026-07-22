@@ -5,7 +5,6 @@ No H3 or DGGRID imports at runtime.
 """
 from __future__ import annotations
 
-import time
 from collections import deque
 from collections.abc import Iterator
 
@@ -33,9 +32,6 @@ from grid_core.app.utils.geometry import normalize_ring_longitudes
 
 _LEVEL_MIN = 0
 _LEVEL_MAX = 15
-_MAX_CANDIDATE_CELLS = 500_000
-_MAX_OUTPUT_CELLS = 100_000
-_MAX_COVER_SECONDS = 30.0
 _GRID_TYPE = "isea4h"
 _WGS84_BOUNDS = box(-180.0, -90.0, 180.0, 90.0)
 _INDEXED_LEVEL_MAX_CELLS = 200_000
@@ -231,8 +227,6 @@ class ISEA4HEngine(BaseGridEngine):
         if cover_mode == CoverMode.MINIMAL.value and is_global_target:
             return [(seqnum, 0) for seqnum in range(1, cell_count(0) + 1)]
 
-        deadline = time.monotonic() + _MAX_COVER_SECONDS
-        visited_count = 0
         shape_cache: dict[tuple[int, int], object] = {}
 
         def cached_cell_shape(seqnum: int, level: int):
@@ -295,19 +289,10 @@ class ISEA4HEngine(BaseGridEngine):
             )
 
         def intersecting_cells(search_target: object, level: int) -> Iterator[tuple[int, object]]:
-            nonlocal visited_count
             search_variants = longitude_variants(search_target)
             candidates = indexed_candidates(search_target, level)
             if candidates is not None:
                 for seqnum in sorted(candidates):
-                    visited_count += 1
-                    if visited_count > _MAX_CANDIDATE_CELLS:
-                        raise ValidationError(
-                            f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
-                            f"limit={_MAX_CANDIDATE_CELLS}, observed={visited_count}"
-                        )
-                    if time.monotonic() > deadline:
-                        raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
                     cell = cached_cell_shape(seqnum, level)
                     if intersects_area(cell, search_variants):
                         yield seqnum, cell
@@ -323,14 +308,6 @@ class ISEA4HEngine(BaseGridEngine):
                 if seqnum in visited:
                     continue
                 visited.add(seqnum)
-                visited_count += 1
-                if visited_count > _MAX_CANDIDATE_CELLS:
-                    raise ValidationError(
-                        f"ISEA4H cover exceeded MAX_CANDIDATE_CELLS: "
-                        f"limit={_MAX_CANDIDATE_CELLS}, observed={visited_count}"
-                    )
-                if time.monotonic() > deadline:
-                    raise ValidationError(f"ISEA4H cover exceeded MAX_COVER_SECONDS: limit={_MAX_COVER_SECONDS}")
                 cell = cached_cell_shape(seqnum, level)
                 if not intersects_area(cell, search_variants):
                     continue
@@ -344,11 +321,6 @@ class ISEA4HEngine(BaseGridEngine):
 
         def append_output(seqnum: int, level: int) -> None:
             output.append((seqnum, level))
-            if len(output) > _MAX_OUTPUT_CELLS:
-                raise ValidationError(
-                    f"ISEA4H cover exceeded MAX_OUTPUT_CELLS: "
-                    f"limit={_MAX_OUTPUT_CELLS}, observed={len(output)}"
-                )
 
         remaining = target
         if cover_mode == CoverMode.MINIMAL.value:

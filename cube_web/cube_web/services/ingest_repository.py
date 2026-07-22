@@ -407,7 +407,7 @@ class OpenGaussIngestRepository:
                        prs.scene_id, s.scene_key, prs.dataset_id, prs.output_version, g.band_unit_id,
                        d.dataset_code, d.dataset_title, d.data_type,
                        sb.band_code, sb.band_name, sb.band_type, sb.unit, sb.display_order,
-                       g.quality_status,
+                       g.grid_type, g.grid_level, g.quality_status,
                        irs.status AS ingest_status
                 FROM partition_runs pr
                 JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
@@ -443,6 +443,7 @@ class OpenGaussIngestRepository:
                 "band_code": row["band_code"], "band_name": row["band_name"],
                 "band_type": row["band_type"], "unit": row["unit"],
                 "display_order": row["display_order"],
+                "grid_type": row["grid_type"], "grid_level": row["grid_level"],
                 "quality_status": row["quality_status"],
                 "ingest_status": row["ingest_status"],
             })
@@ -453,6 +454,12 @@ class OpenGaussIngestRepository:
                 dataset_count=len({unit["dataset_id"] for unit in units}),
                 scene_count=len({unit["scene_id"] for unit in units}),
                 band_count=len(units),
+                grid_configs=[
+                    {"grid_type": grid_type, "grid_level": grid_level}
+                    for grid_type, grid_level in sorted(
+                        {(str(unit["grid_type"]), int(unit["grid_level"])) for unit in units if unit["grid_type"] is not None},
+                    )
+                ],
                 quality_pass_count=sum(unit["quality_status"] in {"pass", "warn"} for unit in units),
                 ingested_count=sum(unit["ingest_status"] == "completed" for unit in units),
             )

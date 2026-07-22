@@ -1300,16 +1300,12 @@ def run_entity_partition(args: argparse.Namespace) -> dict[str, Any]:
 
     grid_level = int(getattr(args, "grid_level", 6) or 6)
     validate_requested_grid_level(grid_type, grid_level)
-    max_cells_per_asset = int(getattr(args, "max_cells_per_asset", 0) or 0)
-    if max_cells_per_asset < 0:
-        raise ValueError("max_cells_per_asset must be greater than or equal to 0")
-
     grid_tasks = build_grid_tasks_driver(
         assets=assets,
         grid_type=grid_type,
         grid_level=grid_level,
         cover_mode=args.cover_mode,
-        max_cells_per_asset=max_cells_per_asset,
+        max_cells_per_asset=0,
     )
     grid_tasks = _ensure_center_cell_tasks(assets, grid_tasks, grid_type, grid_level, args.cover_mode)
     if not grid_tasks:

@@ -5,7 +5,13 @@ from zoneinfo import ZoneInfo
 
 from cube_web.services.quality_contracts import QualityResult
 from cube_web.services.quality_object_reader import AssetInspection
-from cube_web.services.quality_rules import RuleContext, default_rule_registry, reduce_quality_status, snapshot_rules
+from cube_web.services.quality_rules import (
+    RuleContext,
+    default_enabled_optional_rules,
+    default_rule_registry,
+    reduce_quality_status,
+    snapshot_rules,
+)
 
 
 def _result(status: str) -> QualityResult:
@@ -63,7 +69,7 @@ def test_snapshot_contains_every_interpretive_field() -> None:
     assert "product_year_consistency" not in {item.code for item in product}
     assert "optical_band_contract" in {item.code for item in optical}
     assert "radar_band_contract" in {item.code for item in radar}
-    assert "product_band_contract" in {item.code for item in product}
+    assert "product_band_contract" not in {item.code for item in product}
     assert not {"pixel_sample", "metadata_completeness", "declared_metadata_defects", "declared_metadata_warnings"} & {item.code for item in (*optical, *radar, *product, *carbon)}
     assert "asset_crs" not in {item.code for item in carbon}
     assert {
@@ -71,10 +77,33 @@ def test_snapshot_contains_every_interpretive_field() -> None:
         "carbon_coordinates",
         "carbon_xco2_range",
         "carbon_quality_flags",
-        "carbon_observation_duplicates",
-        "carbon_footprints",
     } <= {item.code for item in carbon}
+    assert not {"carbon_observation_duplicates", "carbon_footprints"} & {item.code for item in carbon}
     assert all(item.name and item.applicability and item.implementation_version for item in (*optical, *radar, *product, *carbon))
+
+
+def test_data_type_specific_rules_are_optional_and_can_be_disabled() -> None:
+    registry = default_rule_registry()
+    optional_codes = {
+        "asset_crs",
+        "optical_band_contract",
+        "radar_band_contract",
+        "carbon_schema",
+        "carbon_coordinates",
+        "carbon_xco2_range",
+        "carbon_quality_flags",
+    }
+
+    assert optional_codes <= set(default_enabled_optional_rules())
+    assert all(registry.get(code) is not None and not registry.get(code).mandatory for code in optional_codes)
+    optical_without_optional = snapshot_rules(
+        registry,
+        data_type="optical",
+        product_type="surface-reflectance",
+        enabled_optional_rules=(),
+    )
+    assert not optional_codes & {item.code for item in optical_without_optional}
+    assert {"index_schema", "asset_readability"} <= {item.code for item in optical_without_optional}
 
 
 class _AssetCursor:
@@ -347,8 +376,6 @@ def test_carbon_rules_validate_current_partition_index_observations() -> None:
         "carbon_coordinates",
         "carbon_xco2_range",
         "carbon_quality_flags",
-        "carbon_observation_duplicates",
-        "carbon_footprints",
     ):
         rule = registry.get(code)
         assert rule is not None
@@ -365,8 +392,8 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
         repository=_RowsRepository(
             ("output_id", "source_asset_id", "attributes"),
             [
-                ("index-1", "asset-1", {"observation_id": "duplicate", "center_lon": 181, "center_lat": 0, "xco2": 1001, "quality_flag": ""}),
-                ("index-2", "asset-1", {"observation_id": "duplicate", "center_lon": 116, "center_lat": 40, "xco2": 417, "quality_flag": "1"}),
+                ("index-1", "asset-1", {"observation_id": "obs-1", "center_lon": 181, "center_lat": 0, "xco2": 1001, "quality_flag": ""}),
+                ("index-2", "asset-1", {"observation_id": "obs-2", "center_lon": 116, "center_lat": 40, "xco2": 417, "quality_flag": "1"}),
             ],
         ),
         object_reader=None,
@@ -378,8 +405,6 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
         "carbon_coordinates",
         "carbon_xco2_range",
         "carbon_quality_flags",
-        "carbon_observation_duplicates",
-        "carbon_footprints",
     ):
         rule = registry.get(code)
         assert rule is not None
@@ -388,6 +413,6 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
     assert "invalid_coordinates" in codes
     assert "xco2_out_of_range" in codes
     assert "missing_quality_flag" in codes
-    assert "duplicate_observation_id" in codes
-    assert codes.count("missing_footprint") == 2
+    assert "duplicate_observation_id" not in codes
+    assert "missing_footprint" not in codes
     assert all(finding.index_id for finding in findings)

@@ -28,15 +28,15 @@
 ### 非碳数据规则
 
 - `asset_crs`：`missing_crs`、`invalid_crs` 通常先修正声明；`crs_metadata_mismatch` 需要核对源文件，文件本身错误时退回载入重制 COG。
-- 光学、雷达、信息产品分别使用 `optical_band_contract`、`radar_band_contract`、`product_band_contract`，缺失或错误的波段字段属于元数据修正，不应伪造源数据。
+- 光学、雷达分别使用 `optical_band_contract`、`radar_band_contract`，缺失或错误的波段字段属于元数据修正，不应伪造源数据。信息产品不再执行 `product_band_contract` 变量规范检查。
 
 ### 碳卫星规则
 
-`carbon_schema`、`carbon_coordinates`、`carbon_xco2_range`、`carbon_quality_flags`、`carbon_observation_duplicates`、`carbon_footprints` 均为必选。缺字段、坐标、物理范围、质量标识、重复观测和足迹问题应退回载入系统；不得在剖分层伪造观测值或足迹。
+`carbon_schema`、`carbon_coordinates`、`carbon_xco2_range`、`carbon_quality_flags` 均为必选。缺字段、坐标、物理范围和质量标识问题应退回载入系统；不得在剖分层伪造观测值。观测重复与足迹规则（`carbon_observation_duplicates`、`carbon_footprints`）已从当前规则集移除。
 
 完整错误码映射以 JSON 和前端 `qualityLabels.js` 为准，当前内置码包括：
 
-`missing_st_code`、`missing_tile_reference`、`missing_output_version`、`tile_grid_mismatch`、`tile_kind_mismatch`、`detail_grid_mismatch`、`invalid_bbox`、`missing_time_bucket`、`time_bucket_mismatch`、`invalid_carbon_source`、`invalid_cog_uri`、`invalid_checksum`、`object_reader_unavailable`、`source_object_unreadable`、`missing_crs`、`invalid_crs`、`crs_metadata_mismatch`、`missing_band_metadata`、`invalid_band_type`、`window_out_of_bounds`、`missing_carbon_indexes`、`missing_carbon_fields`、`duplicate_observation_id`、`missing_footprint`、`invalid_coordinates`、`xco2_out_of_range`、`missing_quality_flag`、`output_count_mismatch`。
+`missing_st_code`、`missing_tile_reference`、`missing_output_version`、`tile_grid_mismatch`、`tile_kind_mismatch`、`detail_grid_mismatch`、`invalid_bbox`、`missing_time_bucket`、`time_bucket_mismatch`、`invalid_carbon_source`、`invalid_cog_uri`、`invalid_checksum`、`object_reader_unavailable`、`source_object_unreadable`、`missing_crs`、`invalid_crs`、`crs_metadata_mismatch`、`missing_band_metadata`、`invalid_band_type`、`window_out_of_bounds`、`missing_carbon_indexes`、`missing_carbon_fields`、`invalid_coordinates`、`xco2_out_of_range`、`missing_quality_flag`、`output_count_mismatch`。
 
 ## 3. 质检运行失败与恢复
 

@@ -24,6 +24,7 @@ from cube_web.services.quality_repository import (
     start_quality_run,
     write_quality_error_batch,
 )
+from cube_web.services.config_store import get_enabled_optional_quality_rules
 from cube_web.services.quality_rules import (
     DEFAULT_RULE_SET_VERSION,
     QualityFinding,
@@ -89,8 +90,12 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                     dataset = cur.fetchone()
                 if dataset is None:
                     raise RuntimeError("dataset disappeared before quality dispatch")
+                enabled_optional = get_enabled_optional_quality_rules()
                 snapshots = snapshot_rules(
-                    default_rule_registry(), data_type=dataset["data_type"], product_type=dataset.get("product_type")
+                    default_rule_registry(),
+                    data_type=dataset["data_type"],
+                    product_type=dataset.get("product_type"),
+                    enabled_optional_rules=enabled_optional,
                 )
                 _, created = _allocate_quality_run(
                     tx,

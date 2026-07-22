@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 from shapely.geometry import MultiPolygon, Polygon, box, shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
@@ -135,20 +134,18 @@ def test_small_aoi_cover_does_not_enumerate_the_global_target_level() -> None:
         assert {cell.space_code for cell in covered} == {seed.space_code}
 
 
-def test_candidate_limit_counts_only_cells_visited_for_the_aoi(monkeypatch) -> None:
+def test_small_aoi_cover_is_not_limited_by_candidate_count() -> None:
     engine = ISEA4HEngine()
     resolution = 8
     seed = engine.locate_space_code(116.391, 39.907, resolution)
     lon, lat = cell_center(int(seed.space_code), resolution)
     aoi = box(lon - 1e-6, lat - 1e-6, lon + 1e-6, lat + 1e-6)
-    monkeypatch.setattr(isea4h_engine, "_MAX_CANDIDATE_CELLS", 8)
-
     covered = engine.cover_geometry(aoi.__geo_interface__, resolution, "intersect")
 
     assert {cell.space_code for cell in covered} == {seed.space_code}
 
 
-def test_output_limit_fails_when_the_first_matching_cell_is_appended(monkeypatch) -> None:
+def test_cover_is_not_limited_when_the_first_matching_cell_is_appended(monkeypatch) -> None:
     engine = ISEA4HEngine()
     resolution = 8
     seed = engine.locate_space_code(116.391, 39.907, resolution)
@@ -162,12 +159,11 @@ def test_output_limit_fails_when_the_first_matching_cell_is_appended(monkeypatch
         return original_cell_shape(seqnum, level)
 
     monkeypatch.setattr(isea4h_engine, "_cell_shape", tracking_cell_shape)
-    monkeypatch.setattr(isea4h_engine, "_MAX_OUTPUT_CELLS", 0)
+    covered = engine.cover_geometry(aoi.__geo_interface__, resolution, "intersect")
 
-    with pytest.raises(ValidationError, match=r"MAX_OUTPUT_CELLS: limit=0, observed=1"):
-        engine.cover_geometry(aoi.__geo_interface__, resolution, "intersect")
-
-    assert built_cells == [(int(seed.space_code), resolution)]
+    assert (int(seed.space_code), resolution) in built_cells
+    assert len(built_cells) > 1
+    assert {cell.space_code for cell in covered} == {seed.space_code}
 
 
 def test_disconnected_multipolygon_cover_matches_each_component() -> None:

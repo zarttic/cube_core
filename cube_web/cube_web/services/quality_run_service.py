@@ -3,8 +3,13 @@ from __future__ import annotations
 from uuid import uuid4
 
 from cube_web.routes.auth import Actor, require_admin
+from cube_web.services.config_store import get_enabled_optional_quality_rules
 from cube_web.services.quality_repository import OutputVersionNotFound, allocate_quality_run, lock_dataset, require_open_gauss_domain_store
 from cube_web.services.quality_rules import DEFAULT_RULE_SET_VERSION, default_rule_registry, snapshot_rules
+
+
+def _enabled_optional_rules() -> tuple[str, ...]:
+    return get_enabled_optional_quality_rules()
 
 
 def request_manual_quality_run(dataset_id: str, output_version: str | None, actor: Actor):
@@ -20,6 +25,7 @@ def request_manual_quality_run(dataset_id: str, output_version: str | None, acto
             default_rule_registry(),
             data_type=str(dataset["data_type"]),
             product_type=dataset.get("product_type"),
+            enabled_optional_rules=_enabled_optional_rules(),
         )
         return allocate_quality_run(
             tx,

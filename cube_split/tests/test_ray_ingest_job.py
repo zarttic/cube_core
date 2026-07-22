@@ -22,8 +22,44 @@ from cube_split.ingest.ray_ingest_job import (
     run_ingest,
     upload_assets_to_minio,
     upsert_cube_facts_postgres,
+    _upsert_job_status_postgres,
     upsert_raw_assets_postgres,
 )
+
+
+class _JobStatusCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return None
+
+
+class _JobStatusConnection:
+    def __init__(self) -> None:
+        self.cursor_value = _JobStatusCursor()
+
+    def cursor(self):
+        return self.cursor_value
+
+
+def test_postgres_job_status_merge_casts_the_text_key() -> None:
+    connection = _JobStatusConnection()
+
+    _upsert_job_status_postgres(connection, "job-a", "running", {"dataset": "dataset-a"})
+
+    merge_sql = connection.cursor_value.calls[1][0]
+    assert "%s::varchar(128) AS job_id" in merge_sql
+    assert "CAST(target.job_id AS VARCHAR(128)) = source.job_id" in merge_sql
 
 
 def _sample_row(

@@ -203,11 +203,7 @@ def resolve_dataset_partition(
             if override is None or override.time_granularity is None
             else override.time_granularity
         ),
-        max_cells_per_asset=(
-            request.max_cells_per_asset
-            if override is None or override.max_cells_per_asset is None
-            else override.max_cells_per_asset
-        ),
+        max_cells_per_asset=0,
         max_observations=None if override is None else override.max_observations,
     )
     validate_requested_grid_level(EncoderGridType(resolved.grid_type), resolved.requested_grid_level)

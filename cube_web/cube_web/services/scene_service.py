@@ -202,9 +202,6 @@ class SceneDomainService:
         truncated = False
         seen_sources: set[tuple[str, str]] = set()
         for source in sources:
-            if len(items) >= request.limit:
-                truncated = True
-                break
             scene_id = str(source["scene_id"])
             source_batch_id = str(source["load_batch_id"])
             source_uri = str(source.get("source_uri") or "").strip()
@@ -224,10 +221,9 @@ class SceneDomainService:
                     source_uri,
                     {"source_cache_dir": "/tmp/cube_split_source_cache/preview"},
                 ))
-                remaining = request.limit - len(items)
                 observations = load_observations_from_file(
                     local_path,
-                    max_observations=remaining,
+                    max_observations=None,
                     product_type=source_key[1],
                 )
                 source_items = [
@@ -242,8 +238,6 @@ class SceneDomainService:
                 })
                 continue
             items.extend(source_items)
-            if len(observations) >= remaining:
-                truncated = True
         return {
             "items": items,
             "truncated": truncated,
@@ -254,7 +248,6 @@ class SceneDomainService:
         footprint_preview = self.preview_carbon_footprints(request)
         encoder = CubeEncoderSDK()
         cells: dict[tuple[str, int, str, str | None], dict[str, Any]] = {}
-        cell_limit_reached = False
         for item in footprint_preview["items"]:
             geometry = item["geometry"]
             if geometry.get("type") == "Point":
@@ -277,16 +270,11 @@ class SceneDomainService:
                 key = (cell.grid_type, int(cell.grid_level), cell.space_code, cell.topology_code)
                 if key in cells:
                     continue
-                if len(cells) >= request.max_cells:
-                    cell_limit_reached = True
-                    break
                 cells[key] = cell.model_dump(mode="json")
-            if cell_limit_reached:
-                break
         return {
             **footprint_preview,
             "cells": list(cells.values()),
-            "cell_limit_reached": cell_limit_reached,
+            "cell_limit_reached": False,
         }
 
     def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
@@ -479,6 +467,6 @@ def build_partition_execution_request(
         partition_method=first.partition_method,
         cover_mode=first.cover_mode or "intersect",
         time_granularity=first.time_granularity or "day",
-        max_cells_per_asset=first.max_cells_per_asset or 0,
+        max_cells_per_asset=0,
         datasets=tuple(resolved),
     )

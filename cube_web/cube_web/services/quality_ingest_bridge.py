@@ -144,14 +144,15 @@ def plan_ingest_requests(
     accepted_statuses = {"pass", "warn"} if policy.allow_warn or dataset.allow_warn_auto_ingest else {"pass"}
     if quality_status not in accepted_statuses:
         return ()
-    if dataset.status != "active" or (not manual and not dataset.auto_ingest_allowed) or dataset.current_output_version is None:
+    if dataset.status != "active" or (not manual and (not dataset.auto_ingest_allowed or dataset.current_output_version is None)):
         return ()
 
     grouped: dict[tuple[str, str], list[IngestSceneInput]] = {}
     for row in partition_scenes:
         if (
             row.dataset_id != dataset.dataset_id
-            or row.output_version != dataset.current_output_version
+            or (not manual and row.output_version != dataset.current_output_version)
+            or row.output_version is None
             or row.status != "completed"
         ):
             continue
@@ -159,7 +160,7 @@ def plan_ingest_requests(
             grouped.setdefault((row.partition_run_id, band_unit_id), []).append(
                 IngestSceneInput(
                     scene_id=row.scene_id,
-                    output_version=dataset.current_output_version,
+                    output_version=row.output_version,
                     quality_run_id=quality_run_id,
                     source_load_batch_ids=tuple(sorted(set(row.source_load_batch_ids))),
                     band_unit_ids=(band_unit_id,),
@@ -250,7 +251,7 @@ def create_ingest_runs_after_quality(
             current_output_version=row["current_output_version"],
             allow_warn_auto_ingest=attributes.get("auto_ingest_allow_warn") is True,
         )
-        if dataset.current_output_version != output_version:
+        if not manual and dataset.current_output_version != output_version:
             return 0
 
         cur.execute(

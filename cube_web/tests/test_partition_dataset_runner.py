@@ -13,12 +13,13 @@ def test_normalize_wgs84_bbox_clamps_raster_edges() -> None:
     assert _normalize_wgs84_bbox([-180.0044, -90.0022, 180.0044, 90.0022]) == [-180.0, -90.0, 180.0, 90.0]
 
 
-def test_carbon_unique_cells_enforce_the_same_per_asset_cap_as_cog_cover() -> None:
+def test_carbon_unique_cells_are_not_limited_per_asset() -> None:
     cells: set[tuple[str, int, str | None]] = set()
     _record_asset_cell(cells, ("u4pr", 5, None), max_cells_per_asset=1)
     _record_asset_cell(cells, ("u4pr", 5, None), max_cells_per_asset=1)
-    with pytest.raises(RuntimeError, match=r"2 > 1"):
-        _record_asset_cell(cells, ("u4ps", 5, None), max_cells_per_asset=1)
+    _record_asset_cell(cells, ("u4ps", 5, None), max_cells_per_asset=1)
+
+    assert cells == {("u4pr", 5, None), ("u4ps", 5, None)}
 
 
 def test_carbon_observation_budget_is_shared_across_assets() -> None:

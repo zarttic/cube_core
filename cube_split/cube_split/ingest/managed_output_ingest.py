@@ -305,7 +305,9 @@ def _verify_targets(conn: Any, job_id: str, version: str, result: ManagedIngestR
                 "AND ST_IsClosed(ST_ExteriorRing(cell_geom))" if table == "rs_cube_cell_fact" else ""
             )
             cur.execute(
-                f"SELECT count(*) FROM {table} WHERE run_id=%s AND {version_columns[table]}=%s{geometry_clause}",
+                f"""SELECT count(*) FROM {table}
+                    WHERE CAST(run_id AS VARCHAR(128))=%s::varchar(128)
+                      AND CAST({version_columns[table]} AS VARCHAR(128))=%s::varchar(128){geometry_clause}""",
                 (job_id, version),
             )
             actual = int(cur.fetchone()[0])

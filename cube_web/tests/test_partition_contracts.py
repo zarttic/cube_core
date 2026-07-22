@@ -239,7 +239,7 @@ def test_dataset_partition_overrides_resolve_and_validate_independently() -> Non
     assert effective.grid_type == "isea4h"
     assert effective.requested_grid_level == 1
     assert effective.partition_method == "entity"
-    assert effective.max_cells_per_asset == 50
+    assert effective.max_cells_per_asset == 0
 
     payload["datasets"][0]["partition"]["partition_method"] = "logical"
     with pytest.raises(ValidationError, match="must be entity"):

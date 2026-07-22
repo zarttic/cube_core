@@ -108,10 +108,10 @@ describe('ingest runs store', () => {
 describe('manual ingest selection', () => {
   it('shows selectable data as dataset, scene, and readable band hierarchy', async () => {
     const collection = {
-      partition_run_id: 'partition-run-a', dataset_count: 1, scene_count: 1, quality_pass_count: 2, ingested_count: 0,
+      partition_run_id: 'partition-run-a', dataset_count: 1, scene_count: 1, quality_pass_count: 2, ingested_count: 0, grid_configs: [{ grid_type: 'geohash', grid_level: 4 }],
       units: [
-        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-a', band_code: 'B04', band_name: '红光', band_type: 'spectral', display_order: 1, quality_status: 'pass', ingest_status: 'pending' },
-        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-b', band_code: 'B08', band_name: '近红外', band_type: 'spectral', display_order: 2, quality_status: 'warn', ingest_status: 'pending' },
+        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-a', band_code: 'B04', band_name: '红光', band_type: 'spectral', display_order: 1, grid_type: 'geohash', grid_level: 4, quality_status: 'pass', ingest_status: 'pending' },
+        { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-b', band_code: 'B08', band_name: '近红外', band_type: 'spectral', display_order: 2, grid_type: 'geohash', grid_level: 4, quality_status: 'warn', ingest_status: 'pending' },
       ],
     };
     requestGet.mockImplementation((url) => Promise.resolve(url.startsWith('/v1/ingest-runs?')
@@ -141,10 +141,15 @@ describe('manual ingest selection', () => {
     });
 
     await vi.waitFor(() => expect(wrapper.findAll('button').some((button) => button.text() === '选择数据入库')).toBe(true));
+    const candidateRequestCount = () => requestGet.mock.calls.filter(([url]) => url === '/v1/ingest-runs/collections?page=1&page_size=100').length;
+    const initialCandidateRequests = candidateRequestCount();
+    await wrapper.findAll('button').find((button) => button.text() === '刷新').trigger('click');
+    await vi.waitFor(() => expect(candidateRequestCount()).toBeGreaterThan(initialCandidateRequests));
     await wrapper.findAll('button').find((button) => button.text() === '选择数据入库').trigger('click');
     await vi.waitFor(() => expect(wrapper.get('[data-testid="manual-ingest-tree"]')).toBeTruthy());
 
     expect(wrapper.text()).toContain('光学遥感样例');
+    expect(wrapper.text()).toContain('经纬度格网 · 层级 4');
     expect(wrapper.text()).toContain('LC08_120029_20240622');
     expect(wrapper.text()).toContain('B04 · 红光');
     expect(wrapper.text()).toContain('B08 · 近红外');

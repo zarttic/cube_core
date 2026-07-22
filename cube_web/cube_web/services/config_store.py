@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -46,7 +47,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "optical": {
             "target_crs": "EPSG:4326",
             "history_limit": 20,
-        }
+        },
+        # Optional quality rules enabled for new runs. Mandatory rules always run and
+        # are never stored here. Defaults to every currently optional rule code.
+        "enabled_optional_rules": [
+            "asset_crs",
+            "optical_band_contract",
+            "radar_band_contract",
+            "carbon_schema",
+            "carbon_coordinates",
+            "carbon_xco2_range",
+            "carbon_quality_flags",
+        ],
     },
 }
 
@@ -60,6 +72,23 @@ class ConfigStore:
 
     def update_config(self, config: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
+
+    def update_enabled_optional_quality_rules(self, codes: tuple[str, ...]) -> dict[str, Any]:
+        record = self.get_config_record()
+        config = copy.deepcopy(record["config"])
+        quality = dict(config.get("quality") or {})
+        quality["enabled_optional_rules"] = list(codes)
+        config["quality"] = quality
+        return self.update_config(config)
+
+    def update_optional_quality_rule_enabled(self, code: str, enabled: bool) -> dict[str, Any]:
+        record = self.get_config_record()
+        configured = set((record["config"].get("quality") or {}).get("enabled_optional_rules") or ())
+        if enabled:
+            configured.add(code)
+        else:
+            configured.discard(code)
+        return self.update_enabled_optional_quality_rules(tuple(configured))
 
     def reset_config(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -128,6 +157,79 @@ class PostgresConfigStore(ConfigStore):
             conn.commit()
         return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
 
+    def update_enabled_optional_quality_rules(self, codes: tuple[str, ...]) -> dict[str, Any]:
+        self.ensure_schema()
+        config = stored_config(default_config())
+        config["quality"]["enabled_optional_rules"] = list(codes)
+        params = {"scope": CONFIG_SCOPE, "config": self._jsonb(config)}
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    MERGE INTO cube_web_configs target
+                    USING (SELECT %(scope)s::text AS scope, %(config)s::jsonb AS config) source
+                    ON (target.scope = source.scope)
+                    WHEN MATCHED THEN UPDATE SET
+                      config = jsonb_set(
+                        target.config,
+                        '{quality,enabled_optional_rules}',
+                        source.config #> '{quality,enabled_optional_rules}'
+                      ),
+                      updated_at = now()
+                    WHEN NOT MATCHED THEN INSERT (scope, config)
+                      VALUES (source.scope, source.config)
+                    """,
+                    params,
+                )
+                cur.execute("SELECT config, updated_at FROM cube_web_configs WHERE scope = %s", (CONFIG_SCOPE,))
+                row = cur.fetchone()
+            conn.commit()
+        return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
+
+    def update_optional_quality_rule_enabled(self, code: str, enabled: bool) -> dict[str, Any]:
+        self.ensure_schema()
+        config = stored_config(default_config())
+        configured = list(config["quality"]["enabled_optional_rules"])
+        config["quality"]["enabled_optional_rules"] = [item for item in configured if item != code]
+        if enabled:
+            config["quality"]["enabled_optional_rules"].append(code)
+        params = {
+            "scope": CONFIG_SCOPE,
+            "rule_code": code,
+            "enabled": enabled,
+            "config": self._jsonb(config),
+        }
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    MERGE INTO cube_web_configs target
+                    USING (
+                      SELECT %(scope)s::text AS scope, %(rule_code)s::text AS rule_code,
+                             %(enabled)s::boolean AS enabled, %(config)s::jsonb AS config
+                    ) source
+                    ON (target.scope = source.scope)
+                    WHEN MATCHED THEN UPDATE SET
+                      config = jsonb_set(
+                        target.config,
+                        '{quality,enabled_optional_rules}',
+                        CASE WHEN source.enabled THEN
+                          (COALESCE(target.config #> '{quality,enabled_optional_rules}', source.config #> '{quality,enabled_optional_rules}') - source.rule_code)
+                            || jsonb_build_array(source.rule_code)
+                        ELSE COALESCE(target.config #> '{quality,enabled_optional_rules}', source.config #> '{quality,enabled_optional_rules}') - source.rule_code
+                        END
+                      ),
+                      updated_at = now()
+                    WHEN NOT MATCHED THEN INSERT (scope, config)
+                      VALUES (source.scope, source.config)
+                    """,
+                    params,
+                )
+                cur.execute("SELECT config, updated_at FROM cube_web_configs WHERE scope = %s", (CONFIG_SCOPE,))
+                row = cur.fetchone()
+            conn.commit()
+        return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
+
     def reset_config(self) -> dict[str, Any]:
         return self.update_config(default_config())
 
@@ -169,6 +271,11 @@ def default_config() -> dict[str, Any]:
     config["ingest"]["optical"]["minio_endpoint"] = minio.endpoint
     config["ingest"]["optical"]["minio_bucket"] = minio.bucket
     config["ingest"]["optical"]["minio_secure"] = minio.secure
+    from cube_web.services.quality_rules import normalize_enabled_optional_rules
+
+    # Always expand the default enablement list from the live optional registry so
+    # newly added optional rules stay enabled until an admin turns them off.
+    config["quality"]["enabled_optional_rules"] = list(normalize_enabled_optional_rules(None))
     return config
 
 
@@ -182,7 +289,8 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     validate_requested_grid_level(GridType(optical["grid_type"]), optical["grid_level"])
     optical["cover_mode"] = _choice(optical.get("cover_mode"), {"intersect", "contain", "minimal"}, "cover_mode")
     optical["time_granularity"] = _choice(optical.get("time_granularity"), {"second", "minute", "hour", "day", "month"}, "time_granularity")
-    optical["max_cells_per_asset"] = _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=0)
+    _int_value(optical.get("max_cells_per_asset"), "max_cells_per_asset", minimum=0)
+    optical["max_cells_per_asset"] = 0
     optical["partition_backend"] = _choice(optical.get("partition_backend"), {"ray", "thread", "process"}, "partition_backend")
     optical["ray_parallelism"] = _int_value(optical.get("ray_parallelism"), "ray_parallelism", minimum=0)
     optical["partition_prefix_len"] = _int_value(optical.get("partition_prefix_len"), "partition_prefix_len", minimum=1)
@@ -209,6 +317,9 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     quality = merged["quality"]["optical"]
     quality["target_crs"] = _text_value(quality.get("target_crs"), "quality.target_crs")
     quality["history_limit"] = _int_value(quality.get("history_limit"), "history_limit", minimum=1, maximum=200)
+    merged["quality"]["enabled_optional_rules"] = list(
+        _normalize_enabled_optional_quality_rules(merged["quality"].get("enabled_optional_rules"))
+    )
     return merged
 
 
@@ -242,6 +353,45 @@ def optical_quality_defaults() -> dict[str, Any]:
     config = get_app_config()
     optical = config.get("quality", {}).get("optical", {})
     return dict(optical) if isinstance(optical, dict) else dict(DEFAULT_CONFIG["quality"]["optical"])
+
+
+def _normalize_enabled_optional_quality_rules(codes: Any) -> tuple[str, ...]:
+    from cube_web.services.quality_rules import normalize_enabled_optional_rules
+
+    if codes is None:
+        return normalize_enabled_optional_rules(None)
+    if not isinstance(codes, (list, tuple, set)):
+        raise ValueError("quality.enabled_optional_rules must be a list of rule codes")
+    return normalize_enabled_optional_rules(codes)
+
+
+def get_enabled_optional_quality_rules() -> tuple[str, ...]:
+    """Return the currently enabled optional quality rule codes."""
+    try:
+        store = get_config_store()
+    except (RuntimeError, ValueError):
+        from cube_web.services.quality_rules import default_enabled_optional_rules
+
+        return tuple(sorted(default_enabled_optional_rules()))
+    config = store.get_config_record()["config"]
+    raw = (config.get("quality") or {}).get("enabled_optional_rules")
+    return _normalize_enabled_optional_quality_rules(raw)
+
+
+def set_enabled_optional_quality_rules(codes: Iterable[str] | None) -> tuple[str, ...]:
+    """Persist optional quality-rule enablement and return the normalized list."""
+    enabled = _normalize_enabled_optional_quality_rules(codes)
+    saved = get_config_store().update_enabled_optional_quality_rules(enabled)
+    return tuple((saved["config"].get("quality") or {}).get("enabled_optional_rules") or enabled)
+
+
+def set_optional_quality_rule_enabled(code: str, enabled: bool) -> tuple[str, ...]:
+    """Atomically enable or disable one optional quality rule."""
+    normalized = _normalize_enabled_optional_quality_rules((code,))
+    if len(normalized) != 1:
+        raise ValueError("quality rule code is required")
+    saved = get_config_store().update_optional_quality_rule_enabled(normalized[0], enabled)
+    return tuple((saved["config"].get("quality") or {}).get("enabled_optional_rules") or ())
 
 
 def runtime_info() -> dict[str, Any]:

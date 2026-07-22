@@ -47,6 +47,9 @@ const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [va
 
 const activeProduct = computed(() => productModules.find((item) => item.value === activeModule.value) || null);
 const activeDatasets = computed(() => store.form.datasets.filter((dataset) => dataset.data_type === activeModule.value));
+const gridConfigLocked = computed(() => activeDatasets.value.some((dataset) => (
+  dataset.grid_config_locked === true || dataset.selection_source === 'dataset'
+)));
 const gridLevelLocked = computed(() => activeDatasets.value.length > 0
   && activeDatasets.value.some((dataset) => dataset.grid_level_unlocked !== true));
 
@@ -68,6 +71,7 @@ const formModel = computed({
   get: () => ({ ...store.form, ...moduleForms.value[activeModule.value] }),
   set: (value) => {
     if (activeProduct.value) {
+      if (gridConfigLocked.value) return;
       const gridTypeChanged = value.gridType !== moduleForms.value[activeModule.value].gridType;
       if (!gridTypeChanged && gridLevelLocked.value) return;
       const definition = gridDefinition(value.gridType);
@@ -237,7 +241,6 @@ async function loadCarbonFootprints() {
     const response = await requestJson('/v1/partition/carbon/footprints', {
       source_batch_ids: selectedSourceBatchIds.value,
       scene_ids: sceneIds,
-      limit: 2000,
     });
     if (generation !== carbonFootprintGeneration || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
@@ -281,6 +284,7 @@ function selectDraft(draft) {
 
 function queueManagedPartition(draft) {
   selectDraft(draft);
+  datasetDrawerVisible.value = true;
 }
 
 async function loadDrafts() {
@@ -372,8 +376,6 @@ async function loadCarbonGridPreview() {
       scene_ids: sceneIds,
       grid_type: partition.grid_type,
       requested_grid_level: Number(partition.requested_grid_level),
-      limit: 2000,
-      max_cells: 5000,
     });
     if (generation !== gridPreviewGeneration || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
@@ -386,7 +388,7 @@ async function loadCarbonGridPreview() {
       total: rendered.total,
     });
     const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
-    const suffix = response.cell_limit_reached ? '，格网已按上限截断' : '';
+    const suffix = '';
     if (unavailableCount) {
       ElMessage.warning(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}；${unavailableCount} 个源文件不可访问。`);
     } else {
@@ -593,6 +595,7 @@ onMounted(() => {
             :active-partition-draft-id="activeDraftId"
             @update:model-value="updateDatasets"
             @activate-partition-draft="activeDraftId = $event"
+            @refresh-partition-drafts="loadDrafts"
           />
         </el-drawer>
       </div>

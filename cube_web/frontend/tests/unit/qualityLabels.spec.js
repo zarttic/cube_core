@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { qualityErrorLabel, qualityRecoveryLabel } from '@/utils/qualityLabels';
+import {
+  filterActiveQualityRules,
+  qualityErrorLabel,
+  qualityRecoveryLabel,
+  qualityRuleLabel,
+  RETIRED_QUALITY_RULE_CODES,
+} from '@/utils/qualityLabels';
 
 describe('quality recovery labels', () => {
   it('routes metadata, source and partition-output findings to distinct repair paths', () => {
@@ -20,7 +26,24 @@ describe('quality recovery labels', () => {
   it('provides Chinese labels for current built-in finding codes', () => {
     expect(qualityErrorLabel('missing_tile_reference')).toBe('缺少瓦片引用');
     expect(qualityErrorLabel('window_out_of_bounds')).toBe('像素窗口超出范围');
-    expect(qualityErrorLabel('duplicate_observation_id')).toBe('观测记录标识重复');
     expect(qualityErrorLabel('missing_product_year')).toContain('未分类错误');
+  });
+
+  it('filters retired rules out of catalog and run item lists', () => {
+    expect(RETIRED_QUALITY_RULE_CODES.has('product_band_contract')).toBe(true);
+    expect(RETIRED_QUALITY_RULE_CODES.has('carbon_observation_duplicates')).toBe(true);
+    expect(RETIRED_QUALITY_RULE_CODES.has('carbon_footprints')).toBe(true);
+    expect(qualityRuleLabel('carbon_footprints')).toContain('已停用');
+    const filtered = filterActiveQualityRules([
+      { code: 'asset_readability', name: '数据单元可读性' },
+      { rule_code: 'product_band_contract', status: 'pass' },
+      { rule_code: 'carbon_observation_duplicates', status: 'fail' },
+      { rule_code: 'carbon_footprints', status: 'fail' },
+      { rule_code: 'carbon_schema', status: 'pass' },
+    ]);
+    expect(filtered.map((item) => item.code || item.rule_code)).toEqual([
+      'asset_readability',
+      'carbon_schema',
+    ]);
   });
 });

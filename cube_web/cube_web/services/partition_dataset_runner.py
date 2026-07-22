@@ -47,10 +47,8 @@ def _record_asset_cell(
     cell: tuple[str, int, str | None],
     max_cells_per_asset: int,
 ) -> None:
-    """Record one located raw observation cell under the strict per-asset cap."""
+    """Record one located raw observation cell."""
     cells.add(cell)
-    if max_cells_per_asset and len(cells) > max_cells_per_asset:
-        raise RuntimeError(f"Cover cells exceed max limit: {len(cells)} > {max_cells_per_asset}")
 
 
 def _consume_observation_budget(remaining: int | None, consumed: int) -> int | None:
@@ -285,17 +283,18 @@ def _run_dataset_on_ray(payload: dict[str, Any], runtime_env: dict[str, Any] | N
                     source_bbox = _normalize_wgs84_bbox([
                         bounds.left, bounds.bottom, bounds.right, bounds.top,
                     ])
-                covered = sdk.cover(
-                    grid_type=grid_type,
-                    requested_grid_level=requested_grid_level,
-                    cover_mode=value["cover_mode"],
-                    boundary_type=BoundaryType.BBOX,
-                    bbox=source_bbox,
-                    crs="EPSG:4326",
-                )
-                limit = int(value["max_cells_per_asset"])
-                if limit and len(covered) > limit:
-                    raise RuntimeError(f"Cover cells exceed max limit: {len(covered)} > {limit}")
+                try:
+                    covered = sdk.cover(
+                        grid_type=grid_type,
+                        requested_grid_level=requested_grid_level,
+                        cover_mode=value["cover_mode"],
+                        boundary_type=BoundaryType.BBOX,
+                        bbox=source_bbox,
+                        crs="EPSG:4326",
+                    )
+                except Exception as exc:
+                    # Some SDK exception classes cannot be deserialized by Ray.
+                    raise RuntimeError(f"grid cover failed: {exc}") from None
                 for cell in covered:
                     if source.crs and str(source.crs).upper() != "EPSG:4326":
                         cell_bounds = transform_bounds("EPSG:4326", source.crs, *cell.bbox)
@@ -450,7 +449,7 @@ class NormalizedPartitionDatasetRunner:
         payload = {
             "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
             "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
-            "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
+            "time_granularity": time_granularity, "max_cells_per_asset": 0,
             "max_observations": max_observations,
             "ray_address": runtime_config.require_ray_address(),
         }

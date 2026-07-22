@@ -1205,7 +1205,7 @@ def test_write_entity_metadata_failure_recreates_job_table_after_rollback(monkey
     ]
 
 
-def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path):
+def test_entity_partition_disables_legacy_cover_cell_limit(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     source = input_dir / "demo_scene_unlimited.tif"
@@ -1308,7 +1308,7 @@ def test_entity_partition_forwards_cover_cell_limit(monkeypatch, tmp_path: Path)
         )
     )
 
-    assert captured["max_cells_per_asset"] == 1
+    assert captured["max_cells_per_asset"] == 0
     assert report["grid_task_count"] == 2
     assert report["entity_tile_count"] == 2
 

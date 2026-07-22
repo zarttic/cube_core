@@ -73,7 +73,7 @@ class ScenePartitionRunResponse(SceneStrictModel):
 class CarbonFootprintPreviewRequest(SceneStrictModel):
     source_batch_ids: tuple[str, ...] = Field(min_length=1)
     scene_ids: tuple[str, ...] = Field(min_length=1)
-    limit: int = Field(default=2000, ge=1, le=5000)
+    limit: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_identity(self) -> "CarbonFootprintPreviewRequest":
@@ -87,7 +87,7 @@ class CarbonFootprintPreviewRequest(SceneStrictModel):
 class CarbonGridPreviewRequest(CarbonFootprintPreviewRequest):
     grid_type: Literal["geohash", "mgrs", "isea4h"]
     requested_grid_level: int = Field(ge=1, le=15)
-    max_cells: int = Field(default=5000, ge=1, le=10000)
+    max_cells: int | None = Field(default=None, ge=1)
 
 
 class PartitionDraftCreateRequest(SceneStrictModel):

@@ -209,3 +209,36 @@ def test_carbon_requires_and_writes_lossless_observation_attributes(capture):
     assert capture["carbon"][0].observation_id == "obs-1"
     with pytest.raises(RuntimeError, match="lacks observation attributes"):
         managed._ingest_carbon(_Conn(), _snapshot("carbon"), "output-v3", "job-c")
+
+
+def test_managed_target_verification_casts_opengauss_text_keys() -> None:
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, _params):
+            self.sql = sql
+
+        def fetchone(self):
+            return (1,)
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = Cursor()
+
+        def cursor(self):
+            return self.cursor_value
+
+    connection = Connection()
+    managed._verify_targets(
+        connection,
+        "job-a",
+        "version-a",
+        managed.ManagedIngestResult(("rs_carbon_observation_fact",), {"rs_carbon_observation_fact": 1}),
+    )
+
+    assert "CAST(run_id AS VARCHAR(128))=%s::varchar(128)" in connection.cursor_value.sql
+    assert "CAST(cube_version AS VARCHAR(128))=%s::varchar(128)" in connection.cursor_value.sql

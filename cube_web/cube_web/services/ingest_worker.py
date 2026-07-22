@@ -19,7 +19,7 @@ def process_queued_ingest_scenes(
 ) -> int:
     """Ingest quality-approved managed outputs, then complete their Scenes."""
     repo = repository or OpenGaussIngestRepository(runtime_config.postgres_dsn())
-    verify = verifier or _verify_current_partition_output
+    verify = verifier or _verify_partition_output
     execute = executor or ingest_managed_output
     claimed = repo.claim_queued_outputs(limit=limit)
     completed = 0
@@ -60,12 +60,11 @@ def process_queued_ingest_scenes(
     return completed
 
 
-def _verify_current_partition_output(repository: OpenGaussIngestRepository, item: dict[str, str]) -> str:
+def _verify_partition_output(repository: OpenGaussIngestRepository, item: dict[str, str]) -> str:
     with repository.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT d.current_output_version,
-                   d.dataset_id AS output_dataset_id,
+            SELECT d.dataset_id AS output_dataset_id,
                    prs.status AS scene_partition_status,prs.output_version AS scene_output_version
             FROM datasets d
             JOIN partition_run_scenes prs ON prs.dataset_id=d.dataset_id AND prs.scene_id=%s
@@ -77,8 +76,6 @@ def _verify_current_partition_output(repository: OpenGaussIngestRepository, item
         row = cur.fetchone()
         if row is None:
             raise RuntimeError("partition Scene output is missing")
-        if str(row["current_output_version"] or "") != item["output_version"]:
-            raise RuntimeError("ingest output is no longer the Dataset current version")
         if row["scene_partition_status"] != "completed" or str(row["scene_output_version"] or "") != item["output_version"]:
             raise RuntimeError("partition Scene output is not completed")
         cur.execute(

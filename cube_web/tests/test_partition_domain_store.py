@@ -114,6 +114,31 @@ def test_repartition_rebinds_dataset_to_latest_runtime_batch() -> None:
     assert dataset["partition_completed_at"] is None
 
 
+def test_different_grid_outputs_remain_independently_available() -> None:
+    store = InMemoryPartitionDomainStore()
+    first_request = _request()
+    first_version = store.start_output(first_request, first_request.datasets[0], "geohash-task")
+    first_result = _result(first_version)
+    first_result.task_id = "geohash-task"
+    store.complete_output(first_result)
+
+    second_request = _request()
+    second_request.batch_id = "batch-mgrs"
+    second_request.grid_type = "mgrs"
+    second_request.requested_grid_level = 1
+    second_version = store.start_output(second_request, second_request.datasets[0], "mgrs-task")
+    second_result = _result(second_version)
+    second_result.task_id = "mgrs-task"
+    second_result.grid_type = "mgrs"
+    second_result.requested_grid_level = 1
+    for rows in (second_result.tiles, second_result.indexes, second_result.grid_cells):
+        rows[0]["output_id"] = "output-mgrs"
+    store.complete_output(second_result)
+
+    assert store.outputs[("dataset-a", first_version)]["status"] == "completed"
+    assert store.outputs[("dataset-a", second_version)]["status"] == "completed"
+
+
 def test_detail_failure_rolls_back_pointer_and_outbox() -> None:
     store = InMemoryPartitionDomainStore()
     request = _request()

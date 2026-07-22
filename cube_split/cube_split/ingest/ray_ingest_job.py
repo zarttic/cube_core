@@ -927,7 +927,7 @@ def _upsert_job_status_postgres(
             MERGE INTO rs_ingest_job target
             USING (
               SELECT
-                %s::text AS job_id,
+                %s::varchar(128) AS job_id,
                 %s::text AS status,
                 %s::jsonb AS params_json,
                 %s::jsonb AS stats_json,
@@ -937,7 +937,7 @@ def _upsert_job_status_postgres(
                 %s::timestamptz AS finished_at,
                 %s::text AS output_snapshot
             ) source
-            ON (target.job_id = source.job_id)
+            ON (CAST(target.job_id AS VARCHAR(128)) = source.job_id)
             WHEN MATCHED THEN UPDATE SET
               status = source.status,
               params_json = source.params_json,

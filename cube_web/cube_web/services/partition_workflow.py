@@ -418,10 +418,13 @@ class PartitionWorkflowService:
             if result_status == "cancelled":
                 self.store.mark_cancelled(task_id)
             elif result_status in {"failed", "partial_failure"}:
+                failure_message = _first_dataset_error([
+                    item for item in result.get("datasets", ()) if isinstance(item, dict)
+                ]) or "One or more datasets failed during partition execution"
                 self.store.mark_result_manual_required(
                     task_id,
-                    "One or more datasets failed during partition execution",
-                    error_type="partition_execution_failed",
+                    failure_message,
+                    error_type=classify_partition_error(failure_message),
                 )
         projected_status = "cancelled" if result_status == "cancelled" else ("failed" if result_status in {"failed", "partial_failure"} else result_status)
         self._notify_task_event(task_id, projected_status, result)
@@ -487,6 +490,8 @@ class PartitionWorkflowService:
 
 def classify_partition_error(error: str) -> str:
     normalized = error.lower()
+    if "max_candidate_cells" in normalized or "max_output_cells" in normalized or "gridlimitexceeded" in normalized:
+        return "grid_limit"
     if any(token in normalized for token in ("not found", "no such file", "no such key", "missing", "does not exist", "source missing")):
         return "source_missing"
     if any(
@@ -510,6 +515,16 @@ def classify_partition_error(error: str) -> str:
     if any(token in normalized for token in ("permission denied", "access denied", "forbidden", "unauthorized")):
         return "permission"
     return "unknown"
+
+
+def _first_dataset_error(outcomes: list[dict[str, Any]]) -> str | None:
+    for item in outcomes:
+        error = item.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if item.get("error_message"):
+            return str(item["error_message"])
+    return None
 
 
 def _dataset_partitions(request: StrictPartitionRequest) -> list[dict[str, Any]]:

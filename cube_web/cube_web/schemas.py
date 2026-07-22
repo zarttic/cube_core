@@ -50,6 +50,22 @@ class ManualQualityRunRequest(BaseModel):
     output_version: str | None = None
 
 
+class QualityRuleSettingsUpdate(BaseModel):
+    """Update which optional quality rules are enabled for subsequent quality runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled_optional_rules: list[str] = Field(default_factory=list)
+
+
+class QualityRuleEnabledUpdate(BaseModel):
+    """Toggle one optional quality rule for future quality runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
 class DatasetQualityRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

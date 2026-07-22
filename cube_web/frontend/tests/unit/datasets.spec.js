@@ -46,6 +46,41 @@ describe('datasets store', () => {
 });
 
 describe('DatasetDetailDrawer', () => {
+  it('locks the selected grid when queuing a dataset repartition', async () => {
+    const wrapper = mount(DatasetDetailDrawer, {
+      props: {
+        visible: true, datasetId: 'dataset-1', activeTab: 'scenes',
+        detail: {
+          overview: { dataset_id: 'dataset-1', dataset_code: 'dataset-1', data_type: 'optical' },
+          scenes: { items: [{
+            scene_id: 'scene-1', bands: [{ band_unit_id: 'band-1', band_code: 'B04', grid_statuses: [] }],
+          }] },
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' }, StatusTag: { template: '<span />' }, AppTable: { template: '<div />' },
+          'el-tabs': { template: '<div><slot /></div>' }, 'el-tab-pane': { template: '<section><slot /></section>' },
+          'el-button': { template: '<button><slot /></button>' }, 'el-tooltip': { template: '<span><slot /></span>' },
+          'el-dialog': { template: '<div><slot /></div>' }, 'el-descriptions': { template: '<div><slot /></div>' },
+          'el-descriptions-item': { template: '<div><slot /></div>' }, 'el-table-column': { template: '<div />' },
+        },
+      },
+    });
+    wrappers.push(wrapper);
+
+    wrapper.vm.repartitionGridType = 'mgrs';
+    wrapper.vm.repartitionGridLevel = 0;
+    wrapper.vm.selectedPartitionBandIds = ['band-1'];
+    wrapper.vm.draftName = '平面格网重剖分';
+    wrapper.vm.queuePartition();
+
+    expect(wrapper.emitted('queue-partition')[0][0]).toMatchObject({
+      grid_config_locked: true,
+      partition: { grid_type: 'mgrs', requested_grid_level: 0, partition_method: 'logical' },
+    });
+  });
+
   it('groups band units below their scene in the dataset detail', async () => {
     const wrapper = mount(DatasetDetailDrawer, {
       props: {

@@ -4,7 +4,7 @@ import { Refresh } from '@element-plus/icons-vue';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
-import { qualityRuleLabel } from '@/utils/qualityLabels';
+import { filterActiveQualityRules, qualityRuleLabel } from '@/utils/qualityLabels';
 
 const props = defineProps({
   visible: Boolean,
@@ -25,6 +25,7 @@ const sourceLoadBatchLabels = computed(() => props.detail?.source_load_batch_nam
 const qualityRuns = computed(() => (props.detail?.datasets || []).flatMap((dataset) =>
   (dataset.quality_runs || []).map((run) => ({
     ...run,
+    items: filterActiveQualityRules(run.items || []),
     datasetLabel: dataset.dataset_code || dataset.dataset_title || dataset.dataset_id,
   }))
 ));
@@ -38,6 +39,37 @@ function workflowAdvice(band) {
   if (band.ingest_status === 'failed') return '入库失败，可重试入库';
   if (band.ingest_status !== 'completed') return '质检通过，等待手动入库';
   return '流程完成';
+}
+
+function attemptOperationLabel(operation) {
+  return {
+    auto_run: '自动执行',
+    manual_retry: '手动重试',
+  }[operation] || operation || '剖分执行';
+}
+
+function attemptErrorLabel(attempt) {
+  const detail = partitionFailureDetail(attempt?.error_message);
+  if (detail) return detail;
+  const labels = {
+    partition_execution_failed: '一个或多个数据集剖分执行失败',
+    grid_limit: '格网覆盖范围过大，请降低格网层级或缩小数据范围',
+    source_missing: '源数据不存在或不可访问',
+    local_task_failed: '剖分任务执行失败',
+  };
+  return labels[attempt?.error_type] || attempt?.error_message || attempt?.failure_reason || '-';
+}
+
+function partitionFailureDetail(message) {
+  const text = String(message || '');
+  if (/[\u4e00-\u9fff]/.test(text)) return text;
+  const limit = text.match(/MAX_(?:CANDIDATE|OUTPUT)_CELLS:\s*limit=(\d+),\s*observed=(\d+)/i);
+  if (limit) {
+    return `格网覆盖范围过大：候选格网 ${Number(limit[2]).toLocaleString()} 个，超过上限 ${Number(limit[1]).toLocaleString()} 个。请降低格网层级或缩小数据范围。`;
+  }
+  if (/NoSuchKey|NoSuchObject|NoSuchBucket|source COG.*not found/i.test(text)) return '源数据不存在或不可访问，请等待数据载入后重试。';
+  if (/Failed to deserialize exception/i.test(text)) return 'Ray 任务异常，未能读取底层错误；请查看任务日志。';
+  return '';
 }
 
 const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
@@ -112,9 +144,9 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
       <details class="attempt-history">
         <summary>剖分尝试历史 <span>{{ (detail.attempts || []).length }} 次</span></summary>
         <div v-for="attempt in detail.attempts || []" :key="attempt.task_id" class="attempt-row">
-          <span>#{{ attempt.attempt_no }} · {{ attempt.operation }}</span>
+          <span>#{{ attempt.attempt_no }} · {{ attemptOperationLabel(attempt.operation) }}</span>
           <StatusTag domain="partition" :value="attempt.status" size="small" />
-          <small>{{ attempt.error_message || attempt.failure_reason || '-' }}</small>
+          <small>{{ attemptErrorLabel(attempt) }}</small>
         </div>
       </details>
     </template>

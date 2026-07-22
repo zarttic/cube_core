@@ -11,7 +11,20 @@ from pyproj import CRS
 
 from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, TerminalQualityStatus
 
-DEFAULT_RULE_SET_VERSION = "2026.07.19-v6"
+DEFAULT_RULE_SET_VERSION = "2026.07.21-v8"
+
+# Optional rules can be toggled on/off via quality config. Mandatory rules always run.
+OPTIONAL_QUALITY_RULE_CODES = frozenset(
+    {
+        "asset_crs",
+        "optical_band_contract",
+        "radar_band_contract",
+        "carbon_schema",
+        "carbon_coordinates",
+        "carbon_xco2_range",
+        "carbon_quality_flags",
+    }
+)
 
 RULE_NAMES = {
     "index_schema": "索引结构完整性",
@@ -25,13 +38,10 @@ RULE_NAMES = {
     "window_bounds": "像素窗口边界",
     "optical_band_contract": "光学波段规范",
     "radar_band_contract": "雷达极化通道规范",
-    "product_band_contract": "信息产品变量规范",
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
     "carbon_xco2_range": "XCO2 数值范围",
     "carbon_quality_flags": "碳卫星质量标识",
-    "carbon_observation_duplicates": "碳卫星观测重复",
-    "carbon_footprints": "碳卫星观测足迹",
 }
 
 RULE_DESCRIPTIONS = {
@@ -46,13 +56,10 @@ RULE_DESCRIPTIONS = {
     "window_bounds": "验证像素窗口没有超出源影像的有效行列范围。",
     "optical_band_contract": "检查光学产品波段名称、数量和展示字段是否符合规范。",
     "radar_band_contract": "检查雷达产品极化通道名称和数据结构是否符合规范。",
-    "product_band_contract": "检查信息产品变量名称、单位和数据字段是否符合规范。",
     "carbon_schema": "检查碳卫星文件是否包含规定的观测变量和维度结构。",
     "carbon_coordinates": "验证碳卫星观测经纬度是否存在且处于合法范围。",
     "carbon_xco2_range": "检查XCO2观测值是否落在物理合理范围内。",
     "carbon_quality_flags": "检查碳卫星质量标识是否存在并符合有效取值。",
-    "carbon_observation_duplicates": "识别同一观测时间和位置的重复记录。",
-    "carbon_footprints": "验证碳卫星观测足迹几何是否完整且有效。",
 }
 
 OPTICAL_AUXILIARY_VARIABLE_BANDS = frozenset({
@@ -133,19 +140,70 @@ class RuleRegistry:
         return tuple(rule for rule in self._rules.values() if rule.applies(data_type=data_type, product_type=product_type))
 
 
-def snapshot_rules(registry: RuleRegistry, *, data_type: str, product_type: str | None) -> tuple[RuleSnapshot, ...]:
-    return tuple(
-        RuleSnapshot(
-            code=rule.code,
-            name=rule.name,
-            description=RULE_DESCRIPTIONS.get(rule.code, ""),
-            applicability=dict(rule.applicability),
-            mandatory=rule.mandatory,
-            parameters=dict(rule.parameters),
-            implementation_version=rule.implementation_version,
-        )
-        for rule in registry.applicable(data_type=data_type, product_type=product_type)
+def default_enabled_optional_rules() -> frozenset[str]:
+    """Optional rules are enabled by default; callers may narrow the set via config."""
+    return OPTIONAL_QUALITY_RULE_CODES
+
+
+def normalize_enabled_optional_rules(codes: Iterable[str] | None) -> tuple[str, ...]:
+    """Validate and normalize an optional-rule enablement list.
+
+    Only known optional rule codes are accepted. Order follows the registry definition order.
+    """
+    if codes is None:
+        selected = set(default_enabled_optional_rules())
+    else:
+        selected: set[str] = set()
+        for raw in codes:
+            code = str(raw or "").strip()
+            if not code:
+                continue
+            if code not in OPTIONAL_QUALITY_RULE_CODES:
+                raise ValueError(f"unknown or non-optional quality rule: {code}")
+            selected.add(code)
+    registry_order = [rule.code for rule in default_rule_registry().all() if rule.code in OPTIONAL_QUALITY_RULE_CODES]
+    return tuple(code for code in registry_order if code in selected)
+
+
+def is_rule_enabled(rule: QualityRule, *, enabled_optional_rules: Iterable[str] | None) -> bool:
+    if rule.mandatory:
+        return True
+    enabled = set(enabled_optional_rules) if enabled_optional_rules is not None else set(default_enabled_optional_rules())
+    return rule.code in enabled
+
+
+def snapshot_rules(
+    registry: RuleRegistry,
+    *,
+    data_type: str,
+    product_type: str | None,
+    enabled_optional_rules: Iterable[str] | None = None,
+) -> tuple[RuleSnapshot, ...]:
+    """Build the executable rule snapshot for one dataset.
+
+    Mandatory applicable rules always appear. Optional rules appear only when enabled.
+    """
+    enabled = (
+        set(normalize_enabled_optional_rules(enabled_optional_rules))
+        if enabled_optional_rules is not None
+        else set(default_enabled_optional_rules())
     )
+    snapshots: list[RuleSnapshot] = []
+    for rule in registry.applicable(data_type=data_type, product_type=product_type):
+        if not is_rule_enabled(rule, enabled_optional_rules=enabled):
+            continue
+        snapshots.append(
+            RuleSnapshot(
+                code=rule.code,
+                name=rule.name,
+                description=RULE_DESCRIPTIONS.get(rule.code, ""),
+                applicability=dict(rule.applicability),
+                mandatory=rule.mandatory,
+                parameters=dict(rule.parameters),
+                implementation_version=rule.implementation_version,
+            )
+        )
+    return tuple(snapshots)
 
 
 def reduce_quality_status(results: list[QualityResult], execution_error: str | None) -> TerminalQualityStatus:
@@ -440,10 +498,6 @@ def _radar_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
     return _band_contract(context, "polarization")
 
 
-def _product_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
-    return _band_contract(context, "variable")
-
-
 def _window_bounds(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
@@ -493,32 +547,6 @@ def _carbon_xco2_range(context: RuleContext) -> Iterable[QualityFinding]:
 def _carbon_quality_flags(context: RuleContext) -> Iterable[QualityFinding]:
     for finding in _carbon_attribute_rows(context, "carbon_quality_flags"):
         yield finding
-
-
-def _carbon_observation_duplicates(context: RuleContext) -> Iterable[QualityFinding]:
-    seen: set[str] = set()
-    for row, attributes in _carbon_index_rows(context):
-        identifier = str(attributes.get("observation_id") or "").strip()
-        if identifier and identifier in seen:
-            yield QualityFinding(
-                "duplicate_observation_id",
-                "carbon observations contain duplicate observation IDs",
-                source_asset_id=row["source_asset_id"],
-                index_id=row["output_id"],
-            )
-        seen.add(identifier)
-
-
-def _carbon_footprints(context: RuleContext) -> Iterable[QualityFinding]:
-    for row, attributes in _carbon_index_rows(context):
-        if attributes.get("footprint") is None:
-            yield QualityFinding(
-                "missing_footprint",
-                "carbon observation has no footprint",
-                source_asset_id=row["source_asset_id"],
-                index_id=row["output_id"],
-                field="footprint",
-            )
 
 
 def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityFinding]:
@@ -626,13 +654,10 @@ def default_rule_registry() -> RuleRegistry:
         "window_bounds": _window_bounds,
         "optical_band_contract": _optical_band_contract,
         "radar_band_contract": _radar_band_contract,
-        "product_band_contract": _product_band_contract,
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
         "carbon_xco2_range": _carbon_xco2_range,
         "carbon_quality_flags": _carbon_quality_flags,
-        "carbon_observation_duplicates": _carbon_observation_duplicates,
-        "carbon_footprints": _carbon_footprints,
     }
     rules = [
         RegisteredRule(
@@ -660,7 +685,7 @@ def default_rule_registry() -> RuleRegistry:
             "asset_crs",
             RULE_NAMES["asset_crs"],
             {"data_types": ["optical", "radar", "product"]},
-            True,
+            False,
             {"parser": "pyproj"},
             evaluator=evaluators["asset_crs"],
         )
@@ -668,7 +693,6 @@ def default_rule_registry() -> RuleRegistry:
     for code, data_type, band_type in (
         ("optical_band_contract", "optical", "spectral"),
         ("radar_band_contract", "radar", "polarization"),
-        ("product_band_contract", "product", "variable"),
     ):
         parameters: dict[str, Any] = {"expected_band_type": band_type}
         implementation_version = "1.0.0"
@@ -680,21 +704,19 @@ def default_rule_registry() -> RuleRegistry:
                 code,
                 RULE_NAMES[code],
                 {"data_types": [data_type]},
-                True,
+                False,
                 parameters,
                 implementation_version=implementation_version,
                 evaluator=evaluators[code],
             )
         )
     rules.extend(
-        RegisteredRule(code, RULE_NAMES[code], {"data_types": ["carbon"]}, True, {}, evaluator=evaluators[code])
+        RegisteredRule(code, RULE_NAMES[code], {"data_types": ["carbon"]}, False, {}, evaluator=evaluators[code])
         for code in (
             "carbon_schema",
             "carbon_coordinates",
             "carbon_xco2_range",
             "carbon_quality_flags",
-            "carbon_observation_duplicates",
-            "carbon_footprints",
         )
     )
     return RuleRegistry(rules)

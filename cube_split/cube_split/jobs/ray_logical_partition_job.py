@@ -319,7 +319,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         grid_type=args.grid_type,
         grid_level=args.grid_level,
         cover_mode=args.cover_mode,
-        max_cells_per_asset=args.max_cells_per_asset,
+        max_cells_per_asset=0,
     )
     if not grid_tasks:
         raise RuntimeError(

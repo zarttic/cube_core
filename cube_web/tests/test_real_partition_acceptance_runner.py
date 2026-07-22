@@ -334,7 +334,7 @@ def test_cancel_probe_uses_bounded_product_scene(monkeypatch) -> None:
         def request(self, method, path, body=None):
             if path == "/v1/partition/runs":
                 partition = body["datasets"][0]["partition"]
-                assert partition["max_cells_per_asset"] == 50
+                assert partition["max_cells_per_asset"] == 0
                 return {"task_id": "cancel-task", "status": "queued"}
             if path.endswith("/cancel"):
                 return {"task_id": "cancel-task", "status": "cancel_requested"}
