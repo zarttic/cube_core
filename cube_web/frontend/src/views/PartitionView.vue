@@ -310,6 +310,11 @@ async function submit() {
   try {
     Object.assign(store.form, moduleForms.value[moduleName]);
     await store.submit();
+    store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== moduleName);
+    datasetDrawerVisible.value = false;
+    gridPreviewGeneration += 1;
+    setModuleGridPreview(moduleName, []);
+    if (moduleName === 'carbon') resetCarbonFootprints();
     ElMessage.success('剖分任务已提交。');
   } catch (error) {
     ElMessage.error(error.message || '提交剖分失败。');

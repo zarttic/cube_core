@@ -415,6 +415,26 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     ]));
   });
 
+  it('clears the displayed batch tree when the product page changes', async () => {
+    requestGet.mockImplementation((url) => {
+      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
+      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=radar') return Promise.resolve({ load_batches: [] });
+      return Promise.resolve(responseFor('load-a'));
+    });
+    const wrapper = mountPanel();
+    await flushPromises();
+    await wrapper.vm.loadSelectedBatches(['load-a']);
+    expect(wrapper.vm.availableBatchGroups.map((batch) => batch.load_batch_id)).toEqual(['load-a']);
+
+    await wrapper.setProps({ dataTypeFilter: 'radar' });
+    await flushPromises();
+
+    expect(wrapper.vm.selectedBatchIds).toEqual([]);
+    expect(wrapper.vm.availableBatches).toEqual([]);
+    expect(wrapper.vm.availableBatchGroups).toEqual([]);
+    expect(wrapper.text()).not.toContain('Batch A');
+  });
+
   it('discards a stale batch detail response after the batch selection changes', async () => {
     let resolveOld;
     requestGet.mockImplementation((url) => {

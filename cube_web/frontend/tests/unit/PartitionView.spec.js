@@ -563,6 +563,49 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.find('[data-testid="result"]').exists()).toBe(false);
   });
 
+  it('clears only the submitted product selection after a successful submission', async () => {
+    const store = usePartitionStore();
+    store.form.datasets = [
+      {
+        dataset_id: 'dataset-optical',
+        data_type: 'optical',
+        scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
+        assets: [{ source_asset_id: 'asset-optical', bbox: [100, 20, 101, 21] }],
+        partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+      },
+      {
+        dataset_id: 'dataset-carbon',
+        data_type: 'carbon',
+        scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
+        assets: [{ source_asset_id: 'asset-carbon', bbox: [110, 30, 111, 31] }],
+        partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+      },
+    ];
+    vi.spyOn(store, 'submit').mockResolvedValue({ task_id: 'optical-task', status: 'queued' });
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          ...layoutStubs,
+          GlobeMap: GlobeMapStub,
+          GridParameters: { template: '<button data-testid="submit" @click="$emit(\'submit\')">submit</button>' },
+          BatchAssetsPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    wrapper.vm.datasetDrawerVisible = true;
+    await wrapper.get('[data-testid="submit"]').trigger('click');
+    await flushPromises();
+
+    expect(store.form.datasets).toEqual([expect.objectContaining({ dataset_id: 'dataset-carbon' })]);
+    expect(wrapper.vm.datasetDrawerVisible).toBe(false);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+  });
+
   it('keeps an in-flight preview scoped to its originating product', async () => {
     let resolvePreview;
     requestJson.mockImplementationOnce(() => new Promise((resolve) => { resolvePreview = resolve; }));

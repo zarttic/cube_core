@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Collection, FolderOpened, Picture, Refresh, Search, Unlock } from '@element-plus/icons-vue';
 
 import { requestGet } from '@/api/client';
@@ -29,6 +29,7 @@ const collapsedDatasets = ref(new Set());
 const collapsedScenes = ref(new Set());
 let sceneRequestGeneration = 0;
 let sceneRequestController = null;
+let batchRequestGeneration = 0;
 let refreshTimer = null;
 let committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneIds: [], bandUnitIds: [] };
 const REFRESH_INTERVAL_MS = 20_000;
@@ -142,7 +143,8 @@ function selectedBandsFromModel() {
 const queueBatches = computed(() => availableBatches.value);
 
 async function loadAvailable({ preserveSelection = false, preserveExpansion = false } = {}) {
-  if (loading.value) return;
+  const generation = ++batchRequestGeneration;
+  const dataTypeFilter = props.dataTypeFilter;
   const priorBatchIds = [...selectedBatchIds.value];
   const priorSceneIds = [...selectedSceneIds.value];
   const priorBandUnitIds = [...selectedBandUnitIds.value];
@@ -150,8 +152,9 @@ async function loadAvailable({ preserveSelection = false, preserveExpansion = fa
   error.value = '';
   try {
     const query = new URLSearchParams({ limit: '100', status: 'succeeded' });
-    if (props.dataTypeFilter) query.set('data_type', props.dataTypeFilter);
+    if (dataTypeFilter) query.set('data_type', dataTypeFilter);
     const response = await requestGet(`/v1/partition/load-batches?${query.toString()}`);
+    if (generation !== batchRequestGeneration || dataTypeFilter !== props.dataTypeFilter) return;
     availableBatches.value = Array.isArray(response?.load_batches)
       ? response.load_batches.filter((batch) => batch.status === 'succeeded')
       : [];
@@ -161,11 +164,16 @@ async function loadAvailable({ preserveSelection = false, preserveExpansion = fa
     ));
     selectedSceneIds.value = preserveSelection ? priorSceneIds : selectedScenesFromModel();
     selectedBandUnitIds.value = preserveSelection ? priorBandUnitIds : selectedBandsFromModel();
-    if (selectedBatchIds.value.length) await loadSelectedBatches(selectedBatchIds.value, { preserveExpansion });
+    if (selectedBatchIds.value.length) {
+      await loadSelectedBatches(selectedBatchIds.value, { preserveExpansion });
+    } else {
+      availableDatasets.value = [];
+      availableBatchGroups.value = [];
+    }
   } catch (caught) {
-    error.value = caught.message || '载入批次失败。';
+    if (generation === batchRequestGeneration) error.value = caught.message || '载入批次失败。';
   } finally {
-    loading.value = false;
+    if (generation === batchRequestGeneration) loading.value = false;
   }
 }
 
@@ -566,6 +574,18 @@ function eligibleScene(scene) {
 function refreshAvailable() {
   return loadAvailable({ preserveSelection: true, preserveExpansion: true });
 }
+
+watch(() => props.dataTypeFilter, () => {
+  sceneRequestGeneration += 1;
+  sceneRequestController?.abort();
+  selectedBatchIds.value = [];
+  selectedSceneIds.value = [];
+  selectedBandUnitIds.value = [];
+  availableDatasets.value = [];
+  availableBatchGroups.value = [];
+  committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneIds: [], bandUnitIds: [] };
+  loadAvailable();
+});
 
 onMounted(() => {
   loadAvailable();
