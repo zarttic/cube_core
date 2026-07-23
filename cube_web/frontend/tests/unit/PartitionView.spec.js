@@ -67,7 +67,40 @@ describe('PartitionView map workspace', () => {
 
     wrapper.vm.queueManagedPartition(reloadBatch);
     expect(wrapper.vm.datasetDrawerVisible).toBe(true);
-    expect(usePartitionStore().form.datasets).toEqual(reloadBatch.selection.datasets);
+    expect(usePartitionStore().datasetsFor('optical')).toEqual(reloadBatch.selection.datasets);
+  });
+
+  it('merges a confirmed reload batch into the existing product context', async () => {
+    const store = usePartitionStore();
+    const existing = {
+      dataset_id: 'dataset-existing', data_type: 'optical', source_batch_id: 'load-existing',
+      selection_id: 'load-existing:dataset-existing', scenes: [{ scene_id: 'scene-existing' }],
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    };
+    store.setDatasets('optical', [existing]);
+    const reloadBatch = {
+      load_batch_id: 'dataset-reload-a', data_type: 'optical',
+      selection: { datasets: [{
+        dataset_id: 'dataset-reload', data_type: 'optical', source_batch_id: 'dataset-reload-a',
+        selection_id: 'dataset-reload-a:dataset-reload', scenes: [{ scene_id: 'scene-reload' }],
+        partition: { grid_type: 'mgrs', requested_grid_level: 1, partition_method: 'logical' },
+      }] },
+    };
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true,
+          BatchAssetsPanel: true, TaskQueuePanel: true, QualityView: true, DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    wrapper.vm.queueManagedPartition(reloadBatch);
+
+    expect(store.datasetsFor('optical').map((dataset) => dataset.selection_id)).toEqual([
+      'load-existing:dataset-existing', 'dataset-reload-a:dataset-reload',
+    ]);
   });
 
   it('splits a slightly out-of-bounds global product extent for Cesium', () => {
@@ -119,14 +152,14 @@ describe('PartitionView map workspace', () => {
 
   it('renders the map and previews selected asset bounds', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('optical', [{
       dataset_id: 'dataset-a',
       dataset_title: 'Dataset A',
       data_type: 'optical',
       scenes: [{ scene_id: 'scene-a', source_batch_ids: ['loader-batch-a'] }],
       assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
       bands: [],
-    }];
+    }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -168,12 +201,12 @@ describe('PartitionView map workspace', () => {
 
   it('loads selected carbon source footprints onto the map', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('carbon', [{
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
       scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
       assets: [{ source_asset_id: 'asset-carbon', bbox: [100, 20, 101, 21] }],
       partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
-    }];
+    }]);
     requestJson.mockImplementation(async (path) => (
       path === '/v1/partition/carbon/footprints'
         ? { items: [{ observation_id: 'obs-1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [101, 21], [100, 20]]] } }] }
@@ -200,11 +233,11 @@ describe('PartitionView map workspace', () => {
 
   it('loads carbon footprint coverage cells when loading the map', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('carbon', [{
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
       scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
       assets: [], partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
-    }];
+    }]);
     requestJson.mockResolvedValue({
       items: [{ observation_id: 'obs-1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } }],
       cells: [{ space_code: 'H5', grid_level: 5, geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } }],
@@ -233,12 +266,12 @@ describe('PartitionView map workspace', () => {
 
   it('discards a carbon footprint response after the selected scenes change', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('carbon', [{
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon',
       scenes: [{ scene_id: 'scene-a', source_batch_ids: ['load-a'] }],
       assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
       partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
-    }];
+    }]);
     let resolvePreview;
     requestJson.mockReturnValue(new Promise((resolve) => { resolvePreview = resolve; }));
     const wrapper = mount(PartitionView, {
@@ -277,7 +310,7 @@ describe('PartitionView map workspace', () => {
       };
     });
     const store = usePartitionStore();
-    store.form.datasets = [
+    store.setDatasets('optical', [
       {
         dataset_id: 'higlass', dataset_title: 'HiGLASS', data_type: 'optical',
         assets: [{ source_asset_id: 'higlass-a', bbox: [121.5, 30, 122.7, 31.2] }],
@@ -296,7 +329,7 @@ describe('PartitionView map workspace', () => {
         scenes: [{ scene_id: 'scene-recent' }],
         partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
       },
-    ];
+    ]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -339,23 +372,21 @@ describe('PartitionView map workspace', () => {
       }],
     }));
     const store = usePartitionStore();
-    store.form.datasets = [
-      {
+    store.setDatasets('optical', [{
         dataset_id: 'optical-a', data_type: 'optical', scenes: [{ scene_id: 'scene-o' }],
         assets: [{ source_asset_id: 'asset-o', bbox: [100, 20, 101, 21] }],
         partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
-      },
-      {
+      }]);
+    store.setDatasets('radar', [{
         dataset_id: 'radar-a', data_type: 'radar', scenes: [{ scene_id: 'scene-r' }],
         assets: [{ source_asset_id: 'asset-r', bbox: [110, 30, 111, 31] }],
         partition: { grid_type: 'mgrs', requested_grid_level: 1, partition_method: 'logical' },
-      },
-      {
+      }]);
+    store.setDatasets('product', [{
         dataset_id: 'product-a', data_type: 'product', scenes: [{ scene_id: 'scene-p' }],
         assets: [{ source_asset_id: 'asset-p', bbox: [120, 40, 121, 41] }],
         partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
-      },
-    ];
+      }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -397,11 +428,11 @@ describe('PartitionView map workspace', () => {
       })),
     });
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('optical', [{
       dataset_id: 'dataset-large', data_type: 'optical', scenes: [{ scene_id: 'scene-large' }],
       assets: [{ source_asset_id: 'asset-large', bbox: [100, 20, 101, 21] }],
       partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
-    }];
+    }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -454,14 +485,14 @@ describe('PartitionView map workspace', () => {
 
   it('keeps partition parameters independent between product pages', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('optical', [{
       dataset_id: 'dataset-a',
       data_type: 'optical',
       assets: [],
       bands: [],
       partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
       grid_level_unlocked: true,
-    }];
+    }]);
     const GridParametersStub = {
       props: ['modelValue'],
       emits: ['update:modelValue'],
@@ -485,7 +516,7 @@ describe('PartitionView map workspace', () => {
 
     await wrapper.get('[data-testid="set-mgrs"]').trigger('click');
     expect(wrapper.get('[data-testid="parameters"]').attributes('data-grid-type')).toBe('mgrs');
-    expect(store.form.datasets[0].partition).toMatchObject({
+    expect(store.datasetsFor('optical')[0].partition).toMatchObject({
       grid_type: 'mgrs',
       requested_grid_level: 1,
       partition_method: 'logical',
@@ -501,18 +532,16 @@ describe('PartitionView map workspace', () => {
 
   it('keeps source load batch summaries scoped to the active product page', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [
-      {
+    store.setDatasets('optical', [{
         dataset_id: 'dataset-optical', data_type: 'optical', assets: [],
         scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
         partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
-      },
-      {
+      }]);
+    store.setDatasets('carbon', [{
         dataset_id: 'dataset-carbon', data_type: 'carbon', assets: [],
         scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
         partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
-      },
-    ];
+      }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -565,22 +594,20 @@ describe('PartitionView map workspace', () => {
 
   it('clears only the submitted product selection after a successful submission', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [
-      {
+    store.setDatasets('optical', [{
         dataset_id: 'dataset-optical',
         data_type: 'optical',
         scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
         assets: [{ source_asset_id: 'asset-optical', bbox: [100, 20, 101, 21] }],
         partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
-      },
-      {
+      }]);
+    store.setDatasets('carbon', [{
         dataset_id: 'dataset-carbon',
         data_type: 'carbon',
         scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
         assets: [{ source_asset_id: 'asset-carbon', bbox: [110, 30, 111, 31] }],
         partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
-      },
-    ];
+      }]);
     vi.spyOn(store, 'submit').mockResolvedValue({ task_id: 'optical-task', status: 'queued' });
     const wrapper = mount(PartitionView, {
       global: {
@@ -601,23 +628,58 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="submit"]').trigger('click');
     await flushPromises();
 
-    expect(store.form.datasets).toEqual([expect.objectContaining({ dataset_id: 'dataset-carbon' })]);
+    expect(store.datasetsFor('optical')).toEqual([]);
+    expect(store.datasetsFor('carbon')).toEqual([expect.objectContaining({ dataset_id: 'dataset-carbon' })]);
     expect(wrapper.vm.datasetDrawerVisible).toBe(false);
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+  });
+
+  it('preserves product selections changed while submission is in flight', async () => {
+    let resolveSubmit;
+    const store = usePartitionStore();
+    const submitted = {
+      dataset_id: 'dataset-optical', data_type: 'optical',
+      scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
+      assets: [], partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    };
+    const added = {
+      dataset_id: 'dataset-added', data_type: 'optical',
+      scenes: [{ scene_id: 'scene-added', source_batch_ids: ['load-added'] }],
+      assets: [], partition: { grid_type: 'mgrs', requested_grid_level: 1, partition_method: 'logical' },
+    };
+    store.setDatasets('optical', [submitted]);
+    vi.spyOn(store, 'submit').mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          ...layoutStubs, GlobeMap: GlobeMapStub,
+          GridParameters: { template: '<button data-testid="submit" @click="$emit(\'submit\')">submit</button>' },
+          BatchAssetsPanel: true, TaskQueuePanel: true, QualityView: true, DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="submit"]').trigger('click');
+    store.setDatasets('optical', [submitted, added]);
+    resolveSubmit({ task_id: 'optical-task', status: 'queued' });
+    await flushPromises();
+
+    expect(store.datasetsFor('optical')).toEqual([submitted, added]);
   });
 
   it('keeps an in-flight preview scoped to its originating product', async () => {
     let resolvePreview;
     requestJson.mockImplementationOnce(() => new Promise((resolve) => { resolvePreview = resolve; }));
     const store = usePartitionStore();
-    store.form.datasets = [{
+    store.setDatasets('optical', [{
       dataset_id: 'dataset-a',
       dataset_title: 'Dataset A',
       data_type: 'optical',
       assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
       bands: [],
       partition: { grid_type: 'geohash', requested_grid_level: 6, partition_method: 'logical' },
-    }];
+    }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -642,9 +704,9 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
   });
 
-  it('allows selections accumulated from different loader batches', async () => {
+  it('allows multiple loader batches in the same product submission', async () => {
     const store = usePartitionStore();
-    const submit = vi.spyOn(store, 'submit');
+    const submit = vi.spyOn(store, 'submit').mockResolvedValue({ task_id: 'optical-task', status: 'queued' });
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -662,11 +724,12 @@ describe('PartitionView map workspace', () => {
     });
     wrapper.vm.updateDatasets([
       { dataset_id: 'a', data_type: 'optical', scenes: [{ scene_id: 'scene-a', source_batch_ids: ['loader-a'] }], assets: [] },
-      { dataset_id: 'b', data_type: 'radar', scenes: [{ scene_id: 'scene-b', source_batch_ids: ['loader-b'] }], assets: [] },
+      { dataset_id: 'b', data_type: 'optical', scenes: [{ scene_id: 'scene-b', source_batch_ids: ['loader-b'] }], assets: [] },
     ]);
 
+    expect(store.datasetsFor('optical')).toHaveLength(2);
     expect(store.form).not.toHaveProperty('batchId');
     await wrapper.get('[data-testid="submit"]').trigger('click');
-    expect(submit).toHaveBeenCalledOnce();
+    expect(submit).toHaveBeenCalledWith('optical');
   });
 });

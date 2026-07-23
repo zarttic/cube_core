@@ -57,7 +57,9 @@ There is no runtime mode switch. These APIs are the only production chain.
   the list endpoint returns it alongside subsystem-import batches.
 - `POST /v1/partition/runs` accepts Dataset-specific Scene selections and grid
   settings, then creates one PartitionRun. Each selection may retain its own
-  source load batch and valid grid configuration.
+  source load batch and valid grid configuration. The production frontend sends
+  selections from exactly one product context per request, while allowing that
+  context to merge several source load batches into the same PartitionRun.
 - `GET /v1/datasets` and its detail endpoints expose management, provenance,
   quality, publication, and current output state.
 - `/v1/ingest-runs` exposes ingest execution grouped by Scene, with explicit
@@ -75,7 +77,9 @@ have been verified. Failed or stale work remains retryable. Cube geometry is
 derived from `partition_grid_cells.geometry`, never from its bbox.
 
 The frontend does not ask operators to enter a load batch or partition run ID.
-It selects source load batches and Scenes, then generates a new run ID.
+It keeps independent pending selections for optical, radar, carbon and product
+pages. Submitting one page generates a new run ID from only that page's
+selections and clears only that pending context after the server accepts it.
 
 ## Acceptance
 

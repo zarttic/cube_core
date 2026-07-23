@@ -37,12 +37,12 @@ describe('partition store scene request', () => {
 
   it('submits one run for multiple datasets and source load batches', async () => {
     const store = usePartitionStore();
-    store.form.datasets = [
+    store.setDatasets('optical', [
       dataset('dataset-optical', [scene('scene-shared', ['load-a', 'load-b']), scene('scene-a', ['load-a'])]),
-      dataset('dataset-carbon', [scene('scene-carbon', ['load-b'])], 'geohash', 4),
-    ];
+      dataset('dataset-second', [scene('scene-second', ['load-b'])], 'geohash', 4),
+    ]);
 
-    await store.submit();
+    await store.submit('optical');
 
     expect(requestPost).toHaveBeenCalledOnce();
     const [path, body] = requestPost.mock.calls[0];
@@ -60,10 +60,10 @@ describe('partition store scene request', () => {
         partition: expect.objectContaining({ grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' }),
       }),
       expect.objectContaining({
-        dataset_id: 'dataset-carbon',
+        dataset_id: 'dataset-second',
         source_batch_id: 'load-b',
-        selection_id: 'load-b:dataset-carbon',
-        scene_ids: ['scene-carbon'],
+        selection_id: 'load-b:dataset-second',
+        scene_ids: ['scene-second'],
         partition: expect.objectContaining({ grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' }),
       }),
     ]));
@@ -74,10 +74,10 @@ describe('partition store scene request', () => {
 
   it('keeps execution identity separate from a load batch identity', () => {
     const store = usePartitionStore();
-    store.form.datasets = [dataset('dataset-a', [scene('scene-a', ['load-a'])])];
+    store.setDatasets('optical', [dataset('dataset-a', [scene('scene-a', ['load-a'])])]);
 
-    expect(() => store.buildRequest('load-a')).toThrow(/不能复用载入批次/);
-    expect(store.buildRequest('partition-run-explicit')).toMatchObject({
+    expect(() => store.buildRequest('load-a', 'optical')).toThrow(/不能复用载入批次/);
+    expect(store.buildRequest('partition-run-explicit', 'optical')).toMatchObject({
       partition_run_id: 'partition-run-explicit',
       source_batch_ids: ['load-a'],
     });
@@ -87,9 +87,9 @@ describe('partition store scene request', () => {
     const store = usePartitionStore();
     const selected = dataset('dataset-a', [scene('scene-a', ['load-a'])]);
     selected.band_unit_ids = ['band-scene-a-b04', 'band-scene-a-b08'];
-    store.form.datasets = [selected];
+    store.setDatasets('optical', [selected]);
 
-    expect(store.buildRequest('partition-run-bands').datasets[0]).toMatchObject({
+    expect(store.buildRequest('partition-run-bands', 'optical').datasets[0]).toMatchObject({
       dataset_id: 'dataset-a',
       scene_ids: ['scene-a'],
       band_unit_ids: ['band-scene-a-b04', 'band-scene-a-b08'],
@@ -98,9 +98,9 @@ describe('partition store scene request', () => {
 
   it('deduplicates source batches retained by the same scene', () => {
     const store = usePartitionStore();
-    store.form.datasets = [dataset('dataset-a', [scene('scene-a', ['load-a', 'load-b', 'load-a'])])];
+    store.setDatasets('optical', [dataset('dataset-a', [scene('scene-a', ['load-a', 'load-b', 'load-a'])])]);
 
-    expect(store.buildRequest('partition-run-a')).toMatchObject({
+    expect(store.buildRequest('partition-run-a', 'optical')).toMatchObject({
       source_batch_ids: ['load-a', 'load-b'],
       datasets: [{ dataset_id: 'dataset-a', scene_ids: ['scene-a'] }],
     });
@@ -110,9 +110,9 @@ describe('partition store scene request', () => {
     const store = usePartitionStore();
     const selected = dataset('dataset-a', [scene('scene-a', ['load-a'])]);
     selected.selection_source = 'dataset';
-    store.form.datasets = [selected];
+    store.setDatasets('optical', [selected]);
 
-    expect(store.buildRequest('partition-run-dataset')).toMatchObject({
+    expect(store.buildRequest('partition-run-dataset', 'optical')).toMatchObject({
       selection_source: 'dataset',
       source_batch_ids: ['load-a'],
     });
@@ -127,9 +127,9 @@ describe('partition store scene request', () => {
       time_granularity: 'month',
       max_cells_per_asset: 99,
     };
-    store.form.datasets = [selected];
+    store.setDatasets('optical', [selected]);
 
-    expect(store.buildRequest('partition-run-fixed').datasets[0].partition).toMatchObject({
+    expect(store.buildRequest('partition-run-fixed', 'optical').datasets[0].partition).toMatchObject({
       cover_mode: 'intersect',
       time_granularity: 'day',
       max_cells_per_asset: 0,
@@ -143,18 +143,36 @@ describe('partition store scene request', () => {
     ['invalid partition method', [{ ...dataset('dataset-a', [scene('scene-a', ['load-a'])]), partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'logical' } }], /剖分方式/],
   ])('rejects %s before submission', (_name, datasets, message) => {
     const store = usePartitionStore();
-    store.form.datasets = datasets;
-    expect(() => store.buildRequest('partition-run-invalid')).toThrow(message);
+    store.setDatasets('optical', datasets);
+    expect(() => store.buildRequest('partition-run-invalid', 'optical')).toThrow(message);
     expect(requestPost).not.toHaveBeenCalled();
   });
 
   it('rejects one scene selected under two datasets', () => {
     const store = usePartitionStore();
-    store.form.datasets = [
+    store.setDatasets('optical', [
       dataset('dataset-a', [scene('scene-shared', ['load-a'])]),
       dataset('dataset-b', [scene('scene-shared', ['load-a'])]),
-    ];
-    expect(() => store.buildRequest('partition-run-invalid')).toThrow(/不能重复归入/);
+    ]);
+    expect(() => store.buildRequest('partition-run-invalid', 'optical')).toThrow(/不能重复归入/);
+  });
+
+  it('submits only the selected product context', async () => {
+    const store = usePartitionStore();
+    const optical = dataset('dataset-optical', [scene('scene-optical', ['load-optical'])]);
+    const radar = {
+      ...dataset('dataset-radar', [scene('scene-radar', ['load-radar'])]),
+      data_type: 'radar',
+    };
+    store.setDatasets('optical', [optical]);
+    store.setDatasets('radar', [radar]);
+
+    await store.submit('radar');
+
+    const [, body] = requestPost.mock.calls[0];
+    expect(body.source_batch_ids).toEqual(['load-radar']);
+    expect(body.datasets).toEqual([expect.objectContaining({ dataset_id: 'dataset-radar' })]);
+    expect(store.datasetsFor('optical')).toEqual([optical]);
   });
 
   it('loads server-generated batch identities from the formal endpoint', async () => {

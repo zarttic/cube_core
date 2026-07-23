@@ -46,7 +46,7 @@ const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [va
 }])));
 
 const activeProduct = computed(() => productModules.find((item) => item.value === activeModule.value) || null);
-const activeDatasets = computed(() => store.form.datasets.filter((dataset) => dataset.data_type === activeModule.value));
+const activeDatasets = computed(() => store.datasetsFor(activeModule.value));
 const gridConfigLocked = computed(() => activeDatasets.value.some((dataset) => (
   dataset.grid_config_locked === true || dataset.selection_source === 'dataset'
 )));
@@ -88,8 +88,7 @@ const formModel = computed({
           : requestedGridLevel,
       };
       moduleForms.value[activeModule.value] = settings;
-      store.form.datasets = store.form.datasets.map((dataset) => dataset.data_type === activeModule.value
-        ? {
+      store.setDatasets(activeModule.value, activeDatasets.value.map((dataset) => ({
           ...dataset,
           grid_level_unlocked: gridTypeChanged ? false : dataset.grid_level_unlocked,
           partition: withFixedPartitionOptions({
@@ -100,8 +99,7 @@ const formModel = computed({
               : settings.requestedGridLevel,
             partition_method: derivedPartitionMethod(settings.gridType),
           }),
-        }
-        : dataset);
+        })));
     }
   },
 });
@@ -280,8 +278,9 @@ function resetCarbonFootprints() {
 function selectReloadBatch(reloadBatch) {
   const datasets = reloadBatch?.selection?.datasets || [];
   if (!datasets.length) return;
-  store.form.datasets = datasets;
-  activeModule.value = reloadBatch.data_type || datasets[0]?.data_type || activeModule.value;
+  const dataType = reloadBatch.data_type || datasets[0]?.data_type;
+  store.mergeDatasets(dataType, datasets);
+  activeModule.value = dataType || activeModule.value;
   const partition = datasets[0]?.partition;
   moduleForms.value[activeModule.value] = {
     gridType: partition.grid_type,
@@ -307,10 +306,11 @@ function setModuleGridPreview(moduleName, geometries, meta = {}) {
 
 async function submit() {
   const moduleName = activeModule.value;
+  const contextVersion = store.contextVersionFor(moduleName);
   try {
     Object.assign(store.form, moduleForms.value[moduleName]);
-    await store.submit();
-    store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== moduleName);
+    await store.submit(moduleName);
+    store.clearDatasets(moduleName, contextVersion);
     datasetDrawerVisible.value = false;
     gridPreviewGeneration += 1;
     setModuleGridPreview(moduleName, []);
@@ -343,7 +343,7 @@ async function retryTask(task) {
 
 function reset() {
   const currentType = activeModule.value;
-  store.form.datasets = store.form.datasets.filter((dataset) => dataset.data_type !== currentType);
+  store.clearDatasets(currentType);
   gridPreviewGeneration += 1;
   setModuleGridPreview(currentType, []);
   if (currentType === 'carbon') resetCarbonFootprints();
@@ -497,7 +497,7 @@ function resetGridPreview() {
 }
 
 function updateDatasets(datasets) {
-  store.form.datasets = datasets;
+  store.setDatasets(activeModule.value, datasets);
   mapPreviewVisible.value = true;
   const partitions = datasets
     .filter((dataset) => dataset.data_type === activeModule.value && dataset.partition)
@@ -521,7 +521,7 @@ onMounted(() => {
   if (pendingSelection) queueManagedPartition(pendingSelection);
   const requestedModule = String(router.currentRoute.value.query.module || pendingSelection?.data_type || '');
   if (productModules.some((item) => item.value === requestedModule)) activeModule.value = requestedModule;
-  const queued = store.form.datasets.find((dataset) => dataset.data_type === activeModule.value && dataset.partition);
+  const queued = store.datasetsFor(activeModule.value).find((dataset) => dataset.partition);
   if (queued) {
     moduleForms.value[activeModule.value] = {
       gridType: queued.partition.grid_type,
@@ -629,7 +629,7 @@ onMounted(() => {
           class="partition-data-drawer"
         >
           <BatchAssetsPanel
-            :model-value="store.form.datasets"
+            :model-value="activeDatasets"
             :data-type-filter="activeModule"
             :data-type-label="activeProduct.label"
             :default-grid-type="formModel.gridType"

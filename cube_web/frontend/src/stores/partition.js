@@ -7,10 +7,12 @@ import { createRequestScope } from '@/api/requestScope';
 import { derivedPartitionMethod, gridDefinition, withFixedPartitionOptions } from '@/utils/grid';
 
 const initialForm = () => ({
-  datasets: [],
   gridType: 'geohash',
   requestedGridLevel: 4,
 });
+const productDataTypes = Object.freeze(['optical', 'carbon', 'radar', 'product']);
+const initialDatasetContexts = () => Object.fromEntries(productDataTypes.map((dataType) => [dataType, []]));
+const initialContextVersions = () => Object.fromEntries(productDataTypes.map((dataType) => [dataType, 0]));
 
 const partitionFields = new Set([
   'grid_type',
@@ -90,6 +92,8 @@ export function createPartitionRunId() {
 
 export const usePartitionStore = defineStore('partition', () => {
   const form = reactive(initialForm());
+  const datasetContexts = reactive(initialDatasetContexts());
+  const contextVersions = reactive(initialContextVersions());
   const batches = ref([]);
   const tasks = ref([]);
   const taskPage = reactive({ page: 1, pageSize: 20, total: 0 });
@@ -101,17 +105,55 @@ export const usePartitionStore = defineStore('partition', () => {
   const taskScope = createRequestScope();
   const submitScope = createRequestScope();
 
+  function datasetsFor(dataType) {
+    if (!productDataTypes.includes(dataType)) return [];
+    return datasetContexts[dataType];
+  }
+
+  function setDatasets(dataType, datasets) {
+    if (!productDataTypes.includes(dataType)) throw invalidRequest('数据类型不属于可提交的产品页面。');
+    if (!Array.isArray(datasets) || datasets.some((dataset) => dataset.data_type !== dataType)) {
+      throw invalidRequest('待提交数据必须全部属于当前产品页面。');
+    }
+    datasetContexts[dataType] = datasets;
+    contextVersions[dataType] += 1;
+  }
+
+  function mergeDatasets(dataType, datasets) {
+    const merged = new Map(datasetsFor(dataType).map((dataset) => [
+      String(dataset.selection_id || `${dataset.source_batch_id || ''}:${dataset.dataset_id || ''}`),
+      dataset,
+    ]));
+    datasets.forEach((dataset) => merged.set(
+      String(dataset.selection_id || `${dataset.source_batch_id || ''}:${dataset.dataset_id || ''}`),
+      dataset,
+    ));
+    setDatasets(dataType, [...merged.values()]);
+  }
+
+  function contextVersionFor(dataType) {
+    return productDataTypes.includes(dataType) ? contextVersions[dataType] : -1;
+  }
+
+  function clearDatasets(dataType, expectedVersion = null) {
+    if (expectedVersion !== null && contextVersionFor(dataType) !== expectedVersion) return false;
+    setDatasets(dataType, []);
+    return true;
+  }
+
   function resetForm() {
     Object.assign(form, initialForm());
+    productDataTypes.forEach((dataType) => clearDatasets(dataType));
     result.value = null;
     error.value = '';
   }
 
-  function buildRequest(partitionRunId) {
+  function buildRequest(partitionRunId, dataType) {
     const runId = String(partitionRunId || '').trim();
     if (!runId) throw invalidRequest('缺少剖分执行 ID。');
-    if (!Array.isArray(form.datasets) || !form.datasets.length) throw invalidRequest('请至少选择一个数据单元。');
-    const datasets = form.datasets.map(buildDatasetSelection);
+    const selectedDatasets = datasetsFor(dataType);
+    if (!selectedDatasets.length) throw invalidRequest('请至少选择一个数据单元。');
+    const datasets = selectedDatasets.map(buildDatasetSelection);
     if (datasets.some((dataset) => !dataset.selection_id || !dataset.source_batch_id)) {
       throw invalidRequest('每项剖分选择必须绑定来源载入批次。');
     }
@@ -124,12 +166,12 @@ export const usePartitionStore = defineStore('partition', () => {
       if (owner && owner !== dataset.dataset_id) throw invalidRequest('同一数据单元不能重复归入多个数据集。');
       sceneDatasets.set(sceneId, dataset.dataset_id);
     }));
-    const sourceBatchIds = [...new Set(form.datasets.flatMap((dataset) => (
+    const sourceBatchIds = [...new Set(selectedDatasets.flatMap((dataset) => (
       [dataset.source_batch_id, ...dataset.scenes.flatMap(normalizeSceneBatchIds)]
     )).filter(Boolean))];
     if (!sourceBatchIds.length) throw invalidRequest('所选数据单元缺少来源载入批次。');
     if (sourceBatchIds.includes(runId)) throw invalidRequest('剖分执行 ID 不能复用载入批次 ID。');
-    const selectionSource = form.datasets.every((dataset) => dataset.selection_source === 'dataset')
+    const selectionSource = selectedDatasets.every((dataset) => dataset.selection_source === 'dataset')
       ? 'dataset'
       : 'load_batch';
     return {
@@ -179,9 +221,9 @@ export const usePartitionStore = defineStore('partition', () => {
     }
   }
 
-  async function submit() {
+  async function submit(dataType) {
     const partitionRunId = createPartitionRunId();
-    const body = buildRequest(partitionRunId);
+    const body = buildRequest(partitionRunId, dataType);
     const request = submitScope.begin();
     error.value = '';
     loading.submit = true;
@@ -224,7 +266,8 @@ export const usePartitionStore = defineStore('partition', () => {
   }
 
   return {
-    form, batches, tasks, taskPage, result, error, loading, activeTaskActionId,
+    form, datasetContexts, contextVersions, batches, tasks, taskPage, result, error, loading, activeTaskActionId,
+    datasetsFor, setDatasets, mergeDatasets, contextVersionFor, clearDatasets,
     loadBatches, loadTasks, submit, resetForm, buildRequest, cancelTask, retryTask,
   };
 });
