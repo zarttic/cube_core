@@ -152,6 +152,7 @@ class PartitionDatasetResult(StrictModel):
     requested_grid_level: int
     partition_method: PartitionMethod
     execution_engine: str | None = None
+    ray_parallelism: int | None = Field(default=None, ge=0)
     object_prefix: str
     tiles: tuple[dict[str, Any], ...]
     indexes: tuple[dict[str, Any], ...]

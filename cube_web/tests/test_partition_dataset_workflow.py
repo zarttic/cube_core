@@ -166,6 +166,7 @@ class FakeRunner:
             "grid_type": grid_type,
             "requested_grid_level": requested_grid_level,
             "partition_method": "entity" if grid_type == "isea4h" else "logical",
+            "ray_parallelism": 16,
             "object_prefix": "",
             "tiles": [{"output_id": f"tile-{dataset.dataset_id}"}],
             "indexes": [{"output_id": f"index-{dataset.dataset_id}"}],
@@ -235,6 +236,7 @@ def test_batch_commits_successful_dataset_when_sibling_fails() -> None:
         ],
     }
     assert domain_store.resolve_output_version("dataset-ok") == make_output_version("dataset-ok", "task-batch")
+    assert domain_store.completed[0]["ray_parallelism"] == 16
     with pytest.raises(KeyError):
         domain_store.resolve_output_version("dataset-fail")
 
