@@ -104,6 +104,7 @@ class _Task:
 class _Workflow:
     def __init__(self) -> None:
         self.request = None
+        self.retry = None
 
     def submit_mixed(self, request):
         self.request = request
@@ -111,6 +112,13 @@ class _Workflow:
 
     def submit_strict(self, data_type, request):
         self.request = request
+        return _Task()
+
+    def retry_task(self, task_id, **kwargs):
+        self.retry = (task_id, kwargs)
+        return _Task()
+
+    def get_task(self, _task_id):
         return _Task()
 
 
@@ -123,6 +131,8 @@ class _Repository:
         self.failed_run = None
         self.drafts = {}
         self.reload_batch = None
+        self.rebound = None
+        self.quality_failed_bands = []
 
     def list_load_batches(self, **_kwargs):
         return [{"load_batch_id": "load-001", "batch_name": "Loader batch", "scene_count": 2}]
@@ -211,6 +221,13 @@ class _Repository:
     def bind_partition_task(self, partition_run_id, task_id):
         self.bound = (partition_run_id, task_id)
 
+    def rebind_partition_task(self, source_task_id, task_id, **kwargs):
+        self.rebound = (source_task_id, task_id, kwargs)
+        return "partition-run-001"
+
+    def update_partition_task(self, *_args, **_kwargs):
+        return "partition-run-001"
+
     def fail_partition_run(self, partition_run_id, error_message):
         self.failed_run = (partition_run_id, error_message)
 
@@ -237,6 +254,12 @@ class _Repository:
 
     def list_partition_quality_targets(self, partition_run_id):
         return [{"dataset_id": "dataset-optical", "output_version": "output-001"}] if partition_run_id == "partition-run-001" else []
+
+    def get_partition_run_task_id(self, partition_run_id):
+        return "partition-task-001" if partition_run_id == "partition-run-001" else None
+
+    def list_failed_quality_band_unit_ids(self, partition_run_id):
+        return self.quality_failed_bands if partition_run_id == "partition-run-001" else []
 
 
 @pytest.fixture
@@ -448,6 +471,27 @@ def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_qua
     assert submitted.json()["quality_runs"] == [{
         "dataset_id": "dataset-optical", "output_version": "output-001", "requested_by": "admin",
     }]
+
+
+def test_partition_quality_failure_can_resubmit_only_failed_band_units(api) -> None:
+    client, repository, workflow = api
+    repository.quality_failed_bands = [{"dataset_id": "dataset-optical", "band_unit_id": "band-scene-optical-b04"}]
+
+    response = client.post("/v1/partition/runs/partition-run-001/retry-failed")
+
+    assert response.status_code == 202
+    assert workflow.retry == (
+        "partition-task-001",
+        {
+            "retry_band_unit_ids": {"dataset-optical": {"band-scene-optical-b04"}},
+            "retry_strategy": "quality_failed_units",
+        },
+    )
+    assert repository.rebound == (
+        "partition-task-001",
+        "partition-task-001",
+        {"band_unit_ids": ("band-scene-optical-b04",)},
+    )
 
 
 def test_data_management_selection_creates_a_pending_partition_draft(api) -> None:

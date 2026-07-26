@@ -76,7 +76,6 @@ def test_snapshot_contains_every_interpretive_field() -> None:
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
-        "carbon_quality_flags",
     } <= {item.code for item in carbon}
     assert not {"carbon_observation_duplicates", "carbon_footprints"} & {item.code for item in carbon}
     assert all(item.name and item.applicability and item.implementation_version for item in (*optical, *radar, *product, *carbon))
@@ -91,7 +90,6 @@ def test_data_type_specific_rules_are_optional_and_can_be_disabled() -> None:
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
-        "carbon_quality_flags",
     }
 
     assert optional_codes <= set(default_enabled_optional_rules())
@@ -375,7 +373,6 @@ def test_carbon_rules_validate_current_partition_index_observations() -> None:
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
-        "carbon_quality_flags",
     ):
         rule = registry.get(code)
         assert rule is not None
@@ -404,7 +401,6 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
-        "carbon_quality_flags",
     ):
         rule = registry.get(code)
         assert rule is not None
@@ -412,7 +408,7 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
     codes = [finding.error_code for finding in findings]
     assert "invalid_coordinates" in codes
     assert "xco2_out_of_range" in codes
-    assert "missing_quality_flag" in codes
+    assert "missing_quality_flag" not in codes
     assert "duplicate_observation_id" not in codes
     assert "missing_footprint" not in codes
     assert all(finding.index_id for finding in findings)

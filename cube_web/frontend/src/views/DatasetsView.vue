@@ -92,6 +92,7 @@ onUnmounted(() => store.dispose());
       </el-table-column>
       <el-table-column label="数据类型" width="120"><template #default="{ row }">{{ dataTypeLabel(row.data_type) }}</template></el-table-column>
       <el-table-column prop="product_type" label="产品类型" min-width="170" show-overflow-tooltip />
+      <el-table-column label="产品族" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ (row.product_families || []).join('、') || '-' }}</template></el-table-column>
       <el-table-column prop="scene_count" label="景数量" width="90" />
       <el-table-column label="时间范围" min-width="180"><template #default="{ row }">{{ formatShanghaiRange(row.time_start, row.time_end) }}</template></el-table-column>
       <el-table-column prop="current_output_version" label="当前版本" min-width="130" show-overflow-tooltip />

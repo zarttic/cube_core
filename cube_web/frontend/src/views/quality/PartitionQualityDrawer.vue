@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue';
-import { Refresh } from '@element-plus/icons-vue';
+import { Download, Refresh } from '@element-plus/icons-vue';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
@@ -10,15 +10,18 @@ const props = defineProps({
   visible: Boolean,
   loading: Boolean,
   submitting: Boolean,
+  exporting: Boolean,
   detail: { type: Object, default: null },
 });
-const emit = defineEmits(['close', 'request-quality', 'retry-failed-partition']);
+const emit = defineEmits(['close', 'request-quality', 'retry-failed-partition', 'export-quality-errors']);
 
 const treeProps = { children: 'children', label: 'label' };
 const title = computed(() => props.detail ? `剖分批次 ${props.detail.partition_run_id}` : '剖分批次质检');
 const summary = computed(() => props.detail?.summary || {});
 const canRequestQuality = computed(() => Number(summary.value.partitioned_count || 0) > Number(summary.value.quality_pass_count || 0));
 const hasFailedPartition = computed(() => Number(summary.value.partition_failed_count || 0) > 0);
+const hasFailedQuality = computed(() => Number(summary.value.quality_failed_count || 0) > 0);
+const canRetryPartition = computed(() => hasFailedPartition.value || hasFailedQuality.value);
 const sourceLoadBatchLabels = computed(() => props.detail?.source_load_batch_names?.length
   ? props.detail.source_load_batch_names
   : (props.detail?.source_load_batch_ids || []));
@@ -107,13 +110,16 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
         <div><span>已入库</span><strong>{{ summary.ingested_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
       </section>
       <div class="drawer-actions">
-        <el-button v-if="hasFailedPartition" :loading="submitting" @click="emit('retry-failed-partition')">重试失败剖分</el-button>
+        <el-button v-if="canRetryPartition" :loading="submitting" @click="emit('retry-failed-partition')">重新提交失败数据剖分</el-button>
         <el-button type="primary" :icon="Refresh" :loading="submitting" :disabled="!canRequestQuality" @click="emit('request-quality')">提交批次质检</el-button>
       </div>
       <section v-if="qualityRuns.length" class="quality-run-list" data-testid="partition-quality-items">
         <h3>自动质检项</h3>
         <article v-for="run in qualityRuns" :key="run.quality_run_id" class="quality-run-card">
-          <header><strong>{{ run.datasetLabel }}</strong><span>输出版本 {{ run.output_version }}</span><StatusTag domain="quality" :value="run.status" size="small" /></header>
+          <header>
+            <strong>{{ run.datasetLabel }}</strong><span>输出版本 {{ run.output_version }}</span><StatusTag domain="quality" :value="run.status" size="small" />
+            <el-button v-if="['fail', 'error'].includes(run.status)" link type="primary" :icon="Download" :loading="exporting" @click="emit('export-quality-errors', run)">下载错误明细</el-button>
+          </header>
           <div v-if="run.items?.length" class="quality-item-list">
             <div v-for="item in run.items" :key="item.rule_code" class="quality-item-row">
               <span>{{ qualityRuleLabel(item.rule_code) }}</span>

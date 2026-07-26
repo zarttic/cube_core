@@ -195,7 +195,7 @@ def local_env_values() -> dict[str, str]:
 
 def env_file_candidates() -> list[Path]:
     repo_root = Path(__file__).resolve().parents[2]
-    candidates = [Path.cwd() / ".cube_web.env", repo_root / ".cube_web.env"]
+    candidates = [Path.cwd() / ".cube_web.env", Path.home() / ".cube_web.env", repo_root / ".cube_web.env"]
     unique: list[Path] = []
     for path in candidates:
         if path not in unique:

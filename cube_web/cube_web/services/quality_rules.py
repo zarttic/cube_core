@@ -22,7 +22,6 @@ OPTIONAL_QUALITY_RULE_CODES = frozenset(
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
-        "carbon_quality_flags",
     }
 )
 
@@ -41,7 +40,6 @@ RULE_NAMES = {
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
     "carbon_xco2_range": "XCO2 数值范围",
-    "carbon_quality_flags": "碳卫星质量标识",
 }
 
 RULE_DESCRIPTIONS = {
@@ -59,7 +57,6 @@ RULE_DESCRIPTIONS = {
     "carbon_schema": "检查碳卫星文件是否包含规定的观测变量和维度结构。",
     "carbon_coordinates": "验证碳卫星观测经纬度是否存在且处于合法范围。",
     "carbon_xco2_range": "检查XCO2观测值是否落在物理合理范围内。",
-    "carbon_quality_flags": "检查碳卫星质量标识是否存在并符合有效取值。",
 }
 
 OPTICAL_AUXILIARY_VARIABLE_BANDS = frozenset({
@@ -518,7 +515,7 @@ def _window_bounds(context: RuleContext) -> Iterable[QualityFinding]:
 
 
 def _carbon_schema(context: RuleContext) -> Iterable[QualityFinding]:
-    required = {"observation_id", "lon", "lat", "xco2", "quality_flag"}
+    required = {"observation_id", "lon", "lat", "xco2"}
     rows = _carbon_index_rows(context)
     if not rows:
         yield QualityFinding("missing_carbon_indexes", "carbon output has no observation indexes")
@@ -544,11 +541,6 @@ def _carbon_xco2_range(context: RuleContext) -> Iterable[QualityFinding]:
         yield finding
 
 
-def _carbon_quality_flags(context: RuleContext) -> Iterable[QualityFinding]:
-    for finding in _carbon_attribute_rows(context, "carbon_quality_flags"):
-        yield finding
-
-
 def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityFinding]:
     for row, attributes in _carbon_index_rows(context):
         try:
@@ -567,15 +559,6 @@ def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityF
             yield QualityFinding(
                 "xco2_out_of_range",
                 "xco2 must be between 0 and 1000 ppm",
-                source_asset_id=row["source_asset_id"],
-                index_id=row["output_id"],
-            )
-        elif kind == "carbon_quality_flags" and (
-            attributes.get("quality_flag") is None or not str(attributes["quality_flag"]).strip()
-        ):
-            yield QualityFinding(
-                "missing_quality_flag",
-                "carbon quality_flag is required",
                 source_asset_id=row["source_asset_id"],
                 index_id=row["output_id"],
             )
@@ -657,7 +640,6 @@ def default_rule_registry() -> RuleRegistry:
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
         "carbon_xco2_range": _carbon_xco2_range,
-        "carbon_quality_flags": _carbon_quality_flags,
     }
     rules = [
         RegisteredRule(
@@ -716,7 +698,6 @@ def default_rule_registry() -> RuleRegistry:
             "carbon_schema",
             "carbon_coordinates",
             "carbon_xco2_range",
-            "carbon_quality_flags",
         )
     )
     return RuleRegistry(rules)

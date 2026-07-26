@@ -109,6 +109,37 @@ def test_managed_ingest_rejects_cross_bucket_entity_tile(monkeypatch):
         managed._verify_minio_objects(snapshot)
 
 
+def test_carbon_raw_source_can_remain_in_its_source_bucket(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def stat_object(self, bucket, key):
+            calls.append((bucket, key))
+            return SimpleNamespace(metadata={})
+
+    import minio
+
+    monkeypatch.setattr(minio, "Minio", Client)
+    monkeypatch.setattr(
+        managed.runtime_config,
+        "minio_settings",
+        lambda: SimpleNamespace(endpoint="minio:9000", access_key="key", secret_key="secret", secure=False, bucket="cube"),
+    )
+    snapshot = _snapshot("carbon", "entity")
+    snapshot["indexes"][0].update({
+        "cog_uri": "s3://user-1/cog/source.nc",
+        "source_uri": "s3://user-1/cog/source.nc",
+        "value_ref_uri": "s3://user-1/cog/source.nc",
+    })
+
+    managed._verify_minio_objects(snapshot)
+
+    assert calls == [("user-1", "cog/source.nc")]
+
+
 def test_raster_entity_writes_cube_geometry_and_entity_catalog(capture):
     geometry = {
         "type": "Polygon",

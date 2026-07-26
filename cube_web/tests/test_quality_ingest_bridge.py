@@ -84,6 +84,18 @@ def test_manual_ingest_accepts_a_quality_approved_noncurrent_grid_output() -> No
     assert requests[0].scenes[0].output_version == "geohash-output"
 
 
+def test_manual_ingest_accepts_warn_quality_without_auto_warn_policy() -> None:
+    requests = plan_ingest_requests(
+        quality_run_id="quality-a",
+        quality_status="warn",
+        dataset=_dataset(),
+        partition_scenes=(_scene("scene-warn"),),
+        manual=True,
+    )
+
+    assert len(requests) == 1
+
+
 def test_ingest_request_creates_one_request_per_band_unit() -> None:
     requests = _plan(
         "pass",

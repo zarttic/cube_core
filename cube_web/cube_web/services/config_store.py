@@ -57,7 +57,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "carbon_schema",
             "carbon_coordinates",
             "carbon_xco2_range",
-            "carbon_quality_flags",
         ],
     },
 }
@@ -188,47 +187,13 @@ class PostgresConfigStore(ConfigStore):
 
     def update_optional_quality_rule_enabled(self, code: str, enabled: bool) -> dict[str, Any]:
         self.ensure_schema()
-        config = stored_config(default_config())
-        configured = list(config["quality"]["enabled_optional_rules"])
+        record = self.get_config_record()
+        config = stored_config(record["config"])
+        configured = list(config["quality"].get("enabled_optional_rules") or ())
         config["quality"]["enabled_optional_rules"] = [item for item in configured if item != code]
         if enabled:
             config["quality"]["enabled_optional_rules"].append(code)
-        params = {
-            "scope": CONFIG_SCOPE,
-            "rule_code": code,
-            "enabled": enabled,
-            "config": self._jsonb(config),
-        }
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    MERGE INTO cube_web_configs target
-                    USING (
-                      SELECT %(scope)s::text AS scope, %(rule_code)s::text AS rule_code,
-                             %(enabled)s::boolean AS enabled, %(config)s::jsonb AS config
-                    ) source
-                    ON (target.scope = source.scope)
-                    WHEN MATCHED THEN UPDATE SET
-                      config = jsonb_set(
-                        target.config,
-                        '{quality,enabled_optional_rules}',
-                        CASE WHEN source.enabled THEN
-                          (COALESCE(target.config #> '{quality,enabled_optional_rules}', source.config #> '{quality,enabled_optional_rules}') - source.rule_code)
-                            || jsonb_build_array(source.rule_code)
-                        ELSE COALESCE(target.config #> '{quality,enabled_optional_rules}', source.config #> '{quality,enabled_optional_rules}') - source.rule_code
-                        END
-                      ),
-                      updated_at = now()
-                    WHEN NOT MATCHED THEN INSERT (scope, config)
-                      VALUES (source.scope, source.config)
-                    """,
-                    params,
-                )
-                cur.execute("SELECT config, updated_at FROM cube_web_configs WHERE scope = %s", (CONFIG_SCOPE,))
-                row = cur.fetchone()
-            conn.commit()
-        return {"config": normalized_stored_config(row[0]), "updated_at": _iso_datetime(row[1])}
+        return self.update_enabled_optional_quality_rules(tuple(config["quality"]["enabled_optional_rules"]))
 
     def reset_config(self) -> dict[str, Any]:
         return self.update_config(default_config())

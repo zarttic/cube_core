@@ -24,7 +24,7 @@ const emit = defineEmits([
 
 const tabs = [
   ['overview', '概览'], ['scenes', '数据'],
-  ['outputs', '剖分版本'], ['tiles', '瓦片'],
+  ['outputs', '剖分记录'], ['tiles', '瓦片'],
   ['ingest-records', '入库记录'], ['quality', '质检'], ['provenance', '来源追踪'],
 ];
 const title = computed(() => props.detail?.overview?.dataset_code || props.datasetId || '数据集详情');
@@ -329,8 +329,10 @@ function sceneCollapsed(sceneId) {
               <el-descriptions-item label="名称">{{ detail.overview.dataset_title || '-' }}</el-descriptions-item>
               <el-descriptions-item label="景数量">{{ detail.overview.scene_count ?? 0 }}</el-descriptions-item>
               <el-descriptions-item label="时间范围">{{ formatShanghaiRange(detail.overview.time_start, detail.overview.time_end) }}</el-descriptions-item>
-              <el-descriptions-item label="空间范围" :span="2">{{ detail.overview.bbox || '-' }}</el-descriptions-item>
-              <el-descriptions-item label="当前版本">{{ detail.overview.current_output_version || '-' }}</el-descriptions-item>
+              <el-descriptions-item label="产品类型">{{ detail.overview.product_type || '-' }}</el-descriptions-item>
+              <el-descriptions-item label="产品族">{{ (detail.overview.product_families || []).join('、') || '-' }}</el-descriptions-item>
+              <el-descriptions-item v-if="false" label="空间范围" :span="2">{{ detail.overview.bbox || '-' }}</el-descriptions-item>
+              <el-descriptions-item v-if="false" label="当前版本">{{ detail.overview.current_output_version || '-' }}</el-descriptions-item>
               <el-descriptions-item label="入库状态"><StatusTag domain="ingest" :value="detail.overview.ingest_status" size="small" /></el-descriptions-item>
               <el-descriptions-item label="质检状态"><StatusTag domain="quality" :value="detail.overview.quality_status" size="small" /></el-descriptions-item>
               <el-descriptions-item label="描述" :span="2">{{ detail.overview.description || '-' }}</el-descriptions-item>

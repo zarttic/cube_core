@@ -45,7 +45,7 @@ def request_manual_ingest_collection(partition_run_id: str, band_unit_ids: set[s
                 ) q ON true
                 WHERE prs.partition_run_id=%s AND prs.status='completed'
                   AND g.partition_status='completed' AND g.quality_status IN ('pass','warn')
-                  AND g.ingest_status <> 'completed' AND g.band_unit_id=ANY(%s)
+                  AND COALESCE(g.ingest_status, '') <> 'completed' AND g.band_unit_id=ANY(%s)
                 """,
                 (partition_run_id, sorted(band_unit_ids)),
             )
@@ -141,7 +141,7 @@ def plan_ingest_requests(
     policy: AutoIngestPolicy = AutoIngestPolicy(),
     manual: bool = False,
 ) -> tuple[CreateIngestRun, ...]:
-    accepted_statuses = {"pass", "warn"} if policy.allow_warn or dataset.allow_warn_auto_ingest else {"pass"}
+    accepted_statuses = {"pass", "warn"} if manual or policy.allow_warn or dataset.allow_warn_auto_ingest else {"pass"}
     if quality_status not in accepted_statuses:
         return ()
     if dataset.status != "active" or (not manual and (not dataset.auto_ingest_allowed or dataset.current_output_version is None)):

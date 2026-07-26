@@ -3,6 +3,7 @@ export const RETIRED_QUALITY_RULE_CODES = new Set([
   'product_band_contract',
   'carbon_observation_duplicates',
   'carbon_footprints',
+  'carbon_quality_flags',
 ]);
 
 const ruleLabels = {
@@ -13,7 +14,6 @@ const ruleLabels = {
   optical_band_contract: '光学波段规范', radar_band_contract: '雷达极化通道规范',
   carbon_schema: '碳卫星数据结构',
   carbon_coordinates: '碳卫星坐标有效性', carbon_xco2_range: 'XCO2 数值范围',
-  carbon_quality_flags: '碳卫星质量标识',
 };
 
 const errorLabels = {
@@ -55,7 +55,7 @@ const metadataRules = new Set([
 ]);
 const sourceRules = new Set([
   'asset_readability', 'asset_crs', 'carbon_schema', 'carbon_coordinates',
-  'carbon_xco2_range', 'carbon_quality_flags',
+  'carbon_xco2_range',
 ]);
 
 const systemErrorCodes = new Set(['object_reader_unavailable']);

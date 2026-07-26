@@ -554,6 +554,8 @@ def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
 
     second_attempt = store.get_attempt(second.task_id)
     assert second_attempt is not None
+    assert second_attempt["error_message"] is None
+    assert second_attempt["failure_reason"] is None
     assert [item["dataset_id"] for item in second_attempt["payload"]["datasets"]] == ["dataset-radar"]
     assert [call["dataset_id"] for call in runner.calls] == ["dataset-optical", "dataset-radar", "dataset-radar"]
     assert {asset["data_type"]: asset["status"] for asset in store.list_assets("batch-01")} == {
@@ -704,6 +706,36 @@ def test_failed_unit_filter_does_not_expand_an_explicit_empty_scene_set() -> Non
 
     with pytest.raises(HTTPException, match="no failed data units"):
         _filter_retry_datasets(request.datasets, {"dataset-ok": set()})
+
+
+def test_completed_task_can_retry_explicit_quality_failed_band_units() -> None:
+    store = InMemoryPartitionJobStore()
+    runner = FakeRunner()
+    workflow = _workflow(FakeDomainStore(), runner, store)
+
+    first = workflow.submit_strict("optical", _request())
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if store.get_attempt(first.task_id).get("status") == "succeeded":
+            break
+        time.sleep(0.01)
+
+    second = workflow.retry_task(
+        first.task_id,
+        retry_band_unit_ids={"dataset-ok": {"asset-dataset-ok:B01"}},
+        retry_strategy="quality_failed_units",
+    )
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if store.get_attempt(second.task_id).get("status") == "succeeded":
+            break
+        time.sleep(0.01)
+
+    second_attempt = store.get_attempt(second.task_id)
+    assert second_attempt is not None
+    assert second_attempt["retry_strategy"] == "quality_failed_units"
+    assert [band["band_code"] for band in second_attempt["payload"]["datasets"][0]["bands"]] == ["B01"]
+    assert [call["dataset_id"] for call in runner.calls] == ["dataset-ok", "dataset-ok"]
 
 
 def test_retry_rejects_missing_and_non_latest_tasks() -> None:

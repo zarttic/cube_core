@@ -156,6 +156,10 @@ class PartitionDatasetResult(StrictModel):
     tiles: tuple[dict[str, Any], ...]
     indexes: tuple[dict[str, Any], ...]
     grid_cells: tuple[dict[str, Any], ...]
+    # Logical Ray runs persist their rows as immutable MinIO chunks.  Keeping
+    # only these descriptors in the result prevents the coordinator from
+    # materialising a global grid in memory.
+    chunks: tuple[dict[str, Any], ...] = ()
 
 
 def derive_partition_method(grid_type: GridType) -> PartitionMethod:

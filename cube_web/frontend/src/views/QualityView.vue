@@ -121,6 +121,15 @@ async function retryFailedPartition() {
   }
 }
 
+async function exportQualityErrors(qualityRun) {
+  try {
+    await store.exportRunErrors(qualityRun, 'csv');
+    ElMessage.success('质检错误明细已下载');
+  } catch (requestError) {
+    ElMessage.error(requestError.message || '质检错误明细下载失败');
+  }
+}
+
 function closeDetail() {
   detailVisible.value = false;
   selectedId.value = '';
@@ -149,7 +158,7 @@ onMounted(() => { loadBatches(); });
       <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
       <el-table-column label="操作" width="80" fixed="right"><template #default="{ row }"><el-button link type="primary" @click.stop="openBatch(row)">查看</el-button></template></el-table-column>
     </AppTable>
-    <PartitionQualityDrawer :visible="detailVisible" :detail="detail" :loading="detailLoading" :submitting="submitting" @close="closeDetail" @request-quality="requestQuality" @retry-failed-partition="retryFailedPartition" />
+    <PartitionQualityDrawer :visible="detailVisible" :detail="detail" :loading="detailLoading" :submitting="submitting" :exporting="store.exporting" @close="closeDetail" @request-quality="requestQuality" @retry-failed-partition="retryFailedPartition" @export-quality-errors="exportQualityErrors" />
 
     <el-drawer v-model="ruleDrawerVisible" title="质检规则" size="min(900px, 94vw)" destroy-on-close>
       <div class="rule-version">规则集版本 <strong>{{ store.ruleCatalog?.rule_set_version || '-' }}</strong></div>

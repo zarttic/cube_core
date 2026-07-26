@@ -28,6 +28,7 @@ from cube_split.jobs.ray_logical_partition_job import (
     _prepend_sys_paths,
     _ray_actor_options_from_env,
     _ray_project_roots,
+    _ray_runtime_env_for_init,
     _ray_runtime_env_from_env,
     _resolve_ray_chunk_size,
     _resolve_ray_parallelism,
@@ -642,7 +643,7 @@ def _write_entity_tile_chunks_ray(
     clip_mode: str = "exact",
 ) -> tuple[list[dict[str, Any]], float, float, float, float, float, dict[str, float]]:
     ray = _load_ray()
-    runtime_env = _ray_runtime_env_from_env()
+    runtime_env = _ray_runtime_env_for_init(_ray_runtime_env_from_env())
     ray_init_start = time.perf_counter()
     ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     if ray_address:

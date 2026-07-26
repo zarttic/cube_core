@@ -9,13 +9,16 @@ behavioural surface while exposing a transaction context for quality and publica
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:  # pragma: no cover
     from cube_web.services.partition_contracts import (
@@ -83,6 +86,11 @@ def _output_version(dataset_id: str, task_id: str) -> str:
         return hashlib.sha256(f"{dataset_id}\0{task_id}".encode()).hexdigest()[:32]
 
 
+def _attempt_task_id(task_id: str) -> str:
+    """Map a per-selection execution id back to its registered parent attempt."""
+    return str(task_id).split(":", 1)[0]
+
+
 def _validate_page(limit: int, offset: int, sort_by: str, sort_order: str, allowed: dict[str, str]) -> None:
     if not 1 <= limit <= 200:
         raise ValueError("limit must be between 1 and 200")
@@ -104,6 +112,15 @@ class PartitionDomainStore:
         raise NotImplementedError
 
     def complete_output(self, result: "PartitionDatasetResult") -> dict[str, Any]:
+        raise NotImplementedError
+
+    def record_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        raise NotImplementedError
+
+    def verify_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        raise NotImplementedError
+
+    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
         raise NotImplementedError
 
     def fail_output(self, dataset_id: str, output_version: str, *, error_code: str, error_message: str) -> None:
@@ -224,6 +241,7 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
         self.assets: dict[tuple[str, str], dict[str, Any]] = {}
         self.bands: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.outputs: dict[tuple[str, str], dict[str, Any]] = {}
+        self.chunks: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.tiles: dict[str, dict[str, Any]] = {}
         self.indexes: dict[str, dict[str, Any]] = {}
         self.grid_cells: dict[str, dict[str, Any]] = {}
@@ -242,10 +260,11 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
         self.ensure_schema()
         dataset_id = str(_field(dataset, "dataset_id"))
         version = _output_version(dataset_id, task_id)
+        attempt_task_id = _attempt_task_id(task_id)
         with self._lock:
             existing = self.outputs.get((dataset_id, version))
             if existing is not None:
-                if existing["task_id"] != task_id:
+                if existing["task_id"] != attempt_task_id:
                     raise ValueError("output version collides with a different task")
                 return version
             now = _now()
@@ -256,7 +275,7 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
             self.outputs[(dataset_id, version)] = {
                 "dataset_id": dataset_id,
                 "output_version": version,
-                "task_id": task_id,
+                "task_id": attempt_task_id,
                 "grid_type": grid_type,
                 "requested_grid_level": req_grid,
                 "partition_method": method,
@@ -272,8 +291,23 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
                 "error_code": None,
                 "error_message": None,
             }
-            self.attempts.setdefault(task_id, {"task_id": task_id, "dataset_id": dataset_id, "status": "running"})
+            self.attempts.setdefault(attempt_task_id, {"task_id": attempt_task_id, "dataset_id": dataset_id, "status": "running"})
             return version
+
+    def record_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        for raw in _field(result, "chunks", ()):
+            chunk = _value(raw)
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if not chunk_id:
+                raise ValueError("chunk descriptor is missing chunk_id")
+            self.chunks[(str(_field(result, "dataset_id")), str(_field(result, "output_version")), chunk_id)] = chunk
+
+    def verify_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        if _field(result, "chunks", ()):
+            raise RuntimeError("in-memory store cannot verify persisted chunks")
+
+    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
+        return None
 
     def _upsert_dataset(self, request: Any, dataset: Any, now: str) -> dict[str, Any]:
         dataset_id = str(_field(dataset, "dataset_id"))
@@ -355,6 +389,7 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
         dataset_id = str(_field(result, "dataset_id"))
         version = str(_field(result, "output_version"))
         task_id = str(_field(result, "task_id"))
+        attempt_task_id = _attempt_task_id(task_id)
         with self._lock:
             snapshot = {key: copy.deepcopy(value) for key, value in self.__dict__.items() if key != "_lock"}
             try:
@@ -363,11 +398,13 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
                     raise ValueError("output version has not been started")
                 if output["status"] == "completed":
                     return copy.deepcopy(output)
-                attempt = self.attempts.get(task_id, {})
+                attempt = self.attempts.get(attempt_task_id, {})
                 if attempt.get("status") in {"cancelled", "cancel_requested"}:
                     raise RuntimeError("partition attempt was cancelled")
-                if output["task_id"] != task_id:
+                if output["task_id"] != attempt_task_id:
                     raise ValueError("output version task mismatch")
+                if _field(result, "chunks", ()):
+                    raise RuntimeError("in-memory store cannot materialize persisted chunks")
                 rows = {
                     "tiles": _field(result, "tiles", ()),
                     "indexes": _field(result, "indexes", ()),
@@ -823,14 +860,61 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             else f"%s AS {column}"
             for column in columns
         )
-        predicate = " AND ".join(f"target.{column} = source.{column}" for column in key_columns)
+        predicate = " AND ".join(f"target.{column} = incoming.{column}" for column in key_columns)
         names = ", ".join(columns)
-        source_names = ", ".join(f"source.{column}" for column in columns)
+        source_names = ", ".join(
+            f"CAST(incoming.{column} AS jsonb)" if column in jsonb_columns
+            else f"CAST(incoming.{column} AS timestamptz)" if column in timestamp_columns
+            else f"CAST(incoming.{column} AS uuid)" if column in uuid_columns
+            else f"incoming.{column}"
+            for column in columns
+        )
         self._execute(
             connection,
-            f"MERGE INTO {table} target USING (SELECT {source}) source ON ({predicate}) "
+            f"MERGE INTO {table} target USING (SELECT {source}) incoming ON ({predicate}) "
             f"WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({source_names})",
             values,
+        )
+
+    def _merge_insert_many(
+        self,
+        connection: Any,
+        *,
+        table: str,
+        columns: tuple[str, ...],
+        rows: list[tuple[Any, ...]],
+        key_columns: tuple[str, ...],
+    ) -> None:
+        """Insert a bounded group of immutable rows with one OpenGauss MERGE."""
+        if not rows:
+            return
+        key_positions = tuple(columns.index(column) for column in key_columns)
+        # Adjacent spatial shards may emit the same boundary cell. OpenGauss
+        # rejects duplicate source keys within one MERGE statement, even when
+        # the target operation itself is idempotent.
+        deduplicated: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        for row in rows:
+            deduplicated[tuple(row[position] for position in key_positions)] = row
+        rows = list(deduplicated.values())
+        jsonb_columns = {"attributes", "bbox", "counts", "geometry", "payload"}
+        timestamp_columns = {"acquisition_time", "time_start", "time_end"}
+        uuid_columns = {"event_id", "quality_run_id", "publication_id"}
+        projection = ", ".join(f"%s AS {column}" for column in columns)
+        source = " UNION ALL ".join(f"SELECT {projection}" for _ in rows)
+        predicate = " AND ".join(f"target.{column} = incoming.{column}" for column in key_columns)
+        names = ", ".join(columns)
+        source_names = ", ".join(
+            f"CAST(incoming.{column} AS jsonb)" if column in jsonb_columns
+            else f"CAST(incoming.{column} AS timestamptz)" if column in timestamp_columns
+            else f"CAST(incoming.{column} AS uuid)" if column in uuid_columns
+            else f"incoming.{column}"
+            for column in columns
+        )
+        self._execute(
+            connection,
+            f"MERGE INTO {table} target USING ({source}) incoming ON ({predicate}) "
+            f"WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({source_names})",
+            tuple(value for row in rows for value in row),
         )
 
     def _assert_live_schema(self, connection: Any) -> None:
@@ -843,6 +927,224 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         actual = rows[0].get("schema_version")
         if actual != SCHEMA_VERSION:
             raise RuntimeError(f"partition domain schema version {actual!r} does not match {SCHEMA_VERSION!r}")
+
+    def record_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        """Register immutable logical-output chunks while the version is staging."""
+        dataset_id = str(_field(result, "dataset_id"))
+        version = str(_field(result, "output_version"))
+        chunks = tuple(_field(result, "chunks", ()))
+        if not chunks:
+            return
+        with self.transaction() as connection:
+            self._assert_live_schema(connection)
+            outputs = self._fetchall(
+                connection,
+                "SELECT status FROM partition_output_versions WHERE dataset_id=%s AND output_version=%s FOR UPDATE",
+                (dataset_id, version),
+            )
+            if not outputs or outputs[0].get("status") != "staging":
+                raise RuntimeError("output version is not staging")
+            for raw in chunks:
+                chunk = _value(raw)
+                chunk_id = str(chunk.get("chunk_id") or "")
+                checksum = str(chunk.get("checksum") or "")
+                uri = str(chunk.get("object_uri") or "")
+                if not chunk_id or len(checksum) != 64 or not uri.startswith("s3://"):
+                    raise ValueError("invalid logical chunk descriptor")
+                self._merge_insert(
+                    connection,
+                    table="partition_output_chunks",
+                    columns=("dataset_id", "output_version", "chunk_id", "object_uri", "checksum", "byte_size", "grid_cell_count", "tile_count", "index_count", "status"),
+                    key_columns=("dataset_id", "output_version", "chunk_id"),
+                    values=(
+                        dataset_id, version, chunk_id, uri, checksum, int(chunk.get("byte_size") or 0),
+                        int(chunk.get("grid_cell_count") or 0), int(chunk.get("tile_count") or 0),
+                        int(chunk.get("index_count") or 0), "ready",
+                    ),
+                )
+            if hasattr(connection, "commit"):
+                connection.commit()
+
+    def verify_output_chunks(self, result: "PartitionDatasetResult") -> None:
+        """Validate logical chunks concurrently before they enter normalized tables."""
+        dataset_id = str(_field(result, "dataset_id"))
+        version = str(_field(result, "output_version"))
+        expected_count = len(tuple(_field(result, "chunks", ())))
+        if not expected_count:
+            return
+        with self.transaction() as connection:
+            self._assert_live_schema(connection)
+            descriptors = self._fetchall(
+                connection,
+                "SELECT chunk_id,object_uri,checksum,byte_size,grid_cell_count,tile_count,index_count "
+                "FROM partition_output_chunks WHERE dataset_id=%s AND output_version=%s ORDER BY chunk_id",
+                (dataset_id, version),
+            )
+        if len(descriptors) != expected_count:
+            raise RuntimeError("logical chunk manifest is incomplete")
+
+        from cube_split import runtime_config
+        from minio import Minio
+
+        settings = runtime_config.minio_settings()
+        prefix = f"s3://{settings.bucket}/partition/{dataset_id}/versions/{version}/logical-chunks/"
+
+        def verify_one(descriptor: dict[str, Any]) -> str:
+            uri = str(descriptor["object_uri"])
+            parsed = urlparse(uri)
+            if not uri.startswith(prefix) or parsed.netloc != settings.bucket:
+                raise RuntimeError("logical chunk is outside the immutable output prefix")
+            key = unquote(parsed.path.lstrip("/"))
+            client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
+            stat = client.stat_object(parsed.netloc, key)
+            metadata = {str(name).lower(): str(value) for name, value in (getattr(stat, "metadata", {}) or {}).items()}
+            checksum = metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")
+            if int(getattr(stat, "size", -1)) != int(descriptor["byte_size"]) or checksum != descriptor["checksum"]:
+                raise RuntimeError(f"logical chunk manifest verification failed: {descriptor['chunk_id']}")
+            response = client.get_object(parsed.netloc, key)
+            try:
+                payload = gzip.decompress(response.read())
+            finally:
+                response.close()
+                response.release_conn()
+            counts = {"grid_cells": 0, "tiles": 0, "indexes": 0}
+            for line in payload.splitlines():
+                record = json.loads(line)
+                kind = record.get("kind")
+                if kind not in counts or not isinstance(record.get("row"), dict):
+                    raise RuntimeError(f"logical chunk row is invalid: {descriptor['chunk_id']}")
+                counts[kind] += 1
+            expected = {
+                "grid_cells": int(descriptor["grid_cell_count"]),
+                "tiles": int(descriptor["tile_count"]),
+                "indexes": int(descriptor["index_count"]),
+            }
+            if counts != expected:
+                raise RuntimeError(f"logical chunk row counts do not match manifest: {descriptor['chunk_id']}")
+            return str(descriptor["chunk_id"])
+
+        workers = min(8, len(descriptors))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            verified = [future.result() for future in as_completed([pool.submit(verify_one, row) for row in descriptors])]
+        with self.transaction() as connection:
+            self._assert_live_schema(connection)
+            for chunk_id in verified:
+                self._execute(
+                    connection,
+                    "UPDATE partition_output_chunks SET status='verified', verified_at=now() "
+                    "WHERE dataset_id=%s AND output_version=%s AND chunk_id=%s AND status IN ('ready','verified')",
+                    (dataset_id, version, chunk_id),
+                )
+            if hasattr(connection, "commit"):
+                connection.commit()
+
+    def _iter_persisted_chunk_rows(self, connection: Any, result: "PartitionDatasetResult", noun: str):
+        """Yield one persisted row at a time; never assemble a global result list."""
+        dataset_id = str(_field(result, "dataset_id"))
+        version = str(_field(result, "output_version"))
+        rows = self._fetchall(
+            connection,
+            "SELECT chunk_id,object_uri,checksum,byte_size,status FROM partition_output_chunks "
+            "WHERE dataset_id=%s AND output_version=%s ORDER BY chunk_id FOR UPDATE",
+            (dataset_id, version),
+        )
+        expected_count = len(tuple(_field(result, "chunks", ())))
+        if len(rows) != expected_count:
+            raise RuntimeError("logical chunk manifest is incomplete")
+        if any(row.get("status") != "verified" for row in rows):
+            raise RuntimeError("logical chunk verification is incomplete")
+        from cube_split import runtime_config
+        from minio import Minio
+
+        settings = runtime_config.minio_settings()
+        client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
+        prefix = f"s3://{settings.bucket}/partition/{dataset_id}/versions/{version}/logical-chunks/"
+        for descriptor in rows:
+            uri = str(descriptor["object_uri"])
+            parsed = urlparse(uri)
+            if not uri.startswith(prefix) or parsed.netloc != settings.bucket:
+                raise RuntimeError("logical chunk is outside the immutable output prefix")
+            key = unquote(parsed.path.lstrip("/"))
+            stat = client.stat_object(parsed.netloc, key)
+            metadata = {str(name).lower(): str(value) for name, value in (getattr(stat, "metadata", {}) or {}).items()}
+            actual_checksum = metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")
+            if int(getattr(stat, "size", -1)) != int(descriptor["byte_size"]) or actual_checksum != descriptor["checksum"]:
+                raise RuntimeError(f"logical chunk manifest verification failed: {descriptor['chunk_id']}")
+            response = client.get_object(parsed.netloc, key)
+            try:
+                payload = gzip.decompress(response.read())
+            finally:
+                response.close()
+                response.release_conn()
+            for line in payload.splitlines():
+                record = json.loads(line)
+                if record.get("kind") == noun:
+                    yield record["row"]
+            self._execute(
+                connection,
+                "UPDATE partition_output_chunks SET status='verified', verified_at=now() WHERE dataset_id=%s AND output_version=%s AND chunk_id=%s",
+                (dataset_id, version, descriptor["chunk_id"]),
+            )
+
+    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
+        """Merge Ray-written logical staging rows with set-based OpenGauss SQL."""
+        dataset_id = str(_field(result, "dataset_id"))
+        version = str(_field(result, "output_version"))
+        chunks = tuple(_field(result, "chunks", ()))
+        if not chunks:
+            return
+        expected = {"grid_cells": 0, "tiles": 0, "indexes": 0}
+        count_fields = {"grid_cells": "grid_cell_count", "tiles": "tile_count", "indexes": "index_count"}
+        for raw in chunks:
+            chunk = _value(raw)
+            for kind in expected:
+                expected[kind] += int(chunk.get(count_fields[kind]) or 0)
+        with self.transaction() as connection:
+            self._assert_live_schema(connection)
+            staged = self._fetchall(
+                connection,
+                "SELECT kind, count(*) AS count FROM partition_logical_staging_rows "
+                "WHERE dataset_id=%s AND output_version=%s GROUP BY kind",
+                (dataset_id, version),
+            )
+            actual = {str(row["kind"]): int(row["count"]) for row in staged}
+            if actual != {kind: count for kind, count in expected.items() if count}:
+                raise RuntimeError("logical staging rows are incomplete")
+            self._execute(connection, "BEGIN")
+            source = (
+                "SELECT DISTINCT ON (payload->>'output_id') payload FROM partition_logical_staging_rows "
+                "WHERE dataset_id=%s AND output_version=%s AND kind=%s ORDER BY payload->>'output_id', chunk_id, row_number"
+            )
+            self._execute(connection, "MERGE INTO partition_grid_cells target USING (" + source + ") incoming "
+                "ON (target.output_id=incoming.payload->>'output_id') WHEN NOT MATCHED THEN INSERT "
+                "(output_id,dataset_id,output_version,grid_type,grid_level,grid_level_name,space_code,topology_code,bbox,geometry,tile_count,index_count) VALUES "
+                "(incoming.payload->>'output_id',%s,%s,incoming.payload->>'grid_type',(incoming.payload->>'grid_level')::int,incoming.payload->>'grid_level',incoming.payload->>'space_code',incoming.payload->>'topology_code',incoming.payload->'bbox',incoming.payload->'geometry',0,0)",
+                (dataset_id, version, "grid_cells", dataset_id, version))
+            self._execute(connection, "MERGE INTO partition_tiles target USING (" + source + ") incoming "
+                "ON (target.output_id=incoming.payload->>'output_id') WHEN NOT MATCHED THEN INSERT "
+                "(output_id,dataset_id,output_version,source_asset_id,band_code,grid_type,grid_level,grid_level_name,space_code,topology_code,time_bucket,tile_uri,tile_kind,bbox,status) VALUES "
+                "(incoming.payload->>'output_id',%s,%s,incoming.payload->>'source_asset_id',incoming.payload->>'band_code',incoming.payload->>'grid_type',(incoming.payload->>'grid_level')::int,incoming.payload->>'grid_level',incoming.payload->>'space_code',incoming.payload->>'topology_code',incoming.payload->>'time_bucket',incoming.payload->>'tile_uri',incoming.payload->>'tile_kind',incoming.payload->'bbox','ready')",
+                (dataset_id, version, "tiles", dataset_id, version))
+            self._execute(connection, "MERGE INTO partition_indexes target USING (" + source + ") incoming "
+                "ON (target.output_id=incoming.payload->>'output_id') WHEN NOT MATCHED THEN INSERT "
+                "(output_id,dataset_id,output_version,tile_output_id,source_asset_id,band_code,acquisition_time,time_bucket,grid_type,grid_level,grid_level_name,topology_code,space_code,st_code,value_ref_uri,attributes) VALUES "
+                "(incoming.payload->>'output_id',%s,%s,NULL,incoming.payload->>'source_asset_id',incoming.payload->>'band_code',(incoming.payload->>'acquisition_time')::timestamptz,incoming.payload->>'time_bucket',incoming.payload->>'grid_type',(incoming.payload->>'grid_level')::int,incoming.payload->>'grid_level',incoming.payload->>'topology_code',incoming.payload->>'space_code',incoming.payload->>'st_code',incoming.payload->>'value_ref_uri',incoming.payload->'attributes')",
+                (dataset_id, version, "indexes", dataset_id, version))
+            if hasattr(connection, "commit"):
+                connection.commit()
+
+    def _result_rows(self, connection: Any, result: "PartitionDatasetResult", noun: str):
+        if _field(result, "chunks", ()):
+            staged = self._fetchall(
+                connection,
+                "SELECT count(*) AS count FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s",
+                (str(_field(result, "dataset_id")), str(_field(result, "output_version"))),
+            )
+            if staged and int(staged[0]["count"]):
+                return
+            yield from self._iter_persisted_chunk_rows(connection, result, noun)
+            return
+        yield from _field(result, noun, ())
 
     def transaction(self) -> AbstractContextManager[Any]:
         return self._connect()
@@ -1255,7 +1557,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 values=(
                     dataset_id,
                     version,
-                    task_id,
+                    _attempt_task_id(task_id),
                     _field(request, "grid_type"),
                     _field(request, "requested_grid_level"),
                     str(_field(request, "requested_grid_level")),
@@ -1295,6 +1597,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         dataset_id = str(_field(result, "dataset_id"))
         version = str(_field(result, "output_version"))
         task_id = str(_field(result, "task_id"))
+        attempt_task_id = _attempt_task_id(task_id)
         with self.transaction() as connection:
             self._assert_live_schema(connection)
             self._execute(connection, "BEGIN")
@@ -1304,7 +1607,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             attempts = self._fetchall(
                 connection,
                 "SELECT * FROM partition_job_attempts WHERE task_id = %s FOR UPDATE",
-                (task_id,),
+                (attempt_task_id,),
             )
             attempt = attempts[0] if attempts else None
             attempt_payload = _value(attempt.get("payload")) if attempt else {}
@@ -1323,7 +1626,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             if not outputs:
                 raise ValueError("output version has not been started")
             output = outputs[0]
-            if output.get("task_id") != task_id:
+            if output.get("task_id") != attempt_task_id:
                 raise ValueError("output version task mismatch")
             if output.get("status") == "completed":
                 if hasattr(connection, "commit"):
@@ -1333,7 +1636,9 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 raise RuntimeError(f"output version is not staging: {output.get('status')}")
             # Entity indexes may reference their tile, so honor the FK insertion order.
             for noun in ("grid_cells", "tiles", "indexes"):
-                for row in _field(result, noun, ()):
+                pending: list[tuple[Any, ...]] = []
+                column_names: tuple[str, ...] | None = None
+                for row in self._result_rows(connection, result, noun):
                     payload = _value(row)
                     values: tuple[Any, ...]
                     if noun == "grid_cells":
@@ -1402,18 +1707,26 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                             payload.get("value_ref_uri", payload.get("tile_uri", "s3://")),
                             json.dumps(payload.get("attributes", {})),
                         )
-                    self._merge_insert(
-                        connection,
-                        table=f"partition_{noun}",
-                        columns=tuple(columns.split(",")),
-                        values=values,
-                        key_columns=("output_id",),
+                    column_names = tuple(columns.split(","))
+                    pending.append(values)
+                    if len(pending) >= 500:
+                        self._merge_insert_many(
+                            connection, table=f"partition_{noun}", columns=column_names, rows=pending, key_columns=("output_id",),
+                        )
+                        pending = []
+                if pending and column_names is not None:
+                    self._merge_insert_many(
+                        connection, table=f"partition_{noun}", columns=column_names, rows=pending, key_columns=("output_id",),
                     )
-            counts = {
-                "tiles": len(_field(result, "tiles", ())),
-                "indexes": len(_field(result, "indexes", ())),
-                "grid_cells": len(_field(result, "grid_cells", ())),
-            }
+            count_rows = self._fetchall(
+                connection,
+                "SELECT "
+                "(SELECT count(*) FROM partition_tiles WHERE dataset_id=%s AND output_version=%s) AS tiles,"
+                "(SELECT count(*) FROM partition_indexes WHERE dataset_id=%s AND output_version=%s) AS indexes,"
+                "(SELECT count(*) FROM partition_grid_cells WHERE dataset_id=%s AND output_version=%s) AS grid_cells",
+                (dataset_id, version, dataset_id, version, dataset_id, version),
+            )
+            counts = count_rows[0] if count_rows else {"tiles": 0, "indexes": 0, "grid_cells": 0}
             self._execute(
                 connection,
                 "UPDATE partition_output_versions SET status = 'completed', completed_at = now(), tile_count = %s, index_count = %s, grid_cell_count = %s, counts = %s::jsonb WHERE dataset_id = %s AND output_version = %s",
@@ -1449,6 +1762,12 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                     json.dumps(payload),
                 ),
             )
+            if _field(result, "chunks", ()):
+                self._execute(
+                    connection,
+                    "DELETE FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s",
+                    (dataset_id, version),
+                )
             if hasattr(connection, "commit"):
                 try:
                     connection.commit()

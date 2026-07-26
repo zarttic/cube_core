@@ -650,7 +650,11 @@ class OpenGaussDatasetManagementRepository:
                                                             AND irs.output_version=pd1.current_output_version))
                               ORDER BY ir.created_at DESC LIMIT 1),'pending') AS ingest_status,
                    COALESCE((SELECT pd.quality_status FROM partition_datasets pd WHERE pd.dataset_id=d.dataset_id),'pending') AS quality_status,
-                   COALESCE((SELECT pp.status FROM partition_publications pp WHERE pp.dataset_id=d.dataset_id ORDER BY pp.requested_at DESC LIMIT 1),'unpublished') AS publish_status
+                   COALESCE((SELECT pp.status FROM partition_publications pp WHERE pp.dataset_id=d.dataset_id ORDER BY pp.requested_at DESC LIMIT 1),'unpublished') AS publish_status,
+                   COALESCE((
+                     SELECT json_agg(DISTINCT s.attributes->>'product_family')::jsonb
+                     FROM scenes s WHERE s.dataset_id=d.dataset_id AND s.attributes ? 'product_family'
+                   ),'[]'::jsonb) AS product_families
             FROM datasets d LEFT JOIN scenes s ON s.dataset_id=d.dataset_id
             WHERE ({where or 'TRUE'}) AND {OpenGaussDatasetManagementRepository._canonical_dataset_filter('d')}
             GROUP BY d.dataset_id

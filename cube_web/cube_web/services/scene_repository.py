@@ -383,6 +383,18 @@ class OpenGaussSceneRepository:
                 row = cursor.fetchone()
         return str(row[0]) if row and row[0] else None
 
+    def list_failed_quality_band_unit_ids(self, partition_run_id: str) -> list[dict[str, Any]]:
+        return self._read(
+            """
+            SELECT DISTINCT dataset_id, band_unit_id
+            FROM partition_data_unit_grid_status
+            WHERE partition_run_id=%s AND partition_status='completed'
+              AND quality_status IN ('fail','error')
+            ORDER BY dataset_id, band_unit_id
+            """,
+            (partition_run_id,),
+        )
+
     @staticmethod
     def _partition_quality_summary(row: dict[str, Any]) -> dict[str, Any]:
         value = dict(row)
@@ -1161,7 +1173,13 @@ class OpenGaussSceneRepository:
                 )
             connection.commit()
 
-    def rebind_partition_task(self, source_task_id: str, task_id: str) -> str | None:
+    def rebind_partition_task(
+        self,
+        source_task_id: str,
+        task_id: str,
+        *,
+        band_unit_ids: tuple[str, ...] | None = None,
+    ) -> str | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -1183,20 +1201,42 @@ class OpenGaussSceneRepository:
                     """,
                     (json.dumps({"task_id": task_id, "retry_source_task_id": source_task_id}), partition_run_id),
                 )
-                cursor.execute(
-                    """
-                    UPDATE partition_run_scenes SET status='queued', output_version=NULL,
-                      error_message=NULL, updated_at=now()
-                    WHERE partition_run_id=%s AND status <> 'completed'
-                    """,
-                    (partition_run_id,),
-                )
-                cursor.execute(
-                    "UPDATE partition_data_unit_grid_status SET partition_status='queued',quality_status='pending',"
-                    "ingest_status='pending',output_version=NULL,error_message=NULL,updated_at=now() "
-                    "WHERE partition_run_id=%s AND partition_status<>'completed'",
-                    (partition_run_id,),
-                )
+                if band_unit_ids:
+                    cursor.execute(
+                        """
+                        UPDATE partition_run_scenes SET status='queued', output_version=NULL,
+                          error_message=NULL, updated_at=now()
+                        WHERE partition_run_id=%s
+                          AND EXISTS (
+                            SELECT 1 FROM jsonb_array_elements_text(
+                              COALESCE(grid_config->'band_unit_ids', '[]'::jsonb)
+                            ) AS selected(band_unit_id)
+                            WHERE selected.band_unit_id=ANY(%s::text[])
+                          )
+                        """,
+                        (partition_run_id, list(band_unit_ids)),
+                    )
+                    cursor.execute(
+                        "UPDATE partition_data_unit_grid_status SET partition_status='queued',quality_status='pending',"
+                        "ingest_status='pending',output_version=NULL,error_message=NULL,updated_at=now() "
+                        "WHERE partition_run_id=%s AND band_unit_id=ANY(%s::text[])",
+                        (partition_run_id, list(band_unit_ids)),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE partition_run_scenes SET status='queued', output_version=NULL,
+                          error_message=NULL, updated_at=now()
+                        WHERE partition_run_id=%s AND status <> 'completed'
+                        """,
+                        (partition_run_id,),
+                    )
+                    cursor.execute(
+                        "UPDATE partition_data_unit_grid_status SET partition_status='queued',quality_status='pending',"
+                        "ingest_status='pending',output_version=NULL,error_message=NULL,updated_at=now() "
+                        "WHERE partition_run_id=%s AND partition_status<>'completed'",
+                        (partition_run_id,),
+                    )
             connection.commit()
         return partition_run_id
 

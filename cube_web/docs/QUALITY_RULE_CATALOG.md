@@ -29,7 +29,6 @@
 | 碳卫星 | `carbon_schema` | 碳卫星数据结构 |
 | 碳卫星 | `carbon_coordinates` | 碳卫星坐标有效性 |
 | 碳卫星 | `carbon_xco2_range` | XCO2 数值范围 |
-| 碳卫星 | `carbon_quality_flags` | 碳卫星质量标识 |
 
 这些规则默认启用，管理员可在质检规则页取消勾选；设置只影响之后新建的质检运行。
 

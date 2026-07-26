@@ -4,11 +4,10 @@ import queue
 import threading
 from typing import Any
 
-# 经真实 OpenGauss 4 节点集群压测验证的最优参数：
-#   max_size=2 在 1~64 并发下均持平或优于其他配置
-#   min_size=1 保证无冷启动延迟
+# Chunk staging writers use multiple independent transactions. Keep enough
+# connections for their bounded concurrency while preserving a small warm pool.
 _DEFAULT_MIN_SIZE = 1
-_DEFAULT_MAX_SIZE = 2
+_DEFAULT_MAX_SIZE = 8
 
 
 class _PostgresPool:

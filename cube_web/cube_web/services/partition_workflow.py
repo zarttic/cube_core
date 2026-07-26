@@ -22,11 +22,13 @@ from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.partition_job_store import (
     PartitionBatchAlreadyActiveError,
     PartitionBatchArchivedError,
+    InMemoryPartitionJobStore,
     PartitionJobStore,
     get_partition_job_store,
     normalized_dataset_asset_id,
 )
 from cube_web.services.partition_service import PartitionService, PartitionTask
+from cube_web.services.ray_job_submitter import RayJobPartitionSubmitter, ray_job_executor_enabled
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
@@ -46,11 +48,13 @@ class PartitionWorkflowService:
         *,
         domain_store: Any | None = None,
         runner: Any | None = None,
+        ray_job_submitter: Any | None = None,
     ) -> None:
         self.partition_service = partition_service
         self._store = store
         self.domain_store = domain_store
         self.dataset_runner = runner
+        self.ray_job_submitter = ray_job_submitter
         self.after_ray: Callable[[], None] | None = None
         self.task_event_listeners: list[Callable[[str, str, dict[str, Any] | None], None]] = []
         self._run_lock = Lock()
@@ -124,6 +128,15 @@ class PartitionWorkflowService:
                     raise PartitionCancelledError("Partition task cancelled")
                 if result.dataset_id != dataset_id or result.output_version != output_version or result.task_id != execution_task_id:
                     raise ValueError("dataset result identity does not match the active attempt")
+                record_chunks = getattr(selected_domain_store, "record_output_chunks", None)
+                if result.chunks and callable(record_chunks):
+                    record_chunks(result)
+                    verify_chunks = getattr(selected_domain_store, "verify_output_chunks", None)
+                    if callable(verify_chunks):
+                        verify_chunks(result)
+                    promote_chunks = getattr(selected_domain_store, "promote_logical_staging", None)
+                    if callable(promote_chunks):
+                        promote_chunks(result)
                 committed = selected_domain_store.complete_output(result)
                 completed_result = _completed_dataset_result(result, committed)
                 if dataset.selection_id is not None:
@@ -251,16 +264,19 @@ class PartitionWorkflowService:
             active_task = self._active_task_for_batch(batch)
             if active_task is not None:
                 return active_task
-            completed_keys = _completed_dataset_partition_keys(self.store.list_attempts(request.batch_id))
-            pending_datasets = tuple(
-                dataset
-                for dataset in request.datasets
-                if _dataset_partition_key(_dataset_partition_row(request, dataset)) not in completed_keys
-            )
+            # Explicitly selected retry units may replace an already completed
+            # output version after quality validation fails.
+            if retry_band_unit_ids:
+                pending_datasets = _filter_retry_datasets(request.datasets, retry_band_unit_ids)
+            else:
+                completed_keys = _completed_dataset_partition_keys(self.store.list_attempts(request.batch_id))
+                pending_datasets = tuple(
+                    dataset
+                    for dataset in request.datasets
+                    if _dataset_partition_key(_dataset_partition_row(request, dataset)) not in completed_keys
+                )
             if not pending_datasets:
                 raise HTTPException(status_code=409, detail=f"All requested partition dataset configurations already completed: {request.batch_id}")
-            if retry_band_unit_ids:
-                pending_datasets = _filter_retry_datasets(pending_datasets, retry_band_unit_ids)
             execution_request = request.model_copy(update={"datasets": pending_datasets})
             payload = execution_request.model_dump(mode="json")
             payload["strict_partition_request"] = True
@@ -295,6 +311,15 @@ class PartitionWorkflowService:
                     return active_task
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             self.store.mark_batch_queued(request.batch_id, task_id, operation=operation)
+            if ray_job_executor_enabled() and not isinstance(self.store, InMemoryPartitionJobStore):
+                submitter = self.ray_job_submitter or RayJobPartitionSubmitter()
+                try:
+                    ray_job_id = submitter.submit(task_id)
+                    self.store.set_ray_job_id(task_id, ray_job_id)
+                except Exception as exc:
+                    self.on_task_failed(task_id, str(exc))
+                attempt = self.store.get_attempt(task_id)
+                return _task_from_attempt(attempt or {"task_id": task_id, "data_type": data_type}, self.get_batch(request.batch_id))
             return self.partition_service.task_store.submit(
                 data_type,
                 "run",
@@ -358,12 +383,22 @@ class PartitionWorkflowService:
         batch = self.store.get_batch(str(attempt.get("batch_id") or ""))
         return _task_from_attempt(attempt, batch or {})
 
-    def retry_task(self, task_id: str) -> PartitionTask:
+    def retry_task(
+        self,
+        task_id: str,
+        *,
+        retry_band_unit_ids: dict[str, set[str]] | None = None,
+        retry_strategy: str | None = None,
+    ) -> PartitionTask:
         attempt = self.store.get_attempt(task_id)
         if attempt is None:
             raise HTTPException(status_code=404, detail=f"Managed partition task not found: {task_id}")
         task = self.get_task(task_id)
-        if task.status not in {"failed", "cancelled", "manual_required"}:
+        quality_retry = bool(retry_band_unit_ids)
+        retryable_statuses = {"failed", "cancelled", "manual_required"}
+        if quality_retry:
+            retryable_statuses.add("completed")
+        if task.status not in retryable_statuses:
             raise HTTPException(status_code=409, detail=f"Partition task is not retryable: {task.status}")
         batch_id = str(attempt["batch_id"])
         batch = self.get_batch(batch_id)
@@ -390,14 +425,26 @@ class PartitionWorkflowService:
                 requested_by="operator",
                 operation="manual_retry",
                 source_task_id=task_id,
-                retry_strategy="unfinished_units" if cancelled else "failed_units",
+                retry_strategy=retry_strategy or ("unfinished_units" if cancelled else "failed_units"),
                 failure_reason=_text_or_none(attempt.get("error_message")) or _text_or_none(batch.get("last_error")),
-                retry_band_unit_ids=_unfinished_band_unit_ids(attempt) if cancelled else _failed_band_unit_ids(attempt),
+                retry_band_unit_ids=(
+                    retry_band_unit_ids
+                    if quality_retry
+                    else (_unfinished_band_unit_ids(attempt) if cancelled else _failed_band_unit_ids(attempt))
+                ),
             )
         raise HTTPException(status_code=409, detail="Partition task payload is not a normalized production request")
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         attempt = self.store.request_cancel(task_id)
+        ray_job_id = str((attempt or {}).get("ray_job_id") or "")
+        if ray_job_id and ray_job_executor_enabled():
+            try:
+                (self.ray_job_submitter or RayJobPartitionSubmitter()).stop(ray_job_id)
+            finally:
+                cancelled = self.store.mark_cancelled(task_id)
+                self._notify_task_event(task_id, "cancelled", None)
+            return cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
         if attempt is not None and attempt.get("status") == "cancelled":
             self._notify_task_event(task_id, "cancelled", None)
         task: PartitionTask | None = None
@@ -477,6 +524,11 @@ class PartitionWorkflowService:
         return self.store.get_attempt(task_id) or attempt
 
     def _reconcile_local_attempt(self, task_id: str) -> None:
+        attempt = self.store.get_attempt(task_id)
+        ray_job_id = str((attempt or {}).get("ray_job_id") or "")
+        if ray_job_id:
+            self._reconcile_ray_job_attempt(task_id, ray_job_id)
+            return
         try:
             current = self.partition_service.get_task(task_id)
         except HTTPException as exc:
@@ -501,6 +553,27 @@ class PartitionWorkflowService:
             return
         if current.status == "completed" and isinstance(current.result, dict):
             self.store.succeed_attempt(task_id, current.result)
+
+    def _reconcile_ray_job_attempt(self, task_id: str, ray_job_id: str) -> None:
+        try:
+            status = (self.ray_job_submitter or RayJobPartitionSubmitter()).status(ray_job_id).upper()
+        except Exception:
+            return
+        if status.endswith("SUCCEEDED"):
+            self.store.mark_result_manual_required(
+                task_id,
+                "Ray partition job exited without finalizing its managed attempt",
+                error_type="ray_job_incomplete",
+            )
+        elif status.endswith("FAILED"):
+            self.store.fail_attempt(
+                task_id,
+                "Ray partition job failed; inspect the Ray Job logs for the driver error",
+                manual_required=True,
+                error_type="ray_job_failed",
+            )
+        elif status.endswith("STOPPED"):
+            self.store.mark_cancelled(task_id)
 
 
 
@@ -804,6 +877,7 @@ def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[
             "tiles": _merge_scene_rows(results, "tiles"),
             "indexes": _merge_scene_rows(results, "indexes"),
             "grid_cells": _merge_scene_rows(results, "grid_cells"),
+            "chunks": tuple(chunk for result in results for chunk in result.chunks),
         }
     )
     return combined, outcomes

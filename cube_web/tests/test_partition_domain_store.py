@@ -92,6 +92,35 @@ def test_complete_output_is_idempotent_and_resets_quality() -> None:
     assert len(store.claim_outbox("worker", limit=10)) == 1
 
 
+def test_chunk_descriptors_are_registered_without_materializing_rows() -> None:
+    store = InMemoryPartitionDomainStore()
+    request = _request()
+    version = store.start_output(request, request.datasets[0], "task-a")
+    result = _result(version)
+    result.chunks = ({
+        "chunk_id": "chunk-a", "object_uri": f"s3://cube/partition/dataset-a/versions/{version}/logical-chunks/chunk-a.jsonl.gz",
+        "checksum": "a" * 64, "byte_size": 123, "grid_cell_count": 1, "tile_count": 1, "index_count": 1,
+    },)
+
+    store.record_output_chunks(result)
+
+    assert store.chunks[("dataset-a", version, "chunk-a")]["byte_size"] == 123
+
+
+def test_selection_execution_id_uses_parent_attempt_for_output_ownership() -> None:
+    store = InMemoryPartitionDomainStore()
+    request = _request()
+    execution_task_id = "task-a:load-a:dataset-a"
+    version = store.start_output(request, request.datasets[0], execution_task_id)
+    result = _result(version)
+    result.task_id = execution_task_id
+
+    committed = store.complete_output(result)
+
+    assert committed["status"] == "completed"
+    assert store.outputs[("dataset-a", version)]["task_id"] == "task-a"
+
+
 def test_repartition_rebinds_dataset_to_latest_runtime_batch() -> None:
     store = InMemoryPartitionDomainStore()
     first_request = _request()
@@ -308,8 +337,13 @@ def test_opengauss_complete_persists_index_attributes_as_jsonb(monkeypatch) -> N
     def merge_insert(_connection, **kwargs):
         inserted.append(kwargs)
 
+    def merge_insert_many(_connection, **kwargs):
+        for values in kwargs["rows"]:
+            inserted.append({**kwargs, "values": values})
+
     monkeypatch.setattr(store, "_fetchall", fetchall)
     monkeypatch.setattr(store, "_merge_insert", merge_insert)
+    monkeypatch.setattr(store, "_merge_insert_many", merge_insert_many)
     result = _result("version-a")
     attributes = {"satellite": "OCO2", "observation_id": "obs-1", "xco2": 410.25}
     result.indexes[0]["attributes"] = attributes

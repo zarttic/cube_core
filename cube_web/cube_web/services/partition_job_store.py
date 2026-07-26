@@ -117,6 +117,9 @@ class PartitionJobStore:
     def mark_batch_queued(self, batch_id: str, task_id: str, *, operation: str) -> None:
         raise NotImplementedError
 
+    def set_ray_job_id(self, task_id: str, ray_job_id: str) -> None:
+        raise NotImplementedError
+
     def request_cancel(self, task_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
@@ -396,6 +399,9 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt = self.attempts[task_id]
         now = _utc_now_iso()
         attempt["status"] = "succeeded"
+        attempt["error_type"] = None
+        attempt["error_message"] = None
+        attempt["failure_reason"] = None
         attempt["runner_result"] = copy.deepcopy(result)
         attempt["finished_at"] = now
         attempt["updated_at"] = now
@@ -474,6 +480,12 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         batch["ingest_error"] = None
         batch["ingested_at"] = None
         batch["updated_at"] = _utc_now_iso()
+
+    def set_ray_job_id(self, task_id: str, ray_job_id: str) -> None:
+        attempt = self.attempts.get(task_id)
+        if attempt is not None:
+            attempt["ray_job_id"] = ray_job_id
+            attempt["updated_at"] = _utc_now_iso()
 
     def request_cancel(self, task_id: str) -> dict[str, Any] | None:
         attempt = self.attempts.get(task_id)
@@ -815,6 +827,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                           source_task_id TEXT,
                           retry_strategy TEXT,
                           failure_reason TEXT,
+                          ray_job_id TEXT,
                           started_at TIMESTAMPTZ,
                           finished_at TIMESTAMPTZ,
                           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -826,6 +839,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS source_task_id TEXT")
                     cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS retry_strategy TEXT")
                     cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS failure_reason TEXT")
+                    cur.execute("ALTER TABLE partition_job_attempts ADD COLUMN IF NOT EXISTS ray_job_id TEXT")
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_status TEXT DEFAULT 'not_ready'")
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_job_id TEXT")
                     cur.execute("ALTER TABLE partition_batches ADD COLUMN IF NOT EXISTS ingest_error TEXT")
@@ -1317,7 +1331,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'succeeded', runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids, payload",
+                    "UPDATE partition_job_attempts SET status = 'succeeded', error_type = NULL, error_message = NULL, failure_reason = NULL, runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids, payload",
                     (self._jsonb(result), task_id),
                 )
                 row = cur.fetchone()
@@ -1412,6 +1426,16 @@ class PostgresPartitionJobStore(PartitionJobStore):
                         WHERE batch_id = %s
                     """,
                     (status, task_id, sorted(INGEST_TRACKED_DATA_TYPES), batch_id),
+                )
+            conn.commit()
+
+    def set_ray_job_id(self, task_id: str, ray_job_id: str) -> None:
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE partition_job_attempts SET ray_job_id = %s, updated_at = now() WHERE task_id = %s",
+                    (ray_job_id, task_id),
                 )
             conn.commit()
 

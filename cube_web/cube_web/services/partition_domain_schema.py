@@ -12,12 +12,13 @@ from typing import Any
 PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-19-partition-domain-v2"
 NEW_DOMAIN_TABLES = {
     "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
-    "partition_output_versions", "partition_tiles", "partition_indexes", "partition_grid_cells",
+    "partition_output_versions", "partition_output_chunks", "partition_logical_staging_rows", "partition_tiles", "partition_indexes", "partition_grid_cells",
     "partition_quality_runs", "partition_quality_results", "partition_quality_errors",
     "partition_quality_warn_approvals", "partition_publications", "partition_domain_outbox",
     "partition_domain_schema_version",
 }
 NEW_DOMAIN_OBJECTS = NEW_DOMAIN_TABLES | {
+    "idx_partition_logical_staging_version_kind",
     "idx_partition_quality_claim", "idx_partition_quality_errors_page", "idx_partition_quality_errors_filter",
     "uq_partition_publication_live_snapshot", "idx_partition_publication_claim",
     "idx_partition_publication_dataset_latest", "idx_partition_domain_outbox_claim",
@@ -134,6 +135,25 @@ def schema_statements() -> tuple[str, ...]:
                  (status = 'staging' AND completed_at IS NULL AND failed_at IS NULL) OR
                  (status = 'superseded' AND completed_at IS NOT NULL AND failed_at IS NULL AND error_code IS NULL))
         )""",
+        """CREATE TABLE IF NOT EXISTS partition_output_chunks (
+          dataset_id TEXT NOT NULL, output_version TEXT NOT NULL, chunk_id TEXT NOT NULL,
+          object_uri TEXT NOT NULL CHECK (object_uri LIKE 's3://%'), checksum CHAR(64) NOT NULL CHECK (checksum ~ '^[0-9a-f]{64}$'),
+          byte_size BIGINT NOT NULL CHECK (byte_size >= 0), grid_cell_count BIGINT NOT NULL DEFAULT 0 CHECK (grid_cell_count >= 0),
+          tile_count BIGINT NOT NULL DEFAULT 0 CHECK (tile_count >= 0), index_count BIGINT NOT NULL DEFAULT 0 CHECK (index_count >= 0),
+          status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','verified','failed')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(), verified_at TIMESTAMPTZ,
+          PRIMARY KEY (dataset_id, output_version, chunk_id),
+          FOREIGN KEY (dataset_id, output_version) REFERENCES partition_output_versions(dataset_id, output_version) ON DELETE CASCADE
+        )""",
+        """CREATE TABLE IF NOT EXISTS partition_logical_staging_rows (
+          dataset_id TEXT NOT NULL, output_version TEXT NOT NULL, chunk_id TEXT NOT NULL,
+          row_number BIGINT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('grid_cells','tiles','indexes')),
+          payload JSONB NOT NULL,
+          PRIMARY KEY (dataset_id, output_version, chunk_id, row_number),
+          FOREIGN KEY (dataset_id, output_version) REFERENCES partition_output_versions(dataset_id, output_version) ON DELETE CASCADE
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_partition_logical_staging_version_kind
+          ON partition_logical_staging_rows(dataset_id, output_version, kind)""",
         """CREATE TABLE IF NOT EXISTS partition_grid_cells (
           output_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, output_version TEXT NOT NULL,
           grid_type TEXT NOT NULL, grid_level INT NOT NULL, grid_level_name TEXT NOT NULL,
@@ -245,6 +265,7 @@ def schema_statements() -> tuple[str, ...]:
           singleton BOOLEAN PRIMARY KEY CHECK (singleton), schema_version TEXT NOT NULL, installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )""",
         "CREATE INDEX IF NOT EXISTS idx_partition_quality_claim ON partition_quality_runs(status, available_at, claimed_at, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_partition_indexes_tile_output_id ON partition_indexes(tile_output_id) WHERE tile_output_id IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_partition_quality_errors_page ON partition_quality_errors(quality_run_id, created_at, quality_error_id)",
         "CREATE INDEX IF NOT EXISTS idx_partition_quality_errors_filter ON partition_quality_errors(quality_run_id, rule_code, error_code, source_asset_id, band_code, output_id, field_name)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_partition_publication_live_snapshot ON partition_publications(dataset_id, output_version, quality_run_id) WHERE status IN ('publishing','active','withdrawing')",

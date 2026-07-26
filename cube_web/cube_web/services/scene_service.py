@@ -49,7 +49,13 @@ class SceneRepository(Protocol):
 
     def bind_partition_task(self, partition_run_id: str, task_id: str) -> None: ...
 
-    def rebind_partition_task(self, source_task_id: str, task_id: str) -> str | None: ...
+    def rebind_partition_task(
+        self,
+        source_task_id: str,
+        task_id: str,
+        *,
+        band_unit_ids: tuple[str, ...] | None = None,
+    ) -> str | None: ...
 
     def fail_partition_run(self, partition_run_id: str, error_message: str) -> None: ...
 
@@ -60,6 +66,8 @@ class SceneRepository(Protocol):
     def get_partition_quality_batch(self, partition_run_id: str) -> dict[str, Any] | None: ...
 
     def list_partition_quality_targets(self, partition_run_id: str) -> list[dict[str, Any]]: ...
+
+    def list_failed_quality_band_unit_ids(self, partition_run_id: str) -> list[dict[str, Any]]: ...
 
     def get_partition_run_task_id(self, partition_run_id: str) -> str | None: ...
 
@@ -97,13 +105,26 @@ class SceneDomainService:
         if source_task_id:
             self.bind_partition_retry(source_task_id, task_id)
 
-    def bind_partition_retry(self, source_task_id: str, task_id: str) -> str | None:
+    def bind_partition_retry(
+        self,
+        source_task_id: str,
+        task_id: str,
+        *,
+        band_unit_ids: tuple[str, ...] | None = None,
+    ) -> str | None:
         candidate = source_task_id
         partition_run_id = None
         visited: set[str] = set()
         while candidate and candidate not in visited and len(visited) < 100:
             visited.add(candidate)
-            partition_run_id = self.repository.rebind_partition_task(candidate, task_id)
+            if band_unit_ids:
+                partition_run_id = self.repository.rebind_partition_task(
+                    candidate,
+                    task_id,
+                    band_unit_ids=band_unit_ids,
+                )
+            else:
+                partition_run_id = self.repository.rebind_partition_task(candidate, task_id)
             if partition_run_id is not None:
                 break
             attempt = self.workflow.store.get_attempt(candidate)
@@ -353,12 +374,24 @@ class SceneDomainService:
         return {"partition_run_id": partition_run_id, "quality_runs": runs}
 
     def retry_failed_partition(self, partition_run_id: str) -> dict[str, Any]:
-        """Retry failed units under the original immutable partition batch."""
+        """Retry failed partition or quality-failed units in the original batch."""
         task_id = self.repository.get_partition_run_task_id(partition_run_id)
         if not task_id:
             raise HTTPException(status_code=409, detail="partition batch has no retryable task")
-        task = self.workflow.retry_task(task_id)
-        self.bind_partition_retry(task_id, task.task_id)
+        quality_failed = self.repository.list_failed_quality_band_unit_ids(partition_run_id)
+        retry_band_unit_ids: dict[str, set[str]] = {}
+        for item in quality_failed:
+            retry_band_unit_ids.setdefault(str(item["dataset_id"]), set()).add(str(item["band_unit_id"]))
+        task = self.workflow.retry_task(
+            task_id,
+            retry_band_unit_ids=retry_band_unit_ids or None,
+            retry_strategy="quality_failed_units" if retry_band_unit_ids else None,
+        )
+        self.bind_partition_retry(
+            task_id,
+            task.task_id,
+            band_unit_ids=tuple(sorted({band for bands in retry_band_unit_ids.values() for band in bands})) or None,
+        )
         return task.to_dict()
 
     def create_partition_draft(self, payload: PartitionDraftCreateRequest, actor: Any) -> dict[str, Any]:

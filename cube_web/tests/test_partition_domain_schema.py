@@ -11,7 +11,7 @@ def test_domain_schema_contains_versioned_tables_and_quality_handoff() -> None:
     assert PARTITION_DOMAIN_SCHEMA_VERSION == "2026-07-19-partition-domain-v2"
     assert NEW_DOMAIN_TABLES == {
         "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
-        "partition_output_versions", "partition_tiles", "partition_indexes", "partition_grid_cells",
+        "partition_output_versions", "partition_output_chunks", "partition_logical_staging_rows", "partition_tiles", "partition_indexes", "partition_grid_cells",
         "partition_quality_runs", "partition_quality_results", "partition_quality_errors",
         "partition_quality_warn_approvals", "partition_publications", "partition_domain_outbox",
         "partition_domain_schema_version",

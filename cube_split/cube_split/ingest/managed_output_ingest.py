@@ -348,7 +348,8 @@ def _verify_minio_objects(snapshot: dict[str, Any]) -> None:
         if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
             raise RuntimeError(f"managed ingest object is not a valid MinIO URI: {uri}")
         if (
-            snapshot["output"]["partition_method"] == "entity"
+            snapshot["dataset"]["data_type"] != "carbon"
+            and snapshot["output"]["partition_method"] == "entity"
             and uri in value_uris
             and parsed.netloc != settings.bucket
         ):

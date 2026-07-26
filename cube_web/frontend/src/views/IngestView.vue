@@ -158,8 +158,8 @@ async function openManualIngest(partitionRunId = '') {
 <template>
   <section class="ingest-view" :class="{ embedded }">
     <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
-    <section class="pending-ingest-panel" aria-label="待手动入库">
-      <div class="pending-ingest-heading"><div><h3>待手动入库</h3><span>剖分完成且质检通过的剖分批次数据集合</span></div><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
+    <section class="pending-ingest-panel">
+      <div class="pending-ingest-heading"><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
       <div v-if="store.manualCandidatesLoading" class="pending-state">正在加载待入库集合</div>
       <div v-else-if="!store.manualCandidates.length" class="pending-state">暂无满足入库条件的剖分批次数据集合</div>
       <div v-else class="pending-ingest-list">

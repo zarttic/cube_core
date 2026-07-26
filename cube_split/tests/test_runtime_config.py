@@ -32,6 +32,12 @@ def test_environment_overrides_local_env_file(monkeypatch, tmp_path):
     assert runtime_config.ray_address() == "ray://from-env:10001"
 
 
+def test_env_file_candidates_include_user_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(runtime_config.Path, "home", lambda: tmp_path)
+
+    assert tmp_path / ".cube_web.env" in runtime_config.env_file_candidates()
+
+
 def test_auth_is_required_when_runtime_value_is_not_configured(monkeypatch):
     monkeypatch.setattr(runtime_config, "env_text", lambda _name, default="": default)
 

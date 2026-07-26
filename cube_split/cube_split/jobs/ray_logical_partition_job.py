@@ -218,6 +218,13 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
     }
 
 
+def _ray_runtime_env_for_init(runtime_env: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A Ray Job driver already owns its runtime environment."""
+    if os.environ.get("CUBE_WEB_RAY_JOB_DRIVER") == "1":
+        return None
+    return runtime_env
+
+
 def _ray_project_roots() -> list[str]:
     roots = [os.environ.get("CUBE_PROJECT_ROOT", ""), os.getcwd(), "/tmp/cube_project_ray_code"]
     return [root for root in roots if root]
@@ -254,7 +261,7 @@ def _ensure_ray_worker_project_paths() -> None:
 
 
 def _ray_actor_options_from_env() -> dict[str, Any]:
-    node_resource = os.environ.get("RAY_ACTOR_NODE_RESOURCE", "").strip()
+    node_resource = runtime_config.env_text("RAY_ACTOR_NODE_RESOURCE")
     if not node_resource:
         return {}
     return {"resources": {node_resource: 0.001}}
@@ -354,6 +361,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
         if backend == "ray":
             ray = _load_ray()
             runtime_env = _ray_runtime_env_from_env()
+            runtime_env = _ray_runtime_env_for_init(runtime_env)
             ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
             if args.ray_address:
                 try:

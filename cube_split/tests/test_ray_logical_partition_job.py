@@ -7,6 +7,7 @@ from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
+    _ray_actor_options_from_env,
     _ray_runtime_env_from_env,
     _resolve_ray_actor_parallelism,
     _resolve_ray_chunk_size,
@@ -15,6 +16,8 @@ from cube_split.jobs.ray_logical_partition_job import (
     parse_args,
 )
 from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
+from cube_split.jobs.ray_logical_chunk_job import logical_output_id
+from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 
 class _FakeObjectRef:
@@ -117,6 +120,28 @@ def test_resolve_ray_actor_parallelism_caps_by_asset_count():
     ]
 
     assert _resolve_ray_actor_parallelism(groups, requested_parallelism=8) == 2
+
+
+def test_ray_actor_options_reads_runtime_config(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.runtime_config.env_text",
+        lambda name: "node:10.3.100.180" if name == "RAY_ACTOR_NODE_RESOURCE" else "",
+    )
+
+    assert _ray_actor_options_from_env() == {"resources": {"node:10.3.100.180": 0.001}}
+
+
+def test_logical_chunk_identity_matches_partition_contract():
+    identity = OutputIdentity(
+        dataset_id="dataset-a", output_version="version-a", source_asset_id="asset-a", band_code="B01",
+        grid_type="geohash", grid_level=6, space_code="wxyz", topology_code=None,
+        time_bucket="20260701", window_identity="logical-reference",
+    )
+    assert logical_output_id(
+        dataset_id="dataset-a", output_version="version-a", source_asset_id="asset-a", band_code="B01",
+        grid_type="geohash", grid_level=6, space_code="wxyz", topology_code=None,
+        time_bucket="20260701", window_identity="logical-reference",
+    ) == make_output_id(identity)
 
 
 def test_parse_args_allows_mgrs_grid_type(monkeypatch):

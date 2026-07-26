@@ -1,13 +1,22 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from cube_web.services.partition_dataset_runner import (
+    _run_dataset_on_ray,
     _wait_for_ray_result,
     _carbon_index_attributes,
     _consume_observation_budget,
     _record_asset_cell,
     _source_band_index,
     _normalize_wgs84_bbox,
+    _logical_shards,
+    _entity_planning_shards,
+    ENTITY_RAY_PARALLELISM,
+    _ray_init_runtime_env,
 )
+import cube_web.services.partition_dataset_runner as runner_module
 
 
 class _FakeRay:
@@ -28,6 +37,32 @@ def test_normalize_wgs84_bbox_clamps_raster_edges() -> None:
     assert _normalize_wgs84_bbox([-180.0044, -90.0022, 180.0044, 90.0022]) == [-180.0, -90.0, 180.0, 90.0]
 
 
+def test_logical_shards_cover_registered_boundary_without_cog_access() -> None:
+    assert _logical_shards([100.0, 20.0, 101.0, 21.0], 0.5) == [
+        (100.0, 20.0, 100.5, 20.5),
+        (100.5, 20.0, 101.0, 20.5),
+        (100.0, 20.5, 100.5, 21.0),
+        (100.5, 20.5, 101.0, 21.0),
+    ]
+
+
+def test_entity_planning_uses_fixed_sixteen_spatial_shards() -> None:
+    shards = _entity_planning_shards([100.0, 20.0, 104.0, 24.0])
+
+    assert ENTITY_RAY_PARALLELISM == 16
+    assert len(shards) == 16
+    assert shards[0] == [99.98, 19.98, 101.02, 21.02]
+    assert shards[-1] == [102.98, 22.98, 104.02, 24.02]
+
+
+def test_ray_job_driver_does_not_reapply_runtime_env(monkeypatch) -> None:
+    runtime_env = {"working_dir": "gcs://package", "env_vars": {"PYTHONPATH": "."}}
+    monkeypatch.setenv("CUBE_WEB_RAY_JOB_DRIVER", "1")
+    assert _ray_init_runtime_env(runtime_env) is None
+    monkeypatch.delenv("CUBE_WEB_RAY_JOB_DRIVER")
+    assert _ray_init_runtime_env(runtime_env) == runtime_env
+
+
 def test_carbon_unique_cells_are_not_limited_per_asset() -> None:
     cells: set[tuple[str, int, str | None]] = set()
     _record_asset_cell(cells, ("u4pr", 5, None), max_cells_per_asset=1)
@@ -44,6 +79,75 @@ def test_ray_wait_cancels_active_remote_task() -> None:
         _wait_for_ray_result(ray, "ray-ref", lambda: True)
 
     assert ray.cancelled == [("ray-ref", True)]
+
+
+def test_dataset_ray_task_uses_configured_node_resource(monkeypatch) -> None:
+    class FakeRemoteTask:
+        def __init__(self) -> None:
+            self.options_value = None
+
+        def options(self, **kwargs):
+            self.options_value = kwargs
+            return self
+
+        def remote(self, _payload):
+            return "task-ref"
+
+    class FakeRay:
+        def __init__(self) -> None:
+            self.task = FakeRemoteTask()
+
+        def remote(self, _function):
+            return self.task
+
+        def is_initialized(self) -> bool:
+            return True
+
+        def get(self, ref):
+            assert ref == "task-ref"
+            return {"status": "completed"}
+
+    ray = FakeRay()
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setenv("RAY_ACTOR_NODE_RESOURCE", "node:10.3.100.180")
+
+    result = _run_dataset_on_ray({"ray_address": "10.3.100.182:6379"}, None)
+
+    assert result == {"status": "completed"}
+    assert ray.task.options_value == {"resources": {"node:10.3.100.180": 0.001}}
+
+
+def test_ray_client_uses_node_local_credentials_without_runtime_env(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runner_module.runtime_config, "require_ray_address", lambda: "ray://10.3.100.182:10001")
+    monkeypatch.setattr(
+        runner_module,
+        "_run_dataset_on_ray",
+        lambda payload, runtime_env, cancellation_check: captured.update(payload=payload, runtime_env=runtime_env) or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job._ray_runtime_env_from_env",
+        lambda: {"env_vars": {"CUBE_WEB_POSTGRES_DSN": "must-not-be-forwarded"}},
+    )
+    dataset = SimpleNamespace(data_type="optical", model_dump=lambda **_kwargs: {"dataset_id": "dataset-1"})
+
+    result = runner_module.NormalizedPartitionDatasetRunner().run_dataset(
+        dataset=dataset,
+        task_id="task-1",
+        output_version="version-1",
+        grid_type="quadtree",
+        requested_grid_level=1,
+        cover_mode="covers",
+    )
+
+    assert result == {"status": "completed"}
+    assert captured["runtime_env"] == {"env_vars": {}}
+    assert captured["payload"] == {
+        "dataset": {"dataset_id": "dataset-1"}, "task_id": "task-1", "output_version": "version-1",
+        "grid_type": "quadtree", "requested_grid_level": 1, "cover_mode": "covers",
+        "time_granularity": "day", "max_cells_per_asset": 0, "max_observations": None,
+        "ray_address": "ray://10.3.100.182:10001",
+    }
 
 
 def test_carbon_observation_budget_is_shared_across_assets() -> None:

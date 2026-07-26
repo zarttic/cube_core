@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -100,21 +101,27 @@ def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: s
     source_bucket = parsed.netloc
     key = unquote(parsed.path).lstrip("/")
     target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
-    if target.exists():
-        return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(f"{target.suffix}.part")
-    try:
-        minio_client.fget_object(source_bucket, key, str(temporary))
-    except OSError as exc:
-        if exc.errno != errno.ENOSPC:
-            raise
-        # Worker-local loader cache is disposable; reclaim a stale cache once.
-        temporary.unlink(missing_ok=True)
-        shutil.rmtree(cache_dir.parent, ignore_errors=True)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        minio_client.fget_object(source_bucket, key, str(temporary))
-    temporary.replace(target)
+    lock_path = target.with_name(f"{target.name}.lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if target.exists():
+                return target
+            temporary = target.with_suffix(f"{target.suffix}.part")
+            try:
+                minio_client.fget_object(source_bucket, key, str(temporary))
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
+                    raise
+                # Worker-local loader cache is disposable; reclaim a stale cache once.
+                temporary.unlink(missing_ok=True)
+                shutil.rmtree(cache_dir.parent, ignore_errors=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                minio_client.fget_object(source_bucket, key, str(temporary))
+            temporary.replace(target)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return target
 
 
