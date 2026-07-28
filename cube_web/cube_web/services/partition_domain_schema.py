@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-19-partition-domain-v2"
+PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-26-partition-domain-v3"
 NEW_DOMAIN_TABLES = {
     "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
     "partition_output_versions", "partition_output_chunks", "partition_logical_staging_rows", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -171,11 +171,21 @@ def schema_statements() -> tuple[str, ...]:
           tile_uri TEXT NOT NULL CHECK (tile_uri LIKE 's3://%'), tile_kind TEXT NOT NULL CHECK (tile_kind IN ('logical_reference','entity_file')),
           bbox JSONB, width BIGINT CHECK (width > 0), height BIGINT CHECK (height > 0), byte_size BIGINT CHECK (byte_size >= 0),
           checksum CHAR(64) CHECK (checksum ~ '^[0-9a-f]{64}$'), status TEXT NOT NULL CHECK (status IN ('ready','failed')),
+          publication_status TEXT NOT NULL DEFAULT 'pending' CHECK (publication_status IN ('pending','published','revoked')),
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           FOREIGN KEY (dataset_id, output_version) REFERENCES partition_output_versions(dataset_id, output_version) ON DELETE CASCADE,
           FOREIGN KEY (dataset_id, source_asset_id, band_code) REFERENCES partition_dataset_bands(dataset_id, source_asset_id, band_code),
           UNIQUE (dataset_id, output_version, source_asset_id, band_code, grid_type, grid_level, space_code, time_bucket, tile_kind)
         )""",
+        """ALTER TABLE partition_tiles
+          ADD COLUMN IF NOT EXISTS publication_status TEXT NOT NULL DEFAULT 'pending'""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_tiles ADD CONSTRAINT partition_tiles_publication_status_check
+          CHECK (publication_status IN ('pending','published','revoked'));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        """CREATE INDEX IF NOT EXISTS idx_partition_tiles_searchable
+          ON partition_tiles (grid_type, grid_level, dataset_id)
+          WHERE status = 'ready' AND publication_status = 'published'""",
         """CREATE TABLE IF NOT EXISTS partition_indexes (
           output_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, output_version TEXT NOT NULL, tile_output_id TEXT,
           source_asset_id TEXT NOT NULL, band_code TEXT NOT NULL, acquisition_time TIMESTAMPTZ, time_bucket TEXT NOT NULL,
@@ -283,7 +293,7 @@ def schema_statements() -> tuple[str, ...]:
           DEFERRABLE INITIALLY DEFERRED;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """MERGE INTO partition_domain_schema_version target
-           USING (SELECT TRUE AS singleton, '2026-07-19-partition-domain-v2' AS schema_version) source
+           USING (SELECT TRUE AS singleton, '2026-07-26-partition-domain-v3' AS schema_version) source
            ON (target.singleton = source.singleton)
            WHEN MATCHED THEN UPDATE SET schema_version = source.schema_version, installed_at = now()
            WHEN NOT MATCHED THEN INSERT (singleton, schema_version) VALUES (source.singleton, source.schema_version)""",
@@ -296,6 +306,53 @@ def apply_schema(connection: Any) -> None:
         for statement in schema_statements():
             cursor.execute(statement)
     connection.commit()
+
+
+def count_partition_tile_publication_backfill_candidates(connection: Any) -> int:
+    """Count ready tiles whose selected band units already completed ingest."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(DISTINCT tile.output_id)
+            FROM partition_tiles AS tile
+            JOIN scene_bands AS band
+              ON tile.source_asset_id=band.asset_id AND tile.band_code=band.band_code
+            JOIN partition_data_unit_grid_status AS unit
+              ON unit.dataset_id=tile.dataset_id AND unit.output_version=tile.output_version
+             AND unit.scene_id=band.scene_id AND unit.band_unit_id=band.band_unit_id
+            WHERE tile.status='ready'
+              AND tile.publication_status='pending'
+              AND unit.quality_status IN ('pass','warn')
+              AND unit.ingest_status='completed'
+            """
+        )
+        row = cursor.fetchone()
+    return int(row[0] if isinstance(row, tuple) else row["count"])
+
+
+def backfill_partition_tile_publication_status(connection: Any) -> int:
+    """Publish already ingested ready tiles after adding publication status."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE partition_tiles AS tile
+               SET publication_status='published'
+              FROM scene_bands AS band
+              JOIN partition_data_unit_grid_status AS unit
+                ON unit.scene_id=band.scene_id AND unit.band_unit_id=band.band_unit_id
+             WHERE tile.dataset_id=unit.dataset_id
+               AND tile.output_version=unit.output_version
+               AND tile.source_asset_id=band.asset_id
+               AND tile.band_code=band.band_code
+               AND tile.status='ready'
+               AND tile.publication_status='pending'
+               AND unit.quality_status IN ('pass','warn')
+               AND unit.ingest_status='completed'
+            """
+        )
+        updated = cursor.rowcount
+    connection.commit()
+    return int(updated)
 
 
 def assert_schema_version(connection: Any) -> None:

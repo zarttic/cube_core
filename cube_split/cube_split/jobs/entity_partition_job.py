@@ -6,7 +6,7 @@ import json
 import math
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -236,6 +236,16 @@ def _make_minio_client(args: argparse.Namespace, *, http_pool_size: int) -> Any:
     )
 
 
+def _collect_entity_uploads(
+    upload_futures: set[Future[tuple[str, str]]], asset_uri_map: dict[str, str],
+) -> None:
+    done, _ = wait(upload_futures, return_when=FIRST_COMPLETED)
+    for future in done:
+        upload_futures.remove(future)
+        source_uri, asset_uri = future.result()
+        asset_uri_map[source_uri] = asset_uri
+
+
 def _write_entity_tiles(
     tasks: list[dict[str, Any]],
     run_dir: Path,
@@ -254,7 +264,9 @@ def _write_entity_tiles(
     geometry_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
     upload_pool = None
-    upload_futures = []
+    upload_futures: set[Future[tuple[str, str]]] = set()
+    asset_uri_map: dict[str, str] = {}
+    upload_max_in_flight = 0
     upload_start_time: float | None = None
     upload_args = argparse.Namespace(**tile_upload_options) if tile_upload_options else None
     upload_client = None
@@ -268,6 +280,7 @@ def _write_entity_tiles(
             upload_client.make_bucket(upload_bucket)
         upload_fast = bool(getattr(upload_args, "minio_fast_upload", True))
         upload_pool = ThreadPoolExecutor(max_workers=upload_workers)
+        upload_max_in_flight = max(1, upload_workers * 2)
     task_groups: dict[str, list[dict[str, Any]]] = {}
     try:
         for task in tasks:
@@ -476,7 +489,9 @@ def _write_entity_tiles(
                         if upload_pool is not None and upload_client is not None and upload_args is not None:
                             if upload_start_time is None:
                                 upload_start_time = time.perf_counter()
-                            upload_futures.append(
+                            if len(upload_futures) >= upload_max_in_flight:
+                                _collect_entity_uploads(upload_futures, asset_uri_map)
+                            upload_futures.add(
                                 upload_pool.submit(
                                     _upload_entity_tile_file,
                                     upload_client,
@@ -488,7 +503,8 @@ def _write_entity_tiles(
                                 )
                             )
         if upload_pool is not None:
-            asset_uri_map = dict(future.result() for future in upload_futures)
+            while upload_futures:
+                _collect_entity_uploads(upload_futures, asset_uri_map)
             if upload_start_time is not None:
                 _add_timing(timing, "entity_tile_upload_elapsed_sec", time.perf_counter() - upload_start_time)
             _add_timing(timing, "entity_tile_upload_count", float(len(asset_uri_map)))
@@ -644,6 +660,8 @@ def _write_entity_tile_chunks_ray(
 ) -> tuple[list[dict[str, Any]], float, float, float, float, float, dict[str, float]]:
     ray = _load_ray()
     runtime_env = _ray_runtime_env_for_init(_ray_runtime_env_from_env())
+    if runtime_env is not None:
+        runtime_env = _ray_runtime_env_with_minio_credentials(runtime_env, source_options)
     ray_init_start = time.perf_counter()
     ray_already_initialized = bool(getattr(ray, "is_initialized", lambda: False)())
     if ray_address:
@@ -673,21 +691,16 @@ def _write_entity_tile_chunks_ray(
             source_uris: list[str],
             source_options_value: dict[str, Any] | None,
         ) -> dict[str, Any]:
-            import os
-
-            env_options = dict(source_options_value or {})
-            if env_options.get("endpoint"):
-                os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
-            if env_options.get("access_key"):
-                os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
-            if env_options.get("secret_key"):
-                os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
-
             from cube_split.jobs.ray_partition_core import resolve_asset_source_path as resolve_source
 
             started = time.perf_counter()
-            for source_uri in sorted(set(source_uris)):
-                self._source_path_by_uri[str(source_uri)] = resolve_source(str(source_uri), source_options_value)
+            unique_uris = sorted({str(source_uri) for source_uri in source_uris})
+            if unique_uris:
+                # cache_source_cog uses flock + atomic replace, so concurrent downloads are idempotent.
+                with ThreadPoolExecutor(max_workers=min(8, len(unique_uris))) as pool:
+                    local_paths = pool.map(lambda uri: resolve_source(uri, source_options_value), unique_uris)
+                    for source_uri, local_path in zip(unique_uris, local_paths):
+                        self._source_path_by_uri[source_uri] = local_path
             return {"source_prepare_elapsed_sec": time.perf_counter() - started}
 
         def process_groups(
@@ -726,14 +739,6 @@ def _write_entity_tile_chunks_ray(
                 writer = module._write_entity_tiles
 
             flat_tasks = [task for group in task_groups for task in group]
-            env_options = dict(source_options_value or {})
-            if env_options.get("endpoint"):
-                os.environ["CUBE_WEB_MINIO_ENDPOINT"] = str(env_options["endpoint"])
-            if env_options.get("access_key"):
-                os.environ["CUBE_WEB_MINIO_ACCESS_KEY"] = str(env_options["access_key"])
-            if env_options.get("secret_key"):
-                os.environ["CUBE_WEB_MINIO_SECRET_KEY"] = str(env_options["secret_key"])
-
             prepared_tasks = []
             for task in flat_tasks:
                 source_asset_path = str(task.get("source_asset_path") or task["asset_path"])
@@ -754,7 +759,7 @@ def _write_entity_tile_chunks_ray(
                 source_options=None,
                 timing=writer_timing,
                 clip_mode=clip_mode_text,
-                tile_upload_options=tile_upload_options_value,
+                tile_upload_options=_worker_entity_tile_upload_options(tile_upload_options_value),
             )
             writer_timing["entity_writer_wall_elapsed_sec"] = time.perf_counter() - writer_start
             return {
@@ -775,8 +780,8 @@ def _write_entity_tile_chunks_ray(
             time_granularity,
             partition_prefix_len,
             data_type,
-            source_options,
-            tile_upload_options,
+            source_location_options,
+            tile_upload_public_options,
             clip_mode,
         )
 
@@ -788,6 +793,9 @@ def _write_entity_tile_chunks_ray(
     worker_stats: dict[str, float] = {}
     pending = []
     pending_actor_by_ref: dict[Any, int] = {}
+    pending_kind_by_ref: dict[Any, str] = {}
+    source_location_options = _minio_location_options(source_options)
+    tile_upload_public_options = _entity_tile_upload_public_options(tile_upload_options)
     try:
         if cancellation_check is not None and cancellation_check():
             raise PartitionCancelledError("Partition task cancelled")
@@ -797,25 +805,14 @@ def _write_entity_tile_chunks_ray(
             for group in task_groups:
                 for task in group:
                     source_uris_by_actor[actor_idx].add(str(task["asset_path"]))
-        source_prepare_refs = [
-            actor.prepare_sources.remote(sorted(source_uris_by_actor[idx]), source_options) for idx, actor in enumerate(actors)
-        ]
-        try:
-            for prepare_result in ray.get(source_prepare_refs):
-                source_prepare_worker_elapsed += float(prepare_result.get("source_prepare_elapsed_sec") or 0.0)
-        except Exception:
-            cancel_ray_refs(ray, source_prepare_refs)
-            raise
-        source_prepare_elapsed = time.perf_counter() - source_prepare_start
-        partition_wall_start = time.perf_counter()
-        for actor_idx, task_groups in enumerate(task_groups_by_actor):
-            if not task_groups:
-                continue
-            if cancellation_check is not None and cancellation_check():
-                raise PartitionCancelledError("Partition task cancelled")
-            ref = submit_actor(actor_idx)
-            pending.append(ref)
-            pending_actor_by_ref[ref] = actor_idx
+        for actor_idx, actor in enumerate(actors):
+            prepare_ref = actor.prepare_sources.remote(sorted(source_uris_by_actor[actor_idx]), source_location_options)
+            pending.append(prepare_ref)
+            pending_actor_by_ref[prepare_ref] = actor_idx
+            pending_kind_by_ref[prepare_ref] = "prepare"
+        # Pipeline prepare -> process per actor: as soon as one actor finishes downloading
+        # its sources, submit its process_groups instead of waiting for the slowest actor.
+        process_started = False
         while pending:
             if cancellation_check is not None and cancellation_check():
                 raise PartitionCancelledError("Partition task cancelled")
@@ -824,6 +821,20 @@ def _write_entity_tile_chunks_ray(
                 continue
             for ready_ref in ready:
                 actor_idx = pending_actor_by_ref.pop(ready_ref)
+                ref_kind = pending_kind_by_ref.pop(ready_ref)
+                if ref_kind == "prepare":
+                    prepare_result = ray.get(ready_ref)
+                    source_prepare_worker_elapsed += float(prepare_result.get("source_prepare_elapsed_sec") or 0.0)
+                    source_prepare_elapsed = time.perf_counter() - source_prepare_start
+                    if task_groups_by_actor[actor_idx]:
+                        if not process_started:
+                            process_started = True
+                            partition_wall_start = time.perf_counter()
+                        process_ref = submit_actor(actor_idx)
+                        pending.append(process_ref)
+                        pending_actor_by_ref[process_ref] = actor_idx
+                        pending_kind_by_ref[process_ref] = "process"
+                    continue
                 chunk_result = ray.get(ready_ref)
                 chunk_rows = list(chunk_result.get("rows", []))
                 rows.extend(chunk_rows)
@@ -933,6 +944,55 @@ def _entity_tile_upload_options(args: argparse.Namespace) -> dict[str, Any]:
         "minio_upload_workers": _minio_upload_workers(args),
         "minio_fast_upload": bool(getattr(args, "minio_fast_upload", True)),
     }
+
+
+def _minio_location_options(options: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the non-sensitive MinIO fields allowed in Ray task arguments."""
+    values = dict(options or {})
+    return {key: values[key] for key in ("endpoint", "secure", "bucket") if key in values}
+
+
+def _entity_tile_upload_public_options(options: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep upload identity and endpoint data, but never serialize credentials."""
+    values = dict(options or {})
+    return {
+        key: value
+        for key, value in values.items()
+        if key not in {"minio_access_key", "minio_secret_key"}
+    }
+
+
+def _worker_entity_tile_upload_options(options: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve credentials from the Ray worker environment, never a task payload."""
+    values = dict(options or {})
+    minio = runtime_config.minio_settings()
+    values["minio_endpoint"] = str(values.get("minio_endpoint") or minio.endpoint)
+    values["minio_access_key"] = minio.access_key
+    values["minio_secret_key"] = minio.secret_key
+    values["minio_bucket"] = str(values.get("minio_bucket") or minio.bucket)
+    values["minio_secure"] = bool(values.get("minio_secure", minio.secure))
+    return values
+
+
+def _ray_runtime_env_with_minio_credentials(
+    runtime_env: dict[str, Any],
+    options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Put MinIO credentials in Ray runtime env vars instead of actor arguments."""
+    values = dict(options or {})
+    result = dict(runtime_env)
+    env_vars = dict(result.get("env_vars") or {})
+    for option_name, env_name in (
+        ("endpoint", "CUBE_WEB_MINIO_ENDPOINT"),
+        ("access_key", "CUBE_WEB_MINIO_ACCESS_KEY"),
+        ("secret_key", "CUBE_WEB_MINIO_SECRET_KEY"),
+        ("bucket", "CUBE_WEB_MINIO_BUCKET"),
+    ):
+        value = values.get(option_name)
+        if value:
+            env_vars[env_name] = str(value)
+    result["env_vars"] = env_vars
+    return result
 
 
 def _validate_entity_tile_upload_options(options: dict[str, Any]) -> None:

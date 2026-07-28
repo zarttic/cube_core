@@ -748,6 +748,18 @@ class OpenGaussIngestRepository:
                     "AND (%s::text[]='{}'::text[] OR band_unit_id=ANY(%s))",
                     (item["dataset_id"], item["scene_id"], item["output_version"], item["band_unit_ids"], item["band_unit_ids"]),
                 )
+                cur.execute(
+                    "UPDATE partition_tiles AS tile SET publication_status='published' "
+                    "FROM scene_bands AS band "
+                    "JOIN partition_data_unit_grid_status AS unit "
+                    "ON unit.scene_id=band.scene_id AND unit.band_unit_id=band.band_unit_id "
+                    "WHERE tile.dataset_id=%s AND tile.output_version=%s AND tile.status='ready' "
+                    "AND band.scene_id=%s AND band.band_unit_id=ANY(%s) "
+                    "AND tile.source_asset_id=band.asset_id AND tile.band_code=band.band_code "
+                    "AND unit.dataset_id=tile.dataset_id AND unit.output_version=tile.output_version "
+                    "AND unit.quality_status IN ('pass','warn') AND unit.ingest_status='completed'",
+                    (item["dataset_id"], item["output_version"], item["scene_id"], item["band_unit_ids"]),
+                )
             for ingest_run_id in run_ids:
                 self._refresh(cur, ingest_run_id)
 

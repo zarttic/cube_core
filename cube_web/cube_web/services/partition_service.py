@@ -7,11 +7,26 @@ from threading import Lock
 from typing import Callable
 from uuid import uuid4
 
+from cube_split import runtime_config
+
 from cube_web.services.http_errors import HTTPException
 
 TaskHook = Callable[[str], None]
 TaskResultHook = Callable[[str, dict], None]
 TaskErrorHook = Callable[[str, str], None]
+
+DEFAULT_PARTITION_MAX_WORKERS = 4
+
+
+def _resolve_max_workers() -> int:
+    raw = runtime_config.env_text("CUBE_WEB_PARTITION_MAX_WORKERS")
+    if not raw:
+        return DEFAULT_PARTITION_MAX_WORKERS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_PARTITION_MAX_WORKERS
+    return max(1, value)
 
 
 @dataclass
@@ -30,10 +45,11 @@ class PartitionTask:
 
 
 class PartitionTaskStore:
-    def __init__(self, max_workers: int = 4) -> None:
+    def __init__(self, max_workers: int | None = None) -> None:
         self._tasks: dict[str, PartitionTask] = {}
         self._lock = Lock()
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cube-web-partition")
+        self.max_workers = max_workers if max_workers is not None else _resolve_max_workers()
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="cube-web-partition")
 
     def submit(
         self,
@@ -63,6 +79,10 @@ class PartitionTaskStore:
     def get(self, task_id: str) -> PartitionTask | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def queue_depth(self) -> int:
+        with self._lock:
+            return sum(task.status == "queued" for task in self._tasks.values())
 
     def cancel(self, task_id: str) -> PartitionTask | None:
         with self._lock:
@@ -96,6 +116,19 @@ class PartitionTaskStore:
         self._set_task(task_id, status="cancelled", error="Partition task cancelled")
         if on_failed is not None:
             on_failed(task_id, "Partition task cancelled")
+
+    def _complete_task_if_not_cancelled(self, task_id: str, result: dict) -> bool:
+        # Check-and-commit under a single lock so a concurrent cancel() cannot be overwritten.
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return False
+            if task.status in ("cancel_requested", "cancelled"):
+                return False
+            task.status = "completed"
+            task.result = result
+            task.updated_at = time.time()
+            return True
 
     def _run(
         self,
@@ -135,11 +168,14 @@ class PartitionTaskStore:
             if on_failed is not None:
                 on_failed(task_id, str(exc))
             return
-        task = self.get(task_id)
-        if task is not None and (task.status == "cancel_requested" or (cancellation_check is not None and cancellation_check())):
+        # Atomically commit completion first (single lock), then consult the DB-side
+        # cancellation check outside the lock. If the DB says cancelled after the
+        # in-memory commit, flip the task back to cancelled so both sides agree.
+        if not self._complete_task_if_not_cancelled(task_id, result) or (
+            cancellation_check is not None and cancellation_check()
+        ):
             self._cancel_task(task_id, on_failed)
             return
-        self._set_task(task_id, status="completed", result=result)
         if on_succeeded is not None:
             on_succeeded(task_id, result)
 
@@ -147,6 +183,9 @@ class PartitionTaskStore:
 class PartitionService:
     def __init__(self, task_store: PartitionTaskStore | None = None) -> None:
         self.task_store = task_store or PartitionTaskStore()
+
+    def queue_depth(self) -> int:
+        return self.task_store.queue_depth()
 
     def get_task(self, task_id: str) -> PartitionTask:
         task = self.task_store.get(task_id)

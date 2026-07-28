@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 
+from cube_split import runtime_config
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import (
     PartitionDatasetResult,
@@ -28,12 +30,22 @@ from cube_web.services.partition_job_store import (
     normalized_dataset_asset_id,
 )
 from cube_web.services.partition_service import PartitionService, PartitionTask
-from cube_web.services.ray_job_submitter import RayJobPartitionSubmitter, ray_job_executor_enabled
+from cube_web.services.ray_job_submitter import (
+    RayJobPartitionSubmitter,
+    job_client_timeout_seconds,
+    ray_job_executor_enabled,
+)
 
 ACTIVE_BATCH_RUN_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancel_requested"}
 CANCELLATION_CHECK_INTERVAL_SECONDS = 1.0
 TASK_SYNC_WAIT_SECONDS = 30.0
+RAY_JOB_SUBMISSION_GRACE_SECONDS = 5.0
+logger = logging.getLogger(__name__)
+
+
+def ray_batch_scheduler_enabled() -> bool:
+    return runtime_config.bool_option(runtime_config.env_text("CUBE_WEB_RAY_BATCH_SCHEDULER", "0"), default=False)
 
 
 class PartitionCancelledError(RuntimeError):
@@ -57,7 +69,16 @@ class PartitionWorkflowService:
         self.ray_job_submitter = ray_job_submitter
         self.after_ray: Callable[[], None] | None = None
         self.task_event_listeners: list[Callable[[str, str, dict[str, Any] | None], None]] = []
-        self._run_lock = Lock()
+        # Submission is serialized per batch: the job store already rejects a
+        # second active attempt for one batch, so batches must not block each
+        # other on a process-wide lock. Locks are never evicted; the number of
+        # distinct batches per process stays small.
+        self._batch_locks: dict[str, Lock] = {}
+        self._batch_locks_guard = Lock()
+
+    def _lock_for_batch(self, batch_id: str) -> Lock:
+        with self._batch_locks_guard:
+            return self._batch_locks.setdefault(batch_id, Lock())
 
     def add_task_event_listener(self, listener: Callable[[str, str, dict[str, Any] | None], None]) -> None:
         if listener not in self.task_event_listeners:
@@ -95,6 +116,16 @@ class PartitionWorkflowService:
             raise RuntimeError("dataset runner is required")
         if selected_domain_store is None:
             raise RuntimeError("partition domain store is required")
+        run_batch = getattr(selected_runner, "run_datasets", None)
+        if callable(run_batch) and ray_batch_scheduler_enabled():
+            return self._run_ray_batch(
+                task_id=task_id,
+                request=request,
+                datasets=datasets,
+                runner=selected_runner,
+                domain_store=selected_domain_store,
+                job_store=selected_job_store,
+            )
 
         results: list[dict[str, Any]] = []
         for selection_key, dataset in datasets.items():
@@ -193,6 +224,161 @@ class PartitionWorkflowService:
             status = "failed"
         return {"batch_id": request.batch_id, "status": status, "datasets": results}
 
+    def _run_ray_batch(
+        self,
+        *,
+        task_id: str,
+        request: StrictPartitionRequest,
+        datasets: dict[Any, Any],
+        runner: Any,
+        domain_store: Any,
+        job_store: Any,
+    ) -> dict[str, Any]:
+        """Submit all independent scene units to the batch-owned Ray driver."""
+        results: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
+        for _selection_key, dataset in datasets.items():
+            dataset_id = dataset.dataset_id
+            execution_task_id = task_id if dataset.selection_id is None else f"{task_id}:{dataset.selection_id}"
+            output_version = make_output_version(dataset_id, execution_task_id)
+            effective_request = effective_dataset_request(request, dataset)
+            effective_partition = resolve_dataset_partition(request, dataset)
+            started = False
+            try:
+                started_version = domain_store.start_output(effective_request, dataset, execution_task_id)
+                started = True
+                if started_version != output_version:
+                    raise ValueError("domain store returned a non-deterministic output version")
+                units, track_scenes = _scene_execution_units(dataset)
+                for unit in units:
+                    unit.update({
+                        "task_id": execution_task_id,
+                        "output_version": output_version,
+                        "grid_type": effective_request.grid_type,
+                        "requested_grid_level": effective_request.requested_grid_level,
+                        "cover_mode": effective_request.cover_mode,
+                        "max_cells_per_asset": effective_request.max_cells_per_asset,
+                        "time_granularity": effective_request.time_granularity,
+                        "max_observations": effective_partition.max_observations,
+                    })
+                prepared.append({
+                    "dataset": dataset,
+                    "dataset_id": dataset_id,
+                    "task_id": execution_task_id,
+                    "output_version": output_version,
+                    "units": units,
+                    "track_scenes": track_scenes,
+                })
+            except Exception as exc:
+                message = _safe_dataset_error(exc)
+                if started:
+                    domain_store.fail_output(
+                        dataset_id,
+                        output_version,
+                        error_code="partition_execution_failed",
+                        error_message=message,
+                    )
+                failure = {
+                    "dataset_id": dataset_id,
+                    "output_version": output_version,
+                    "status": "failed",
+                    "error": {"code": "partition_execution_failed", "message": message},
+                }
+                if dataset.selection_id is not None:
+                    failure["selection_id"] = dataset.selection_id
+                results.append(failure)
+
+        units = [unit for item in prepared for unit in item["units"]]
+        try:
+            outcomes = runner.run_datasets(
+                runs=units,
+                cancellation_check=lambda: _is_cancelled(job_store, task_id),
+            )
+            if len(outcomes) != len(units):
+                raise RuntimeError("batch runner returned a mismatched number of outcomes")
+        except PartitionCancelledError:
+            return self._cancel_ray_batch(prepared, results, request.batch_id, domain_store)
+        except Exception as exc:
+            message = _safe_dataset_error(exc)
+            for item in prepared:
+                domain_store.fail_output(
+                    item["dataset_id"],
+                    item["output_version"],
+                    error_code="partition_execution_failed",
+                    error_message=message,
+                )
+                results.append(_failed_batch_dataset(item, message))
+            return _batch_result(request.batch_id, results)
+
+        for unit, outcome in zip(units, outcomes, strict=True):
+            unit["outcome"] = outcome
+        if self.after_ray is not None:
+            self.after_ray()
+        if _is_cancelled(job_store, task_id):
+            return self._cancel_ray_batch(prepared, results, request.batch_id, domain_store)
+
+        for item in prepared:
+            dataset = item["dataset"]
+            try:
+                result, scene_outcomes = _combine_batch_unit_outcomes(item)
+                if (
+                    result.dataset_id != item["dataset_id"]
+                    or result.task_id != item["task_id"]
+                    or result.output_version != item["output_version"]
+                ):
+                    raise ValueError("dataset result identity does not match the active attempt")
+                record_chunks = getattr(domain_store, "record_output_chunks", None)
+                if result.chunks and callable(record_chunks):
+                    record_chunks(result)
+                    verify_chunks = getattr(domain_store, "verify_output_chunks", None)
+                    if callable(verify_chunks):
+                        verify_chunks(result)
+                    promote_chunks = getattr(domain_store, "promote_logical_staging", None)
+                    if callable(promote_chunks):
+                        promote_chunks(result)
+                committed = domain_store.complete_output(result)
+                completed = _completed_dataset_result(result, committed)
+                if dataset.selection_id is not None:
+                    completed["selection_id"] = dataset.selection_id
+                if scene_outcomes is not None:
+                    completed["scenes"] = scene_outcomes
+                    if any(outcome["status"] != "completed" for outcome in scene_outcomes):
+                        completed["status"] = "partial_failure"
+                results.append(completed)
+            except PartitionCancelledError:
+                domain_store.fail_output(
+                    item["dataset_id"],
+                    item["output_version"],
+                    error_code="partition_cancelled",
+                    error_message="Partition task cancelled",
+                )
+                results.append(_cancelled_batch_dataset(item))
+            except Exception as exc:
+                message = _safe_dataset_error(exc)
+                domain_store.fail_output(
+                    item["dataset_id"],
+                    item["output_version"],
+                    error_code="partition_execution_failed",
+                    error_message=message,
+                )
+                failed = _failed_batch_dataset(item, message)
+                if isinstance(exc, _ScenePartitionFailure):
+                    failed["scenes"] = exc.outcomes
+                results.append(failed)
+        return _batch_result(request.batch_id, results)
+
+    @staticmethod
+    def _cancel_ray_batch(prepared: list[dict[str, Any]], results: list[dict[str, Any]], batch_id: str, domain_store: Any) -> dict[str, Any]:
+        for item in prepared:
+            domain_store.fail_output(
+                item["dataset_id"],
+                item["output_version"],
+                error_code="partition_cancelled",
+                error_message="Partition task cancelled",
+            )
+            results.append(_cancelled_batch_dataset(item))
+        return _batch_result(batch_id, results)
+
     def submit_strict(
         self,
         data_type: str,
@@ -233,7 +419,7 @@ class PartitionWorkflowService:
             raise RuntimeError("strict partition dataset runner is required")
         group_datasets(request)
 
-        with self._run_lock:
+        with self._lock_for_batch(request.batch_id):
             full_payload = request.model_dump(mode="json")
             full_payload["strict_partition_request"] = True
             full_payload["dataset_partitions"] = _dataset_partitions(request)
@@ -311,25 +497,28 @@ class PartitionWorkflowService:
                     return active_task
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             self.store.mark_batch_queued(request.batch_id, task_id, operation=operation)
-            if ray_job_executor_enabled() and not isinstance(self.store, InMemoryPartitionJobStore):
-                submitter = self.ray_job_submitter or RayJobPartitionSubmitter()
-                try:
-                    ray_job_id = submitter.submit(task_id)
-                    self.store.set_ray_job_id(task_id, ray_job_id)
-                except Exception as exc:
-                    self.on_task_failed(task_id, str(exc))
-                attempt = self.store.get_attempt(task_id)
-                return _task_from_attempt(attempt or {"task_id": task_id, "data_type": data_type}, self.get_batch(request.batch_id))
-            return self.partition_service.task_store.submit(
-                data_type,
-                "run",
-                lambda: _strict_task_result(self.run(task_id=task_id, request=execution_request), execution_request),
-                task_id=task_id,
-                on_started=self.on_task_started,
-                on_succeeded=self.on_task_succeeded,
-                on_failed=self.on_task_failed,
-                cancellation_check=cancellation_check,
-            )
+        # The Ray Dashboard round-trip happens outside the batch lock: the
+        # attempt row already guards this batch against duplicate submissions,
+        # and a slow dashboard must not stall other callers.
+        if ray_job_executor_enabled() and not isinstance(self.store, InMemoryPartitionJobStore):
+            submitter = self.ray_job_submitter or RayJobPartitionSubmitter()
+            try:
+                ray_job_id = submitter.submit(task_id)
+                self.store.set_ray_job_id(task_id, ray_job_id)
+            except Exception as exc:
+                self.on_task_failed(task_id, str(exc))
+            attempt = self.store.get_attempt(task_id)
+            return _task_from_attempt(attempt or {"task_id": task_id, "data_type": data_type}, self.get_batch(request.batch_id))
+        return self.partition_service.task_store.submit(
+            data_type,
+            "run",
+            lambda: _strict_task_result(self.run(task_id=task_id, request=execution_request), execution_request),
+            task_id=task_id,
+            on_started=self.on_task_started,
+            on_succeeded=self.on_task_succeeded,
+            on_failed=self.on_task_failed,
+            cancellation_check=cancellation_check,
+        )
 
     def get_batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.store.get_batch(batch_id)
@@ -529,6 +718,16 @@ class PartitionWorkflowService:
         if ray_job_id:
             self._reconcile_ray_job_attempt(task_id, ray_job_id)
             return
+        if (
+            ray_job_executor_enabled()
+            and not isinstance(self.store, InMemoryPartitionJobStore)
+            and _attempt_age_seconds(attempt) <= job_client_timeout_seconds() + RAY_JOB_SUBMISSION_GRACE_SECONDS
+        ):
+            # The Ray Job submission runs outside the batch lock and is bounded
+            # by the job client timeout; a fresh attempt without a ray_job_id is
+            # still in flight and must not be failed by a reader, or a duplicate
+            # attempt could be created for the same batch.
+            return
         try:
             current = self.partition_service.get_task(task_id)
         except HTTPException as exc:
@@ -557,7 +756,8 @@ class PartitionWorkflowService:
     def _reconcile_ray_job_attempt(self, task_id: str, ray_job_id: str) -> None:
         try:
             status = (self.ray_job_submitter or RayJobPartitionSubmitter()).status(ray_job_id).upper()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Unable to reconcile Ray job status for task %s (job %s): %s", task_id, ray_job_id, exc)
             return
         if status.endswith("SUCCEEDED"):
             self.store.mark_result_manual_required(
@@ -785,6 +985,12 @@ def _timestamp_or_now(value: Any) -> float:
     return timestamp.timestamp()
 
 
+def _attempt_age_seconds(attempt: dict[str, Any] | None) -> float:
+    if not isinstance(attempt, dict):
+        return float("inf")
+    return max(time.time() - _timestamp_or_now(attempt.get("created_at")), 0.0)
+
+
 def _text_or_none(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
@@ -830,6 +1036,104 @@ class _ScenePartitionFailure(RuntimeError):
         self.outcomes = outcomes
         failures = [item.get("error", {}).get("message", "scene failed") for item in outcomes if item["status"] == "failed"]
         super().__init__("; ".join(failures) or "all scenes failed")
+
+
+def _scene_execution_units(dataset: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Build independent scene units without dispatching them one by one."""
+    grouped: dict[str, tuple[str, Any]] = {}
+    assets_by_id = {asset.source_asset_id: asset for asset in dataset.assets}
+    for band in dataset.bands:
+        band_unit_id = _band_unit_id(band)
+        asset = assets_by_id.get(band.source_asset_id)
+        scene_id = str((asset.attributes or {}).get("scene_id") or "").strip() if asset is not None else ""
+        if not band_unit_id or not scene_id or asset is None:
+            return [{"dataset": dataset, "scene_id": None, "band_unit_id": None}], False
+        grouped[band_unit_id] = (scene_id, band)
+    return [
+        {
+            "dataset": dataset.model_copy(update={"assets": (assets_by_id[band.source_asset_id],), "bands": (band,)}),
+            "scene_id": scene_id,
+            "band_unit_id": band_unit_id,
+        }
+        for band_unit_id, (scene_id, band) in grouped.items()
+    ], True
+
+
+def _combine_batch_unit_outcomes(item: dict[str, Any]) -> tuple[PartitionDatasetResult, list[dict[str, Any]] | None]:
+    successful: list[PartitionDatasetResult] = []
+    scene_outcomes: list[dict[str, Any]] | None = [] if item["track_scenes"] else None
+    for unit in item["units"]:
+        outcome = unit.get("outcome") or {}
+        if "error" in outcome:
+            if scene_outcomes is not None:
+                scene_outcomes.append({
+                    "scene_id": unit["scene_id"],
+                    "band_unit_id": unit["band_unit_id"],
+                    "status": "failed",
+                    "error": {"code": "partition_execution_failed", "message": str(outcome["error"])},
+                })
+            continue
+        raw = outcome.get("result")
+        if not isinstance(raw, dict):
+            raise RuntimeError("batch runner outcome is missing result")
+        result = PartitionDatasetResult.model_validate(raw)
+        successful.append(result)
+        if scene_outcomes is not None:
+            scene_outcomes.append({
+                "scene_id": unit["scene_id"],
+                "band_unit_id": unit["band_unit_id"],
+                "status": "completed",
+            })
+    if not successful:
+        if scene_outcomes is not None:
+            raise _ScenePartitionFailure(scene_outcomes)
+        raise RuntimeError("batch runner did not produce a dataset result")
+    first = successful[0]
+    return first.model_copy(update={
+        "tiles": _merge_scene_rows(successful, "tiles"),
+        "indexes": _merge_scene_rows(successful, "indexes"),
+        "grid_cells": _merge_scene_rows(successful, "grid_cells"),
+        "chunks": tuple(chunk for result in successful for chunk in result.chunks),
+    }), scene_outcomes
+
+
+def _cancelled_batch_dataset(item: dict[str, Any]) -> dict[str, Any]:
+    dataset = item["dataset"]
+    result = {
+        "dataset_id": item["dataset_id"],
+        "output_version": item["output_version"],
+        "status": "cancelled",
+    }
+    if dataset.selection_id is not None:
+        result["selection_id"] = dataset.selection_id
+    return result
+
+
+def _failed_batch_dataset(item: dict[str, Any], message: str) -> dict[str, Any]:
+    dataset = item["dataset"]
+    result = {
+        "dataset_id": item["dataset_id"],
+        "output_version": item["output_version"],
+        "status": "failed",
+        "error": {"code": "partition_execution_failed", "message": message},
+    }
+    if dataset.selection_id is not None:
+        result["selection_id"] = dataset.selection_id
+    return result
+
+
+def _batch_result(batch_id: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses = [str(item["status"]) for item in results]
+    completed = statuses.count("completed")
+    if completed == len(statuses):
+        status = "completed"
+    elif completed or "partial_failure" in statuses:
+        status = "partial_failure"
+    elif statuses and all(value == "cancelled" for value in statuses):
+        status = "cancelled"
+    else:
+        status = "failed"
+    return {"batch_id": batch_id, "status": status, "datasets": results}
 
 
 def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[PartitionDatasetResult, list[dict[str, Any]] | None]:

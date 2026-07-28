@@ -932,9 +932,15 @@ class OpenGaussSceneRepository:
                         "JOIN partition_run_scenes prs ON prs.partition_run_id=g.partition_run_id "
                         "AND prs.scene_id=g.scene_id "
                         "WHERE g.band_unit_id=ANY(%s::text[]) AND prs.source_load_batch_id=ANY(%s::text[]) "
+                        "AND g.grid_type=%s AND g.grid_level=%s "
                         "AND g.partition_status='completed' AND g.ingest_status='completed' "
                         "ORDER BY g.band_unit_id,g.grid_type,g.grid_level",
-                        (sorted(selected_for_grid), [selection_batch_id] if selection_batch_id else list(request.source_batch_ids)),
+                        (
+                            sorted(selected_for_grid),
+                            [selection_batch_id] if selection_batch_id else list(request.source_batch_ids),
+                            selection.partition.grid_type,
+                            selection.partition.requested_grid_level,
+                        ),
                     )
                     if ingested_rows:
                         labels = [
@@ -945,18 +951,6 @@ class OpenGaussSceneRepository:
                             "band units already partitioned and ingested in the selected load batch: "
                             + ", ".join(labels)
                         )
-                completed_rows = self._read(
-                    "SELECT band_unit_id FROM partition_data_unit_grid_status "
-                    "WHERE band_unit_id=ANY(%s::text[]) AND grid_type=%s AND grid_level=%s "
-                    "AND partition_status='completed'",
-                    (
-                        sorted(selected_for_grid), selection.partition.grid_type,
-                        selection.partition.requested_grid_level,
-                    ),
-                )
-                completed = sorted(str(item["band_unit_id"]) for item in completed_rows)
-                if completed:
-                    raise ValueError(f"band units already completed grid_type={selection.partition.grid_type}: {completed}")
             for row in scene_rows:
                 scene_id = str(row["scene_id"])
                 selected_band_rows = [

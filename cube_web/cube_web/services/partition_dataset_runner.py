@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 from cube_split import runtime_config
+from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
 
 from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 
-ENTITY_RAY_PARALLELISM = 16
+def _entity_ray_parallelism(default: int = 16) -> int:
+    """Entity planning fan-out; CUBE_ENTITY_RAY_PARALLELISM overrides the default."""
+    raw = runtime_config.env_text("CUBE_ENTITY_RAY_PARALLELISM")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
+ENTITY_RAY_PARALLELISM = _entity_ray_parallelism()
 ENTITY_PLANNING_OVERLAP_DEGREES = 0.02
 
 
@@ -28,7 +39,7 @@ def _ray_init_runtime_env(runtime_env: dict[str, Any] | None) -> dict[str, Any] 
 
 
 def _time_bucket(value: str, granularity: str) -> str:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     formats = {"second": "%Y%m%d%H%M%S", "minute": "%Y%m%d%H%M", "hour": "%Y%m%d%H", "day": "%Y%m%d", "month": "%Y%m"}
     return parsed.strftime(formats[granularity])
 
@@ -135,9 +146,11 @@ def _logical_shards(bbox: list[float] | tuple[float, float, float, float], degre
 
 def _entity_planning_shards(
     bbox: list[float] | tuple[float, float, float, float],
-    parallelism: int = ENTITY_RAY_PARALLELISM,
+    parallelism: int | None = None,
 ) -> list[list[float]]:
     """Split one entity source into a stable square task grid."""
+    if parallelism is None:
+        parallelism = _entity_ray_parallelism()
     west, south, east, north = _normalize_wgs84_bbox(bbox)
     side = max(1, int(parallelism**0.5))
     shards: list[list[float]] = []
@@ -233,10 +246,13 @@ def _run_logical_dataset_on_ray(
                         "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")},
                     }})
         rows = [{"kind": "grid_cells", "row": row} for row in cells.values()] + rows
-        content = b"".join(json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n" for row in rows)
-        body = gzip.compress(content)
+        content = serialize_logical_chunk_rows(rows)
+        body = compress_logical_chunk(content)
         checksum = sha256(body).hexdigest()
-        chunk_id = sha256((value["dataset"]["dataset_id"] + "\0" + value["output_version"] + "\0" + value["shard_id"]).encode()).hexdigest()[:32]
+        chunk_id = logical_chunk_id(
+            dataset_id=dataset["dataset_id"], output_version=value["output_version"],
+            shard_id=value["shard_id"], bands=bands,
+        )
         settings = worker_runtime_config.minio_settings()
         key = f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/logical-chunks/{chunk_id}.jsonl.gz"
         client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
@@ -647,6 +663,7 @@ def _run_dataset_on_ray(
     from cube_split.jobs.ray_logical_partition_job import _ray_actor_options_from_env
 
     assets = list((payload.get("dataset") or {}).get("assets") or [])
+    ray_parallelism = _entity_ray_parallelism()
     if not assets:
         return _wait_for_ray_result(ray, execute.options(**_ray_actor_options_from_env()).remote(payload), cancellation_check)
     options = {"num_cpus": 1, **_ray_actor_options_from_env()}
@@ -655,7 +672,7 @@ def _run_dataset_on_ray(
         asset_bbox = asset.get("bbox")
         if not isinstance(asset_bbox, (list, tuple)) or len(asset_bbox) != 4:
             raise ValueError("entity source asset bbox is required for parallel planning")
-        for shard in _entity_planning_shards(asset_bbox):
+        for shard in _entity_planning_shards(asset_bbox, ray_parallelism):
             task_asset = {**asset, "planning_bbox": shard}
             task_dataset = {**payload["dataset"], "assets": [task_asset]}
             pending.append(execute.options(**options).remote({**payload, "dataset": task_dataset}))
@@ -677,7 +694,7 @@ def _run_dataset_on_ray(
         "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"],
         "output_version": payload["output_version"], "grid_type": payload["grid_type"],
         "requested_grid_level": int(payload["requested_grid_level"]), "partition_method": "entity",
-        "execution_engine": "ray", "ray_parallelism": ENTITY_RAY_PARALLELISM,
+        "execution_engine": "ray", "ray_parallelism": ray_parallelism,
         "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/",
         **{kind: list(rows.values()) for kind, rows in merged.items()},
     }
@@ -685,6 +702,89 @@ def _run_dataset_on_ray(
 
 class NormalizedPartitionDatasetRunner:
     """Production runner used by normalized partition runs."""
+
+    def _ray_execution_context(self) -> tuple[str, dict[str, Any]]:
+        from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
+
+        ray_address = runtime_config.require_ray_address()
+        if ray_address.startswith("ray://"):
+            # Ray Client workers load their protected node-local runtime settings.
+            return ray_address, {"env_vars": {}}
+        minio = runtime_config.minio_settings()
+        ray_runtime_env = _ray_runtime_env_from_env() or {"env_vars": {}}
+        env_vars = dict(ray_runtime_env.get("env_vars") or {})
+        env_vars.update({
+            "CUBE_WEB_POSTGRES_DSN": runtime_config.require_postgres_dsn(),
+            "CUBE_WEB_MINIO_ENDPOINT": minio.endpoint,
+            "CUBE_WEB_MINIO_ACCESS_KEY": minio.access_key,
+            "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
+            "CUBE_WEB_MINIO_BUCKET": minio.bucket,
+        })
+        ray_runtime_env["env_vars"] = env_vars
+        return ray_address, ray_runtime_env
+
+    @staticmethod
+    def _payload(
+        *, dataset: Any, task_id: str, output_version: str, grid_type: str,
+        requested_grid_level: int, cover_mode: str, max_cells_per_asset: int,
+        time_granularity: str, max_observations: int | None, ray_address: str,
+    ) -> dict[str, Any]:
+        return {
+            "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
+            "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
+            "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
+            "max_observations": max_observations, "ray_address": ray_address,
+        }
+
+    @staticmethod
+    def _run_payload(
+        payload: dict[str, Any], runtime_env: dict[str, Any] | None,
+        cancellation_check: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        if payload["dataset"].get("data_type") == "carbon":
+            return _run_carbon_dataset_on_ray(payload, runtime_env, cancellation_check)
+        if payload["grid_type"] in {"geohash", "mgrs"}:
+            from cube_split.jobs.ray_logical_chunk_job import run_logical_chunk_job
+
+            return run_logical_chunk_job(payload, runtime_env, cancellation_check)
+        return _run_dataset_on_ray(payload, runtime_env, cancellation_check)
+
+    def run_datasets(
+        self, *, runs: list[dict[str, Any]], cancellation_check: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Submit all logical scene units through one Ray queue for a batch."""
+        if not runs:
+            return []
+        ray_address, runtime_env = self._ray_execution_context()
+        payload_fields = {
+            "dataset", "task_id", "output_version", "grid_type", "requested_grid_level",
+            "cover_mode", "max_cells_per_asset", "time_granularity", "max_observations",
+        }
+        payloads = [
+            self._payload(ray_address=ray_address, **{key: value for key, value in run.items() if key in payload_fields})
+            for run in runs
+        ]
+        outcomes: list[dict[str, Any] | None] = [None] * len(payloads)
+        logical_positions = [
+            index for index, payload in enumerate(payloads)
+            if payload["dataset"].get("data_type") != "carbon" and payload["grid_type"] in {"geohash", "mgrs"}
+        ]
+        if logical_positions:
+            from cube_split.jobs.ray_logical_chunk_job import run_logical_chunk_jobs
+
+            logical_outcomes = run_logical_chunk_jobs(
+                [payloads[index] for index in logical_positions], runtime_env, cancellation_check,
+            )
+            for index, outcome in zip(logical_positions, logical_outcomes, strict=True):
+                outcomes[index] = outcome
+        for index, payload in enumerate(payloads):
+            if outcomes[index] is not None:
+                continue
+            try:
+                outcomes[index] = {"result": self._run_payload(payload, runtime_env, cancellation_check)}
+            except Exception as exc:
+                outcomes[index] = {"error": str(exc)}
+        return [outcome for outcome in outcomes if outcome is not None]
 
     def run_dataset(
         self,
@@ -700,39 +800,20 @@ class NormalizedPartitionDatasetRunner:
         max_observations: int | None = None,
         cancellation_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
-
-        ray_address = runtime_config.require_ray_address()
-        if ray_address.startswith("ray://"):
-            # Ray Client blocks before task submission when runtime_env carries env_vars.
-            # Workers load their protected node-local .cube_web.env instead.
-            ray_runtime_env = {"env_vars": {}}
-        else:
-            minio = runtime_config.minio_settings()
-            ray_runtime_env = _ray_runtime_env_from_env() or {"env_vars": {}}
-            env_vars = dict(ray_runtime_env.get("env_vars") or {})
-            env_vars.update({
-                "CUBE_WEB_POSTGRES_DSN": runtime_config.require_postgres_dsn(),
-                "CUBE_WEB_MINIO_ENDPOINT": minio.endpoint,
-                "CUBE_WEB_MINIO_ACCESS_KEY": minio.access_key,
-                "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
-                "CUBE_WEB_MINIO_BUCKET": minio.bucket,
-            })
-            ray_runtime_env["env_vars"] = env_vars
-        payload = {
-            "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
-            "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
-            "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
-            "max_observations": max_observations,
-            "ray_address": ray_address,
-        }
-        if dataset.data_type == "carbon":
-            return _run_carbon_dataset_on_ray(payload, ray_runtime_env, cancellation_check)
-        if grid_type in {"geohash", "mgrs"}:
-            from cube_split.jobs.ray_logical_chunk_job import run_logical_chunk_job
-
-            return run_logical_chunk_job(payload, ray_runtime_env, cancellation_check)
-        return _run_dataset_on_ray(payload, ray_runtime_env, cancellation_check)
+        ray_address, runtime_env = self._ray_execution_context()
+        payload = self._payload(
+            dataset=dataset,
+            task_id=task_id,
+            output_version=output_version,
+            grid_type=grid_type,
+            requested_grid_level=requested_grid_level,
+            cover_mode=cover_mode,
+            max_cells_per_asset=max_cells_per_asset,
+            time_granularity=time_granularity,
+            max_observations=max_observations,
+            ray_address=ray_address,
+        )
+        return self._run_payload(payload, runtime_env, cancellation_check)
 def _normalize_wgs84_bbox(bbox: list[float] | tuple[float, ...]) -> list[float]:
     """Clamp raster-derived WGS84 bounds to the legal geographic range."""
     if len(bbox) != 4:

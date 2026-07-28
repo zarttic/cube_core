@@ -301,28 +301,28 @@ class SceneDomainService:
         }
 
     def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
-        datasets = self.repository.materialize_partition_datasets(request)
-        strict_request = build_partition_execution_request(request, datasets)
         run = self.repository.create_partition_run(request)
         if not run.get("created"):
             attributes = run.get("attributes") if isinstance(run.get("attributes"), dict) else {}
             task_id = str(attributes.get("task_id") or "")
             if task_id:
-                data_types = {dataset.data_type for dataset in datasets}
+                task = self.workflow.get_task(task_id).to_dict()
                 return {
                     "partition_run_id": request.partition_run_id,
                     "source_batch_ids": list(request.source_batch_ids),
                     "task_id": task_id,
-                    "status": str(run.get("status") or "queued"),
-                    "data_type": "mixed" if len(data_types) > 1 else next(iter(data_types)),
-                    "operation": "run",
+                    "status": str(task.get("status") or run.get("status") or "queued"),
+                    "data_type": str(task.get("data_type") or "mixed"),
+                    "operation": str(task.get("operation") or "run"),
                 }
             raise HTTPException(
                 status_code=409,
                 detail=f"Partition run is being created: {request.partition_run_id}",
             )
-        data_types = {dataset.data_type for dataset in datasets}
         try:
+            datasets = self.repository.materialize_partition_datasets(request)
+            strict_request = build_partition_execution_request(request, datasets)
+            data_types = {dataset.data_type for dataset in datasets}
             if len(data_types) > 1:
                 task = self.workflow.submit_mixed(strict_request)
             else:

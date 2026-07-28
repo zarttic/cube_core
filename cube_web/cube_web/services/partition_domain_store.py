@@ -20,6 +20,8 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote, urlparse
 
+from cube_web.services.partition_domain_schema import PARTITION_DOMAIN_SCHEMA_VERSION
+
 if TYPE_CHECKING:  # pragma: no cover
     from cube_web.services.partition_contracts import (
         DatasetInput,
@@ -28,7 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover
     )
 
 SortOrder = Literal["asc", "desc"]
-SCHEMA_VERSION = "2026-07-19-partition-domain-v2"
+SCHEMA_VERSION = PARTITION_DOMAIN_SCHEMA_VERSION
 
 _DATASET_SORTS = {
     "updated_at": "updated_at",
@@ -45,6 +47,10 @@ _DETAIL_SORTS = {
     "grid_cells": {"created_at": "created_at", "output_id": "output_id", "space_code": "space_code", "grid_level": "grid_level"},
     "publications": {"requested_at": "requested_at", "activated_at": "activated_at", "status": "status"},
 }
+_PUBLIC_TILE_COLUMNS = (
+    "output_id, dataset_id, output_version, source_asset_id, band_code, grid_type, grid_level, grid_level_name, "
+    "space_code, topology_code, time_bucket, tile_uri, tile_kind, bbox, width, height, byte_size, checksum, status, created_at"
+)
 
 
 def _now() -> str:
@@ -1349,7 +1355,8 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
         tie_breaker = (
             "output_id" if noun in {"tiles", "indexes", "grid_cells"} else "publication_id" if noun == "publications" else "source_asset_id"
         )
-        sql = f"SELECT * FROM {table} WHERE {' AND '.join(conditions)} ORDER BY {column} {direction} NULLS LAST, {tie_breaker} {direction}"
+        projection = _PUBLIC_TILE_COLUMNS if noun == "tiles" else "*"
+        sql = f"SELECT {projection} FROM {table} WHERE {' AND '.join(conditions)} ORDER BY {column} {direction} NULLS LAST, {tie_breaker} {direction}"
         if limit is not None:
             sql += " LIMIT %s OFFSET %s"
             params.extend((limit, offset))

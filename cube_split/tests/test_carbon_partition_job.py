@@ -7,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from cube_split.jobs.carbon_partition_job import _resolve_backend, _resolve_worker_count, parse_args, run_carbon_partition
+from cube_split.jobs.carbon_partition_job import (
+    _default_ray_parallelism,
+    _resolve_backend,
+    _resolve_worker_count,
+    parse_args,
+    run_carbon_partition,
+)
 from cube_split.partition.carbon import CarbonPartitionConfig
 
 
@@ -31,11 +37,40 @@ def test_carbon_partition_job_auto_backend_selects_ray_when_address_is_set():
     assert _resolve_backend("thread", "auto") == "thread"
 
 
-def test_carbon_partition_job_resolves_ray_worker_count():
+def test_carbon_partition_job_resolves_ray_worker_count(monkeypatch):
+    monkeypatch.delenv("CUBE_CARBON_RAY_PARALLELISM", raising=False)
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.os.cpu_count", lambda: 2)
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: False))
+
     assert _resolve_worker_count(partition_workers=0, ray_parallelism=0, backend="ray") == 4
     assert _resolve_worker_count(partition_workers=2, ray_parallelism=0, backend="ray") == 2
     assert _resolve_worker_count(partition_workers=2, ray_parallelism=6, backend="ray") == 6
     assert _resolve_worker_count(partition_workers=0, ray_parallelism=6, backend="process") == 1
+
+
+def test_carbon_partition_job_default_parallelism_prefers_env_override(monkeypatch):
+    monkeypatch.setenv("CUBE_CARBON_RAY_PARALLELISM", "12")
+
+    assert _default_ray_parallelism() == 12
+    assert _resolve_worker_count(partition_workers=0, ray_parallelism=0, backend="ray") == 12
+    assert _resolve_worker_count(partition_workers=0, ray_parallelism=6, backend="ray") == 6
+    assert _resolve_worker_count(partition_workers=0, ray_parallelism=0, backend="process") == 1
+
+    monkeypatch.setenv("CUBE_CARBON_RAY_PARALLELISM", "0")
+    monkeypatch.setattr("cube_split.jobs.carbon_partition_job.os.cpu_count", lambda: 2)
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: False))
+    assert _default_ray_parallelism() == 1
+
+    monkeypatch.setenv("CUBE_CARBON_RAY_PARALLELISM", "not-a-number")
+    assert _default_ray_parallelism() == 4
+
+
+def test_carbon_partition_job_default_parallelism_uses_cluster_cpus(monkeypatch):
+    monkeypatch.delenv("CUBE_CARBON_RAY_PARALLELISM", raising=False)
+    fake_ray = SimpleNamespace(is_initialized=lambda: True, cluster_resources=lambda: {"CPU": 24.0})
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+
+    assert _default_ray_parallelism() == 24
 
 
 def test_carbon_partition_job_accepts_only_frozen_sdk_time_granularities(monkeypatch):

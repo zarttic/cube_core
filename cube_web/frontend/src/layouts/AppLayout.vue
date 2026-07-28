@@ -32,7 +32,7 @@ async function handleLogout() {
         </div>
         <nav class="portal-nav" aria-label="主导航">
           <template v-for="item in navItems(showAdminNavigation)" :key="item.label">
-            <RouterLink v-if="item.kind === 'internal'" :to="item.path" active-class="active active-nav">{{ item.label }}</RouterLink>
+            <RouterLink v-if="item.kind === 'internal' || item.kind === 'admin'" :to="item.path" active-class="active active-nav">{{ item.label }}</RouterLink>
             <a v-else :href="item.url">{{ item.label }}</a>
           </template>
         </nav>

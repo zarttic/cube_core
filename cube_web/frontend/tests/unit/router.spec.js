@@ -10,21 +10,26 @@ describe('router guards', () => {
     expect(router.hasRoute('datasets')).toBe(false);
   });
 
-  it('hides management, quality and config entries from the global navigation', () => {
-    const labels = navItems(true).map((item) => item.label);
+  it('hides partitioning but keeps administration available to non-administrators', () => {
+    const labels = navItems(false).map((item) => item.label);
 
     expect(labels).not.toContain('数据管理与入库');
     expect(labels).not.toContain('自动化质检');
     expect(labels).not.toContain('系统配置');
-    expect(labels).toContain('分析就绪数据剖分');
+    expect(labels).not.toContain('分析就绪数据剖分');
+    expect(labels).toContain('ARD数据载入');
+    expect(labels).toContain('剖分数据服务');
+    expect(labels).toContain('资源调度');
+    expect(labels).toContain('后台管理');
     expect(labels).toContain('全球离散格网模型与编码');
+    expect(navItems(false).find((item) => item.label === '后台管理')).toMatchObject({ kind: 'external', url: '/admin' });
   });
 
   it('sends an unauthenticated protected route to the auth redirect with its local target', async () => {
     const redirectToAuth = vi.fn();
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/data-management', component: { template: '<div />' }, meta: { requiresAuth: true, requiresAdmin: true } }],
+      routes: [{ path: '/data-management', component: { template: '<div />' }, meta: { requiresAuth: true } }],
     });
     installGuards(router, {
       ready: () => true,
@@ -38,7 +43,7 @@ describe('router guards', () => {
     expect(redirectToAuth).toHaveBeenCalledWith('/data-management?status=completed');
   });
 
-  it('redirects a non-admin away from an administrator route', async () => {
+  it('redirects a non-admin away from the partitioning route', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [

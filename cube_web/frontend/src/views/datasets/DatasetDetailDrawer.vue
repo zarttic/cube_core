@@ -193,19 +193,6 @@ function rowId(row) {
     || row.index_id || row.ingest_run_id || row.quality_run_id || row.publication_id || row.load_batch_id || '-';
 }
 
-function sourceOrError(row) {
-  if (row?.error_message) return row.error_message;
-  if (row?.source_uri) return row.source_uri;
-  if (row?.tile_uri) return row.tile_uri;
-  if (row?.value_ref_uri) return row.value_ref_uri;
-  if (row?.source_kind) return row.source_kind;
-  if (row?.details) {
-    const details = typeof row.details === 'string' ? row.details : JSON.stringify(row.details);
-    return details === '{}' ? '-' : details;
-  }
-  return row?.source_load_batch_id || row?.load_batch_id || row?.provenance || '-';
-}
-
 function provenanceTypeLabel(type) {
   return {
     load_batch: '数据载入',
@@ -405,7 +392,7 @@ function sceneCollapsed(sceneId) {
             <el-table-column v-if="key === 'provenance'" label="处理记录" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ provenanceRecordLabel(row) }}</template></el-table-column>
             <el-table-column label="状态" min-width="110"><template #default="{ row }"><StatusTag v-if="row.status" :domain="key === 'quality' ? 'quality' : key === 'scenes' ? 'scene' : 'ingest'" :value="row.status" size="small" /><span v-else>-</span></template></el-table-column>
             <el-table-column v-if="key === 'tiles'" prop="st_code" label="时空编码" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.st_code || '-' }}</template></el-table-column>
-            <el-table-column :label="key === 'provenance' ? '关联信息' : '来源或错误'" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ key === 'provenance' ? provenanceDetails(row) : sourceOrError(row) }}</template></el-table-column>
+            <el-table-column v-if="key === 'provenance'" label="关联信息" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ provenanceDetails(row) }}</template></el-table-column>
             <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
             <el-table-column v-if="writeEnabled && ['scenes', 'ingest-records'].includes(key)" label="操作" width="130" fixed="right">
               <template #default="{ row }">

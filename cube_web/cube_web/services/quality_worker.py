@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg.rows import dict_row
 
-from cube_web.services.ingest_worker import process_queued_ingest_scenes
+from cube_split import runtime_config
+from cube_web.services.ingest_worker import _resolve_ingest_max_workers, process_queued_ingest_scenes
 from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.quality_contracts import QualityResult
+from cube_web.services.quality_ingest_bridge import create_ingest_runs_after_quality
 from cube_web.services.quality_object_reader import quality_object_reader
 from cube_web.services.quality_repository import (
     ERROR_BATCH_SIZE,
     NewQualityError,
+    QualityCompletionConflict,
     QualityLease,
+    StaleQualityLease,
     _allocate_quality_run,
     assert_quality_result_totals,
     complete_quality_run_if_current,
@@ -24,7 +29,7 @@ from cube_web.services.quality_repository import (
     start_quality_run,
     write_quality_error_batch,
 )
-from cube_web.services.config_store import get_enabled_optional_quality_rules
+from cube_web.services.config_store import auto_ingest_after_quality_enabled, get_enabled_optional_quality_rules
 from cube_web.services.quality_rules import (
     DEFAULT_RULE_SET_VERSION,
     QualityFinding,
@@ -35,6 +40,18 @@ from cube_web.services.quality_rules import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_QUALITY_MAX_WORKERS = 4
+
+
+def _resolve_quality_max_workers() -> int:
+    raw = runtime_config.env_text("CUBE_WEB_QUALITY_MAX_WORKERS")
+    if not raw:
+        return DEFAULT_QUALITY_MAX_WORKERS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_QUALITY_MAX_WORKERS
 
 
 def _safe_execution_error(exc: Exception, prefix: str) -> str:
@@ -247,9 +264,15 @@ def execute_quality_run(lease: QualityLease) -> None:
                     "WHERE dataset_id=%s AND output_version=%s AND partition_status='completed'",
                     (terminal_status, None if terminal_status in {"pass", "warn"} else "quality validation failed", run.dataset_id, run.output_version),
                 )
+            if is_current and auto_ingest_after_quality_enabled():
+                create_ingest_runs_after_quality(
+                    tx,
+                    quality_run_id=lease.quality_run_id,
+                    dataset_id=run.dataset_id,
+                    output_version=run.output_version,
+                    quality_status=terminal_status,
+                )
             quality_completed = True
-            # Ingest is an explicit data-management action. Quality completion
-            # only records the gate result; it must not enqueue ingest work.
         except Exception as exc:
             if quality_completed:
                 raise
@@ -266,9 +289,18 @@ def execute_quality_run(lease: QualityLease) -> None:
 
 
 class QualityRuntime:
-    def __init__(self, *, worker_id: str = "cube-web-quality", poll_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        worker_id: str = "cube-web-quality",
+        poll_seconds: float = 1.0,
+        execution_workers: int | None = None,
+        ingest_workers: int | None = None,
+    ) -> None:
         self.worker_id = worker_id
         self.poll_seconds = poll_seconds
+        self.execution_workers = max(1, execution_workers or _resolve_quality_max_workers())
+        self.ingest_workers = max(1, ingest_workers or _resolve_ingest_max_workers())
         self._stop = Event()
         self._threads: list[Thread] = []
 
@@ -304,18 +336,40 @@ class QualityRuntime:
                 store = require_open_gauss_domain_store()
                 with store.transaction() as tx:
                     leases = claim_quality_runs(tx, worker_id=f"{self.worker_id}:execute", limit=10)
-                for lease in leases:
-                    if self._stop.is_set():
-                        break
-                    execute_quality_run(lease)
+                self._execute_claimed_runs(leases)
             except Exception:
                 logger.exception("quality worker iteration failed")
             self._stop.wait(self.poll_seconds)
 
+    def _execute_claimed_runs(self, leases: list[QualityLease]) -> None:
+        if self._stop.is_set() or not leases:
+            return
+        if self.execution_workers == 1:
+            for lease in leases:
+                if self._stop.is_set():
+                    return
+                self._execute_claimed_run(lease)
+            return
+        for offset in range(0, len(leases), self.execution_workers):
+            if self._stop.is_set():
+                return
+            active = leases[offset : offset + self.execution_workers]
+            with ThreadPoolExecutor(max_workers=len(active), thread_name_prefix="cube-web-quality-run") as pool:
+                futures = [pool.submit(self._execute_claimed_run, lease) for lease in active]
+                for future in futures:
+                    future.result()
+
+    @staticmethod
+    def _execute_claimed_run(lease: QualityLease) -> None:
+        try:
+            execute_quality_run(lease)
+        except (StaleQualityLease, QualityCompletionConflict):
+            logger.debug("quality lease was completed or replaced before execution: %s", lease.quality_run_id)
+
     def _ingest_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                process_queued_ingest_scenes(limit=10)
+                process_queued_ingest_scenes(limit=10, max_workers=self.ingest_workers)
             except Exception:
                 logger.exception("ingest worker iteration failed")
             self._stop.wait(self.poll_seconds)

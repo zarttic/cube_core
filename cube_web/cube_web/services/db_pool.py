@@ -4,10 +4,29 @@ import queue
 import threading
 from typing import Any
 
+from cube_split import runtime_config
+
 # Chunk staging writers use multiple independent transactions. Keep enough
 # connections for their bounded concurrency while preserving a small warm pool.
 _DEFAULT_MIN_SIZE = 1
-_DEFAULT_MAX_SIZE = 8
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = runtime_config.env_text(name)
+    if raw:
+        try:
+            return max(minimum, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
+def _default_max_size() -> int:
+    return _env_int("CUBE_WEB_PG_POOL_SIZE", 8)
+
+
+def _acquire_timeout_seconds() -> float:
+    return float(_env_int("CUBE_WEB_PG_POOL_ACQUIRE_TIMEOUT_SECONDS", 30))
 
 
 class _PostgresPool:
@@ -44,7 +63,19 @@ class _PostgresPool:
                 if self._created < self._max_size:
                     self._created += 1
                     return self._new_conn()
-            return self._queue.get()
+            timeout = _acquire_timeout_seconds()
+            try:
+                return self._queue.get(timeout=timeout)
+            except queue.Empty:
+                # Narrow race: capacity may have been released while we waited.
+                with self._lock:
+                    if self._created < self._max_size:
+                        self._created += 1
+                        return self._new_conn()
+                raise RuntimeError(
+                    f"Timed out acquiring a database connection after {timeout:.0f}s "
+                    f"(pool max_size={self._max_size}, dsn pool exhausted)"
+                ) from None
         if getattr(conn, "closed", False):
             with self._lock:
                 self._created -= 1
@@ -62,11 +93,11 @@ class _PostgresPool:
         return _PoolContext(self)
 
     @classmethod
-    def for_dsn(cls, dsn: str, min_size: int = _DEFAULT_MIN_SIZE, max_size: int = _DEFAULT_MAX_SIZE) -> "_PostgresPool":
+    def for_dsn(cls, dsn: str, min_size: int = _DEFAULT_MIN_SIZE, max_size: int | None = None) -> "_PostgresPool":
         with cls._pools_lock:
             pool = cls._pools.get(dsn)
             if pool is None:
-                pool = cls(dsn, min_size=min_size, max_size=max_size)
+                pool = cls(dsn, min_size=min_size, max_size=max_size if max_size is not None else _default_max_size())
                 cls._pools[dsn] = pool
             return pool
 

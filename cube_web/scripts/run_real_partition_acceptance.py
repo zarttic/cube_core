@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +36,7 @@ GRID_CASES = (
 )
 EXPECTED_RUN_COUNT = len(GRID_CASES) + 3  # three grid runs, cancel probe, quality warn and fail probes
 DATA_TYPES = ("optical", "radar", "product", "carbon")
-TERMINAL_TASK_STATES = {"succeeded", "completed", "failed", "cancelled", "partial_failure"}
+TERMINAL_TASK_STATES = {"succeeded", "completed", "failed", "cancelled", "partial_failure", "manual_required"}
 
 
 def load_prepared(path: str | Path = "/tmp/cube-real-acceptance-prepared.json") -> dict[str, Any]:
@@ -73,6 +74,25 @@ def load_manifest(path: str | Path = "/tmp/cube-real-acceptance-prepared.json") 
     if missing:
         raise ValueError("manifest is missing data types: " + ", ".join(sorted(missing)))
     return payload
+
+
+def verify_manifest_sources(manifest: dict[str, Any], client: Any) -> None:
+    """Reject an acceptance manifest unless every submitted source exists in MinIO."""
+    for dataset in manifest.get("datasets", []):
+        for scene in dataset.get("scenes", []):
+            for asset in scene.get("assets", []):
+                uri = str(asset.get("source_uri") or asset.get("cog_uri") or "")
+                parsed = urlparse(uri)
+                if parsed.scheme != "s3" or not parsed.netloc:
+                    raise ValueError(f"acceptance source is not an s3 URI: {uri}")
+                bucket = parsed.netloc
+                key = unquote(parsed.path.lstrip("/"))
+                try:
+                    stat = client.stat_object(bucket, key)
+                except Exception as exc:
+                    raise RuntimeError(f"acceptance source is unavailable: {uri}") from exc
+                if int(getattr(stat, "size", 0) or 0) <= 0:
+                    raise RuntimeError(f"acceptance source is empty: {uri}")
 
 
 def discover_carbon_asset(client: Any, *, bucket: str, explicit_uri: str | None = None) -> dict[str, Any]:
@@ -293,11 +313,44 @@ def verify_idempotent_submissions(client: HttpClient, manifest: dict[str, Any], 
             raise RuntimeError(f"partition run is not idempotent: {payload['partition_run_id']}")
 
 
+def cancellation_probe_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Build a product Dataset isolated from the normal acceptance flow."""
+    prefix = manifest["load_batch_id"].removesuffix("-batch")
+    source = next(item for item in manifest["datasets"] if item["data_type"] == "product")["scenes"][0]
+    scene = json.loads(json.dumps(source))
+    scene_id = f"{prefix}-cancel-scene"
+    dataset_id = f"{prefix}-cancel-product"
+    batch_id = f"{prefix}-cancel-batch"
+    scene["scene_id"] = scene_id
+    scene["canonical_scene_id"] = scene_id
+    scene["scene_key"] = scene_id
+    scene["identity_key"] = f"{prefix}:cancel-probe"
+    for asset in scene["assets"]:
+        asset["asset_id"] = f"{prefix}-cancel-{asset['asset_id']}"
+        for band in asset.get("bands", []):
+            band["band_code"] = f"{prefix}_CANCEL_{band.get('band_code') or 'VALUE'}"
+    return {
+        "schema_version": "real-acceptance-v1",
+        "source_system": "noda-minio-real-acceptance",
+        "load_batch_id": batch_id,
+        "batch_name": f"Cancellation probe {prefix}",
+        "datasets": [{
+            "dataset_id": dataset_id,
+            "dataset_code": dataset_id,
+            "dataset_title": "真实信息产品取消重试探针",
+            "data_type": "product",
+            "scenes": [scene],
+        }],
+    }
+
+
 def probe_task_cancellation(client: HttpClient, manifest: dict[str, Any], *, poll_seconds: float = 1.0) -> dict[str, Any]:
-    dataset = next(item for item in manifest["datasets"] if item["data_type"] == "product")
+    probe = cancellation_probe_manifest(manifest)
+    client.request("POST", "/v1/partition/schemas/import", import_payload(probe))
+    dataset = probe["datasets"][0]
     payload = {
-        "partition_run_id": f"{manifest['load_batch_id']}-cancel-probe",
-        "source_batch_ids": [manifest["load_batch_id"]],
+        "partition_run_id": f"{probe['load_batch_id']}-cancel-probe",
+        "source_batch_ids": [probe["load_batch_id"]],
         "datasets": [{
             "dataset_id": dataset["dataset_id"],
             "scene_ids": [dataset["scenes"][0]["scene_id"]],
@@ -334,20 +387,7 @@ def quality_probe_manifest(manifest: dict[str, Any], expected_status: str) -> di
     source = next(item for item in manifest["datasets"] if item["data_type"] == "product")["scenes"][0]
     asset = json.loads(json.dumps(source["assets"][0]))
     asset["asset_id"] = f"{prefix}-quality-{expected_status}-asset"
-    attributes = dict(asset.get("attributes") or {})
-    acquisition_time = str(asset.get("acquisition_time") or "2020-01-01T00:00:00Z")
-    attributes.setdefault("product_year", int(acquisition_time[:4]))
-    declared_finding = {
-        "error_code": "acceptance_declared_defect",
-        "message": f"controlled real acceptance quality {expected_status}",
-        "field": "acceptance_probe",
-    }
-    if expected_status == "warn":
-        declared_finding["severity"] = "warning"
-    attributes["quality_metadata_defects"] = [declared_finding]
-    if expected_status == "fail":
-        attributes.pop("product_year", None)
-    asset["attributes"] = attributes
+    asset["crs"] = "EPSG:3857" if str(asset.get("crs") or "").upper() == "EPSG:4326" else "EPSG:4326"
     for band in asset.get("bands", []):
         band["band_code"] = f"{prefix}_QUALITY_{expected_status.upper()}_{band.get('band_code') or 'VALUE'}"
     dataset_id = f"{prefix}-quality-{expected_status}-product"
@@ -374,6 +414,31 @@ def quality_probe_manifest(manifest: dict[str, Any], expected_status: str) -> di
     }
 
 
+def inject_quality_failure(dataset_id: str) -> None:
+    """Corrupt one namespaced acceptance index to exercise a mandatory rule."""
+    from cube_split import runtime_config
+    import psycopg
+
+    with psycopg.connect(runtime_config.postgres_dsn()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE partition_indexes target SET time_bucket='acceptance-invalid-time-bucket'
+                WHERE target.output_id = (
+                  SELECT source.output_id
+                  FROM partition_indexes source
+                  JOIN partition_datasets dataset ON dataset.dataset_id=source.dataset_id
+                  WHERE source.dataset_id=%s AND source.output_version=dataset.current_output_version
+                  ORDER BY source.output_id
+                  LIMIT 1
+                )
+                """,
+                (dataset_id,),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("quality failure probe could not locate an isolated index row")
+
+
 def run_quality_probe(
     client: HttpClient,
     manifest: dict[str, Any],
@@ -397,6 +462,8 @@ def run_quality_probe(
     submitted = client.request("POST", "/v1/partition/runs", payload)
     final = wait_for_task(client, str(submitted["task_id"]), poll_seconds=poll_seconds)
     assert_partition_success([{**submitted, "final": final}])
+    if expected_status == "fail":
+        inject_quality_failure(str(dataset["dataset_id"]))
     quality = client.request("POST", f"/v1/datasets/{dataset['dataset_id']}/quality-runs")
     quality_run_id = str(quality["quality_run_id"])
     deadline = time.monotonic() + 900
@@ -486,7 +553,7 @@ def run_quality_ingest_gate(
     poll_seconds: float = 2.0,
     timeout_seconds: float = 900.0,
 ) -> list[dict[str, Any]]:
-    """Request quality, validate complete error export, then await auto-ingest."""
+    """Request quality, validate its export, then explicitly request ingest."""
     reports: list[dict[str, Any]] = []
     for dataset in manifest["datasets"]:
         dataset_id = str(dataset["dataset_id"])
@@ -494,7 +561,12 @@ def run_quality_ingest_gate(
         quality_run_id = str(quality.get("quality_run_id") or "")
         if not quality_run_id:
             raise RuntimeError(f"quality request did not return an id: {dataset_id}")
-        deadline = time.monotonic() + timeout_seconds
+        reports.append({"dataset_id": dataset_id, "quality_run_id": quality_run_id})
+
+    deadline = time.monotonic() + timeout_seconds
+    for report in reports:
+        dataset_id = report["dataset_id"]
+        quality_run_id = report["quality_run_id"]
         while True:
             quality = client.request("GET", f"/v1/quality/records/{quality_run_id}")
             status = str(quality.get("status") or "").lower()
@@ -512,8 +584,22 @@ def run_quality_ingest_gate(
                 raise RuntimeError(f"quality error export is empty: {quality_run_id}")
         if status not in {"pass", "warn"}:
             raise RuntimeError(f"quality gate rejected dataset {dataset_id}: {status}")
+        before_manual_request = client.request("GET", f"/v1/ingest-runs?dataset_id={dataset_id}&page_size=20")
+        if before_manual_request.get("items"):
+            raise RuntimeError(f"quality unexpectedly created ingest work before manual request: {dataset_id}")
+        report["quality_status"] = status
+
+    for report in reports:
+        dataset_id = report["dataset_id"]
+        manual_ingest = client.request("POST", f"/v1/datasets/{dataset_id}/ingest", {})
+        if int(manual_ingest.get("created") or 0) < 1:
+            raise RuntimeError(f"manual ingest request created no work: {dataset_id}")
+        report["manual_ingest"] = manual_ingest
+
+    for report in reports:
+        dataset_id = report["dataset_id"]
         ingest = _wait_for_dataset_ingest(client, dataset_id, deadline=deadline, poll_seconds=poll_seconds)
-        reports.append({"dataset_id": dataset_id, "quality_run_id": quality_run_id, "quality_status": status, "ingest": ingest})
+        report["ingest"] = ingest
     return reports
 
 
@@ -529,7 +615,7 @@ def _wait_for_dataset_ingest(client: HttpClient, dataset_id: str, *, deadline: f
                     raise RuntimeError(f"ingest gate failed for {dataset_id}: {status}")
                 return latest
         if time.monotonic() >= deadline:
-            raise TimeoutError(f"auto-ingest did not finish: {dataset_id}")
+            raise TimeoutError(f"manual ingest did not finish: {dataset_id}")
         time.sleep(poll_seconds)
 
 
@@ -540,7 +626,7 @@ def verify_publication_lifecycle(
     poll_seconds: float = 2.0,
     timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
-    created = client.request("POST", f"/v1/datasets/{dataset_id}/publish")
+    created = client.request("POST", f"/v1/datasets/{dataset_id}/publish", {})
     publication_id = str(created.get("publication_id") or "")
     if not publication_id:
         raise RuntimeError("publication request did not return publication_id")
@@ -686,20 +772,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--no-wait", action="store_true")
     args = parser.parse_args(argv)
+    from cube_split import runtime_config
+    from minio import Minio
+
+    settings = runtime_config.minio_settings()
+    if not all((settings.endpoint, settings.bucket, settings.access_key, settings.secret_key)):
+        raise RuntimeError("MinIO runtime configuration is incomplete")
+    minio = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
     prepared = load_prepared(args.manifest)
     if isinstance(prepared.get("datasets"), list):
         derived = prepared
     else:
-        from cube_split import runtime_config
-        from minio import Minio
-
-        settings = runtime_config.minio_settings()
-        if not all((settings.endpoint, settings.bucket, settings.access_key, settings.secret_key)):
-            raise RuntimeError("MinIO runtime configuration is incomplete")
-        minio = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
         carbon = discover_carbon_asset(minio, bucket=settings.bucket, explicit_uri=os.getenv("CUBE_CARBON_SOURCE_URI"))
         derived = derive_manifest(prepared, carbon)
     manifest = namespace_manifest(derived)
+    verify_manifest_sources(manifest, minio)
     counts = validate_manifest_contract(manifest)
     path = Path("/tmp") / f"{manifest['load_batch_id']}.json"
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -707,8 +794,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "prepared", "manifest": str(path), "scene_counts": counts}, ensure_ascii=False))
         return 0
     client = HttpClient(args.base_url, args.token)
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
     imported = client.request("POST", "/v1/partition/schemas/import", import_payload(manifest))
     runs = submit_grid_runs(client, manifest, wait=not args.no_wait)
+    timings["partition_seconds"] = round(time.perf_counter() - started, 3)
     downstream: list[dict[str, Any]] = []
     publication: dict[str, Any] = {}
     controls: dict[str, Any] = {}
@@ -718,15 +808,21 @@ def main(argv: list[str] | None = None) -> int:
         ray_evidence = collect_ray_evidence()
         verify_idempotent_submissions(client, manifest, runs)
         controls["cancel"] = probe_task_cancellation(client, manifest)
+        started = time.perf_counter()
         downstream = run_quality_ingest_gate(client, manifest)
+        timings["quality_ingest_seconds"] = round(time.perf_counter() - started, 3)
+        started = time.perf_counter()
         controls["quality_warning"] = run_quality_probe(client, manifest, "warn")
         controls["quality_failure"] = run_quality_probe(client, manifest, "fail")
+        timings["quality_probes_seconds"] = round(time.perf_counter() - started, 3)
+        started = time.perf_counter()
         publication = verify_publication_lifecycle(client, manifest["datasets"][0]["dataset_id"])
+        timings["publication_seconds"] = round(time.perf_counter() - started, 3)
     database = {}
     if not args.no_wait:
         from cube_split import runtime_config
         database = inspect_database(runtime_config.postgres_dsn(), manifest["load_batch_id"].removesuffix("-batch"))
-    print(json.dumps({"status": "submitted" if args.no_wait else "passed", "import": imported, "runs": runs, "ray_evidence": ray_evidence, "controls": controls, "quality_ingest": downstream, "publication": publication, "database": database, "scene_counts": counts}, ensure_ascii=False))
+    print(json.dumps({"status": "submitted" if args.no_wait else "passed", "import": imported, "runs": runs, "ray_evidence": ray_evidence, "controls": controls, "quality_ingest": downstream, "publication": publication, "database": database, "scene_counts": counts, "timings_seconds": timings}, ensure_ascii=False))
     return 0
 
 

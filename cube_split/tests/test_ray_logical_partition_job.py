@@ -4,6 +4,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from cube_split.jobs.cancellation import shutdown_ray_if_needed
+from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
@@ -16,7 +17,7 @@ from cube_split.jobs.ray_logical_partition_job import (
     parse_args,
 )
 from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
-from cube_split.jobs.ray_logical_chunk_job import logical_output_id
+from cube_split.jobs.ray_logical_chunk_job import _time_bucket, logical_output_id, run_logical_chunk_jobs
 from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 
@@ -78,11 +79,73 @@ class _FakeRay:
         return self._initialized
 
 
+class _FakeLogicalChunkRemote:
+    def __init__(self, func, events):
+        self._func = func
+        self._events = events
+
+    def options(self, **kwargs):
+        assert kwargs == {"num_cpus": 1}
+        return self
+
+    def remote(self, value):
+        self._events.append(("submit", value["name"]))
+        return _FakeObjectRef(self._func(value))
+
+
+class _FakeLogicalChunkRay(_FakeRay):
+    def __init__(self, events):
+        super().__init__()
+        self._events = events
+
+    def remote(self, func):
+        return _FakeLogicalChunkRemote(func, self._events)
+
+
 def test_chunk_tasks_for_ray_preserves_order_and_chunk_size():
     tasks = [{"id": i} for i in range(7)]
     chunks = _chunk_tasks_for_ray(tasks, chunk_size=3)
 
     assert [[row["id"] for row in chunk] for chunk in chunks] == [[0, 1, 2], [3, 4, 5], [6]]
+
+
+def test_logical_chunk_scheduler_consumes_dataset_iterators_lazily_and_round_robin(monkeypatch):
+    events = []
+    fake_ray = _FakeLogicalChunkRay(events)
+
+    def logical_values(payload):
+        for index in range(3):
+            name = f"{payload['dataset']['dataset_id']}:{index}"
+            events.append(("yield", name))
+            yield {"name": name}
+
+    monkeypatch.setitem(__import__("sys").modules, "ray", fake_ray)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_chunk_job._logical_task_values", logical_values)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_chunk_job._logical_task_limit", lambda: 2)
+    monkeypatch.setattr("cube_split.jobs.ray_logical_chunk_job._plan_logical_chunk", lambda value: {"chunk_id": value["name"]})
+
+    payloads = [
+        {
+            "dataset": {"dataset_id": dataset_id},
+            "task_id": f"task-{dataset_id}",
+            "output_version": "v1",
+            "grid_type": "isea4h",
+            "requested_grid_level": 5,
+            "ray_address": "auto",
+        }
+        for dataset_id in ("dataset-a", "dataset-b")
+    ]
+
+    outcomes = run_logical_chunk_jobs(payloads, runtime_env=None)
+
+    assert events[:4] == [
+        ("yield", "dataset-a:0"),
+        ("submit", "dataset-a:0"),
+        ("yield", "dataset-b:0"),
+        ("submit", "dataset-b:0"),
+    ]
+    assert [chunk["chunk_id"] for chunk in outcomes[0]["result"]["chunks"]] == ["dataset-a:0", "dataset-a:1", "dataset-a:2"]
+    assert [chunk["chunk_id"] for chunk in outcomes[1]["result"]["chunks"]] == ["dataset-b:0", "dataset-b:1", "dataset-b:2"]
 
 
 def test_chunk_task_groups_by_actor_keeps_asset_groups_together():
@@ -144,6 +207,37 @@ def test_logical_chunk_identity_matches_partition_contract():
     ) == make_output_id(identity)
 
 
+def test_logical_chunk_time_bucket_uses_utc_date():
+    assert _time_bucket("2026-07-21T07:15:25+08:00", "day") == "20260720"
+
+
+def test_logical_chunk_compression_is_deterministic():
+    content = b'{"kind":"indexes","row":{"output_id":"output-1"}}\n'
+    compressed = compress_logical_chunk(content)
+
+    assert compressed == compress_logical_chunk(content)
+    assert compressed[4:8] == b"\0\0\0\0"
+
+
+def test_logical_chunk_serialization_is_independent_of_input_order():
+    rows = [
+        {"kind": "tiles", "row": {"output_id": "tile-2", "band_code": "B02"}},
+        {"kind": "grid_cells", "row": {"output_id": "cell-1", "space_code": "35f"}},
+        {"kind": "tiles", "row": {"output_id": "tile-1", "band_code": "B01"}},
+    ]
+
+    assert serialize_logical_chunk_rows(rows) == serialize_logical_chunk_rows(list(reversed(rows)))
+
+
+def test_logical_chunk_identity_includes_selected_bands():
+    band_1 = {"source_asset_id": "asset-1", "band_code": "B01", "attributes": {"band_unit_id": "unit-1"}}
+    band_2 = {"source_asset_id": "asset-1", "band_code": "B02", "attributes": {"band_unit_id": "unit-2"}}
+    common = {"dataset_id": "dataset-1", "output_version": "version-1", "shard_id": "asset-1:0"}
+
+    assert logical_chunk_id(**common, bands=[band_1, band_2]) == logical_chunk_id(**common, bands=[band_2, band_1])
+    assert logical_chunk_id(**common, bands=[band_1]) != logical_chunk_id(**common, bands=[band_2])
+
+
 def test_parse_args_allows_mgrs_grid_type(monkeypatch):
     monkeypatch.setattr("sys.argv", ["ray_logical_partition_job.py", "--grid-type", "mgrs"])
     args = parse_args()
@@ -201,7 +295,7 @@ def test_prepare_task_rows_for_partitioning_adds_prefix_and_time_bucket():
         [
             {
                 "space_code": "35f04",
-                "acq_time": "2021-03-12T00:00:00Z",
+                "acq_time": "2026-07-21T07:15:25+08:00",
             }
         ],
         partition_prefix_len=3,
@@ -209,7 +303,7 @@ def test_prepare_task_rows_for_partitioning_adds_prefix_and_time_bucket():
     )
 
     assert rows[0]["space_code_prefix"] == "35f"
-    assert rows[0]["time_bucket"] == "20210312"
+    assert rows[0]["time_bucket"] == "20260720"
 
 
 def test_group_tasks_can_split_single_asset_by_space_prefix():

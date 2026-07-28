@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from threading import Event, Lock, Thread
+
 from cube_web.services.ingest_worker import _verify_partition_output, process_queued_ingest_scenes
 
 
@@ -85,6 +87,54 @@ def test_worker_never_completes_scenes_when_rs_merge_fails() -> None:
     assert process_queued_ingest_scenes(repository=repository, verifier=lambda *_args: "partition-dataset-a", executor=fail) == 0
     assert repository.completed == []
     assert repository.failed == [("run-a", "scene-a", "RS MERGE failed")]
+
+
+def test_worker_executes_independent_output_groups_in_parallel() -> None:
+    repository = _Repository()
+    repository.claim_queued_outputs = lambda **_kwargs: (
+        {
+            "dataset_id": "dataset-a", "output_version": "v1",
+            "items": ({"ingest_run_id": "run-a", "scene_id": "scene-a", "dataset_id": "dataset-a", "output_version": "v1", "band_unit_ids": ["band-a"]},),
+        },
+        {
+            "dataset_id": "dataset-b", "output_version": "v1",
+            "items": ({"ingest_run_id": "run-b", "scene_id": "scene-b", "dataset_id": "dataset-b", "output_version": "v1", "band_unit_ids": ["band-b"]},),
+        },
+    )
+    both_started = Event()
+    release = Event()
+    lock = Lock()
+    active = 0
+    peak = 0
+
+    def execute(*_args, **_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                both_started.set()
+        assert release.wait(timeout=1)
+        with lock:
+            active -= 1
+
+    thread = Thread(
+        target=process_queued_ingest_scenes,
+        kwargs={
+            "repository": repository,
+            "verifier": lambda *_args: "partition-dataset",
+            "executor": execute,
+            "max_workers": 2,
+        },
+    )
+    thread.start()
+    assert both_started.wait(timeout=1)
+    release.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert peak == 2
+    assert set(repository.completed) == {("run-a", "scene-a"), ("run-b", "scene-b")}
 
 
 class _VerifyCursor:

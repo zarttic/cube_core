@@ -10,7 +10,7 @@ import shutil
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
@@ -415,7 +415,7 @@ def _prepare_task_rows_for_partitioning(
     for task in tasks:
         row = dict(task)
         row["space_code_prefix"] = row["space_code"][:prefix_len]
-        row["time_bucket"] = datetime.fromisoformat(row["acq_time"].replace("Z", "+00:00")).strftime(time_format)
+        row["time_bucket"] = datetime.fromisoformat(row["acq_time"].replace("Z", "+00:00")).astimezone(UTC).strftime(time_format)
         task_rows.append(row)
     return task_rows
 

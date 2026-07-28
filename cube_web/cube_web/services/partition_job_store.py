@@ -13,6 +13,10 @@ BATCH_VISIBLE_STATUSES = BATCH_ACTIVE_STATUSES | {"failed", "manual_required", "
 BATCH_RUN_ACTIVE_STATUSES = {"queued", "running", "retrying", "cancel_requested"}
 BATCH_HIDDEN_STATUSES = {"succeeded", "archived"}
 BATCH_REQUEUEABLE_STATUSES = {"failed", "manual_required", "cancelled"}
+# Attempts may only transition to a terminal outcome (succeeded/failed/manual_required)
+# from these statuses. Cancellation intent wins: `cancel_requested` and terminal states
+# must never be overwritten by late runner callbacks (see mark_cancelled guard).
+ATTEMPT_FINALIZABLE_STATUSES = {"queued", "running", "retrying"}
 INGEST_TRACKED_DATA_TYPES = {"optical", "product", "radar", "entity", "carbon"}
 
 
@@ -397,6 +401,8 @@ class InMemoryPartitionJobStore(PartitionJobStore):
 
     def succeed_attempt(self, task_id: str, result: dict[str, Any]) -> None:
         attempt = self.attempts[task_id]
+        if str(attempt.get("status") or "") not in ATTEMPT_FINALIZABLE_STATUSES:
+            return
         now = _utc_now_iso()
         attempt["status"] = "succeeded"
         attempt["error_type"] = None
@@ -425,6 +431,8 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         error_type: str | None = None,
     ) -> None:
         attempt = self.attempts[task_id]
+        if str(attempt.get("status") or "") not in ATTEMPT_FINALIZABLE_STATUSES:
+            return
         now = _utc_now_iso()
         attempt["status"] = "failed"
         attempt["error_type"] = error_type
@@ -456,6 +464,10 @@ class InMemoryPartitionJobStore(PartitionJobStore):
 
     def mark_result_manual_required(self, task_id: str, error: str, *, error_type: str) -> None:
         attempt = self.attempts[task_id]
+        # `succeeded` is allowed here: on_task_succeeded records the runner result via
+        # succeed_attempt first, then demotes partial failures to manual_required.
+        if str(attempt.get("status") or "") not in (ATTEMPT_FINALIZABLE_STATUSES | {"succeeded"}):
+            return
         now = _utc_now_iso()
         attempt.update(
             status="manual_required",
@@ -511,6 +523,8 @@ class InMemoryPartitionJobStore(PartitionJobStore):
         attempt = self.attempts.get(task_id)
         if attempt is None:
             return None
+        if str(attempt.get("status") or "") not in (ATTEMPT_FINALIZABLE_STATUSES | {"cancel_requested"}):
+            return copy.deepcopy(attempt)
         now = _utc_now_iso()
         attempt["status"] = "cancelled"
         attempt["finished_at"] = now
@@ -1331,7 +1345,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'succeeded', error_type = NULL, error_message = NULL, failure_reason = NULL, runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids, payload",
+                    "UPDATE partition_job_attempts SET status = 'succeeded', error_type = NULL, error_message = NULL, failure_reason = NULL, runner_result = %s, finished_at = now(), updated_at = now() WHERE task_id = %s AND status IN ('queued', 'running', 'retrying') RETURNING batch_id, asset_ids, payload",
                     (self._jsonb(result), task_id),
                 )
                 row = cur.fetchone()
@@ -1363,7 +1377,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = %s, error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id, asset_ids",
+                    "UPDATE partition_job_attempts SET status = %s, error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s AND status IN ('queued', 'running', 'retrying') RETURNING batch_id, asset_ids",
                     (status, error_type, error, task_id),
                 )
                 row = cur.fetchone()
@@ -1394,15 +1408,18 @@ class PostgresPartitionJobStore(PartitionJobStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE partition_job_attempts SET status = 'manual_required', error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s RETURNING batch_id",
+                    # `succeeded` is allowed here: on_task_succeeded records the runner result via
+                    # succeed_attempt first, then demotes partial failures to manual_required.
+                    "UPDATE partition_job_attempts SET status = 'manual_required', error_type = %s, error_message = %s, finished_at = now(), updated_at = now() WHERE task_id = %s AND status IN ('queued', 'running', 'retrying', 'succeeded') RETURNING batch_id",
                     (error_type, error, task_id),
                 )
                 row = cur.fetchone()
-                if row is not None:
-                    cur.execute(
-                        "UPDATE partition_batches SET status = 'manual_required', last_error = %s, manual_required_at = now(), updated_at = now() WHERE batch_id = %s",
-                        (error, row[0]),
-                    )
+                if row is None:
+                    return
+                cur.execute(
+                    "UPDATE partition_batches SET status = 'manual_required', last_error = %s, manual_required_at = now(), updated_at = now() WHERE batch_id = %s",
+                    (error, row[0]),
+                )
             conn.commit()
 
     def mark_batch_queued(self, batch_id: str, task_id: str, *, operation: str) -> None:
@@ -1481,8 +1498,12 @@ class PostgresPartitionJobStore(PartitionJobStore):
         return self.get_attempt(task_id)
 
     def is_cancel_requested(self, task_id: str) -> bool:
-        attempt = self.get_attempt(task_id)
-        return bool(attempt and attempt["status"] in {"cancel_requested", "cancelled"})
+        self.ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM partition_job_attempts WHERE task_id = %s", (task_id,))
+                row = cur.fetchone()
+        return bool(row and row[0] in {"cancel_requested", "cancelled"})
 
     def get_attempt(self, task_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
