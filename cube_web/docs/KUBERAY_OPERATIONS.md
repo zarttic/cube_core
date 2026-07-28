@@ -16,7 +16,7 @@ Web 服务必须通过运行时环境变量配置 Ray Jobs API，而不能写入
 
 ```text
 CUBE_WEB_PARTITION_EXECUTOR=ray_job
-CUBE_WEB_RAY_JOB_ADDRESS=http://<ray-head-service>:8265
+CUBE_WEB_RAY_JOB_ADDRESS=http://<kubernetes-node>:<dashboard-nodeport>
 CUBE_WEB_RAY_ADDRESS=auto
 ```
 
@@ -24,10 +24,17 @@ CUBE_WEB_RAY_ADDRESS=auto
 Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址和凭据
 同样只从运行时环境读取。凭据不可写入任务业务 payload、业务配置表或仓库。
 
+当 Web 服务位于 Kubernetes 集群外时，地址必须是 KubeRay Dashboard 的 NodePort
+或受控 Ingress，例如当前集群的 `http://<node-ip>:30265`。不能复用裸机 Ray
+Dashboard 的 `:8265` 地址，否则 Job 会提交到另一套 Ray 集群。集群内服务可使用
+`test-cluster-head-svc.default.svc.cluster.local:8265`。
+
 ## 集群与镜像要求
 
 - Head 与 Worker 使用同一兼容 Ray 版本的运行镜像，镜像应包含
   `cube_encoder`、`cube_split`、`cube_web` 和栅格、对象存储、OpenGauss 驱动依赖。
+- 镜像应来自所有节点可拉取的镜像仓库。若临时使用 `localhost/...` 镜像，必须先在
+  每个可调度节点导入同一镜像；否则扩容会出现 `ImagePullBackOff`。
 - Worker 允许 `minReplicas: 0`，并设置明确的 `maxReplicas`。容量、CPU、内存
   与临时盘按真实影像大小和并发度配置；不能依赖节点本地源码目录或镜像携带影像。
 - 源影像和成果均使用 MinIO `s3://` URI。Worker 在自己的缓存目录下载源对象、
@@ -47,6 +54,11 @@ Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址�
 因此满扩容时 Ray 最多可调度 30 个 CPU slot，Kubernetes 的 Worker 容量上限为
 30 CPU 和 60Gi 内存。更新容量时必须同时修改 Ray CPU 声明、Kubernetes request/limit
 和 `maxReplicas`；只改其中一项会使 Ray 调度容量与 Pod 实际可用资源不一致。
+
+`spec.enableInTreeAutoscaling` 必须开启，并显式设置
+`spec.autoscalerOptions.version: v2`。Head 与 sidecar 的 Autoscaler 版本必须一致；
+验证时应提交至少两个 `num_cpus=1` 的长任务，观察 `ray status` 的 pending demand
+和 Worker Pod 数量一起增长。
 
 ## 验收顺序
 
