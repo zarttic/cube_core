@@ -35,6 +35,19 @@ Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址�
 - Pod 必须能访问 MinIO、OpenGauss 与 Head Service。OpenGauss 的访问控制必须
   允许 Kubernetes Pod CIDR，而不是只允许节点网段。
 
+### Worker 容量基线
+
+当前 KubeRay 剖分集群的 Worker 配置为 `minReplicas: 0`、`maxReplicas: 30`。
+每个 Worker 必须同时声明以下一致的资源值：
+
+- Ray `rayStartParams.num-cpus: "1"`
+- Kubernetes `requests.cpu` 与 `limits.cpu`: `1`
+- Kubernetes `requests.memory` 与 `limits.memory`: `2Gi`
+
+因此满扩容时 Ray 最多可调度 30 个 CPU slot，Kubernetes 的 Worker 容量上限为
+30 CPU 和 60Gi 内存。更新容量时必须同时修改 Ray CPU 声明、Kubernetes request/limit
+和 `maxReplicas`；只改其中一项会使 Ray 调度容量与 Pod 实际可用资源不一致。
+
 ## 验收顺序
 
 1. 验证 Head 与 Worker Pod 能导入项目依赖，并连接 MinIO 和 OpenGauss。
