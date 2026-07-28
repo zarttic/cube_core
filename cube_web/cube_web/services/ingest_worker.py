@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from typing import Any, Callable
 
@@ -9,6 +10,18 @@ from psycopg.rows import dict_row
 
 from cube_web.services.ingest_repository import OpenGaussIngestRepository
 
+DEFAULT_INGEST_MAX_WORKERS = 4
+
+
+def _resolve_ingest_max_workers() -> int:
+    raw = runtime_config.env_text("CUBE_WEB_INGEST_MAX_WORKERS")
+    if not raw:
+        return DEFAULT_INGEST_MAX_WORKERS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_INGEST_MAX_WORKERS
+
 
 def process_queued_ingest_scenes(
     *,
@@ -16,47 +29,66 @@ def process_queued_ingest_scenes(
     repository: Any | None = None,
     verifier: Callable[[Any, dict[str, str]], None] | None = None,
     executor: Callable[..., Any] | None = None,
+    max_workers: int | None = None,
 ) -> int:
     """Ingest quality-approved managed outputs, then complete their Scenes."""
     repo = repository or OpenGaussIngestRepository(runtime_config.postgres_dsn())
     verify = verifier or _verify_partition_output
     execute = executor or ingest_managed_output
     claimed = repo.claim_queued_outputs(limit=limit)
+    worker_count = max(1, max_workers or _resolve_ingest_max_workers())
+    if len(claimed) < 2 or worker_count == 1:
+        return sum(_process_claimed_group(repo, group, verify=verify, execute=execute, production_execution=executor is None) for group in claimed)
+    with ThreadPoolExecutor(max_workers=min(worker_count, len(claimed)), thread_name_prefix="cube-web-ingest-group") as pool:
+        futures = [
+            pool.submit(_process_claimed_group, repo, group, verify=verify, execute=execute, production_execution=executor is None)
+            for group in claimed
+        ]
+        return sum(future.result() for future in futures)
+
+
+def _process_claimed_group(
+    repo: Any,
+    group: dict[str, Any],
+    *,
+    verify: Callable[[Any, dict[str, str]], None],
+    execute: Callable[..., Any],
+    production_execution: bool,
+) -> int:
+    """Process one claimed Dataset/output group serially under its claim token."""
     completed = 0
-    for group in claimed:
-        claim_token = str(group.get("claim_token") or "")
-        production_execution = executor is None
-        for item in tuple(group["items"]):
-            try:
-                output_dataset_id = str(verify(repo, item) or "")
-                if not output_dataset_id:
-                    raise RuntimeError("ingest band unit does not resolve to a managed output Dataset")
-                band_unit_ids = tuple(str(value) for value in item.get("band_unit_ids") or ())
-                if len(band_unit_ids) != 1:
-                    raise RuntimeError("ingest execution unit must contain exactly one band")
-                band_unit_id = band_unit_ids[0]
-                identity = f"{group['dataset_id']}\0{group['output_version']}\0{band_unit_id}"
-                ingest_job_id = f"ingest-{sha256(identity.encode()).hexdigest()[:24]}"
-                kwargs = {
-                    "dataset_id": group["dataset_id"], "output_dataset_id": output_dataset_id,
-                    "output_version": group["output_version"], "ingest_job_id": ingest_job_id,
-                    "scene_ids": (item["scene_id"],), "band_unit_ids": (band_unit_id,),
-                }
-                if executor is None:
-                    with repo.pool.connection() as connection:
-                        execute(connection, **kwargs, before_commit=lambda conn, unit=item: repo.complete_claimed_output(conn, (unit,), claim_token))
-                else:
-                    execute(repo, **kwargs)
-                    repo.complete_scene(item["ingest_run_id"], item["scene_id"])
-                completed += 1
-            except Exception as exc:
-                if production_execution and claim_token:
-                    repo.fail_claimed_output((item,), claim_token, str(exc)[:2000])
-                else:
-                    try:
-                        repo.fail_scene(item["ingest_run_id"], item["scene_id"], str(exc)[:2000])
-                    except Exception:
-                        continue
+    claim_token = str(group.get("claim_token") or "")
+    for item in tuple(group["items"]):
+        try:
+            output_dataset_id = str(verify(repo, item) or "")
+            if not output_dataset_id:
+                raise RuntimeError("ingest band unit does not resolve to a managed output Dataset")
+            band_unit_ids = tuple(str(value) for value in item.get("band_unit_ids") or ())
+            if len(band_unit_ids) != 1:
+                raise RuntimeError("ingest execution unit must contain exactly one band")
+            band_unit_id = band_unit_ids[0]
+            identity = f"{group['dataset_id']}\0{group['output_version']}\0{band_unit_id}"
+            ingest_job_id = f"ingest-{sha256(identity.encode()).hexdigest()[:24]}"
+            kwargs = {
+                "dataset_id": group["dataset_id"], "output_dataset_id": output_dataset_id,
+                "output_version": group["output_version"], "ingest_job_id": ingest_job_id,
+                "scene_ids": (item["scene_id"],), "band_unit_ids": (band_unit_id,),
+            }
+            if production_execution:
+                with repo.pool.connection() as connection:
+                    execute(connection, **kwargs, before_commit=lambda conn, unit=item: repo.complete_claimed_output(conn, (unit,), claim_token))
+            else:
+                execute(repo, **kwargs)
+                repo.complete_scene(item["ingest_run_id"], item["scene_id"])
+            completed += 1
+        except Exception as exc:
+            if production_execution and claim_token:
+                repo.fail_claimed_output((item,), claim_token, str(exc)[:2000])
+            else:
+                try:
+                    repo.fail_scene(item["ingest_run_id"], item["scene_id"], str(exc)[:2000])
+                except Exception:
+                    continue
     return completed
 
 

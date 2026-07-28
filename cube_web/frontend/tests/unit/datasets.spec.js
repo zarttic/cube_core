@@ -13,7 +13,11 @@ import { useDatasetsStore } from '@/stores/datasets';
 import DatasetDetailDrawer from '@/views/datasets/DatasetDetailDrawer.vue';
 
 const wrappers = [];
-afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
+afterEach(() => {
+  wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
+  deferred.splice(0);
+  vi.clearAllMocks();
+});
 
 describe('datasets store', () => {
   it('keeps only the most recently opened dataset detail', async () => {
@@ -22,6 +26,8 @@ describe('datasets store', () => {
     const first = store.openDetail('dataset-a');
     const second = store.openDetail('dataset-b');
     deferred[1]({ dataset_id: 'dataset-b', dataset_title: 'B' });
+    await Promise.resolve();
+    deferred[2]({ hidden_roles: [] });
     deferred[0]({ dataset_id: 'dataset-a', dataset_title: 'A' });
     await Promise.all([first, second]);
     expect(store.selectedDatasetId).toBe('dataset-b');
@@ -174,7 +180,7 @@ describe('DatasetDetailDrawer', () => {
     expect(wrapper.text()).toContain('数据');
     expect(wrapper.text()).not.toContain('资产');
     expect(wrapper.text()).toContain('数据');
-    expect(wrapper.text()).toContain('剖分版本');
+    expect(wrapper.text()).toContain('剖分记录');
     expect(wrapper.text()).toContain('瓦片');
     expect(wrapper.text()).toContain('时空编码');
     expect(wrapper.text()).not.toContain('索引');

@@ -196,6 +196,15 @@ def publish_dataset(dataset_id: str, request: PublishRequest, actor: Actor) -> P
                         "SELECT 1 FROM partition_publication_targets WHERE publication_id=%s AND source_asset_id=%s AND band_code=%s)",
                         (publication_id, dataset_id, output_version, source_asset_id, band_code, publication_id, source_asset_id, band_code),
                     )
+            cur.execute(
+                "UPDATE partition_tiles AS tile SET publication_status = 'published' "
+                "WHERE tile.dataset_id = %s AND tile.output_version = %s AND tile.status = 'ready' "
+                "AND tile.publication_status = 'revoked' AND ("
+                "NOT EXISTS (SELECT 1 FROM partition_publication_targets WHERE publication_id = %s) OR EXISTS ("
+                "SELECT 1 FROM partition_publication_targets AS target WHERE target.publication_id = %s "
+                "AND target.source_asset_id = tile.source_asset_id AND target.band_code = tile.band_code))",
+                (dataset_id, output_version, publication_id, publication_id),
+            )
             if existing is not None:
                 return _publication(existing)
 
@@ -222,4 +231,19 @@ def withdraw_publication(dataset_id: str, publication_id: UUID, reason: str, act
                 "WHERE publication_id = %s RETURNING *",
                 (actor.username, reason, publication_id),
             )
-            return _publication(cur.fetchone())
+            withdrawn = _publication(cur.fetchone())
+            cur.execute(
+                "UPDATE partition_tiles AS tile SET publication_status = 'revoked' "
+                "WHERE tile.dataset_id = %s AND tile.output_version = %s AND tile.publication_status = 'published' "
+                "AND (NOT EXISTS (SELECT 1 FROM partition_publication_targets WHERE publication_id = %s) OR EXISTS ("
+                "SELECT 1 FROM partition_publication_targets AS target WHERE target.publication_id = %s "
+                "AND target.source_asset_id = tile.source_asset_id AND target.band_code = tile.band_code)) "
+                "AND NOT EXISTS (SELECT 1 FROM partition_publications AS other "
+                "WHERE other.dataset_id = tile.dataset_id AND other.output_version = tile.output_version "
+                "AND other.status = 'active' AND other.publication_id <> %s AND ("
+                "NOT EXISTS (SELECT 1 FROM partition_publication_targets WHERE publication_id = other.publication_id) "
+                "OR EXISTS (SELECT 1 FROM partition_publication_targets AS target WHERE target.publication_id = other.publication_id "
+                "AND target.source_asset_id = tile.source_asset_id AND target.band_code = tile.band_code)))",
+                (dataset_id, withdrawn.output_version, publication_id, publication_id, publication_id),
+            )
+            return withdrawn

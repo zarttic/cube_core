@@ -469,6 +469,8 @@ def test_publication_is_active_and_withdraws_in_database(open_gauss_tx, seeded_o
     scene_id = f"scene-{uuid4().hex}"
     partition_run_id = f"partition-run-{uuid4().hex}"
     ingest_run_id = f"ingest-run-{uuid4().hex}"
+    source_asset_id = f"asset-{uuid4().hex}"
+    tile_output_id = f"tile-{uuid4().hex}"
     try:
         with open_gauss_tx() as connection:
             run = _allocate(
@@ -508,6 +510,22 @@ def test_publication_is_active_and_withdraws_in_database(open_gauss_tx, seeded_o
                 (ingest_run_id, scene_id, partition_run_id, seeded_outputs["current_version"], ingest_run_id),
             )
             connection.execute(
+                "INSERT INTO partition_dataset_assets (dataset_id, source_asset_id, cog_uri, source_uri) VALUES (%s, %s, %s, %s)",
+                (seeded_outputs["dataset_id"], source_asset_id, "s3://cube/test/source.tif", "s3://cube/test/source.tif"),
+            )
+            connection.execute(
+                "INSERT INTO partition_dataset_bands (dataset_id, source_asset_id, band_code) VALUES (%s, %s, 'B1')",
+                (seeded_outputs["dataset_id"], source_asset_id),
+            )
+            connection.execute(
+                "INSERT INTO partition_tiles "
+                "(output_id, dataset_id, output_version, source_asset_id, band_code, grid_type, grid_level, grid_level_name, "
+                "space_code, time_bucket, tile_uri, tile_kind, status, publication_status) "
+                "VALUES (%s, %s, %s, %s, 'B1', 'geohash', 5, 'Geohash precision 5', 'wx4g0', '2026-07', "
+                "'s3://cube/test/tile.tif', 'logical_reference', 'ready', 'published')",
+                (tile_output_id, seeded_outputs["dataset_id"], seeded_outputs["current_version"], source_asset_id),
+            )
+            connection.execute(
                 "UPDATE partition_runs SET status = 'partial_failure' WHERE partition_run_id = %s",
                 (partition_run_id,),
             )
@@ -527,6 +545,16 @@ def test_publication_is_active_and_withdraws_in_database(open_gauss_tx, seeded_o
         assert withdrawn.status == "withdrawn"
         assert withdrawn.publication_id == publication.publication_id
         assert withdrawn.withdrawal_reason == "superseded"
+        with open_gauss_tx() as connection:
+            assert connection.execute(
+                "SELECT publication_status FROM partition_tiles WHERE output_id = %s", (tile_output_id,)
+            ).fetchone()["publication_status"] == "revoked"
+        republished = publish_dataset(seeded_outputs["dataset_id"], PublishRequest(), Actor("publisher", "admin"))
+        assert republished.status == "active"
+        with open_gauss_tx() as connection:
+            assert connection.execute(
+                "SELECT publication_status FROM partition_tiles WHERE output_id = %s", (tile_output_id,)
+            ).fetchone()["publication_status"] == "published"
     finally:
         with open_gauss_tx() as connection:
             connection.execute("DELETE FROM ingest_run_scenes WHERE ingest_run_id = %s", (ingest_run_id,))

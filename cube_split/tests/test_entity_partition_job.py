@@ -117,6 +117,37 @@ def _stub_source_asset_upload(monkeypatch: pytest.MonkeyPatch) -> None:
     _ = monkeypatch
 
 
+def test_ray_entity_payload_keeps_minio_credentials_out_of_actor_arguments() -> None:
+    source_options = {
+        "endpoint": "minio.example:9000",
+        "access_key": "access-secret",
+        "secret_key": "secret-secret",
+        "secure": False,
+        "bucket": "cube",
+    }
+    upload_options = {
+        "dataset": "dataset-a",
+        "minio_endpoint": "minio.example:9000",
+        "minio_access_key": "access-secret",
+        "minio_secret_key": "secret-secret",
+        "minio_bucket": "cube",
+    }
+
+    source_payload = entity_partition_job._minio_location_options(source_options)
+    upload_payload = entity_partition_job._entity_tile_upload_public_options(upload_options)
+    runtime_env = entity_partition_job._ray_runtime_env_with_minio_credentials(
+        {"env_vars": {"PYTHONPATH": "."}}, source_options
+    )
+
+    assert source_payload == {"endpoint": "minio.example:9000", "secure": False, "bucket": "cube"}
+    assert "access-secret" not in str(source_payload)
+    assert "secret-secret" not in str(source_payload)
+    assert "minio_access_key" not in upload_payload
+    assert "minio_secret_key" not in upload_payload
+    assert runtime_env["env_vars"]["CUBE_WEB_MINIO_ACCESS_KEY"] == "access-secret"
+    assert runtime_env["env_vars"]["CUBE_WEB_MINIO_SECRET_KEY"] == "secret-secret"
+
+
 def test_entity_partition_writes_one_hex_file_per_band(tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -228,6 +259,69 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     assert rows
     assert rows[0]["source_asset_path"] == str(source)
     assert rows[0]["asset_path"] != rows[0]["source_asset_path"]
+
+
+def test_entity_writer_bounds_outstanding_uploads(monkeypatch, tmp_path: Path):
+    run_dir = tmp_path / "run"
+    source = tmp_path / "source.tif"
+    _write_tif(source)
+    cell = entity_partition_job.CubeEncoderSDK().locate(
+        grid_type="isea4h",
+        requested_grid_level=1,
+        point=[116.016, 39.984],
+    )
+    tasks = [
+        {
+            "scene_id": f"scene-{index}",
+            "band": "b04",
+            "asset_path": str(source),
+            "source_asset_path": str(source),
+            "acq_time": "2026-04-21T00:00:00Z",
+            "grid_type": "isea4h",
+            "grid_level": 1,
+            "space_code": cell.space_code,
+            "cover_mode": "intersect",
+            "cell_min_lon": float(cell.bbox[0]),
+            "cell_min_lat": float(cell.bbox[1]),
+            "cell_max_lon": float(cell.bbox[2]),
+            "cell_max_lat": float(cell.bbox[3]),
+        }
+        for index in range(3)
+    ]
+    wait_sizes = []
+    original_wait = entity_partition_job.wait
+
+    class _Client:
+        def bucket_exists(self, bucket):
+            return True
+
+    def tracking_wait(futures, **kwargs):
+        wait_sizes.append(len(futures))
+        return original_wait(futures, **kwargs)
+
+    monkeypatch.setattr(entity_partition_job, "_make_minio_client", lambda *args, **kwargs: _Client())
+    monkeypatch.setattr(entity_partition_job, "_upload_entity_tile_file", lambda client, bucket, path, row, args, fast: (path, f"s3://{bucket}/{Path(path).name}"))
+    monkeypatch.setattr(entity_partition_job, "wait", tracking_wait)
+
+    rows = entity_partition_job._write_entity_tiles(
+        tasks,
+        run_dir=run_dir,
+        time_granularity="day",
+        partition_prefix_len=3,
+        data_type="optical",
+        tile_upload_options={
+            "minio_endpoint": "minio:9000",
+            "minio_access_key": "test",
+            "minio_secret_key": "test",
+            "minio_bucket": "entity-bucket",
+            "minio_upload_workers": 1,
+            "minio_fast_upload": True,
+        },
+    )
+
+    assert len(rows) == 3
+    assert max(wait_sizes) == 2
+    assert all(row["asset_path"].startswith("s3://entity-bucket/") for row in rows)
 
 
 def test_entity_writer_uses_task_grid_type_for_output_paths_and_rows(tmp_path: Path):

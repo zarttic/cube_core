@@ -48,10 +48,10 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/partition', name: 'partition', component: view('PartitionView'), meta: { requiresAuth: true, requiresAdmin: true } },
-    { path: '/data-management', name: 'data-management', component: view('DataManagementView'), meta: { requiresAuth: true, requiresAdmin: true } },
-    { path: '/quality', name: 'quality', component: view('QualityView'), meta: { requiresAuth: true, requiresAdmin: true } },
+    { path: '/data-management', name: 'data-management', component: view('DataManagementView'), meta: { requiresAuth: true } },
+    { path: '/quality', name: 'quality', component: view('QualityView'), meta: { requiresAuth: true } },
     { path: '/encoding', name: 'encoding', component: view('EncodingView'), meta: { requiresAuth: true } },
-    { path: '/config', name: 'config', component: view('ConfigView'), meta: { requiresAuth: true, requiresAdmin: true } },
+    { path: '/config', name: 'config', component: view('ConfigView'), meta: { requiresAuth: true } },
     { path: '/callback', name: 'callback', component: view('PartitionView') },
     { path: '/', redirect: '/partition' },
     { path: '/:pathMatch(.*)*', redirect: '/partition' },

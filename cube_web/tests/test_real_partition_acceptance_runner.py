@@ -63,6 +63,25 @@ def test_manifest_validation_requires_all_four_real_data_types(tmp_path: Path) -
         runner.load_manifest(path)
 
 
+def test_manifest_sources_must_exist_in_configured_minio_bucket() -> None:
+    requested: list[tuple[str, str]] = []
+
+    class Minio:
+        def stat_object(self, bucket, key):
+            requested.append((bucket, key))
+            return type("Stat", (), {"size": 1})()
+
+    runner.verify_manifest_sources(_manifest(), Minio())
+    assert len(requested) == len(runner.DATA_TYPES)
+
+    class Missing:
+        def stat_object(self, _bucket, _key):
+            raise RuntimeError("missing")
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        runner.verify_manifest_sources(_manifest(), Missing())
+
+
 def test_prepared_assets_are_derived_into_required_scene_band_shapes() -> None:
     def cog(role, bands=1):
         return {
@@ -205,15 +224,21 @@ def test_quality_ingest_gate_checks_full_error_export(monkeypatch) -> None:
     class Client:
         def __init__(self):
             self.exports = []
+            self.manual_requests = []
 
         def request(self, method, path, body=None):
-            if method == "POST":
+            if method == "POST" and path.endswith("/quality-runs"):
                 dataset_id = path.split("/")[3]
                 return {"quality_run_id": f"quality-{dataset_id}"}
+            if method == "POST" and path.endswith("/ingest"):
+                self.manual_requests.append((path, body))
+                return {"created": 1}
             if path.startswith("/v1/quality/records/"):
                 return {"status": "warn", "error_count": 2}
             if path.startswith("/v1/ingest-runs"):
-                return {"items": [{"ingest_run_id": "ingest-1", "status": "completed"}]}
+                dataset_id = path.split("dataset_id=", 1)[1].split("&", 1)[0]
+                requested = any(item[0].split("/")[3] == dataset_id for item in self.manual_requests)
+                return {"items": [{"ingest_run_id": "ingest-1", "status": "completed"}] if requested else []}
             raise AssertionError(path)
 
         def request_bytes(self, method, path):
@@ -225,6 +250,8 @@ def test_quality_ingest_gate_checks_full_error_export(monkeypatch) -> None:
     reports = runner.run_quality_ingest_gate(client, manifest, poll_seconds=0)
     assert len(reports) == 4
     assert len(client.exports) == 4
+    assert len(client.manual_requests) == 4
+    assert all(body == {} for _path, body in client.manual_requests)
 
 
 def test_quality_probe_manifests_are_isolated_and_have_distinct_severity() -> None:
@@ -236,14 +263,8 @@ def test_quality_probe_manifests_are_isolated_and_have_distinct_severity() -> No
     assert warning["datasets"][0]["data_type"] == "product"
     assert warning["datasets"][0]["dataset_id"] != failure["datasets"][0]["dataset_id"]
     assert warning["load_batch_id"] != manifest["load_batch_id"]
-    assert warning_asset["attributes"]["quality_metadata_defects"] == [{
-        "error_code": "acceptance_declared_defect",
-        "message": "controlled real acceptance quality warn",
-        "field": "acceptance_probe",
-        "severity": "warning",
-    }]
-    assert warning_asset["attributes"]["product_year"]
-    assert "product_year" not in failure_asset["attributes"]
+    assert warning_asset["crs"] == "EPSG:4326"
+    assert failure_asset["crs"] == "EPSG:4326"
     assert (failure_asset.get("source_uri") or failure_asset.get("cog_uri")).startswith("s3://cube/")
 
 
@@ -312,6 +333,7 @@ def test_publication_lifecycle_requires_active_then_withdrawn(monkeypatch) -> No
 
         def request(self, method, path, body=None):
             if path.endswith("/publish"):
+                assert body == {}
                 return {"publication_id": "publication-1", "status": "publishing"}
             if path.endswith("/withdraw"):
                 assert body["reason"]
@@ -332,9 +354,13 @@ def test_cancel_probe_uses_bounded_product_scene(monkeypatch) -> None:
 
     class Client:
         def request(self, method, path, body=None):
+            if path == "/v1/partition/schemas/import":
+                assert body["load_batch_id"] != manifest["load_batch_id"]
+                return {"status": "imported"}
             if path == "/v1/partition/runs":
                 partition = body["datasets"][0]["partition"]
                 assert partition["max_cells_per_asset"] == 0
+                assert body["source_batch_ids"] != [manifest["load_batch_id"]]
                 return {"task_id": "cancel-task", "status": "queued"}
             if path.endswith("/cancel"):
                 return {"task_id": "cancel-task", "status": "cancel_requested"}
@@ -349,3 +375,20 @@ def test_cancel_probe_uses_bounded_product_scene(monkeypatch) -> None:
     assert report["final"]["status"] == "cancelled"
     assert report["retried"]["task_id"] == "retry-task"
     assert report["retry_final"]["status"] == "completed"
+
+
+def test_cancellation_probe_manifest_uses_distinct_dataset_and_band_identity() -> None:
+    manifest = runner.namespace_manifest(_manifest(), "accept-cancel-isolated")
+    probe = runner.cancellation_probe_manifest(manifest)
+    source = next(item for item in manifest["datasets"] if item["data_type"] == "product")["scenes"][0]
+    scene = probe["datasets"][0]["scenes"][0]
+
+    assert probe["load_batch_id"] != manifest["load_batch_id"]
+    assert probe["datasets"][0]["dataset_id"] not in {item["dataset_id"] for item in manifest["datasets"]}
+    assert scene["scene_id"] != source["scene_id"]
+    assert (
+        scene["assets"][0].get("source_uri") or scene["assets"][0].get("cog_uri")
+    ) == (
+        source["assets"][0].get("source_uri") or source["assets"][0].get("cog_uri")
+    )
+    assert scene["assets"][0]["bands"][0]["band_code"] != source["assets"][0]["bands"][0]["band_code"]

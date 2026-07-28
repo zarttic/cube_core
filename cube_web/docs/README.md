@@ -14,10 +14,12 @@
 ## 当前文档
 
 - [ARD_TO_PARTITION_INGEST_QUALITY_WORKFLOW.md](ARD_TO_PARTITION_INGEST_QUALITY_WORKFLOW.md)：
-  面向新读者说明 ARD 数据如何进入系统，以及从 schema 导入、剖分执行、自动入库到质检报告落库的完整链路，并附常见 QA。
+  面向新读者说明 ARD 数据如何进入系统，以及从 schema 导入、剖分执行、质量门禁、手动入库到质检报告落库的完整链路，并附常见 QA。
 - [PARTITION_GRID_CONTRACT.md](PARTITION_GRID_CONTRACT.md)：当前三类格网和剖分方式契约。
 - [SCENE_DOMAIN_OPERATIONS.md](SCENE_DOMAIN_OPERATIONS.md)：正式 Dataset/Scene/LoadBatch
   关系、Schema 安装和 API 交接说明。
+- [KUBERAY_OPERATIONS.md](KUBERAY_OPERATIONS.md)：Ray Jobs 与长期 KubeRay
+  RayCluster 的运行约束、扩缩容和验收要求。
 - [QUALITY_RULE_CATALOG.md](QUALITY_RULE_CATALOG.md)：当前质检规则集的必选/可选属性和产品适用范围。
 - [BAND_PRESENTATION_CONTRACT.md](BAND_PRESENTATION_CONTRACT.md)：剖分数据单元的波段命名、类型、筛选和展示契约。
 

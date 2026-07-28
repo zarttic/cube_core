@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from cube_web.services.partition_dataset_runner import (
+    NormalizedPartitionDatasetRunner,
+    _time_bucket,
     _run_dataset_on_ray,
     _wait_for_ray_result,
     _carbon_index_attributes,
@@ -14,6 +16,7 @@ from cube_web.services.partition_dataset_runner import (
     _logical_shards,
     _entity_planning_shards,
     ENTITY_RAY_PARALLELISM,
+    _entity_ray_parallelism,
     _ray_init_runtime_env,
 )
 import cube_web.services.partition_dataset_runner as runner_module
@@ -31,6 +34,10 @@ class _FakeRay:
 
     def get(self, ref):
         return {"ref": ref}
+
+
+def test_time_bucket_uses_utc_date() -> None:
+    assert _time_bucket("2026-07-21T07:15:25+08:00", "day") == "20260720"
 
 
 def test_normalize_wgs84_bbox_clamps_raster_edges() -> None:
@@ -53,6 +60,28 @@ def test_entity_planning_uses_fixed_sixteen_spatial_shards() -> None:
     assert len(shards) == 16
     assert shards[0] == [99.98, 19.98, 101.02, 21.02]
     assert shards[-1] == [102.98, 22.98, 104.02, 24.02]
+
+
+def test_entity_ray_parallelism_env_override(monkeypatch) -> None:
+    monkeypatch.delenv("CUBE_ENTITY_RAY_PARALLELISM", raising=False)
+    assert _entity_ray_parallelism() == 16
+
+    monkeypatch.setenv("CUBE_ENTITY_RAY_PARALLELISM", "25")
+    assert _entity_ray_parallelism() == 25
+
+    monkeypatch.setenv("CUBE_ENTITY_RAY_PARALLELISM", "0")
+    assert _entity_ray_parallelism() == 1
+
+    monkeypatch.setenv("CUBE_ENTITY_RAY_PARALLELISM", "not-a-number")
+    assert _entity_ray_parallelism() == 16
+
+
+def test_entity_planning_resolves_parallelism_at_execution_time(monkeypatch) -> None:
+    monkeypatch.setenv("CUBE_ENTITY_RAY_PARALLELISM", "25")
+
+    shards = _entity_planning_shards([100.0, 20.0, 104.0, 24.0])
+
+    assert len(shards) == 25
 
 
 def test_ray_job_driver_does_not_reapply_runtime_env(monkeypatch) -> None:
@@ -148,6 +177,33 @@ def test_ray_client_uses_node_local_credentials_without_runtime_env(monkeypatch)
         "time_granularity": "day", "max_cells_per_asset": 0, "max_observations": None,
         "ray_address": "ray://10.3.100.182:10001",
     }
+
+
+def test_batch_runner_submits_all_logical_units_to_one_ray_queue(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    runner = NormalizedPartitionDatasetRunner()
+    monkeypatch.setattr(runner, "_ray_execution_context", lambda: ("ray-address", {"env_vars": {}}))
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job.run_logical_chunk_jobs",
+        lambda payloads, runtime_env, cancellation_check: captured.update(
+            payloads=payloads, runtime_env=runtime_env, cancellation_check=cancellation_check,
+        ) or [{"result": {"dataset_id": payload["dataset"]["dataset_id"]}} for payload in payloads],
+    )
+    first = SimpleNamespace(data_type="optical", model_dump=lambda **_kwargs: {"dataset_id": "first", "data_type": "optical"})
+    second = SimpleNamespace(data_type="optical", model_dump=lambda **_kwargs: {"dataset_id": "second", "data_type": "optical"})
+
+    outcomes = runner.run_datasets(
+        runs=[
+            {"dataset": first, "task_id": "task", "output_version": "v1", "grid_type": "geohash", "requested_grid_level": 5, "cover_mode": "intersect", "max_cells_per_asset": 0, "time_granularity": "day", "max_observations": None, "scene_id": "scene-first", "band_unit_id": "unit-first"},
+            {"dataset": second, "task_id": "task", "output_version": "v2", "grid_type": "mgrs", "requested_grid_level": 3, "cover_mode": "intersect", "max_cells_per_asset": 0, "time_granularity": "day", "max_observations": None},
+        ],
+    )
+
+    assert [payload["dataset"]["dataset_id"] for payload in captured["payloads"]] == ["first", "second"]
+    assert captured["runtime_env"] == {"env_vars": {}}
+    assert "scene_id" not in captured["payloads"][0]
+    assert "band_unit_id" not in captured["payloads"][0]
+    assert outcomes == [{"result": {"dataset_id": "first"}}, {"result": {"dataset_id": "second"}}]
 
 
 def test_carbon_observation_budget_is_shared_across_assets() -> None:

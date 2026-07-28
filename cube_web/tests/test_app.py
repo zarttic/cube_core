@@ -42,7 +42,9 @@ def test_health_endpoint_reports_service_status() -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] in {"ok", "degraded"}
+    body = response.json()
+    assert body["status"] in {"ok", "degraded"}
+    assert body["checks"]["partition_queue"] == {"status": "ok", "queued": 0, "max_workers": 4}
 
 
 def test_auth_config_has_no_runtime_mode_switch() -> None:

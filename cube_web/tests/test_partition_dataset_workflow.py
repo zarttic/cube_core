@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from copy import deepcopy
 from typing import Any
 
 import pytest
 
+import cube_web.services.partition_workflow as workflow_module
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import PartitionDatasetResult, StrictPartitionRequest, make_output_version
 from cube_web.services.partition_job_store import InMemoryPartitionJobStore, PartitionBatchAlreadyActiveError
@@ -16,6 +19,7 @@ from cube_web.services.partition_workflow import (
     _filter_retry_datasets,
     _merge_scene_rows,
 )
+from cube_web.services.ray_job_submitter import RayJobPartitionSubmitter
 
 
 def _request() -> StrictPartitionRequest:
@@ -174,6 +178,29 @@ class FakeRunner:
         }
 
 
+class BatchRunner(FakeRunner):
+    def __init__(self, domain_store: FakeDomainStore) -> None:
+        super().__init__()
+        self.domain_store = domain_store
+        self.batch_calls: list[list[dict[str, Any]]] = []
+        self.staging_snapshots: list[list[str]] = []
+
+    def run_datasets(self, *, runs, cancellation_check):
+        self.batch_calls.append(runs)
+        self.staging_snapshots.append([output["status"] for output in self.domain_store.outputs.values()])
+        outcomes = []
+        for run in runs:
+            outcomes.append({"result": self.run_dataset(
+                dataset=run["dataset"],
+                task_id=run["task_id"],
+                output_version=run["output_version"],
+                grid_type=run["grid_type"],
+                requested_grid_level=run["requested_grid_level"],
+                cover_mode=run["cover_mode"],
+            )})
+        return outcomes
+
+
 def _workflow(domain_store, runner, job_store=None) -> PartitionWorkflowService:
     return PartitionWorkflowService(
         PartitionService(),
@@ -181,6 +208,147 @@ def _workflow(domain_store, runner, job_store=None) -> PartitionWorkflowService:
         domain_store=domain_store,
         runner=runner,
     )
+
+
+def test_batch_runner_receives_all_datasets_after_outputs_enter_staging(monkeypatch) -> None:
+    monkeypatch.setattr(workflow_module, "ray_batch_scheduler_enabled", lambda: True)
+    domain_store = FakeDomainStore()
+    runner = BatchRunner(domain_store)
+    workflow = _workflow(domain_store, runner, FakeJobStore())
+
+    result = workflow.run(task_id="task-batch", request=_request_with_datasets("dataset-one", "dataset-two"))
+
+    assert result["status"] == "completed"
+    assert len(runner.batch_calls) == 1
+    assert [run["dataset"].dataset_id for run in runner.batch_calls[0]] == ["dataset-one", "dataset-two"]
+    assert runner.staging_snapshots == [["staging", "staging"]]
+
+
+def test_batch_scheduler_toggle_preserves_legacy_dataset_execution(monkeypatch) -> None:
+    monkeypatch.setattr(workflow_module, "ray_batch_scheduler_enabled", lambda: False)
+    domain_store = FakeDomainStore()
+    runner = BatchRunner(domain_store)
+    workflow = _workflow(domain_store, runner, FakeJobStore())
+
+    result = workflow.run(task_id="task-legacy", request=_request_with_datasets("dataset-one", "dataset-two"))
+
+    assert result["status"] == "completed"
+    assert runner.batch_calls == []
+    assert [call["dataset_id"] for call in runner.calls] == ["dataset-one", "dataset-two"]
+
+
+def test_batch_scheduler_is_disabled_without_explicit_flag(monkeypatch) -> None:
+    monkeypatch.delenv("CUBE_WEB_RAY_BATCH_SCHEDULER", raising=False)
+
+    assert workflow_module.ray_batch_scheduler_enabled() is False
+
+
+def test_per_batch_submission_locks_isolate_unrelated_batches() -> None:
+    workflow = _workflow(FakeDomainStore(), FakeRunner(), InMemoryPartitionJobStore())
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release = threading.Event()
+
+    def hold(batch_id: str, entered: threading.Event) -> None:
+        with workflow._lock_for_batch(batch_id):
+            entered.set()
+            release.wait(timeout=1)
+
+    first = threading.Thread(target=hold, args=("batch-a", first_entered))
+    second = threading.Thread(target=hold, args=("batch-b", second_entered))
+    first.start()
+    assert first_entered.wait(timeout=1)
+    second.start()
+    assert second_entered.wait(timeout=1)
+    release.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+    assert not first.is_alive()
+    assert not second.is_alive()
+
+
+def test_ray_reconcile_logs_status_errors(caplog) -> None:
+    workflow = _workflow(FakeDomainStore(), FakeRunner(), InMemoryPartitionJobStore())
+
+    class FailingSubmitter:
+        def status(self, _ray_job_id: str) -> str:
+            raise RuntimeError("dashboard unavailable")
+
+    workflow.ray_job_submitter = FailingSubmitter()
+    with caplog.at_level(logging.WARNING, logger="cube_web.services.partition_workflow"):
+        workflow._reconcile_ray_job_attempt("task-01", "ray-job-01")
+
+    assert "task-01" in caplog.text
+    assert "ray-job-01" in caplog.text
+
+
+class _PersistentStoreAdapter:
+    """Exercise the Ray Job path while retaining the in-memory store's behavior."""
+
+    def __init__(self) -> None:
+        self._store = InMemoryPartitionJobStore()
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+
+class _BlockingSubmitter:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
+
+    def submit(self, task_id: str) -> str:
+        with self._lock:
+            self.calls.append(task_id)
+            self.entered.set()
+        self.release.wait(timeout=2)
+        return f"ray-{task_id}"
+
+
+def test_ray_submission_is_parallel_across_batches_and_deduplicated_per_batch(monkeypatch) -> None:
+    monkeypatch.setattr(workflow_module, "ray_job_executor_enabled", lambda: True)
+    store = _PersistentStoreAdapter()
+    submitter = _BlockingSubmitter()
+    workflow = PartitionWorkflowService(
+        PartitionService(),
+        store=store,
+        domain_store=FakeDomainStore(),
+        runner=FakeRunner(),
+        ray_job_submitter=submitter,
+    )
+    results: list[PartitionTask] = []
+
+    def submit(request: StrictPartitionRequest) -> None:
+        results.append(workflow.submit_strict("optical", request))
+
+    first_request = _request().model_copy(update={"batch_id": "batch-a"})
+    first = threading.Thread(target=submit, args=(first_request,))
+    first.start()
+    assert submitter.entered.wait(timeout=1)
+
+    second_request = _request().model_copy(update={"batch_id": "batch-b"})
+    second = threading.Thread(target=submit, args=(second_request,))
+    second.start()
+    deadline = time.monotonic() + 1
+    while len(submitter.calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(submitter.calls) == 2
+
+    duplicate = threading.Thread(target=submit, args=(first_request,))
+    duplicate.start()
+    duplicate.join(timeout=1)
+    assert not duplicate.is_alive()
+    assert len(submitter.calls) == 2
+
+    submitter.release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(results) == 3
+    assert len({task.task_id for task in results if task.task_id in submitter.calls}) == 2
 
 
 def _seed_failed_retry_attempt(

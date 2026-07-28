@@ -382,6 +382,18 @@ def test_opengauss_reads_are_parameterized_and_validate_bounds_before_sql() -> N
     assert len(connection.statements) == before
 
 
+def test_tile_detail_query_hides_internal_publication_status() -> None:
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: _RecordingConnection())
+
+    sql, _params = store._detail_query(
+        "tiles", "dataset-a", "version-a", limit=1, offset=0, sort_by="created_at", sort_order="asc"
+    )
+
+    assert "SELECT *" not in sql
+    assert "publication_status" not in sql
+    assert "tile_uri" in sql
+
+
 class _EmptyReadCursor(_RecordingCursor):
     def fetchall(self) -> list[tuple[str]]:
         if self.connection.statements[-1][0].startswith("SELECT schema_version"):

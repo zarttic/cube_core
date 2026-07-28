@@ -13,7 +13,7 @@ const hiddenNavLabels = new Set(['数据库入库管理', '数据管理与入库
 const defaultNavItems = [
   { label: '首页', kind: 'external', url: portalHomeUrl },
   { label: 'ARD数据载入', kind: 'external', url: '/ard' },
-  { label: '分析就绪数据剖分', kind: 'internal', path: '/partition' },
+  { label: '分析就绪数据剖分', kind: 'admin', path: '/partition' },
   { label: '剖分数据服务', kind: 'external', url: '/partition' },
   { label: '资源调度', kind: 'external', url: '/dispatch' },
   { label: '后台管理', kind: 'external', url: '/admin' },
@@ -30,14 +30,14 @@ const headerLabelOrder = [
   '全球离散格网模型与编码',
 ];
 
-const publicNavLabels = new Set(['全球离散格网模型与编码']);
-
 function normalizeNavItem(item) {
   if (!item?.label) return null;
   if (hiddenNavLabels.has(item.label)) return null;
   if (item.label === '数据集管理') return null;
   if (item.label === '首页') return { label: '首页', kind: 'external', url: portalHomeUrl };
+  if (item.label === '分析就绪数据剖分') return { label: '分析就绪数据剖分', kind: 'admin', path: '/partition' };
   if (localNavPaths[item.label]) return { label: item.label, kind: 'internal', path: localNavPaths[item.label] };
+  if (item.kind === 'admin') return item;
   if (item.kind === 'external' && item.url) return item;
   if (item.url) return { label: item.label, kind: 'external', url: item.url };
   if (item.path) return { label: item.label, kind: 'external', url: item.path };
@@ -54,7 +54,7 @@ export function navItems(isAdmin = true) {
     const normalized = normalizeNavItem(item);
     if (normalized) itemsByLabel.set(normalized.label, normalized);
   });
-  const items = [...itemsByLabel.values()].filter((item) => isAdmin || publicNavLabels.has(item.label));
+  const items = [...itemsByLabel.values()].filter((item) => isAdmin || item.kind !== 'admin');
   return [
     ...headerLabelOrder.flatMap((label) => items.filter((item) => item.label === label)),
     ...items.filter((item) => !headerLabelOrder.includes(item.label)),

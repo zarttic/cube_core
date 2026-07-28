@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "sensor": "optical_mosaic",
             "quality_rule": "best_quality_wins",
             "allow_failed_quality": False,
+            "auto_after_quality": False,
             "metadata_backend": "postgres",
             "asset_storage_backend": "minio",
             "minio_endpoint": "",
@@ -270,6 +271,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
         ingest["asset_version"] = _text_value(ingest.get("asset_version"), "asset_version")
     ingest["quality_rule"] = _choice(ingest.get("quality_rule"), {"best_quality_wins", "latest_wins"}, "quality_rule")
     ingest["allow_failed_quality"] = bool(ingest.get("allow_failed_quality", False))
+    ingest["auto_after_quality"] = bool(ingest.get("auto_after_quality", False))
     ingest["metadata_backend"] = _choice(ingest.get("metadata_backend"), {"none", "local", "postgres"}, "metadata_backend")
     ingest["asset_storage_backend"] = _choice(ingest.get("asset_storage_backend"), {"local", "minio"}, "asset_storage_backend")
     ingest["minio_endpoint"] = str(ingest.get("minio_endpoint") or "").strip()
@@ -312,6 +314,17 @@ def optical_ingest_defaults() -> dict[str, Any]:
     config = get_app_config()
     optical = config.get("ingest", {}).get("optical", {})
     return dict(optical) if isinstance(optical, dict) else dict(DEFAULT_CONFIG["ingest"]["optical"])
+
+
+def auto_ingest_after_quality_enabled() -> bool:
+    """Return whether the retained automatic quality-to-ingest bridge is enabled."""
+    try:
+        config = get_app_config()
+    except Exception:
+        # A configuration outage must not roll back a completed quality result.
+        return False
+    ingest = (config.get("ingest") or {}).get("optical") or {}
+    return bool(ingest.get("auto_after_quality", False))
 
 
 def optical_quality_defaults() -> dict[str, Any]:

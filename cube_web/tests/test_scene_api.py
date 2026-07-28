@@ -126,6 +126,7 @@ class _Repository:
     def __init__(self) -> None:
         self.bound = None
         self.run_request = None
+        self.materialize_calls = 0
         self.fail_materialize = False
         self.existing_run = None
         self.failed_run = None
@@ -174,6 +175,7 @@ class _Repository:
         }]
 
     def materialize_partition_datasets(self, request):
+        self.materialize_calls += 1
         if self.fail_materialize:
             raise ValueError("scenes are not linked to source_batch_ids: ['scene-carbon']")
         if len(request.datasets) == 1:
@@ -435,7 +437,8 @@ def test_scene_partition_run_rejects_scene_outside_selected_load_batches(api) ->
 
     assert response.status_code == 422
     assert "not linked to source_batch_ids" in response.json()["detail"]
-    assert repository.run_request is None
+    assert repository.run_request is not None
+    assert repository.failed_run[0] == "partition-run-001"
 
 
 def test_scene_partition_run_replay_returns_original_task_without_resubmit(api) -> None:
@@ -453,6 +456,7 @@ def test_scene_partition_run_replay_returns_original_task_without_resubmit(api) 
     assert response.json()["task_id"] == "partition-task-existing"
     assert workflow.request is None
     assert repository.bound is None
+    assert repository.materialize_calls == 0
 
 
 def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_quality(api) -> None:
@@ -1196,10 +1200,10 @@ def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:
     assert [band["band_unit_id"] for band in rows[0]["bands"]] == ["band-a-b04", "band-a-b08"]
 
 
-def test_load_batch_partition_rejects_a_band_already_partitioned_and_ingested() -> None:
+def test_load_batch_partition_rejects_a_band_already_ingested_for_the_same_grid() -> None:
     repository = OpenGaussSceneRepository(None)
 
-    def read(sql, _params):
+    def read(sql, params):
         if "FROM load_batches" in sql:
             return [{"load_batch_id": "load-a"}]
         if "FROM scenes s" in sql:
@@ -1213,7 +1217,8 @@ def test_load_batch_partition_rejects_a_band_already_partitioned_and_ingested() 
         if "SELECT b.* FROM scene_bands" in sql:
             return [{"scene_id": "scene-a", "asset_id": "asset-a", "band_unit_id": "band-a-b04"}]
         if "SELECT DISTINCT g.band_unit_id,g.grid_type,g.grid_level" in sql:
-            return [{"band_unit_id": "band-a-b04", "grid_type": "mgrs", "grid_level": 1}]
+            assert params[-2:] == ("geohash", 4)
+            return [{"band_unit_id": "band-a-b04", "grid_type": "geohash", "grid_level": 4}]
         raise AssertionError(sql)
 
     repository._read = read
@@ -1229,6 +1234,53 @@ def test_load_batch_partition_rejects_a_band_already_partitioned_and_ingested() 
 
     with pytest.raises(ValueError, match="already partitioned and ingested"):
         repository.materialize_partition_datasets(request)
+
+
+def test_load_batch_partition_allows_an_ingested_band_for_a_different_grid() -> None:
+    repository = OpenGaussSceneRepository(None)
+
+    def read(sql, params):
+        if "FROM load_batches" in sql:
+            return [{"load_batch_id": "load-a"}]
+        if "FROM scenes s" in sql:
+            return [{
+                "scene_id": "scene-a", "dataset_id": "dataset-a", "dataset_code": "DS-A",
+                "dataset_title": "Optical A", "data_type": "optical", "product_type": None,
+                "dataset_attributes": {}, "load_batch_id": "load-a",
+            }]
+        if "FROM scene_assets" in sql:
+            return [{
+                "scene_id": "scene-a", "asset_id": "asset-a", "cog_uri": "s3://cube/source/a.tif",
+                "checksum": "a" * 64, "acquisition_time": "2026-07-01T00:00:00Z",
+                "bbox": [100, 20, 101, 21], "crs": "EPSG:4326", "attributes": {},
+            }]
+        if "SELECT b.* FROM scene_bands" in sql:
+            return [{
+                "scene_id": "scene-a", "asset_id": "asset-a", "band_unit_id": "band-a-b04",
+                "band_code": "B04", "band_name": "Red", "band_type": "spectral",
+                "unit": None, "display_order": 0, "attributes": {},
+            }]
+        if "SELECT DISTINCT g.band_unit_id,g.grid_type,g.grid_level" in sql:
+            assert params[-2:] == ("geohash", 4)
+            # An existing MGRS output must not block a Geohash request.
+            return []
+        raise AssertionError(sql)
+
+    repository._read = read
+    request = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "partition-run-new",
+        "source_batch_ids": ["load-a"],
+        "selection_source": "load_batch",
+        "datasets": [{
+            "dataset_id": "dataset-a", "scene_ids": ["scene-a"], "band_unit_ids": ["band-a-b04"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        }],
+    })
+
+    datasets = repository.materialize_partition_datasets(request)
+
+    assert [dataset.dataset_id for dataset in datasets] == ["dataset-a"]
+    assert datasets[0].bands[0].source_asset_id == "asset-a"
 
 
 def test_load_batch_scene_groups_include_resolution_grid_recommendations() -> None:

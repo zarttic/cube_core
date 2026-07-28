@@ -67,9 +67,11 @@ There is no runtime mode switch. These APIs are the only production chain.
   collection selection are evaluated at band-unit granularity; retry retains
   the original selected band set.
 
-After a current quality result passes, the background ingest worker claims all
-queued Scene executions for the same Dataset/output version as one unit. It reads the
-committed managed partition tables, checks referenced MinIO objects, and runs
+After a current quality result is `pass` or an allowed `warn`, an operator must
+explicitly submit `POST /v1/datasets/{dataset_id}/ingest` or the collection ingest
+endpoint. The background ingest worker then claims the queued Scene executions for
+the same Dataset/output version as one unit. It reads the committed managed partition
+tables, checks referenced MinIO objects, and runs
 the existing RS upsert primitives. A Scene becomes `completed` only after
 `rs_ingest_job` and the applicable `rs_raw_scene_asset`, `rs_cube_cell_fact`,
 `rs_entity_tile_asset`, `rs_product_*`, or `rs_carbon_observation_fact` rows

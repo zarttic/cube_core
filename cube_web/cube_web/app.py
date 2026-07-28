@@ -58,11 +58,17 @@ def create_app() -> FastAPI:
         return {"service": "cube-web", "status": "ok"}
 
     @web_app.get("/health")
-    async def health(
+    def health(
         checks: list[str] | None = Query(default=None),
         check: list[str] | None = Query(default=None),
     ) -> dict[str, Any]:
-        return health_service.health_report([*(checks or []), *(check or [])])
+        report = health_service.health_report([*(checks or []), *(check or [])])
+        report["checks"]["partition_queue"] = {
+            "status": "ok",
+            "queued": partition_service.queue_depth(),
+            "max_workers": partition_service.task_store.max_workers,
+        }
+        return report
 
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())

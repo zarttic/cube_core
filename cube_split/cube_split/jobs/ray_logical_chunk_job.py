@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
-from datetime import datetime
+from collections import deque
+from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from cube_split import runtime_config
+from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
 
 
 def _ray_init_runtime_env(runtime_env: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -68,118 +69,203 @@ def logical_output_id(
 
 
 def _time_bucket(value: str, granularity: str) -> str:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime(
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC).strftime(
         {"second": "%Y%m%d%H%M%S", "minute": "%Y%m%d%H%M", "hour": "%Y%m%d%H", "day": "%Y%m%d", "month": "%Y%m"}[granularity]
     )
 
 
-def _shards(bbox: list[float] | tuple[float, float, float, float], degrees: float) -> list[tuple[float, float, float, float]]:
+def _iter_shards(
+    bbox: list[float] | tuple[float, float, float, float], degrees: float,
+) -> Iterator[tuple[float, float, float, float]]:
     west, south, east, north = (float(value) for value in bbox)
     if not -180 <= west <= 180 or not -180 <= east <= 180 or not -90 <= south <= 90 or not -90 <= north <= 90 or west > east or south > north:
         raise ValueError("logical chunk source bbox must be a non-wrapping WGS84 bbox")
-    result = []
     lat = south
     while lat < north:
         next_lat = min(north, lat + degrees)
         lon = west
         while lon < east:
             next_lon = min(east, lon + degrees)
-            result.append((lon, lat, next_lon, next_lat))
+            yield lon, lat, next_lon, next_lat
             lon = next_lon
         lat = next_lat
-    return result
+
+
+def _shards(bbox: list[float] | tuple[float, float, float, float], degrees: float) -> list[tuple[float, float, float, float]]:
+    return list(_iter_shards(bbox, degrees))
+
+
+def _logical_task_limit() -> int:
+    raw = runtime_config.env_text("CUBE_LOGICAL_MAX_IN_FLIGHT", "4")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 4
+
+
+def _logical_task_values(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    degrees = float(runtime_config.env_text("CUBE_LOGICAL_SHARD_DEGREES", "1"))
+    if not 0 < degrees <= 10:
+        raise ValueError("CUBE_LOGICAL_SHARD_DEGREES must be within (0, 10]")
+    per_task = max(1, int(runtime_config.env_text("CUBE_LOGICAL_SHARDS_PER_TASK", "16")))
+    for asset in payload["dataset"]["assets"]:
+        shards: list[tuple[float, float, float, float]] = []
+        shard_number = 0
+        for shard in _iter_shards(asset["bbox"], degrees):
+            shards.append(shard)
+            if len(shards) < per_task:
+                continue
+            yield {
+                **payload,
+                "asset": asset,
+                "shards": shards,
+                "shard_id": f"{asset['source_asset_id']}:{shard_number}",
+            }
+            shard_number += 1
+            shards = []
+        if shards:
+            yield {
+                **payload,
+                "asset": asset,
+                "shards": shards,
+                "shard_id": f"{asset['source_asset_id']}:{shard_number}",
+            }
+
+
+def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
+    from io import BytesIO
+
+    from grid_core.app.core.enums import BoundaryType
+    from grid_core.app.models.grid_address import GridAddress
+    from grid_core.sdk import CubeEncoderSDK
+    from minio import Minio
+
+    dataset, asset = value["dataset"], value["asset"]
+    sdk = CubeEncoderSDK()
+    grid_type, level = value["grid_type"], int(value["requested_grid_level"])
+    bucket = _time_bucket(asset["time_start"], value["time_granularity"])
+    timestamp = datetime.fromisoformat(asset["time_start"].replace("Z", "+00:00"))
+    bands = [band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
+    cells: dict[tuple[str, int, str | None], dict[str, Any]] = {}
+    rows: list[dict[str, Any]] = []
+    for shard in value["shards"]:
+        for cell in sdk.cover(grid_type=grid_type, requested_grid_level=level, cover_mode=value["cover_mode"], boundary_type=BoundaryType.BBOX, bbox=shard, crs="EPSG:4326"):
+            address = GridAddress(grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code)
+            cell_key = (cell.space_code, int(cell.grid_level), cell.topology_code)
+            if cell_key not in cells:
+                cells[cell_key] = {
+                    "output_id": logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id="_grid", band_code="_cell", grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket="_", window_identity="cell"),
+                    "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
+                    "bbox": cell.bbox, "geometry": cell.geometry or sdk.code_to_geometry(address=address),
+                }
+            for band in bands:
+                output_id = logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"], band_code=band["band_code"], grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket=bucket, window_identity="logical-reference")
+                base = {"source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code, "time_bucket": bucket}
+                rows.append({"kind": "tiles", "row": {"output_id": output_id, **base, "tile_uri": asset["cog_uri"], "tile_kind": "logical_reference", "bbox": cell.bbox}})
+                rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": sdk.generate_st_code(address=address, timestamp=timestamp, time_granularity=value["time_granularity"]).st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
+    rows = [{"kind": "grid_cells", "row": row} for row in cells.values()] + rows
+    content = serialize_logical_chunk_rows(rows)
+    body = compress_logical_chunk(content)
+    checksum = sha256(body).hexdigest()
+    chunk_id = logical_chunk_id(
+        dataset_id=dataset["dataset_id"], output_version=value["output_version"],
+        shard_id=value["shard_id"], bands=bands,
+    )
+    settings = runtime_config.minio_settings()
+    key = f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/logical-chunks/{chunk_id}.jsonl.gz"
+    client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
+    try:
+        existing = client.stat_object(settings.bucket, key)
+    except Exception as exc:
+        if getattr(exc, "code", None) not in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
+            raise
+        existing = None
+    if existing is None:
+        client.put_object(settings.bucket, key, BytesIO(body), len(body), content_type="application/gzip", metadata={"checksum-sha256": checksum})
+    else:
+        metadata = {str(name).lower(): str(item) for name, item in (getattr(existing, "metadata", {}) or {}).items()}
+        if int(getattr(existing, "size", -1)) != len(body) or (metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")) != checksum:
+            raise RuntimeError(f"immutable logical chunk collision for {key}")
+    _stage_chunk_rows(
+        dataset_id=dataset["dataset_id"], output_version=value["output_version"],
+        chunk_id=chunk_id, rows=rows,
+    )
+    return {"chunk_id": chunk_id, "object_uri": f"s3://{settings.bucket}/{key}", "checksum": checksum, "byte_size": len(body), "grid_cell_count": len(cells), "tile_count": sum(row["kind"] == "tiles" for row in rows), "index_count": sum(row["kind"] == "indexes" for row in rows)}
+
+
+def run_logical_chunk_jobs(
+    payloads: list[dict[str, Any]], runtime_env: dict[str, Any] | None,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Plan all logical dataset chunks through one bounded Ray queue."""
+    import ray
+
+    if not ray.is_initialized():
+        ray.init(
+            address=payloads[0]["ray_address"],
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            logging_level=40,
+            runtime_env=_ray_init_runtime_env(runtime_env),
+        )
+    plan_chunk = ray.remote(_plan_logical_chunk)
+    queued = deque(range(len(payloads)))
+    task_values = [iter(_logical_task_values(payload)) for payload in payloads]
+    chunks: list[list[dict[str, Any]]] = [[] for _ in payloads]
+    errors: list[str | None] = [None for _ in payloads]
+    pending: dict[Any, int] = {}
+    limit = _logical_task_limit()
+    while queued or pending:
+        while queued and len(pending) < limit:
+            index = queued.popleft()
+            if errors[index] is not None:
+                continue
+            try:
+                value = next(task_values[index])
+            except StopIteration:
+                continue
+            pending[plan_chunk.options(num_cpus=1).remote(value)] = index
+            queued.append(index)
+        if cancellation_check and cancellation_check():
+            for ref in pending:
+                ray.cancel(ref, force=True)
+            from cube_split.jobs.cancellation import PartitionCancelledError
+            raise PartitionCancelledError("Partition task cancelled")
+        if not pending:
+            continue
+        ready, _ = ray.wait(list(pending), num_returns=1, timeout=1.0)
+        for ref in ready:
+            index = pending.pop(ref)
+            try:
+                chunks[index].append(ray.get(ref))
+            except Exception as exc:
+                errors[index] = str(exc)
+                for active_ref, active_index in tuple(pending.items()):
+                    if active_index == index:
+                        ray.cancel(active_ref, force=True)
+                        pending.pop(active_ref)
+    results = []
+    for index, payload in enumerate(payloads):
+        if errors[index] is not None:
+            results.append({"error": errors[index]})
+            continue
+        results.append({"result": {
+            "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"],
+            "output_version": payload["output_version"], "grid_type": payload["grid_type"],
+            "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical",
+            "execution_engine": "ray",
+            "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/",
+            "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks[index],
+        }})
+    return results
 
 
 def run_logical_chunk_job(
     payload: dict[str, Any], runtime_env: dict[str, Any] | None,
     cancellation_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Submit spatial planning work; source COGs are never opened in this path."""
-    import ray
-
-    @ray.remote
-    def plan_chunk(value: dict[str, Any]) -> dict[str, Any]:
-        from io import BytesIO
-
-        from grid_core.app.core.enums import BoundaryType
-        from grid_core.app.models.grid_address import GridAddress
-        from grid_core.sdk import CubeEncoderSDK
-        from minio import Minio
-
-        dataset, asset = value["dataset"], value["asset"]
-        sdk = CubeEncoderSDK()
-        grid_type, level = value["grid_type"], int(value["requested_grid_level"])
-        bucket = _time_bucket(asset["time_start"], value["time_granularity"])
-        timestamp = datetime.fromisoformat(asset["time_start"].replace("Z", "+00:00"))
-        bands = [band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
-        cells: dict[tuple[str, int, str | None], dict[str, Any]] = {}
-        rows: list[dict[str, Any]] = []
-        for shard in value["shards"]:
-            for cell in sdk.cover(grid_type=grid_type, requested_grid_level=level, cover_mode=value["cover_mode"], boundary_type=BoundaryType.BBOX, bbox=shard, crs="EPSG:4326"):
-                address = GridAddress(grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code)
-                cell_key = (cell.space_code, int(cell.grid_level), cell.topology_code)
-                if cell_key not in cells:
-                    cells[cell_key] = {
-                        "output_id": logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id="_grid", band_code="_cell", grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket="_", window_identity="cell"),
-                        "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
-                        "bbox": cell.bbox, "geometry": cell.geometry or sdk.code_to_geometry(address=address),
-                    }
-                for band in bands:
-                    output_id = logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"], band_code=band["band_code"], grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket=bucket, window_identity="logical-reference")
-                    base = {"source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code, "time_bucket": bucket}
-                    rows.append({"kind": "tiles", "row": {"output_id": output_id, **base, "tile_uri": asset["cog_uri"], "tile_kind": "logical_reference", "bbox": cell.bbox}})
-                    rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": sdk.generate_st_code(address=address, timestamp=timestamp, time_granularity=value["time_granularity"]).st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
-        rows = [{"kind": "grid_cells", "row": row} for row in cells.values()] + rows
-        body = gzip.compress(b"".join(json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode() + b"\n" for row in rows))
-        checksum = sha256(body).hexdigest()
-        chunk_id = sha256(f"{dataset['dataset_id']}\0{value['output_version']}\0{value['shard_id']}".encode()).hexdigest()[:32]
-        settings = runtime_config.minio_settings()
-        key = f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/logical-chunks/{chunk_id}.jsonl.gz"
-        client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
-        try:
-            existing = client.stat_object(settings.bucket, key)
-        except Exception as exc:
-            if getattr(exc, "code", None) not in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
-                raise
-            existing = None
-        if existing is None:
-            client.put_object(settings.bucket, key, BytesIO(body), len(body), content_type="application/gzip", metadata={"checksum-sha256": checksum})
-        else:
-            metadata = {str(name).lower(): str(item) for name, item in (getattr(existing, "metadata", {}) or {}).items()}
-            if int(getattr(existing, "size", -1)) != len(body) or (metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")) != checksum:
-                raise RuntimeError(f"immutable logical chunk collision for {key}")
-        _stage_chunk_rows(
-            dataset_id=dataset["dataset_id"], output_version=value["output_version"],
-            chunk_id=chunk_id, rows=rows,
-        )
-        return {"chunk_id": chunk_id, "object_uri": f"s3://{settings.bucket}/{key}", "checksum": checksum, "byte_size": len(body), "grid_cell_count": len(cells), "tile_count": sum(row["kind"] == "tiles" for row in rows), "index_count": sum(row["kind"] == "indexes" for row in rows)}
-
-    if not ray.is_initialized():
-        ray.init(
-            address=payload["ray_address"],
-            ignore_reinit_error=True,
-            include_dashboard=False,
-            logging_level=40,
-            runtime_env=_ray_init_runtime_env(runtime_env),
-        )
-    degrees = float(runtime_config.env_text("CUBE_LOGICAL_SHARD_DEGREES", "1"))
-    if not 0 < degrees <= 10:
-        raise ValueError("CUBE_LOGICAL_SHARD_DEGREES must be within (0, 10]")
-    per_task = max(1, int(runtime_config.env_text("CUBE_LOGICAL_SHARDS_PER_TASK", "16")))
-    tasks = []
-    for asset in payload["dataset"]["assets"]:
-        asset_shards = _shards(asset["bbox"], degrees)
-        for start in range(0, len(asset_shards), per_task):
-            tasks.append({**payload, "asset": asset, "shards": asset_shards[start:start + per_task], "shard_id": f"{asset['source_asset_id']}:{start // per_task}"})
-    pending = [plan_chunk.options(num_cpus=1).remote(task) for task in tasks]
-    chunks = []
-    while pending:
-        if cancellation_check and cancellation_check():
-            for ref in pending:
-                ray.cancel(ref, force=True)
-            from cube_split.jobs.cancellation import PartitionCancelledError
-            raise PartitionCancelledError("Partition task cancelled")
-        ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
-        if ready:
-            chunks.append(ray.get(ready[0]))
-    return {"dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"], "output_version": payload["output_version"], "grid_type": payload["grid_type"], "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical", "execution_engine": "ray", "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/", "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks}
+    """Submit one logical dataset through the batch scheduler compatibility path."""
+    outcome = run_logical_chunk_jobs([payload], runtime_env, cancellation_check)[0]
+    if "error" in outcome:
+        raise RuntimeError(str(outcome["error"]))
+    return outcome["result"]

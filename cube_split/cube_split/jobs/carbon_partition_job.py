@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -40,12 +41,37 @@ def _resolve_backend(requested_backend: str, ray_address: str) -> str:
     return requested_backend
 
 
+def _default_ray_parallelism() -> int:
+    """Derive the default Ray parallelism from the environment or the cluster size.
+
+    CUBE_CARBON_RAY_PARALLELISM takes precedence; otherwise use the cluster CPU
+    count when Ray is already initialized, falling back to the local CPU count.
+    """
+    raw = os.environ.get("CUBE_CARBON_RAY_PARALLELISM", "")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    cpu_total = 0
+    try:
+        import ray
+
+        if ray.is_initialized():
+            cpu_total = int(ray.cluster_resources().get("CPU", 0))
+    except Exception:
+        cpu_total = 0
+    if cpu_total <= 0:
+        cpu_total = os.cpu_count() or 4
+    return max(cpu_total, 4)
+
+
 def _resolve_worker_count(partition_workers: int, ray_parallelism: int, backend: str) -> int:
     if backend == "ray" and ray_parallelism > 0:
         return ray_parallelism
     if partition_workers > 0:
         return partition_workers
-    return 4 if backend == "ray" else 1
+    return _default_ray_parallelism() if backend == "ray" else 1
 
 
 def run_carbon_partition(args: argparse.Namespace) -> dict:
