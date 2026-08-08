@@ -61,12 +61,14 @@ class PartitionWorkflowService:
         domain_store: Any | None = None,
         runner: Any | None = None,
         ray_job_submitter: Any | None = None,
+        scene_repository: Any | None = None,
     ) -> None:
         self.partition_service = partition_service
         self._store = store
         self.domain_store = domain_store
         self.dataset_runner = runner
         self.ray_job_submitter = ray_job_submitter
+        self.scene_repository = scene_repository
         self.after_ray: Callable[[], None] | None = None
         self.task_event_listeners: list[Callable[[str, str, dict[str, Any] | None], None]] = []
         # Submission is serialized per batch: the job store already rejects a
@@ -604,6 +606,7 @@ class PartitionWorkflowService:
                 request = StrictPartitionRequest.model_validate(payload)
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail="Partition task payload is no longer retryable") from exc
+            request = self._refresh_retry_assets(request)
             data_type = str(batch.get("data_type") or "")
             if data_type not in {"mixed", "optical", "radar", "product", "carbon"}:
                 raise HTTPException(status_code=409, detail="Partition task has no retryable normalized data type")
@@ -623,6 +626,62 @@ class PartitionWorkflowService:
                 ),
             )
         raise HTTPException(status_code=409, detail="Partition task payload is not a normalized production request")
+
+    def _refresh_retry_assets(self, request: StrictPartitionRequest) -> StrictPartitionRequest:
+        """Re-materialize retried asset source URIs from the authoritative scene_assets table.
+
+        Retry reuses the original attempt payload, which may reference stale source
+        URIs after an operator fixes the underlying object. Refreshing from
+        ``scene_assets`` makes the fix effective on retry instead of silently
+        reproducing references to the old (missing) object.
+        """
+        if self.scene_repository is None:
+            return request
+        asset_ids = sorted({asset.source_asset_id for dataset in request.datasets for asset in dataset.assets})
+        rows = self.scene_repository.read_scene_assets_by_ids(asset_ids)
+        by_id: dict[str, dict[str, Any]] = {str(row["asset_id"]): row for row in rows}
+        normalized_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        for dataset in request.datasets:
+            dataset_asset_ids = [asset.source_asset_id for asset in dataset.assets]
+            for row in self.scene_repository.read_partition_dataset_asset_uris(dataset.dataset_id, dataset_asset_ids):
+                normalized_by_key[(dataset.dataset_id, str(row["source_asset_id"]))] = row
+        refreshed_datasets = []
+        for dataset in request.datasets:
+            refreshed_assets = []
+            for asset in dataset.assets:
+                row = by_id.get(asset.source_asset_id)
+                if row is None:
+                    refreshed_assets.append(asset)
+                    continue
+                if dataset.data_type == "carbon":
+                    update = {"source_uri": str(row.get("source_uri") or "") or None, "checksum": str(row.get("checksum") or asset.checksum)}
+                    authoritative_uri = str(row.get("source_uri") or "")
+                else:
+                    # Non-carbon COG assets carry the object URI in cog_uri and must
+                    # keep source_uri None; scene_assets.source_uri may hold the raw
+                    # loader URI which the normalized contract forbids.
+                    update = {
+                        "source_uri": None,
+                        "cog_uri": str(row.get("cog_uri") or "") or None,
+                        "checksum": str(row.get("checksum") or asset.checksum),
+                    }
+                    authoritative_uri = str(row.get("cog_uri") or "")
+                normalized = normalized_by_key.get((dataset.dataset_id, asset.source_asset_id))
+                normalized_uri = (
+                    str(normalized.get("source_uri") or "")
+                    if dataset.data_type == "carbon"
+                    else str(normalized.get("cog_uri") or "")
+                ) if normalized else ""
+                if authoritative_uri and normalized_uri and authoritative_uri != normalized_uri:
+                    logger.warning(
+                        "asset %s source definition diverges (scene_assets=%s, partition_dataset_assets=%s); retry uses scene_assets",
+                        asset.source_asset_id,
+                        authoritative_uri,
+                        normalized_uri,
+                    )
+                refreshed_assets.append(asset.model_copy(update=update))
+            refreshed_datasets.append(dataset.model_copy(update={"assets": tuple(refreshed_assets)}))
+        return request.model_copy(update={"datasets": tuple(refreshed_datasets)})
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         attempt = self.store.request_cancel(task_id)
