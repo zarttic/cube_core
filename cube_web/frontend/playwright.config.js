@@ -21,12 +21,8 @@ export default defineConfig({
   },
   projects: [
     {
-      name: 'app-e2e',
-      testIgnore: /(ui-workflows|real-system)\.spec\.js/,
-    },
-    {
-      name: 'ui-workflows',
-      testMatch: /ui-workflows\.spec\.js/,
+      name: 'full-chain',
+      testMatch: /full-chain\.spec\.js/,
     },
     ...(includeRealSystem ? [{ name: 'real-system', testMatch: /real-system\.spec\.js/ }] : []),
   ],
