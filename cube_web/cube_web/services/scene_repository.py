@@ -925,32 +925,28 @@ class OpenGaussSceneRepository:
                 if item.get("band_unit_id")
             }
             if selected_for_grid:
-                if request.selection_source == "load_batch":
-                    ingested_rows = self._read(
-                        "SELECT DISTINCT g.band_unit_id,g.grid_type,g.grid_level "
-                        "FROM partition_data_unit_grid_status g "
-                        "JOIN partition_run_scenes prs ON prs.partition_run_id=g.partition_run_id "
-                        "AND prs.scene_id=g.scene_id "
-                        "WHERE g.band_unit_id=ANY(%s::text[]) AND prs.source_load_batch_id=ANY(%s::text[]) "
-                        "AND g.grid_type=%s AND g.grid_level=%s "
-                        "AND g.partition_status='completed' AND g.ingest_status='completed' "
-                        "ORDER BY g.band_unit_id,g.grid_type,g.grid_level",
-                        (
-                            sorted(selected_for_grid),
-                            [selection_batch_id] if selection_batch_id else list(request.source_batch_ids),
-                            selection.partition.grid_type,
-                            selection.partition.requested_grid_level,
-                        ),
+                ingested_rows = self._read(
+                    "SELECT DISTINCT g.band_unit_id,g.grid_type,g.grid_level "
+                    "FROM partition_data_unit_grid_status g "
+                    "WHERE g.band_unit_id=ANY(%s::text[]) "
+                    "AND g.grid_type=%s AND g.grid_level=%s "
+                    "AND g.partition_status='completed' AND g.ingest_status='completed' "
+                    "ORDER BY g.band_unit_id,g.grid_type,g.grid_level",
+                    (
+                        sorted(selected_for_grid),
+                        selection.partition.grid_type,
+                        selection.partition.requested_grid_level,
+                    ),
+                )
+                if ingested_rows:
+                    labels = [
+                        f"{row['band_unit_id']}({row['grid_type']}/L{row['grid_level']})"
+                        for row in ingested_rows
+                    ]
+                    raise ValueError(
+                        "band units already partitioned and ingested: "
+                        + ", ".join(labels)
                     )
-                    if ingested_rows:
-                        labels = [
-                            f"{row['band_unit_id']}({row['grid_type']}/L{row['grid_level']})"
-                            for row in ingested_rows
-                        ]
-                        raise ValueError(
-                            "band units already partitioned and ingested in the selected load batch: "
-                            + ", ".join(labels)
-                        )
             for row in scene_rows:
                 scene_id = str(row["scene_id"])
                 selected_band_rows = [
@@ -1394,6 +1390,36 @@ class OpenGaussSceneRepository:
             with connection.cursor() as cursor:
                 cursor.execute(sql, params)
                 return _all(cursor)
+
+    def read_scene_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        """Read authoritative data asset rows from ``scene_assets`` by asset id.
+
+        Retry re-materialization uses this table as the source of truth so a
+        fixed source URI/checksum is honored on retry instead of the stale copy
+        stored in the original attempt payload.
+        """
+        if not asset_ids:
+            return []
+        return self._read(
+            "SELECT * FROM scene_assets WHERE asset_id = ANY(%s::text[]) AND asset_role = 'data' "
+            "ORDER BY scene_id, asset_id",
+            (asset_ids,),
+        )
+
+    def read_partition_dataset_asset_uris(self, dataset_id: str, asset_ids: list[str]) -> list[dict[str, Any]]:
+        """Read normalized asset URI rows from ``partition_dataset_assets``.
+
+        Quality rules read this table, while submission and retry read
+        ``scene_assets``. Comparing the two surfaces divergent definitions that
+        the unified asset update endpoint keeps in sync.
+        """
+        if not asset_ids:
+            return []
+        return self._read(
+            "SELECT source_asset_id, source_uri, cog_uri, checksum FROM partition_dataset_assets "
+            "WHERE dataset_id = %s AND source_asset_id = ANY(%s::text[])",
+            (dataset_id, asset_ids),
+        )
 
 
 def _scene_inputs(

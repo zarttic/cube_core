@@ -82,7 +82,9 @@ function levelOptions(gridType) {
   return definition ? Array.from({ length: definition.maxLevel - definition.minLevel + 1 }, (_, index) => definition.minLevel + index) : [];
 }
 function gridCompleted(band, gridType = repartitionGridType.value) {
-  return (band?.grid_statuses || []).some((status) => status.grid_type === gridType && status.partition_status === 'completed');
+  return (band?.grid_statuses || []).some(
+    (status) => status.grid_type === gridType && ['completed', 'running', 'queued'].includes(status.partition_status)
+  );
 }
 function selectableBands(scene = null) {
   const bands = scene ? (scene.bands || []) : datasetBands();
