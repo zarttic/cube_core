@@ -1093,6 +1093,7 @@ class OpenGaussSceneRepository:
                             ) source ON (
                               target.partition_run_id = source.partition_run_id
                               AND target.selection_id = source.selection_id
+                              AND target.scene_id = source.scene_id
                             )
                             WHEN NOT MATCHED THEN INSERT (
                               partition_run_id, selection_id, scene_id, dataset_id, source_load_batch_id,

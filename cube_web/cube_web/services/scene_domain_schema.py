@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-23-scene-domain-v11"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-23-scene-domain-v12"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -200,7 +200,7 @@ def schema_statements() -> tuple[str, ...]:
           error_message TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          PRIMARY KEY (partition_run_id, selection_id),
+          PRIMARY KEY (partition_run_id, selection_id, scene_id),
           UNIQUE (partition_run_id, idempotency_key)
         )""",
         """CREATE TABLE IF NOT EXISTS partition_data_unit_grid_status (
@@ -225,7 +225,7 @@ def schema_statements() -> tuple[str, ...]:
         """UPDATE partition_run_scenes SET selection_id=idempotency_key WHERE selection_id IS NULL""",
         """ALTER TABLE partition_run_scenes ALTER COLUMN selection_id SET NOT NULL""",
         """ALTER TABLE partition_run_scenes DROP CONSTRAINT IF EXISTS partition_run_scenes_pkey""",
-        """ALTER TABLE partition_run_scenes ADD PRIMARY KEY (partition_run_id, selection_id)""",
+        """ALTER TABLE partition_run_scenes ADD PRIMARY KEY (partition_run_id, selection_id, scene_id)""",
         """ALTER TABLE partition_data_unit_grid_status DROP CONSTRAINT IF EXISTS partition_data_unit_grid_status_pkey""",
         """ALTER TABLE partition_data_unit_grid_status ADD PRIMARY KEY (band_unit_id, grid_type, grid_level)""",
         """CREATE TABLE IF NOT EXISTS ingest_runs (

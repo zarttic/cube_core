@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-23-scene-domain-v11"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-23-scene-domain-v12"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -65,6 +65,26 @@ def test_partition_data_unit_grid_status_enforces_band_grid_identity_and_lifecyc
     assert "partition_status text not null default 'pending' check" in table_sql
     assert "quality_status text not null default 'pending' check" in table_sql
     assert "ingest_status text not null default 'pending' check" in table_sql
+
+
+def test_partition_run_scenes_keys_every_scene_of_a_multi_scene_selection() -> None:
+    statements = [" ".join(statement.lower().split()) for statement in schema_statements()]
+    table_sql = next(
+        statement for statement in statements
+        if "create table if not exists partition_run_scenes" in statement
+    )
+
+    # One selection_id covers a whole dataset, so scene_id has to be part of the
+    # key or every scene after the first collapses onto the same row.
+    assert "primary key (partition_run_id, selection_id, scene_id)" in table_sql
+    assert "primary key (partition_run_id, selection_id)," not in table_sql
+    assert "unique (partition_run_id, idempotency_key)" in table_sql
+
+    assert "alter table partition_run_scenes add primary key (partition_run_id, selection_id, scene_id)" in statements
+    assert "alter table partition_run_scenes add primary key (partition_run_id, selection_id)" not in statements
+    drop_index = statements.index("alter table partition_run_scenes drop constraint if exists partition_run_scenes_pkey")
+    add_index = statements.index("alter table partition_run_scenes add primary key (partition_run_id, selection_id, scene_id)")
+    assert drop_index < add_index
 
 
 class _Cursor:

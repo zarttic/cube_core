@@ -793,6 +793,88 @@ def test_partition_projection_does_not_regress_terminal_run() -> None:
     assert not any("UPDATE partition_run_scenes" in sql for sql, _ in statements)
 
 
+def test_create_partition_run_keeps_one_row_per_scene_under_a_shared_selection_id() -> None:
+    """A dataset-scoped selection_id must not collapse its scenes into one row.
+
+    The frontend sends a single ``{load_batch_id}:{dataset_id}`` selection_id for
+    every scene of a dataset, so the run/selection pair alone cannot identify a
+    row. Without scene_id in the merge key the second scene is silently dropped
+    and its grid status stays queued forever.
+    """
+    statements: list[tuple[str, Any]] = []
+
+    class Cursor:
+        description = (("partition_run_id",), ("attributes",))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            self.last_sql = " ".join(str(sql).split())
+            statements.append((self.last_sql, params))
+            if "MERGE INTO partition_runs" in self.last_sql:
+                self.claim = json.loads(params[2])
+
+        def fetchone(self):
+            if "FROM partition_runs" in self.last_sql:
+                return ("partition-run-001", json.dumps(self.claim))
+            if "FROM load_batch_scenes" in self.last_sql:
+                return ("load-001",)
+            return None
+
+        def fetchall(self):
+            if "FROM scene_bands" in self.last_sql:
+                return [("band-scene-optical-b04",)]
+            return []
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return cursor
+
+        def commit(self):
+            return None
+
+    request = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "partition-run-001",
+        "source_batch_ids": ["load-001"],
+        "datasets": [{
+            "selection_id": "load-001:dataset-carbon",
+            "source_batch_id": "load-001",
+            "dataset_id": "dataset-carbon",
+            "scene_ids": ["scene-carbon-0301", "scene-carbon-0302"],
+            "partition": {
+                "grid_type": "isea4h",
+                "requested_grid_level": 5,
+                "partition_method": "entity",
+            },
+        }],
+    })
+
+    OpenGaussSceneRepository(None, connection_factory=Connection).create_partition_run(request)
+
+    merges = [
+        params for sql, params in statements
+        if "MERGE INTO partition_run_scenes" in sql
+    ]
+    assert [params[2] for params in merges] == ["scene-carbon-0301", "scene-carbon-0302"]
+    assert {params[1] for params in merges} == {"load-001:dataset-carbon"}
+    assert len({params[6] for params in merges}) == 2
+
+    merge_sql = next(sql for sql, _ in statements if "MERGE INTO partition_run_scenes" in sql)
+    assert "target.scene_id = source.scene_id" in merge_sql
+
+
 def test_scene_contract_rejects_legacy_batch_id_and_allows_separate_source_selections() -> None:
     payload = _payload()
     payload["batch_id"] = "load-001"
