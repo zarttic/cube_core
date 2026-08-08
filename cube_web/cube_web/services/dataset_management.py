@@ -59,6 +59,10 @@ class DatasetManagementRepository(Protocol):
 
     def update_metadata(self, dataset_id: str, changes: dict[str, Any], *, actor: str) -> dict[str, Any]: ...
 
+    def update_dataset_asset(
+        self, dataset_id: str, source_asset_id: str, changes: dict[str, Any], *, actor: str
+    ) -> dict[str, Any]: ...
+
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
     ) -> dict[str, Any]: ...
@@ -136,6 +140,19 @@ class DatasetManagementService:
     def update_metadata(self, dataset_id: str, changes: dict[str, Any], *, actor: str) -> dict[str, Any]:
         self.get_dataset(dataset_id)
         return self.repository.update_metadata(dataset_id, changes, actor=actor)
+
+    def update_dataset_asset(
+        self, dataset_id: str, source_asset_id: str, changes: dict[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        """Update a dataset asset definition (source URI/checksum) atomically.
+
+        ``scene_assets`` is the authoritative source for first submission and
+        retry re-materialization, while ``partition_dataset_assets`` is read by
+        quality rules. Updating both keeps the two read paths consistent so a
+        source fix takes effect everywhere.
+        """
+        self.get_dataset(dataset_id)
+        return self.repository.update_dataset_asset(dataset_id, source_asset_id, changes, actor=actor)
 
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
@@ -281,6 +298,20 @@ class InMemoryDatasetManagementRepository:
                 "after": copy.deepcopy(changes), "changed_by": actor, "changed_at": row["updated_at"],
             })
             return self._overview(dataset_id)
+
+    def update_dataset_asset(
+        self, dataset_id: str, source_asset_id: str, changes: dict[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        with self._lock:
+            assets = self.details.get(dataset_id, {}).get("assets", [])
+            asset = next((row for row in assets if str(row.get("asset_id") or "") == source_asset_id), None)
+            if asset is None:
+                raise ManagedSceneNotFound(source_asset_id)
+            for key in ("source_uri", "cog_uri", "checksum"):
+                if key in changes and changes[key] is not None:
+                    asset[key] = changes[key]
+            asset["updated_at"] = _now_text()
+            return copy.deepcopy(asset)
 
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
@@ -533,6 +564,44 @@ class OpenGaussDatasetManagementRepository:
             title = changes.get("dataset_title", before["dataset_title"])
             cursor.execute("UPDATE datasets SET dataset_title=%s,attributes=%s,updated_at=now() WHERE dataset_id=%s", (title, Jsonb(attributes), dataset_id))
         return self.get_dataset(dataset_id) or {}
+
+    def update_dataset_asset(
+        self, dataset_id: str, source_asset_id: str, changes: dict[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        allowed = {"source_uri", "cog_uri", "checksum"}
+        updates = {key: value for key, value in changes.items() if key in allowed and value is not None}
+        if not updates:
+            raise DatasetManagementConflict("at least one of source_uri/cog_uri/checksum is required")
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT dataset_id FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
+            if cursor.fetchone() is None:
+                raise ManagedDatasetNotFound(dataset_id)
+            cursor.execute(
+                "SELECT scene_id FROM scene_assets WHERE asset_id=%s AND asset_role='data' ORDER BY scene_id LIMIT 1",
+                (source_asset_id,),
+            )
+            if cursor.fetchone() is None:
+                raise ManagedSceneNotFound(source_asset_id)
+            source_uri = updates.get("source_uri")
+            cog_uri = updates.get("cog_uri")
+            checksum = updates.get("checksum")
+            cursor.execute(
+                "UPDATE scene_assets SET source_uri=COALESCE(%s, source_uri), cog_uri=COALESCE(%s, cog_uri), "
+                "checksum=COALESCE(%s, checksum) WHERE asset_id=%s AND asset_role='data'",
+                (source_uri, cog_uri, checksum, source_asset_id),
+            )
+            cursor.execute(
+                "UPDATE partition_dataset_assets SET source_uri=COALESCE(%s, source_uri), cog_uri=COALESCE(%s, cog_uri), "
+                "checksum=COALESCE(%s, checksum) WHERE dataset_id=%s AND source_asset_id=%s",
+                (source_uri, cog_uri, checksum, dataset_id, source_asset_id),
+            )
+            cursor.execute(
+                "SELECT source_asset_id, source_uri, cog_uri, checksum FROM partition_dataset_assets "
+                "WHERE dataset_id=%s AND source_asset_id=%s",
+                (dataset_id, source_asset_id),
+            )
+            row = cursor.fetchone()
+        return dict(row) if row is not None else {"source_asset_id": source_asset_id, **updates}
 
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str

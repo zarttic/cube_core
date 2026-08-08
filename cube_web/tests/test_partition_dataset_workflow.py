@@ -239,6 +239,9 @@ def test_batch_scheduler_toggle_preserves_legacy_dataset_execution(monkeypatch) 
 
 def test_batch_scheduler_is_disabled_without_explicit_flag(monkeypatch) -> None:
     monkeypatch.delenv("CUBE_WEB_RAY_BATCH_SCHEDULER", raising=False)
+    # The local .cube_web.env file may enable the batch scheduler; isolate the
+    # test from any repository-local runtime configuration file.
+    monkeypatch.setenv("CUBE_WEB_ENV_FILE", "/nonexistent-cube-web-env-file")
 
     assert workflow_module.ray_batch_scheduler_enabled() is False
 

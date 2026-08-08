@@ -16,6 +16,15 @@ from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_
 from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 
+class SourceObjectMissingError(ValueError):
+    """Raised before Ray work starts when a loader-owned source object is missing or empty.
+
+    Logical partition plans derive grid coverage from declared asset bbox metadata and
+    only open source objects lazily, so a missing source would otherwise produce index
+    rows referencing objects that do not exist until quality catches them later.
+    """
+
+
 def _entity_ray_parallelism(default: int = 16) -> int:
     """Entity planning fan-out; CUBE_ENTITY_RAY_PARALLELISM overrides the default."""
     raw = runtime_config.env_text("CUBE_ENTITY_RAY_PARALLELISM")
@@ -703,6 +712,39 @@ def _run_dataset_on_ray(
 class NormalizedPartitionDatasetRunner:
     """Production runner used by normalized partition runs."""
 
+    @staticmethod
+    def _verify_assets_exist(payloads: list[dict[str, Any]]) -> None:
+        """Preflight every loader-owned source object so missing sources fail fast."""
+        from minio import Minio
+        from urllib.parse import unquote
+
+        settings = runtime_config.minio_settings()
+        if not all((settings.endpoint, settings.access_key, settings.secret_key)):
+            return
+        client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
+        failures: list[str] = []
+        for payload in payloads:
+            for asset in payload.get("dataset", {}).get("assets") or []:
+                uri = str(asset.get("cog_uri") or asset.get("source_uri") or "")
+                parsed = urlparse(uri)
+                if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
+                    failures.append(f"invalid_uri:{uri}")
+                    continue
+                key = unquote(parsed.path).lstrip("/")
+                try:
+                    stat = client.stat_object(parsed.netloc, key)
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "") or "")
+                    if code in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
+                        failures.append(f"source_missing:{uri}")
+                    else:
+                        raise
+                else:
+                    if int(getattr(stat, "size", 0) or 0) <= 0:
+                        failures.append(f"source_empty:{uri}")
+        if failures:
+            raise SourceObjectMissingError("source preflight failed: " + ", ".join(failures))
+
     def _ray_execution_context(self) -> tuple[str, dict[str, Any]]:
         from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
 
@@ -764,6 +806,7 @@ class NormalizedPartitionDatasetRunner:
             self._payload(ray_address=ray_address, **{key: value for key, value in run.items() if key in payload_fields})
             for run in runs
         ]
+        self._verify_assets_exist(payloads)
         outcomes: list[dict[str, Any] | None] = [None] * len(payloads)
         logical_positions = [
             index for index, payload in enumerate(payloads)
@@ -813,6 +856,7 @@ class NormalizedPartitionDatasetRunner:
             max_observations=max_observations,
             ray_address=ray_address,
         )
+        self._verify_assets_exist([payload])
         return self._run_payload(payload, runtime_env, cancellation_check)
 def _normalize_wgs84_bbox(bbox: list[float] | tuple[float, ...]) -> list[float]:
     """Clamp raster-derived WGS84 bounds to the legal geographic range."""

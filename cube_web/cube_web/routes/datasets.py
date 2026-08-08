@@ -47,6 +47,18 @@ class MetadataPatch(StrictPayload):
         return self
 
 
+class AssetUpdateRequest(StrictPayload):
+    source_uri: str | None = Field(default=None, min_length=1, max_length=2000)
+    cog_uri: str | None = Field(default=None, min_length=1, max_length=2000)
+    checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_change(self) -> "AssetUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("at least one asset field is required")
+        return self
+
+
 class SceneReassignment(StrictPayload):
     target_dataset_id: str = Field(min_length=1)
     reason: str = Field(min_length=1, max_length=2000)
@@ -125,6 +137,13 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
     def update_dataset(dataset_id: str, payload: MetadataPatch, request: Request) -> dict:
         actor = require_admin(current_actor(request))
         return _call(lambda: service.update_metadata(dataset_id, payload.model_dump(exclude_unset=True), actor=actor.username))
+
+    @router.patch("/{dataset_id}/assets/{source_asset_id}")
+    def update_dataset_asset(dataset_id: str, source_asset_id: str, payload: AssetUpdateRequest, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        return _call(lambda: service.update_dataset_asset(
+            dataset_id, source_asset_id, payload.model_dump(exclude_unset=True), actor=actor.username
+        ))
 
     @router.post("/{dataset_id}/scenes/{scene_id}/reassign")
     def reassign_scene(dataset_id: str, scene_id: str, payload: SceneReassignment, request: Request) -> dict:

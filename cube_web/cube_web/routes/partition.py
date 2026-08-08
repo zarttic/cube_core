@@ -16,6 +16,7 @@ from cube_web.services.partition_dataset_runner import NormalizedPartitionDatase
 from cube_web.services.partition_domain_store import OpenGaussPartitionDomainStore, set_partition_domain_store
 from cube_web.services.partition_service import PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
+from cube_web.services.scene_repository import OpenGaussSceneRepository
 
 partition_service = PartitionService()
 partition_domain_store = OpenGaussPartitionDomainStore(dsn=runtime_config.postgres_dsn())
@@ -24,6 +25,7 @@ partition_workflow_service = PartitionWorkflowService(
     partition_service,
     domain_store=partition_domain_store,
     runner=NormalizedPartitionDatasetRunner(),
+    scene_repository=OpenGaussSceneRepository(dsn=runtime_config.postgres_dsn()),
 )
 
 
