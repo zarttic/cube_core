@@ -1458,6 +1458,7 @@ class PostgresPartitionJobStore(PartitionJobStore):
 
     def request_cancel(self, task_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
+        refresh_attempt = False
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT status, batch_id, asset_ids FROM partition_job_attempts WHERE task_id = %s", (task_id,))
@@ -1466,18 +1467,21 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     return None
                 status, batch_id, asset_ids = row
                 if status not in {"queued", "running", "retrying", "cancel_requested"}:
-                    return self.get_attempt(task_id)
-                next_status = "cancelled" if status == "queued" else "cancel_requested"
-                finished = ", finished_at = now()" if next_status == "cancelled" else ""
-                cur.execute(
-                    f"UPDATE partition_job_attempts SET status = %s{finished}, updated_at = now() WHERE task_id = %s RETURNING *",
-                    (next_status, task_id),
-                )
-                attempt = _dict_row(cur)
-                cur.execute("UPDATE partition_batches SET status = %s, updated_at = now() WHERE batch_id = %s", (next_status, batch_id))
-                if next_status == "cancelled":
-                    self._update_assets(cur, batch_id, asset_ids, "cancelled")
+                    refresh_attempt = True
+                else:
+                    next_status = "cancelled" if status == "queued" else "cancel_requested"
+                    finished = ", finished_at = now()" if next_status == "cancelled" else ""
+                    cur.execute(
+                        f"UPDATE partition_job_attempts SET status = %s{finished}, updated_at = now() WHERE task_id = %s RETURNING *",
+                        (next_status, task_id),
+                    )
+                    attempt = _dict_row(cur)
+                    cur.execute("UPDATE partition_batches SET status = %s, updated_at = now() WHERE batch_id = %s", (next_status, batch_id))
+                    if next_status == "cancelled":
+                        self._update_assets(cur, batch_id, asset_ids, "cancelled")
             conn.commit()
+        if refresh_attempt:
+            return self.get_attempt(task_id)
         return attempt
 
     def mark_cancelled(self, task_id: str) -> dict[str, Any] | None:
@@ -1489,11 +1493,10 @@ class PostgresPartitionJobStore(PartitionJobStore):
                     (task_id,),
                 )
                 row = cur.fetchone()
-                if row is None:
-                    return self.get_attempt(task_id)
-                batch_id, asset_ids = row
-                cur.execute("UPDATE partition_batches SET status = 'cancelled', updated_at = now() WHERE batch_id = %s", (batch_id,))
-                self._update_assets(cur, batch_id, asset_ids, "cancelled")
+                if row is not None:
+                    batch_id, asset_ids = row
+                    cur.execute("UPDATE partition_batches SET status = 'cancelled', updated_at = now() WHERE batch_id = %s", (batch_id,))
+                    self._update_assets(cur, batch_id, asset_ids, "cancelled")
             conn.commit()
         return self.get_attempt(task_id)
 

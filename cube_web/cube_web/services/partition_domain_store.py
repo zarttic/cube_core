@@ -1779,6 +1779,8 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 try:
                     connection.commit()
                 except Exception:
+                    # Deliberately verify an ambiguous commit on fresh connections;
+                    # the original transaction must remain available for cleanup.
                     recovered = self._recover_ambiguous_commit(dataset_id, version)
                     if recovered is not None:
                         return recovered
