@@ -299,3 +299,39 @@ def test_carbon_quality_check_fails_invalid_schema_coordinates_and_xco2(tmp_path
     warn_names = {check["name"] for check in report["checks"] if check["status"] == "WARN"}
     assert {"time_bucket", "carbon_coordinates", "xco2_range"} <= failed_names
     assert "carbon_quality_flag" in warn_names
+
+
+def test_carbon_quality_check_uses_sif_range_for_tansat_rows(tmp_path: Path):
+    run_dir = tmp_path / "sif_run"
+    run_dir.mkdir()
+    rows = []
+    for name, value in (("SIF_758nm", 1.25), ("SIF_771nm", 0.25)):
+        rows.append(
+            {
+                "data_type": "carbon",
+                "satellite": "TanSat",
+                "product_type": "sif",
+                "observation_id": f"20170209-00000000:{name}",
+                "acq_time": "2017-02-09T00:00:00Z",
+                "time_bucket": "20170209",
+                "grid_type": "isea4h",
+                "grid_level": 1,
+                "space_code": "R1-12345",
+                "st_code": "isea4h:1:R1-12345:20170209",
+                "xco2": value,
+                "quality_flag": None,
+                "center_lon": 116.4,
+                "center_lat": 39.9,
+                "measurement_name": name,
+            }
+        )
+    (run_dir / "carbon_observation_rows.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    report = run_carbon_quality_check(Namespace(run_dir=str(run_dir), target_crs="EPSG:4326"))
+
+    assert report["status"] == "PASS"
+    assert {check["name"] for check in report["checks"] if check["status"] == "PASS"} >= {"sif_range"}
+    assert report["summary"]["min_sif"] == 0.25
+    assert report["summary"]["max_sif"] == 1.25

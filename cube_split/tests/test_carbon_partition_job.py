@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from netCDF4 import Dataset
 
 from cube_split.jobs.carbon_partition_job import (
     _default_ray_parallelism,
@@ -172,3 +173,41 @@ def test_run_carbon_partition_normalizes_tansat_alias_in_rows_and_report(tmp_pat
     assert row["product_type"] == "tansat"
     assert summary["product_type"] == "tansat"
     assert report["product_type"] == "tansat"
+
+
+def test_run_carbon_partition_writes_both_tansat_sif_measurements(tmp_path: Path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    source = input_dir / "20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4"
+    with Dataset(source, mode="w") as dataset:
+        dataset.createDimension("sounding_dim", 1)
+        dataset.createDimension("vertex_dim", 4)
+        latitude = dataset.createVariable("Latitude", "f4", ("sounding_dim",))
+        longitude = dataset.createVariable("Longitude", "f4", ("sounding_dim",))
+        time_var = dataset.createVariable("Time", "f8", ("sounding_dim",))
+        sif_758 = dataset.createVariable("SIF_758nm", "f4", ("sounding_dim",))
+        sif_771 = dataset.createVariable("SIF_771nm", "f4", ("sounding_dim",))
+        lat_vertex = dataset.createVariable("LatVertex", "f4", ("vertex_dim", "sounding_dim"))
+        lon_vertex = dataset.createVariable("LongVertex", "f4", ("vertex_dim", "sounding_dim"))
+        latitude[:] = [39.9]
+        longitude[:] = [116.4]
+        time_var[:] = [0]
+        sif_758[:] = [1.25]
+        sif_771[:] = [0.25]
+        lat_vertex[:] = [[39.8], [39.8], [40.0], [40.0]]
+        lon_vertex[:] = [[116.3], [116.5], [116.5], [116.3]]
+
+    summary = run_carbon_partition(
+        SimpleNamespace(
+            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=5,
+            time_granularity="day", product_type="sif", max_observations=0,
+            partition_chunk_size=1000, partition_workers=1, partition_backend="process",
+            ray_address="", ray_parallelism=0,
+        )
+    )
+
+    rows = [json.loads(line) for line in (Path(summary["run_dir"]) / "carbon_observation_rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["rows"] == 2
+    assert {item["observation_id"] for item in rows} == {"20170209-00000000:SIF_758nm", "20170209-00000000:SIF_771nm"}
+    assert {json.loads(item["metadata_json"])["measurement_name"] for item in rows} == {"SIF_758nm", "SIF_771nm"}

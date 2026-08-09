@@ -8,7 +8,7 @@ from cube_web.services.partition_domain_schema import (
 
 def test_domain_schema_contains_versioned_tables_and_quality_handoff() -> None:
     sql = "\n".join(schema_statements()).lower()
-    assert PARTITION_DOMAIN_SCHEMA_VERSION == "2026-07-26-partition-domain-v3"
+    assert PARTITION_DOMAIN_SCHEMA_VERSION == "2026-08-09-partition-domain-v4"
     assert NEW_DOMAIN_TABLES == {
         "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
         "partition_output_versions", "partition_output_chunks", "partition_logical_staging_rows", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -28,6 +28,8 @@ def test_domain_schema_contains_versioned_tables_and_quality_handoff() -> None:
     assert "uq_partition_publication_live_snapshot" in sql
     assert "source_uri text not null" in sql
     assert "source_format text not null default 'cog'" in sql
+    assert "source_format in ('cog','netcdf','hdf5','sif')" in sql
+    assert "drop constraint if exists partition_dataset_assets_check" in sql
     assert "alter table partition_indexes add column if not exists attributes jsonb" in sql
     assert "publication_status text not null default 'pending'" in sql
     assert "publication_status in ('pending','published','revoked')" in sql

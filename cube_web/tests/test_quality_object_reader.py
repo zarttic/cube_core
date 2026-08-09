@@ -91,6 +91,18 @@ def test_reader_opens_local_netcdf_without_loading_observation_arrays(tmp_path: 
     assert result.sample_pixels is None
 
 
+def test_reader_opens_local_sif_container_without_loading_observation_arrays(tmp_path: Path) -> None:
+    source = tmp_path / "source.sif"
+    with Dataset(source, mode="w") as dataset:
+        dataset.createDimension("observation", 1)
+        variable = dataset.createVariable("xco2", "f4", ("observation",))
+        variable[:] = [411.0]
+
+    result = QualityObjectReader().inspect(str(source), "sif")
+
+    assert result == AssetInspection()
+
+
 def test_reader_rejects_checksum_mismatch_before_opening(tmp_path: Path) -> None:
     source = tmp_path / "source.tif"
     _write_raster(source, np.ones((16, 16), dtype=np.uint16))

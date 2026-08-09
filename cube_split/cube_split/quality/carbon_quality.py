@@ -28,6 +28,8 @@ REQUIRED_CARBON_FIELDS = {
 
 XCO2_MIN = 250.0
 XCO2_MAX = 650.0
+SIF_MIN = -0.5
+SIF_MAX = 5.0
 
 
 def _check(name: str, status: str, message: str, **metrics: Any) -> dict[str, Any]:
@@ -127,8 +129,47 @@ def _validate_xco2(rows: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def _validate_sif(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    invalid_rows: list[dict[str, Any]] = []
+    values: list[float] = []
+    for row in rows:
+        try:
+            value = float(row["xco2"])
+        except Exception:
+            invalid_rows.append({"line_no": row.get("_line_no"), "reason": "non_numeric", "sif": row.get("xco2")})
+            continue
+        values.append(value)
+        if not (SIF_MIN <= value <= SIF_MAX):
+            invalid_rows.append(
+                {
+                    "line_no": row.get("_line_no"),
+                    "reason": "out_of_expected_range",
+                    "sif": value,
+                    "expected_range": [SIF_MIN, SIF_MAX],
+                    "measurement_name": row.get("measurement_name"),
+                }
+            )
+    if invalid_rows:
+        return _check(
+            "sif_range",
+            "FAIL",
+            "Some SIF values are missing or outside the expected range.",
+            invalid_rows=invalid_rows[:20],
+            invalid_count=len(invalid_rows),
+            expected_range=[SIF_MIN, SIF_MAX],
+        )
+    return _check(
+        "sif_range",
+        "PASS",
+        "All SIF values are numeric and within the expected range.",
+        min_sif=min(values) if values else None,
+        max_sif=max(values) if values else None,
+        avg_sif=round(sum(values) / len(values), 6) if values else None,
+    )
+
+
 def _validate_quality_flags(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    counts = Counter(str(row.get("quality_flag", "")) for row in rows)
+    counts = Counter(str(row.get("quality_flag") or "") for row in rows)
     bad_count = sum(count for flag, count in counts.items() if flag not in {"", "0", "1"})
     if bad_count:
         return _check(
@@ -183,14 +224,17 @@ def _validate_footprints(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _summarize(rows: list[dict[str, Any]], checks: list[dict[str, Any]]) -> dict[str, Any]:
-    quality_counts = Counter(str(row.get("quality_flag", "")) for row in rows)
+    quality_counts = Counter(str(row.get("quality_flag") or "") for row in rows)
     product_counts = Counter(str(row.get("product_type", "")) for row in rows)
     satellite_counts = Counter(str(row.get("satellite", "")) for row in rows)
     time_counts = Counter(str(row.get("time_bucket", "")) for row in rows)
     xco2_values: list[float] = []
+    sif_values: list[float] = []
     for row in rows:
         try:
             xco2_values.append(float(row.get("xco2")))
+            if str(row.get("product_type") or "") == "sif":
+                sif_values.append(float(row.get("xco2")))
         except Exception:
             continue
     return {
@@ -207,6 +251,9 @@ def _summarize(rows: list[dict[str, Any]], checks: list[dict[str, Any]]) -> dict
         "min_xco2": min(xco2_values) if xco2_values else None,
         "max_xco2": max(xco2_values) if xco2_values else None,
         "avg_xco2": round(sum(xco2_values) / len(xco2_values), 6) if xco2_values else None,
+        "min_sif": min(sif_values) if sif_values else None,
+        "max_sif": max(sif_values) if sif_values else None,
+        "avg_sif": round(sum(sif_values) / len(sif_values), 6) if sif_values else None,
         "passed_checks": sum(1 for check in checks if check["status"] == "PASS"),
         "warning_checks": sum(1 for check in checks if check["status"] == "WARN"),
         "failed_checks": sum(1 for check in checks if check["status"] == "FAIL"),
@@ -251,7 +298,10 @@ def run_quality_check(args: argparse.Namespace) -> dict[str, Any]:
     if not any(check["name"] == "carbon_schema" and check["status"] == "FAIL" for check in checks):
         checks.append(_validate_time_buckets(rows))
         checks.append(_validate_coordinates(rows))
-        checks.append(_validate_xco2(rows))
+        if any(str(row.get("product_type") or "") == "sif" for row in rows):
+            checks.append(_validate_sif(rows))
+        else:
+            checks.append(_validate_xco2(rows))
         checks.append(_validate_quality_flags(rows))
         checks.append(_validate_observation_duplicates(rows))
         checks.append(_validate_footprints(rows))

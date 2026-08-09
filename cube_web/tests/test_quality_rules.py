@@ -56,6 +56,7 @@ def test_snapshot_contains_every_interpretive_field() -> None:
     radar = snapshot_rules(registry, data_type="radar", product_type="sar")
     product = snapshot_rules(registry, data_type="product", product_type="annual")
     carbon = snapshot_rules(registry, data_type="carbon", product_type="xco2")
+    sif = snapshot_rules(registry, data_type="carbon", product_type="sif")
     assert {
         "index_schema",
         "asset_readability",
@@ -77,6 +78,8 @@ def test_snapshot_contains_every_interpretive_field() -> None:
         "carbon_coordinates",
         "carbon_xco2_range",
     } <= {item.code for item in carbon}
+    assert "carbon_sif_range" in {item.code for item in sif}
+    assert "carbon_xco2_range" not in {item.code for item in sif}
     assert not {"carbon_observation_duplicates", "carbon_footprints"} & {item.code for item in carbon}
     assert all(item.name and item.applicability and item.implementation_version for item in (*optical, *radar, *product, *carbon))
 
@@ -90,6 +93,7 @@ def test_data_type_specific_rules_are_optional_and_can_be_disabled() -> None:
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
+        "carbon_sif_range",
     }
 
     assert optional_codes <= set(default_enabled_optional_rules())
@@ -189,6 +193,14 @@ def test_asset_readability_accepts_raw_carbon_and_resolves_cog_source_uri() -> N
         object_reader=_ObjectReader(),
     )
     assert list(rule.evaluate(raw_context)) == []
+    sif_reader = _ObjectReader()
+    sif_context = RuleContext(
+        dataset_id="carbon-sif", output_version="v1", data_type="carbon", product_type="xco2",
+        repository=_AssetRepository(("sif-a", None, "s3://cube/cube/source/carbon/sample.sif", "sif", checksum)),
+        object_reader=sif_reader,
+    )
+    assert list(rule.evaluate(sif_context)) == []
+    assert sif_reader.calls == [("s3://cube/cube/source/carbon/sample.sif", "sif", False, 1, checksum)]
     optical_context = RuleContext(
         dataset_id="optical-a", output_version="v1", data_type="optical", product_type=None,
         repository=_AssetRepository(("cog-a", None, "s3://cube/cube/source/optical/a.tif", "cog", checksum)), object_reader=None,
@@ -412,3 +424,26 @@ def test_carbon_rules_report_invalid_index_observation_with_index_id() -> None:
     assert "duplicate_observation_id" not in codes
     assert "missing_footprint" not in codes
     assert all(finding.index_id for finding in findings)
+
+
+def test_carbon_sif_range_uses_sif_bounds() -> None:
+    rule = default_rule_registry().get("carbon_sif_range")
+    assert rule is not None
+    context = RuleContext(
+        dataset_id="carbon-sif",
+        output_version="v1",
+        data_type="carbon",
+        product_type="sif",
+        repository=_RowsRepository(
+            ("output_id", "source_asset_id", "attributes"),
+            [
+                ("index-good", "asset-1", {"observation_id": "obs-1", "center_lon": 116, "center_lat": 40, "xco2": 1.25}),
+                ("index-bad", "asset-1", {"observation_id": "obs-2", "center_lon": 116, "center_lat": 40, "xco2": 5.1}),
+            ],
+        ),
+        object_reader=None,
+    )
+
+    findings = list(rule.evaluate(context))
+    assert [finding.error_code for finding in findings] == ["sif_out_of_range"]
+    assert findings[0].index_id == "index-bad"

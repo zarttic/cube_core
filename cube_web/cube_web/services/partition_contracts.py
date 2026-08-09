@@ -22,7 +22,7 @@ class SourceAssetInput(StrictModel):
     cog_uri: AnyUrl | None = None
     source_uri: AnyUrl | None = None
     source_kind: Literal["cog", "raw"] = "cog"
-    source_format: Literal["cog", "netcdf", "hdf5"] = "cog"
+    source_format: Literal["cog", "netcdf", "hdf5", "sif"] = "cog"
     checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     bbox: tuple[float, float, float, float] | None = None
     crs: str | None = Field(default=None, min_length=1)
@@ -92,12 +92,13 @@ class DatasetInput(StrictModel):
                     raise ValueError(str(exc)) from exc
                 if asset.cog_uri is not None or asset.source_uri is None:
                     raise ValueError("carbon assets require source_uri and must not use cog_uri")
-                if asset.source_kind != "raw" or asset.source_format not in {"netcdf", "hdf5"}:
-                    raise ValueError("carbon assets require source_kind=raw and source_format netcdf or hdf5")
+                if asset.source_kind != "raw" or asset.source_format not in {"netcdf", "hdf5", "sif"}:
+                    raise ValueError("carbon assets require source_kind=raw and source_format netcdf, hdf5, or sif")
                 suffix = asset.source_uri.path.lower()
                 allowed = {
                     "netcdf": (".nc", ".nc4"),
                     "hdf5": (".h5", ".hdf", ".hdf5"),
+                    "sif": (".sif",),
                 }[asset.source_format]
                 if not suffix.endswith(allowed):
                     raise ValueError(f"carbon source_uri does not match source_format={asset.source_format}")

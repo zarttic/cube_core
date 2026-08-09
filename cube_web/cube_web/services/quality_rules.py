@@ -11,7 +11,7 @@ from pyproj import CRS
 
 from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, TerminalQualityStatus
 
-DEFAULT_RULE_SET_VERSION = "2026.07.21-v8"
+DEFAULT_RULE_SET_VERSION = "2026.08.09-v9"
 
 # Optional rules can be toggled on/off via quality config. Mandatory rules always run.
 OPTIONAL_QUALITY_RULE_CODES = frozenset(
@@ -22,6 +22,7 @@ OPTIONAL_QUALITY_RULE_CODES = frozenset(
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
+        "carbon_sif_range",
     }
 )
 
@@ -40,6 +41,7 @@ RULE_NAMES = {
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
     "carbon_xco2_range": "XCO2 数值范围",
+    "carbon_sif_range": "SIF 数值范围",
 }
 
 RULE_DESCRIPTIONS = {
@@ -57,6 +59,7 @@ RULE_DESCRIPTIONS = {
     "carbon_schema": "检查碳卫星文件是否包含规定的观测变量和维度结构。",
     "carbon_coordinates": "验证碳卫星观测经纬度是否存在且处于合法范围。",
     "carbon_xco2_range": "检查XCO2观测值是否落在物理合理范围内。",
+    "carbon_sif_range": "检查 TanSat SIF 观测值是否落在产品允许范围内。",
 }
 
 OPTICAL_AUXILIARY_VARIABLE_BANDS = frozenset({
@@ -343,7 +346,11 @@ def _asset_readability(context: RuleContext) -> Iterable[QualityFinding]:
         object_uri = source_uri if context.data_type == "carbon" else str(row.get("cog_uri") or source_uri)
         source_contract_valid = True
         if context.data_type == "carbon":
-            allowed = {"netcdf": (".nc", ".nc4"), "hdf5": (".h5", ".hdf", ".hdf5")}
+            allowed = {
+                "netcdf": (".nc", ".nc4"),
+                "hdf5": (".h5", ".hdf", ".hdf5"),
+                "sif": (".sif",),
+            }
             if (
                 source_format not in allowed
                 or not _is_supported_object_uri(source_uri)
@@ -352,7 +359,7 @@ def _asset_readability(context: RuleContext) -> Iterable[QualityFinding]:
                 source_contract_valid = False
                 yield QualityFinding(
                     "invalid_carbon_source",
-                    "carbon source must be an s3 NetCDF/HDF5 asset matching source_format",
+                    "carbon source must be an s3 NetCDF/HDF5/SIF asset matching source_format",
                     source_asset_id=source_asset_id,
                     field="source_uri",
                 )
@@ -541,6 +548,11 @@ def _carbon_xco2_range(context: RuleContext) -> Iterable[QualityFinding]:
         yield finding
 
 
+def _carbon_sif_range(context: RuleContext) -> Iterable[QualityFinding]:
+    for finding in _carbon_attribute_rows(context, "carbon_sif_range"):
+        yield finding
+
+
 def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityFinding]:
     for row, attributes in _carbon_index_rows(context):
         try:
@@ -559,6 +571,13 @@ def _carbon_attribute_rows(context: RuleContext, kind: str) -> Iterable[QualityF
             yield QualityFinding(
                 "xco2_out_of_range",
                 "xco2 must be between 0 and 1000 ppm",
+                source_asset_id=row["source_asset_id"],
+                index_id=row["output_id"],
+            )
+        elif kind == "carbon_sif_range" and not (-0.5 <= xco2 <= 5.0):
+            yield QualityFinding(
+                "sif_out_of_range",
+                "SIF value must be between -0.5 and 5.0 mw/m^2/sr/nm",
                 source_asset_id=row["source_asset_id"],
                 index_id=row["output_id"],
             )
@@ -640,6 +659,7 @@ def default_rule_registry() -> RuleRegistry:
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
         "carbon_xco2_range": _carbon_xco2_range,
+        "carbon_sif_range": _carbon_sif_range,
     }
     rules = [
         RegisteredRule(
@@ -693,11 +713,12 @@ def default_rule_registry() -> RuleRegistry:
             )
         )
     rules.extend(
-        RegisteredRule(code, RULE_NAMES[code], {"data_types": ["carbon"]}, False, {}, evaluator=evaluators[code])
-        for code in (
-            "carbon_schema",
-            "carbon_coordinates",
-            "carbon_xco2_range",
+        RegisteredRule(code, RULE_NAMES[code], applicability, False, {}, evaluator=evaluators[code])
+        for code, applicability in (
+            ("carbon_schema", {"data_types": ["carbon"]}),
+            ("carbon_coordinates", {"data_types": ["carbon"]}),
+            ("carbon_xco2_range", {"data_types": ["carbon"], "product_types": ["xco2", "tansat"]}),
+            ("carbon_sif_range", {"data_types": ["carbon"], "product_types": ["sif"]}),
         )
     )
     return RuleRegistry(rules)

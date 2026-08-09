@@ -102,6 +102,27 @@ def test_carbon_uses_explicit_raw_dataset_source_not_observations() -> None:
         StrictPartitionRequest.model_validate(payload)
 
 
+def test_carbon_accepts_tansat_sif_netcdf_source() -> None:
+    payload = normalized_request()
+    dataset = payload["datasets"][0]
+    dataset["data_type"] = "carbon"
+    dataset["product_type"] = "sif"
+    asset = dataset["assets"][0]
+    asset.pop("cog_uri")
+    asset.pop("bbox")
+    asset.pop("crs")
+    asset.update({
+        "source_uri": "s3://user-1/cog/20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4",
+        "source_kind": "raw",
+        "source_format": "netcdf",
+    })
+
+    request = StrictPartitionRequest.model_validate(payload)
+
+    assert request.datasets[0].product_type == "sif"
+    assert request.datasets[0].assets[0].source_format == "netcdf"
+
+
 def test_carbon_contract_normalizes_tansat_product_type() -> None:
     payload = normalized_request()
     dataset = payload["datasets"][0]

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-PARTITION_DOMAIN_SCHEMA_VERSION = "2026-07-26-partition-domain-v3"
+PARTITION_DOMAIN_SCHEMA_VERSION = "2026-08-09-partition-domain-v4"
 NEW_DOMAIN_TABLES = {
     "partition_datasets", "partition_dataset_assets", "partition_dataset_bands",
     "partition_output_versions", "partition_output_chunks", "partition_logical_staging_rows", "partition_tiles", "partition_indexes", "partition_grid_cells",
@@ -76,13 +76,16 @@ def schema_statements() -> tuple[str, ...]:
           source_asset_id TEXT NOT NULL, cog_uri TEXT CHECK (cog_uri LIKE 's3://%'),
           source_uri TEXT NOT NULL CHECK (source_uri LIKE 's3://%'),
           source_kind TEXT NOT NULL DEFAULT 'cog' CHECK (source_kind IN ('cog','raw')),
-          source_format TEXT NOT NULL DEFAULT 'cog' CHECK (source_format IN ('cog','netcdf','hdf5')),
+          source_format TEXT NOT NULL DEFAULT 'cog' CHECK (source_format IN ('cog','netcdf','hdf5','sif')),
           checksum CHAR(64) CHECK (checksum ~ '^[0-9a-f]{64}$'), bbox JSONB, crs TEXT,
           time_start TIMESTAMPTZ, time_end TIMESTAMPTZ, attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (dataset_id, source_asset_id),
           CHECK (time_end IS NULL OR time_start IS NULL OR time_end >= time_start),
-          CHECK ((source_kind = 'cog' AND source_format = 'cog' AND cog_uri IS NOT NULL) OR
-                 (source_kind = 'raw' AND source_format IN ('netcdf','hdf5')))
+          CONSTRAINT partition_dataset_assets_source_format_check
+            CHECK (source_format IN ('cog','netcdf','hdf5','sif')),
+          CONSTRAINT partition_dataset_assets_source_contract_check
+            CHECK ((source_kind = 'cog' AND source_format = 'cog' AND cog_uri IS NOT NULL) OR
+                   (source_kind = 'raw' AND source_format IN ('netcdf','hdf5','sif')))
         )""",
         """CREATE TABLE IF NOT EXISTS partition_dataset_bands (
           dataset_id TEXT NOT NULL, source_asset_id TEXT NOT NULL, band_code TEXT NOT NULL,
@@ -100,13 +103,17 @@ def schema_statements() -> tuple[str, ...]:
         """UPDATE partition_dataset_assets SET source_uri = cog_uri WHERE source_uri IS NULL AND cog_uri IS NOT NULL""",
         """ALTER TABLE partition_dataset_assets ALTER COLUMN source_uri SET NOT NULL""",
         """ALTER TABLE partition_dataset_assets ALTER COLUMN cog_uri DROP NOT NULL""",
+        """ALTER TABLE partition_dataset_assets DROP CONSTRAINT IF EXISTS partition_dataset_assets_source_format_check""",
+        """ALTER TABLE partition_dataset_assets DROP CONSTRAINT IF EXISTS partition_dataset_assets_source_contract_check""",
+        """ALTER TABLE partition_dataset_assets DROP CONSTRAINT IF EXISTS partition_dataset_assets_check""",
+        """ALTER TABLE partition_dataset_assets DROP CONSTRAINT IF EXISTS partition_dataset_assets_check1""",
         """DO $$ BEGIN
           ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_uri_s3
           CHECK (source_uri LIKE 's3://%');
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """DO $$ BEGIN
           ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_format_check
-          CHECK (source_format IN ('cog','netcdf','hdf5'));
+          CHECK (source_format IN ('cog','netcdf','hdf5','sif'));
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """DO $$ BEGIN
           ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_kind_check
@@ -115,7 +122,7 @@ def schema_statements() -> tuple[str, ...]:
         """DO $$ BEGIN
           ALTER TABLE partition_dataset_assets ADD CONSTRAINT partition_dataset_assets_source_contract_check
           CHECK ((source_kind = 'cog' AND source_format = 'cog' AND cog_uri IS NOT NULL) OR
-                 (source_kind = 'raw' AND source_format IN ('netcdf','hdf5')));
+                 (source_kind = 'raw' AND source_format IN ('netcdf','hdf5','sif')));
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """CREATE TABLE IF NOT EXISTS partition_output_versions (
           dataset_id TEXT NOT NULL, output_version TEXT NOT NULL UNIQUE,
@@ -293,7 +300,7 @@ def schema_statements() -> tuple[str, ...]:
           DEFERRABLE INITIALLY DEFERRED;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
         """MERGE INTO partition_domain_schema_version target
-           USING (SELECT TRUE AS singleton, '2026-07-26-partition-domain-v3' AS schema_version) source
+           USING (SELECT TRUE AS singleton, '2026-08-09-partition-domain-v4' AS schema_version) source
            ON (target.singleton = source.singleton)
            WHEN MATCHED THEN UPDATE SET schema_version = source.schema_version, installed_at = now()
            WHEN NOT MATCHED THEN INSERT (singleton, schema_version) VALUES (source.singleton, source.schema_version)""",
