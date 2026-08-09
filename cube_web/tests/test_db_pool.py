@@ -18,6 +18,22 @@ class _FakeConn:
         self.closed = True
 
 
+class _RollbackFailingConn(_FakeConn):
+    def rollback(self) -> None:
+        raise RuntimeError("rollback failed")
+
+
+class _FlakyFactory:
+    def __init__(self, connections: list[object | BaseException]):
+        self._connections = list(connections)
+
+    def __call__(self):
+        value = self._connections.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
 @pytest.fixture(autouse=True)
 def _isolated_pools(monkeypatch):
     monkeypatch.setattr(_PostgresPool, "_pools", {})
@@ -72,15 +88,61 @@ def test_pool_timeout_retries_creation_when_capacity_freed(monkeypatch):
     monkeypatch.setattr("cube_web.services.db_pool._acquire_timeout_seconds", lambda: 0.05)
 
     pool = _PostgresPool("dsn-c", min_size=0, max_size=2)
+    first = pool._acquire()
     pool._acquire()
-    pool._acquire()
-    # Simulate a failed connection decrementing the counter while a waiter blocks.
+    # A discarded connection frees a slot while a waiter is waiting.
+    pool._discard(first)
     with pool._lock:
-        pool._created -= 1
+        assert pool._created == 1
 
     conn = pool._acquire()
     assert isinstance(conn, _FakeConn)
     assert pool._created == 2
+
+
+def test_pool_connection_creation_failure_does_not_leak_capacity(monkeypatch):
+    factory = _FlakyFactory([ConnectionError("database unavailable"), _FakeConn()])
+    monkeypatch.setattr(_PostgresPool, "_new_conn", factory)
+
+    pool = _PostgresPool("dsn-flaky", min_size=0, max_size=1)
+    with pytest.raises(ConnectionError, match="database unavailable"):
+        pool._acquire()
+    assert pool._created == 0
+
+    conn = pool._acquire()
+    assert isinstance(conn, _FakeConn)
+    assert pool._created == 1
+
+
+def test_pool_discards_connection_when_rollback_fails():
+    pool = _PostgresPool("dsn-rollback", min_size=0, max_size=1)
+    conn = _RollbackFailingConn()
+    with pool._lock:
+        pool._created = 1
+    pool._queue.put(conn)
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        with pool.connection():
+            raise RuntimeError("body failed")
+
+    assert conn.closed is True
+    assert pool._created == 0
+    assert pool._queue.empty()
+
+
+def test_for_dsn_does_not_open_connection_while_registry_lock_is_held(monkeypatch):
+    opened = False
+
+    def fail_if_opened(_pool: _PostgresPool):
+        nonlocal opened
+        opened = True
+        return _FakeConn()
+
+    monkeypatch.setattr(_PostgresPool, "_new_conn", fail_if_opened)
+    pool = _PostgresPool.for_dsn("dsn-lazy", min_size=1, max_size=1)
+
+    assert opened is False
+    assert pool._created == 0
 
 
 def test_pool_context_returns_connection_on_success():
