@@ -94,8 +94,8 @@ Content-Type: application/json
 ```
 
 光学、雷达和信息产品资产必须提供可读取的 COG `cog_uri`。碳卫星资产使用原始
-NetCDF/HDF5 `source_uri`，不转换为 COG。生产 URI 必须是 MinIO `s3://` 地址，禁止节点
-本地绝对路径。
+NetCDF/HDF5 `source_uri`，不转换为 COG。TanSat SIF 使用 `product_type=sif` 的 NetCDF4
+文件，读取 `SIF_758nm` 和 `SIF_771nm` 两个变量。生产 URI 必须是 MinIO `s3://` 地址，禁止节点本地绝对路径。
 
 ## 4. 波段要求
 

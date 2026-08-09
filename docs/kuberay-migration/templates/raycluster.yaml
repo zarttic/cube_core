@@ -1,0 +1,79 @@
+# Replace every value in angle brackets. Do not put real credentials in this file.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: cube-partition
+  namespace: <namespace>
+spec:
+  rayVersion: "2.55.1"
+  enableInTreeAutoscaling: true
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      spec:
+        serviceAccountName: <service-account>
+        imagePullSecrets:
+          - name: <image-pull-secret>
+        containers:
+          - name: ray-head
+            image: <registry>/<project>/cube-ray:<immutable-tag-or-digest>
+            imagePullPolicy: IfNotPresent
+            envFrom:
+              - secretRef:
+                  name: <cube-runtime-secret>
+            env:
+              - name: CUBE_SOURCE_CACHE_DIR
+                value: /data/cube_split_source_cache
+            resources:
+              requests:
+                cpu: "2"
+                memory: "8Gi"
+                ephemeral-storage: "20Gi"
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+                ephemeral-storage: "20Gi"
+            volumeMounts:
+              - name: source-cache
+                mountPath: /data/cube_split_source_cache
+        volumes:
+          - name: source-cache
+            emptyDir:
+              sizeLimit: 20Gi
+  workerGroupSpecs:
+    - groupName: partition-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: <max-worker-replicas>
+      rayStartParams: {}
+      template:
+        spec:
+          serviceAccountName: <service-account>
+          imagePullSecrets:
+            - name: <image-pull-secret>
+          containers:
+            - name: ray-worker
+              image: <registry>/<project>/cube-ray:<immutable-tag-or-digest>
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - secretRef:
+                    name: <cube-runtime-secret>
+              env:
+                - name: CUBE_SOURCE_CACHE_DIR
+                  value: /data/cube_split_source_cache
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "16Gi"
+                  ephemeral-storage: "50Gi"
+                limits:
+                  cpu: "4"
+                  memory: "16Gi"
+                  ephemeral-storage: "50Gi"
+              volumeMounts:
+                - name: source-cache
+                  mountPath: /data/cube_split_source_cache
+          volumes:
+            - name: source-cache
+              emptyDir:
+                sizeLimit: 50Gi

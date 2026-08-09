@@ -1,6 +1,6 @@
 # 质检规则契约
 
-当前规则集版本为 `2026.07.21-v8`，以
+当前规则集版本为 `2026.08.09-v9`，以
 `cube_web.services.quality_rules.default_rule_registry()` 的运行时注册结果为准。
 前端通过 `GET /v1/quality/rules` 展示同一份定义，不单独维护规则矩阵。
 
@@ -28,7 +28,8 @@
 | 雷达遥感 | `radar_band_contract` | 极化通道编码与类型规范 |
 | 碳卫星 | `carbon_schema` | 碳卫星数据结构 |
 | 碳卫星 | `carbon_coordinates` | 碳卫星坐标有效性 |
-| 碳卫星 | `carbon_xco2_range` | XCO2 数值范围 |
+| XCO2 碳卫星 | `carbon_xco2_range` | XCO2 数值范围 |
+| TanSat SIF | `carbon_sif_range` | SIF 数值范围 |
 
 这些规则默认启用，管理员可在质检规则页取消勾选；设置只影响之后新建的质检运行。
 
@@ -42,5 +43,5 @@
 生产 `asset_readability` 会从 MinIO 下载缓存并真实打开数据；读取器也支持本地路径用于
 测试和诊断，但生产领域表只接受 `s3://`。COG 使用 rasterio，NetCDF 使用 netCDF4，
 非 NetCDF 数据模型的 HDF5 使用 GDAL/rasterio fallback。读取错误只记录
-通用错误类型，不保存连接异常文本或凭据。碳卫星使用观测结构、坐标、XCO2、质量标识
-专项规则，不执行栅格像素抽样。
+通用错误类型，不保存连接异常文本或凭据。XCO2 碳卫星使用观测结构、坐标、XCO2、质量标识
+专项规则；TanSat SIF 使用 `SIF_758nm`、`SIF_771nm` 观测值和坐标专项规则，不执行栅格像素抽样。

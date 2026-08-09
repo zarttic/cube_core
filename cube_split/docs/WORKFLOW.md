@@ -10,13 +10,13 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 
 ## 2. 输入与执行边界
 
-生产剖分接收正式 `StrictPartitionRequest` 和 loader 交付的完整 `DatasetInput`。同一批次允许包含不同数据类型，每个数据集可在 `datasets[].partition` 中独立选择格网、层级和剖分参数。光学、雷达和信息产品必须提供非空 COG `assets`；`carbon` 使用原始 NetCDF/HDF5 `source_uri`（包括 `.nc4`、`.hdf5`），不要求 TIFF/COG。所有数据集在数据集层提供 `bands`。
+生产剖分接收正式 `StrictPartitionRequest` 和 loader 交付的完整 `DatasetInput`。同一批次允许包含不同数据类型，每个数据集可在 `datasets[].partition` 中独立选择格网、层级和剖分参数。光学、雷达和信息产品必须提供非空 COG `assets`；`carbon` 使用原始 NetCDF/HDF5 `source_uri`（包括 `.nc4`、`.hdf5`），不要求 TIFF/COG。TanSat SIF 使用 `product_type=sif` 的 NetCDF4 原始文件，读取 `SIF_758nm` 和 `SIF_771nm` 两个观测量，不转换为 COG。所有数据集在数据集层提供 `bands`。
 
 请求使用 `requested_grid_level`。输出 cell 保留实际 `grid_level`；`minimal` cover 可以返回不同于请求层级的 cell。Geohash 与 MGRS 输出逻辑索引，ISEA4H 输出实体瓦片及其元数据。
 
 输入 `s3://` 对象必须先由 MinIO stat 验证存在。Ray worker 从 MinIO 下载到按 URI 稳定哈希隔离的本地 source cache，在该 worker 内读取后写出规范结果对象。driver 不得将本地临时文件作为跨节点输入。
 
-剖分不创建、转换、重投影、上传或修复 loader 输入。真实验收只使用生产 Ray cache 可读取的审阅 COG 或碳卫星原始 NetCDF/HDF5；source 前缀在验收期间为只读。
+剖分不创建、转换、重投影、上传或修复 loader 输入。真实验收只使用生产 Ray cache 可读取的审阅 COG 或碳卫星原始 NetCDF/HDF5；TanSat SIF 通过 NetCDF4 变量契约读取，source 前缀在验收期间为只读。
 
 ## 3. ISEA4H 约束
 

@@ -10,7 +10,7 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 
 请求使用 `requested_grid_level`。返回的 cell 保留实际 `grid_level`；`minimal` cover 可以返回不同于请求层级的 cell。ISEA4H 的 `space_code` 是未补零的十进制 DGGRID SEQNUM，且 `cell_count(r) = 10 * 4**r + 2`。运行时不依赖 H3 或 DGGRID。
 
-正式请求只消费 loader 已交付的完整 `DatasetInput`。同一批次可以包含不同 `data_type`，每个数据集通过 `datasets[].partition` 独立选择格网、层级和剖分参数。光学、雷达和信息产品资产使用非空 COG `cog_uri`；碳卫星资产保留原始 `source_uri`，格式为 NetCDF/HDF5（包括 `.nc4`、`.hdf5`），不要求也不生成 TIFF/COG。所有数据集提供数据集级 `bands`，Ray worker 只通过生产缓存路径读取 MinIO 中可 stat 的输入对象。
+正式请求只消费 loader 已交付的完整 `DatasetInput`。同一批次可以包含不同 `data_type`，每个数据集通过 `datasets[].partition` 独立选择格网、层级和剖分参数。光学、雷达和信息产品资产使用非空 COG `cog_uri`；碳卫星资产保留原始 `source_uri`，格式为 NetCDF/HDF5（包括 `.nc4`、`.hdf5`），不要求也不生成 TIFF/COG。TanSat SIF 使用 `product_type=sif` 的 NetCDF4 原始对象，读取 `SIF_758nm` 和 `SIF_771nm`，不改变源文件。所有数据集提供数据集级 `bands`，Ray worker 只通过生产缓存路径读取 MinIO 中可 stat 的输入对象。
 
 发布记录生命周期只能是 `publishing|active|withdrawing|failed|withdrawn`。数据集派生发布状态只能是 `unpublished|publishing|active|withdrawing|failed|withdrawn`。旧的终态标签不得在生产接口、当前文档、验收结果或证据中使用。
 
@@ -41,7 +41,7 @@ npx playwright test
 ## 3. 运行时与认证
 
 - OpenGauss 通过 `CUBE_WEB_POSTGRES_DSN` 的 PostgreSQL 兼容 DSN 使用 `psycopg` 连接。
-- Ray 使用 `CUBE_WEB_RAY_ADDRESS`；真实分布式验收不能用本地执行器代替。
+- Ray 真实验收通过 `CUBE_WEB_RAY_JOB_ADDRESS` 调用 KubeRay Jobs API；Ray Job driver 在集群内部使用 `CUBE_WEB_RAY_ADDRESS=auto`。真实分布式验收不能用本地执行器代替。
 - MinIO 使用 `CUBE_WEB_MINIO_*`；输入对象为可 stat 的 `s3://cube/cube/source/...` URI。
 - `cube_web_configs` 只保存 `partition`、`ingest`、`quality`；不保存运行时端点或凭据。
 - `.cube_web.env`、明文密钥、本地绝对数据路径和真实数据不进入 Git。

@@ -6,7 +6,8 @@
 <h2 id="env-file">创建 .cube_web.env</h2>
 <p>把下面模板复制到仓库根目录，再替换尖括号内容。文件已被 Git 忽略；不要执行 <code>git add -f .cube_web.env</code>，也不要把完整文件贴到工单或聊天记录。</p>
 <div class="code-wrap"><button class="copy-code" type="button">复制</button><pre><code>CUBE_WEB_POSTGRES_DSN=postgresql://&lt;user&gt;:&lt;password&gt;@10.3.100.180:15400/postgres?client_encoding=UTF8
-CUBE_WEB_RAY_ADDRESS=10.3.100.182:6379
+CUBE_WEB_RAY_JOB_ADDRESS=http://&lt;ray-head-service-or-gateway&gt;:30826
+CUBE_WEB_RAY_ADDRESS=auto
 CUBE_WEB_MINIO_ENDPOINT=10.3.100.179:9000
 CUBE_WEB_MINIO_BUCKET=cube
 CUBE_WEB_MINIO_ACCESS_KEY=&lt;access-key&gt;
