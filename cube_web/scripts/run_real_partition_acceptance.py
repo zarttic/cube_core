@@ -14,6 +14,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 import sys
 import time
 import urllib.error
@@ -96,27 +98,32 @@ def verify_manifest_sources(manifest: dict[str, Any], client: Any) -> None:
 
 
 def discover_carbon_asset(client: Any, *, bucket: str, explicit_uri: str | None = None) -> dict[str, Any]:
-    """Find, stat and SHA-256 verify one real carbon NC/NC4 object in MinIO."""
+    """Find, stat and SHA-256 verify one real carbon raw object in MinIO."""
     if explicit_uri:
-        prefix = f"s3://{bucket}/"
-        if not explicit_uri.startswith(prefix):
-            raise ValueError("explicit carbon URI must use the configured MinIO bucket")
-        keys = [explicit_uri[len(prefix):]]
+        parsed = urlparse(explicit_uri)
+        if parsed.scheme != "s3" or not parsed.netloc:
+            raise ValueError("explicit carbon URI must use s3://bucket/key")
+        selected_bucket = parsed.netloc
+        keys = [unquote(parsed.path.lstrip("/"))]
     else:
+        selected_bucket = bucket
         keys = sorted(
             item.object_name
             for item in client.list_objects(bucket, prefix="cube/source/carbon/", recursive=True)
-            if str(item.object_name).lower().endswith((".nc", ".nc4"))
+            if str(item.object_name).lower().endswith((".nc", ".nc4", ".h5", ".hdf", ".hdf5", ".sif"))
         )
     if len(keys) != 1:
-        raise RuntimeError(f"expected exactly one carbon NC/NC4 source, observed={len(keys)}; set CUBE_CARBON_SOURCE_URI")
+        raise RuntimeError(
+            f"expected exactly one carbon raw source, observed={len(keys)}; "
+            "set CUBE_CARBON_SOURCE_URI to choose one explicitly"
+        )
     key = keys[0]
-    stat = client.stat_object(bucket, key)
+    stat = client.stat_object(selected_bucket, key)
     if int(stat.size) <= 0:
         raise RuntimeError("carbon source object is empty")
     metadata = {str(name).lower(): str(value) for name, value in (getattr(stat, "metadata", {}) or {}).items()}
     expected = str(metadata.get("x-amz-meta-sha256") or metadata.get("x-amz-meta-checksum-sha256") or metadata.get("sha256") or "").lower()
-    response = client.get_object(bucket, key)
+    response = client.get_object(selected_bucket, key)
     digest = hashlib.sha256()
     try:
         for chunk in response.stream(1024 * 1024):
@@ -127,7 +134,19 @@ def discover_carbon_asset(client: Any, *, bucket: str, explicit_uri: str | None 
     checksum = digest.hexdigest()
     if expected and expected != checksum:
         raise RuntimeError("carbon source SHA-256 metadata mismatch")
-    return {"s3_uri": f"s3://{bucket}/{key}", "sha256": checksum, "size_bytes": int(stat.size)}
+    suffix = Path(key).suffix.lower()
+    source_format = "sif" if suffix == ".sif" else ("hdf5" if suffix in {".h5", ".hdf", ".hdf5"} else "netcdf")
+    product_type = "sif" if "sif" in Path(key).name.casefold() else "xco2"
+    date_tokens = re.findall(r"(?<!\d)(20\d{6})(?!\d)", Path(key).name)
+    acquisition_time = f"{date_tokens[-1][:4]}-{date_tokens[-1][4:6]}-{date_tokens[-1][6:]}T00:00:00Z" if date_tokens else ""
+    return {
+        "s3_uri": f"s3://{selected_bucket}/{key}",
+        "sha256": checksum,
+        "size_bytes": int(stat.size),
+        "source_format": source_format,
+        "product_type": product_type,
+        "acquisition_time": acquisition_time,
+    }
 
 
 def derive_manifest(prepared: dict[str, Any], carbon: dict[str, Any]) -> dict[str, Any]:
@@ -187,10 +206,17 @@ def derive_manifest(prepared: dict[str, Any], carbon: dict[str, Any]) -> dict[st
                 raster_asset("radar_vh", "radar-vh", [{"band_code": "VH", "band_name": "VH", "band_type": "polarization"}]),
             ]}]},
             {"dataset_id": "product-standard", "dataset_title": "真实信息产品 COG 验收数据集", "data_type": "product", "scenes": product_scenes},
-            {"dataset_id": "carbon-standard", "dataset_title": "真实碳卫星 NC4 验收数据集", "data_type": "carbon", "scenes": [{"scene_id": "carbon-scene", "scene_key": "carbon-scene", "assets": [{
-                "asset_id": "carbon-asset", "source_uri": carbon["s3_uri"], "source_kind": "observation", "source_format": "netcdf",
-                "checksum": carbon["sha256"], "acquisition_time": "2018-01-01T00:00:00Z",
-                "bands": [{"band_code": "XCO2", "band_name": "XCO2", "band_type": "variable", "unit": "ppm"}],
+            {"dataset_id": "carbon-standard", "dataset_title": "真实碳卫星原始数据验收数据集", "data_type": "carbon", "product_type": carbon.get("product_type") or "xco2", "scenes": [{"scene_id": "carbon-scene", "scene_key": "carbon-scene", "assets": [{
+                "asset_id": "carbon-asset", "source_uri": carbon["s3_uri"], "source_kind": "raw", "source_format": carbon.get("source_format") or "netcdf",
+                "checksum": carbon["sha256"], "acquisition_time": carbon.get("acquisition_time") or "2018-01-01T00:00:00Z",
+                "bands": (
+                    [
+                        {"band_code": "SIF_758nm", "band_name": "SIF 758 nm", "band_type": "variable", "unit": "mw/m^2/sr/nm", "display_order": 0},
+                        {"band_code": "SIF_771nm", "band_name": "SIF 771 nm", "band_type": "variable", "unit": "mw/m^2/sr/nm", "display_order": 1},
+                    ]
+                    if (carbon.get("product_type") or "xco2") == "sif"
+                    else [{"band_code": "XCO2", "band_name": "XCO2", "band_type": "variable", "unit": "ppm", "display_order": 0}]
+                ),
             }]}]},
         ],
     }
@@ -528,8 +554,13 @@ def _contains_ray_evidence(value: Any) -> bool:
 
 def collect_ray_evidence() -> dict[str, Any]:
     """Prove the configured production Ray cluster is reachable for this gate."""
-    import ray
     from cube_split import runtime_config
+
+    job_address = runtime_config.env_text("CUBE_WEB_RAY_JOB_ADDRESS")
+    if job_address:
+        return _collect_ray_job_evidence(job_address)
+
+    import ray
 
     address = runtime_config.require_ray_address()
     started_here = not ray.is_initialized()
@@ -544,6 +575,69 @@ def collect_ray_evidence() -> dict[str, Any]:
     finally:
         if started_here:
             ray.shutdown()
+
+
+def _collect_ray_job_evidence(job_address: str) -> dict[str, Any]:
+    """Prove a KubeRay cluster by running a small worker task through Jobs API."""
+    from cube_split import runtime_config
+    from ray.job_submission import JobSubmissionClient
+
+    probe_id = f"real-acceptance-ray-probe-{uuid4().hex[:12]}"
+    probe_code = (
+        "import json,ray,socket; "
+        "ray.init(address='auto', ignore_reinit_error=True, include_dashboard=False, logging_level=40); "
+        "task=ray.remote(num_cpus=1)(lambda: socket.gethostname()); "
+        "worker_hostname=ray.get(task.remote()); "
+        "nodes=ray.nodes(); "
+        "print('CUBE_RAY_PROBE=' + json.dumps({"
+        "'worker_hostname': worker_hostname, "
+        "'live_nodes': sum(1 for node in nodes if node.get('Alive')), "
+        "'nodes': len(nodes), "
+        "'cpu': ray.cluster_resources().get('CPU', 0)"
+        "}, sort_keys=True)); "
+        "ray.shutdown()"
+    )
+    client = JobSubmissionClient(job_address)
+    job_id = client.submit_job(
+        entrypoint=f"python3.11 -c {shlex.quote(probe_code)}",
+        submission_id=probe_id,
+        runtime_env={"env_vars": {}},
+        metadata={"cube_job_kind": "real-acceptance-ray-probe"},
+        entrypoint_num_cpus=0,
+    )
+    timeout_raw = runtime_config.env_text("CUBE_WEB_RAY_JOB_TIMEOUT_SECONDS", "120")
+    try:
+        timeout_seconds = max(10.0, float(timeout_raw))
+    except ValueError:
+        timeout_seconds = 120.0
+    deadline = time.monotonic() + timeout_seconds
+    terminal = {"SUCCEEDED", "FAILED", "STOPPED"}
+    status = ""
+    while time.monotonic() < deadline:
+        status = str(client.get_job_status(job_id)).rsplit(".", 1)[-1].upper()
+        if status in terminal:
+            break
+        time.sleep(2.0)
+    if status not in terminal:
+        try:
+            client.stop_job(job_id)
+        except Exception:
+            pass
+        raise TimeoutError(f"Ray Job probe timed out after {timeout_seconds:g}s: {job_id}")
+    logs = client.get_job_logs(job_id)
+    if status != "SUCCEEDED":
+        raise RuntimeError(f"Ray Job probe failed ({job_id}): {logs[-2000:]}")
+    marker = next((line for line in logs.splitlines() if line.startswith("CUBE_RAY_PROBE=")), None)
+    if marker is None:
+        raise RuntimeError(f"Ray Job probe completed without evidence ({job_id})")
+    evidence = json.loads(marker.split("=", 1)[1])
+    return {
+        "backend": "ray",
+        "execution_engine": "ray_job",
+        "ray_job_address": job_address,
+        "ray_job_id": job_id,
+        **evidence,
+    }
 
 
 def run_quality_ingest_gate(
