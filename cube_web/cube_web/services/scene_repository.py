@@ -1828,6 +1828,8 @@ def _error_text(value: Any) -> str | None:
 
 def _source_format(uri: str) -> str:
     lowered = uri.lower()
+    if lowered.endswith(".sif"):
+        return "sif"
     if lowered.endswith((".h5", ".hdf", ".hdf5")):
         return "hdf5"
     return "netcdf"

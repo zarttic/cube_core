@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable
@@ -109,12 +109,72 @@ def _footprint_geojson(observation: CarbonSatelliteObservation) -> dict[str, Any
     return {"type": "Point", "coordinates": [observation.lon, observation.lat]}
 
 
+def _measurement_values(observation: CarbonSatelliteObservation) -> dict[str, float]:
+    raw_values = observation.metadata.get("measurement_values")
+    if not isinstance(raw_values, dict):
+        return {}
+    values: dict[str, float] = {}
+    for name, raw_value in raw_values.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values[str(name)] = value
+    return values
+
+
+def _normalize_measurement_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _select_measurement(
+    observation: CarbonSatelliteObservation,
+    measurement_name: str | None = None,
+) -> tuple[str | None, float, str | None] | None:
+    values = _measurement_values(observation)
+    if not values:
+        value = float(observation.xco2)
+        return (None, value, None) if math.isfinite(value) else None
+
+    selected_name: str | None = None
+    if measurement_name:
+        normalized_requested = _normalize_measurement_name(measurement_name)
+        for name in values:
+            normalized_name = _normalize_measurement_name(name)
+            if normalized_requested == normalized_name or normalized_requested in normalized_name or normalized_name in normalized_requested:
+                selected_name = name
+                break
+        if selected_name is None:
+            raise ValueError(
+                f"carbon observation does not contain requested measurement {measurement_name!r}; "
+                f"available={sorted(values)}"
+            )
+    else:
+        selected_name = next(iter(values))
+
+    units = observation.metadata.get("measurement_units")
+    unit = str(units.get(selected_name)) if isinstance(units, dict) and units.get(selected_name) else None
+    return selected_name, values[selected_name], unit
+
+
+def _measurement_names(observation: CarbonSatelliteObservation) -> tuple[str | None, ...]:
+    values = _measurement_values(observation)
+    return tuple(values) if values else (None,)
+
+
 def partition_observation(
     observation: CarbonSatelliteObservation,
     config: CarbonPartitionConfig,
     sdk: CubeEncoderSDK | None = None,
+    measurement_name: str | None = None,
 ) -> dict[str, Any]:
     encoder = sdk or CubeEncoderSDK()
+    product_type = normalize_carbon_product_type(config.product_type)
+    selected = _select_measurement(observation, measurement_name)
+    if selected is None:
+        raise ValueError(f"carbon observation has no finite value for measurement {measurement_name!r}")
+    selected_name, selected_value, selected_unit = selected
     address = encoder.locate_space_code(
         grid_type=config.grid_type,
         requested_grid_level=config.grid_level,
@@ -126,25 +186,40 @@ def partition_observation(
         timestamp=timestamp,
         time_granularity=config.time_granularity,
     ).st_code
+    metadata = dict(observation.metadata)
+    if selected_name is not None:
+        metadata.update(
+            {
+                "measurement_name": selected_name,
+                "measurement_value": selected_value,
+                "measurement_unit": selected_unit,
+            }
+        )
+    observation_id = observation.observation_id
+    if selected_name is not None and not observation_id.endswith(f":{selected_name}"):
+        observation_id = f"{observation_id}:{selected_name}"
     return {
         "data_type": "carbon",
         "satellite": observation.satellite,
-        "product_type": normalize_carbon_product_type(config.product_type),
-        "observation_id": observation.observation_id,
+        "product_type": product_type,
+        "observation_id": observation_id,
         "acq_time": observation.acq_time,
         "time_bucket": _time_bucket_from_datetime(timestamp, config.time_granularity),
         "grid_type": config.grid_type,
         "grid_level": int(address.grid_level),
         "space_code": address.space_code,
         "st_code": st_code,
-        "xco2": float(observation.xco2),
+        # The legacy fact table uses ``xco2`` as its numeric carbon-value
+        # carrier. ``product_type`` and the measurement metadata preserve SIF
+        # semantics until that table is generalized.
+        "xco2": selected_value,
         "quality_flag": observation.quality_flag,
         "center_lon": float(observation.lon),
         "center_lat": float(observation.lat),
         "footprint_geojson": _footprint_geojson(observation),
         "source_uri": observation.source_uri,
         "source_index": observation.source_index,
-        "metadata_json": json.dumps(observation.metadata, ensure_ascii=False),
+        "metadata_json": json.dumps(metadata, ensure_ascii=False),
     }
 
 
@@ -406,10 +481,10 @@ def _dataset_footprint(
 def _dataset_observation_count(ds: Any) -> int:
     for variable in (
         _dataset_variable(ds, "sounding_id", "exposure_id", "exposureID", "observation_id"),
-        _dataset_variable(ds, "latitude", "lat"),
-        _dataset_variable(ds, "longitude", "lon"),
+        _dataset_variable(ds, "latitude", "lat", "Latitude"),
+        _dataset_variable(ds, "longitude", "lon", "Longitude"),
         _dataset_variable(ds, "xco2", "xco2_no_bias_correction"),
-        _dataset_variable(ds, "time"),
+        _dataset_variable(ds, "time", "Time", "SIF_758nm"),
     ):
         if variable is not None:
             return len(variable)
@@ -519,6 +594,186 @@ def _build_generic_xco2_observations(
     return observations
 
 
+def _finite_float(value: Any) -> float | None:
+    if bool(getattr(value, "mask", False)):
+        return None
+    try:
+        raw = value.item() if hasattr(value, "item") else value
+        number = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _sif_date_text(path: Path) -> str:
+    matches = re.findall(r"(?<!\d)(20\d{6})(?!\d)", path.name)
+    if not matches:
+        raise ValueError(f"TanSat SIF filename does not contain an acquisition date: {path.name}")
+    # MinIO object names may carry an upload timestamp before the product's
+    # acquisition date, so the final date token is the product date.
+    date_text = matches[-1]
+    datetime.strptime(date_text, "%Y%m%d")
+    return date_text
+
+
+def _sif_footprint(
+    footprint_lon_var: Any,
+    footprint_lat_var: Any,
+    offset: int,
+) -> list[list[float]] | None:
+    shape = tuple(getattr(footprint_lon_var, "shape", ()))
+    if len(shape) != 2:
+        return None
+    if shape[0] == 4:
+        longitudes = footprint_lon_var[:, offset]
+        latitudes = footprint_lat_var[:, offset]
+    elif shape[1] == 4:
+        longitudes = footprint_lon_var[offset, :]
+        latitudes = footprint_lat_var[offset, :]
+    else:
+        return None
+    footprint: list[list[float]] = []
+    for longitude, latitude in zip(longitudes, latitudes, strict=True):
+        lon = _finite_float(longitude)
+        lat = _finite_float(latitude)
+        if lon is None or lat is None:
+            return None
+        footprint.append([lon, lat])
+    return footprint if len(footprint) >= 4 else None
+
+
+def _sif_time_iso(value: Any, date_text: str) -> str:
+    seconds = _finite_float(value)
+    base = datetime.strptime(date_text, "%Y%m%d").replace(tzinfo=UTC)
+    if seconds is None or not 0 <= seconds < 86400:
+        return base.isoformat().replace("+00:00", "Z")
+    return (base + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def _sif_source_format(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".h5", ".hdf", ".hdf5"}:
+        return "hdf5"
+    if suffix == ".sif":
+        return "sif"
+    return "netcdf"
+
+
+def _load_sif_observation_slice(
+    path: Path,
+    start_index: int,
+    stop_index: int,
+    *,
+    source_uri: str | None = None,
+) -> list[CarbonSatelliteObservation]:
+    Dataset = _netcdf4_dataset_class()
+    if Dataset is None:
+        raise RuntimeError("Reading TanSat SIF NetCDF4 files requires Python netCDF4")
+    if start_index < 0 or stop_index < start_index:
+        raise ValueError("invalid SIF observation slice range")
+
+    with Dataset(path, "r") as ds:
+        latitude_var = _dataset_variable(ds, "Latitude")
+        longitude_var = _dataset_variable(ds, "Longitude")
+        time_var = _dataset_variable(ds, "Time")
+        sif_758_var = _dataset_variable(ds, "SIF_758nm")
+        sif_771_var = _dataset_variable(ds, "SIF_771nm")
+        footprint_lat_var = _dataset_variable(ds, "LatVertex")
+        footprint_lon_var = _dataset_variable(ds, "LongVertex")
+        required = {
+            "Latitude": latitude_var,
+            "Longitude": longitude_var,
+            "Time": time_var,
+            "SIF_758nm": sif_758_var,
+            "SIF_771nm": sif_771_var,
+            "LatVertex": footprint_lat_var,
+            "LongVertex": footprint_lon_var,
+        }
+        missing = sorted(name for name, variable in required.items() if variable is None)
+        if missing:
+            raise ValueError("TanSat SIF L2 file is missing variables: " + ", ".join(missing))
+
+        count = len(latitude_var)
+        end_index = min(stop_index, count)
+        if start_index >= end_index:
+            return []
+        date_text = _sif_date_text(path)
+        selection = slice(start_index, end_index)
+        latitudes = latitude_var[selection]
+        longitudes = longitude_var[selection]
+        times = time_var[selection]
+        sif_758_values = sif_758_var[selection]
+        sif_771_values = sif_771_var[selection]
+        footprint_shape = tuple(getattr(footprint_lon_var, "shape", ()))
+        if len(footprint_shape) != 2 or footprint_shape != tuple(getattr(footprint_lat_var, "shape", ())):
+            raise ValueError("TanSat SIF L2 footprint variables must have matching two-dimensional shapes")
+        if footprint_shape[0] == 4:
+            footprint_lons = footprint_lon_var[:, selection]
+            footprint_lats = footprint_lat_var[:, selection]
+        elif footprint_shape[1] == 4:
+            footprint_lons = footprint_lon_var[selection, :]
+            footprint_lats = footprint_lat_var[selection, :]
+        else:
+            raise ValueError("TanSat SIF L2 footprint variables must have one dimension of size 4")
+        source_format = _sif_source_format(path)
+        observations: list[CarbonSatelliteObservation] = []
+        default_units = "mw/m^2/sr/nm"
+        for offset, (latitude, longitude, time_value, value_758, value_771) in enumerate(
+            zip(latitudes, longitudes, times, sif_758_values, sif_771_values, strict=True)
+        ):
+            lat = _finite_float(latitude)
+            lon = _finite_float(longitude)
+            if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+            measurement_values: dict[str, float] = {}
+            sif_758 = _finite_float(value_758)
+            sif_771 = _finite_float(value_771)
+            if sif_758 is not None:
+                measurement_values["SIF_758nm"] = sif_758
+            if sif_771 is not None:
+                measurement_values["SIF_771nm"] = sif_771
+            if not measurement_values:
+                continue
+            source_index = start_index + offset
+            observations.append(
+                CarbonSatelliteObservation(
+                    satellite="TanSat",
+                    observation_id=f"{date_text}-{source_index:08d}",
+                    acq_time=_sif_time_iso(time_value, date_text),
+                    lon=lon,
+                    lat=lat,
+                    xco2=next(iter(measurement_values.values())),
+                    quality_flag=None,
+                    footprint=_sif_footprint(footprint_lons, footprint_lats, offset),
+                    source_uri=source_uri or str(path),
+                    source_index=source_index,
+                    metadata={
+                        "source_format": source_format,
+                        "schema_kind": "tansat_sif_l2",
+                        "measurement_values": measurement_values,
+                        "measurement_units": {
+                            "SIF_758nm": str(getattr(sif_758_var, "units", "") or default_units),
+                            "SIF_771nm": str(getattr(sif_771_var, "units", "") or default_units),
+                        },
+                    },
+                )
+            )
+        return observations
+
+
+def _load_sif_observations_from_file(
+    path: Path,
+    max_observations: int | None = None,
+) -> list[CarbonSatelliteObservation]:
+    Dataset = _netcdf4_dataset_class()
+    if Dataset is None:
+        raise RuntimeError("Reading TanSat SIF NetCDF4 files requires Python netCDF4")
+    with Dataset(path, "r") as ds:
+        count = _dataset_observation_count(ds)
+    limit = count if max_observations is None else min(max_observations, count)
+    return _load_sif_observation_slice(path, 0, limit)
+
+
 def _load_oco2_lite_with_netcdf4(
     path: Path,
     max_observations: int | None,
@@ -597,6 +852,19 @@ def _load_oco2_lite_observation_slice(
             start_index=start_index,
             stop_index=end_index,
         )
+
+
+def _load_carbon_observation_slice(
+    path: Path,
+    start_index: int,
+    stop_index: int,
+    *,
+    product_type: str,
+    source_uri: str | None = None,
+) -> list[CarbonSatelliteObservation]:
+    if normalize_carbon_product_type(product_type) == "sif":
+        return _load_sif_observation_slice(path, start_index, stop_index, source_uri=source_uri)
+    return _load_oco2_lite_observation_slice(path, start_index, stop_index, source_uri=source_uri)
 
 
 _NUMBER_RE = re.compile(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
@@ -703,13 +971,13 @@ def _iter_input_files(input_dir: Path) -> list[Path]:
         path
         for path in input_dir.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
+        and path.suffix.lower() in {".jsonl", ".csv", ".nc", ".nc4", ".h5", ".hdf", ".hdf5", ".sif"}
         and path.name not in {"carbon_observation_rows.jsonl", "index_rows.jsonl"}
     )
 
 
 def _is_oco2_lite_netcdf_source(source_uri: str) -> bool:
-    return Path(str(source_uri).strip()).suffix.lower() in {".nc", ".nc4", ".h5", ".hdf", ".hdf5"}
+    return Path(str(source_uri).strip()).suffix.lower() in {".nc", ".nc4", ".h5", ".hdf", ".hdf5", ".sif"}
 
 
 def _resolve_oco2_lite_source_path(source_uri: str) -> Path:
@@ -761,7 +1029,7 @@ def _plan_oco2_lite_source_slices(
 ) -> list[CarbonPartitionChunk] | None:
     if config.partition_backend != "ray":
         return None
-    if normalize_carbon_product_type(config.product_type) not in {"xco2", "tansat"}:
+    if normalize_carbon_product_type(config.product_type) not in {"xco2", "tansat", "sif"}:
         return None
     if config.selected_source_indexes:
         return None
@@ -855,28 +1123,45 @@ def _partition_observation_chunk(
     )
     rows: list[dict[str, Any]] = []
     for observation, address, timestamp, st_code in zip(observations, addresses, timestamps, st_codes):
-        rows.append(
-            {
-                "data_type": "carbon",
-                "satellite": observation.satellite,
-                "product_type": product_type,
-                "observation_id": observation.observation_id,
-                "acq_time": observation.acq_time,
-                "time_bucket": _time_bucket_from_datetime(timestamp, config.time_granularity),
-                "grid_type": config.grid_type,
-                "grid_level": int(address.grid_level),
-                "space_code": address.space_code,
-                "st_code": st_code,
-                "xco2": float(observation.xco2),
-                "quality_flag": observation.quality_flag,
-                "center_lon": float(observation.lon),
-                "center_lat": float(observation.lat),
-                "footprint_geojson": _footprint_geojson(observation),
-                "source_uri": observation.source_uri,
-                "source_index": observation.source_index,
-                "metadata_json": json.dumps(observation.metadata, ensure_ascii=False),
-            }
-        )
+        for measurement_name in _measurement_names(observation):
+            selected = _select_measurement(observation, measurement_name)
+            if selected is None:
+                continue
+            selected_name, selected_value, selected_unit = selected
+            metadata = dict(observation.metadata)
+            if selected_name is not None:
+                metadata.update(
+                    {
+                        "measurement_name": selected_name,
+                        "measurement_value": selected_value,
+                        "measurement_unit": selected_unit,
+                    }
+                )
+            observation_id = observation.observation_id
+            if selected_name is not None and not observation_id.endswith(f":{selected_name}"):
+                observation_id = f"{observation_id}:{selected_name}"
+            rows.append(
+                {
+                    "data_type": "carbon",
+                    "satellite": observation.satellite,
+                    "product_type": product_type,
+                    "observation_id": observation_id,
+                    "acq_time": observation.acq_time,
+                    "time_bucket": _time_bucket_from_datetime(timestamp, config.time_granularity),
+                    "grid_type": config.grid_type,
+                    "grid_level": int(address.grid_level),
+                    "space_code": address.space_code,
+                    "st_code": st_code,
+                    "xco2": selected_value,
+                    "quality_flag": observation.quality_flag,
+                    "center_lon": float(observation.lon),
+                    "center_lat": float(observation.lat),
+                    "footprint_geojson": _footprint_geojson(observation),
+                    "source_uri": observation.source_uri,
+                    "source_index": observation.source_index,
+                    "metadata_json": json.dumps(metadata, ensure_ascii=False),
+                }
+            )
     return rows
 
 
@@ -886,13 +1171,15 @@ def _partition_source_slice_chunk(
     *,
     resolved_source_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    observations = _load_oco2_lite_observation_slice(
+    normalized_product_type = normalize_carbon_product_type(config.product_type)
+    observations = _load_carbon_observation_slice(
         Path(resolved_source_path or _resolve_oco2_lite_source_path(chunk.source_uri)),
         chunk.start_index,
         chunk.stop_index,
+        product_type=normalized_product_type,
         source_uri=chunk.source_uri,
     )
-    if normalize_carbon_product_type(config.product_type) == "tansat":
+    if normalized_product_type in {"tansat", "sif"}:
         unsupported = sorted({observation.satellite for observation in observations if observation.satellite.casefold() != "tansat"})
         if unsupported:
             raise ValueError(f"TanSat product requires TanSat observations, found: {', '.join(unsupported)}")

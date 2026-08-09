@@ -58,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "carbon_schema",
             "carbon_coordinates",
             "carbon_xco2_range",
+            "carbon_sif_range",
         ],
     },
 }

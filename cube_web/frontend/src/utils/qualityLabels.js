@@ -14,6 +14,7 @@ const ruleLabels = {
   optical_band_contract: '光学波段规范', radar_band_contract: '雷达极化通道规范',
   carbon_schema: '碳卫星数据结构',
   carbon_coordinates: '碳卫星坐标有效性', carbon_xco2_range: 'XCO2 数值范围',
+  carbon_sif_range: 'SIF 数值范围',
 };
 
 const errorLabels = {
@@ -29,6 +30,7 @@ const errorLabels = {
   invalid_band_type: '波段类型无效', window_out_of_bounds: '像素窗口超出范围',
   missing_carbon_indexes: '缺少碳卫星观测索引', missing_carbon_fields: '缺少碳卫星字段',
   invalid_coordinates: '观测坐标无效', xco2_out_of_range: 'XCO2 数值超出范围',
+  sif_out_of_range: 'SIF 数值超出范围',
   missing_quality_flag: '缺少质量标识', output_count_mismatch: '输出数量不一致',
 };
 
@@ -55,7 +57,7 @@ const metadataRules = new Set([
 ]);
 const sourceRules = new Set([
   'asset_readability', 'asset_crs', 'carbon_schema', 'carbon_coordinates',
-  'carbon_xco2_range',
+  'carbon_xco2_range', 'carbon_sif_range',
 ]);
 
 const systemErrorCodes = new Set(['object_reader_unavailable']);
@@ -65,7 +67,7 @@ const metadataErrorCodes = new Set([
 const sourceErrorCodes = new Set([
   'invalid_carbon_source', 'invalid_cog_uri', 'invalid_checksum', 'source_object_unreadable',
   'missing_carbon_indexes', 'missing_carbon_fields',
-  'invalid_coordinates', 'xco2_out_of_range',
+  'invalid_coordinates', 'xco2_out_of_range', 'sif_out_of_range',
   'missing_quality_flag',
 ]);
 

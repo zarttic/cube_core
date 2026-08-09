@@ -370,7 +370,11 @@ def _run_carbon_dataset_on_ray(
                 raise ValueError("normalized carbon source must use an accessible MinIO bucket")
             source_format = str(asset["source_format"])
             suffix = Path(parsed.path).suffix.lower()
-            allowed_suffixes = {"netcdf": {".nc", ".nc4"}, "hdf5": {".h5", ".hdf", ".hdf5"}}
+            allowed_suffixes = {
+                "netcdf": {".nc", ".nc4"},
+                "hdf5": {".h5", ".hdf", ".hdf5"},
+                "sif": {".sif"},
+            }
             if suffix not in allowed_suffixes.get(source_format, set()):
                 raise ValueError(f"carbon source suffix {suffix!r} does not match source_format={source_format!r}")
             local_path = cache_source_cog(
@@ -390,7 +394,7 @@ def _run_carbon_dataset_on_ray(
             bands = [band for band in dataset["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
             asset_cell_keys: set[tuple[str, int, str | None]] = set()
             for ordinal, observation in enumerate(observations):
-                row = partition_observation(observation, config, sdk=sdk)
+                base_row = partition_observation(observation, config, sdk=sdk)
                 address = sdk.locate(
                     grid_type=grid_type,
                     requested_grid_level=requested_grid_level,
@@ -414,8 +418,14 @@ def _run_carbon_dataset_on_ray(
                 )
                 source_index = ordinal if observation.source_index is None else int(observation.source_index)
                 # Multiple observations can share a cell and time period.  The stable suffix preserves each raw observation.
-                observation_bucket = f"{row['time_bucket']}-{source_index:09d}"
+                observation_bucket = f"{base_row['time_bucket']}-{source_index:09d}"
                 for band in bands:
+                    row = partition_observation(
+                        observation,
+                        config,
+                        sdk=sdk,
+                        measurement_name=str(band["band_code"]),
+                    )
                     identity = OutputIdentity(
                         dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"],
                         band_code=band["band_code"], grid_type=grid_type, grid_level=int(address.grid_level), space_code=address.space_code,

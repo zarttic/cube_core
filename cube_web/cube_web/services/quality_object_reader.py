@@ -44,7 +44,7 @@ class QualityObjectReader:
                 sample_pixels=sample_pixels,
                 sample_band_index=sample_band_index,
             )
-        if source_format in {"netcdf", "hdf5"}:
+        if source_format in {"netcdf", "hdf5", "sif"}:
             self._inspect_scientific_container(local_path, source_format)
             return AssetInspection()
         raise ValueError(f"unsupported source format: {source_format}")
@@ -111,7 +111,7 @@ class QualityObjectReader:
                 tuple(dataset.variables)
                 return
         except (OSError, RuntimeError):
-            if source_format != "hdf5":
+            if source_format not in {"hdf5", "sif"}:
                 raise
         # Some valid HDF5 products do not use the NetCDF data model but are
         # still exposed by GDAL through raster bands or subdatasets.

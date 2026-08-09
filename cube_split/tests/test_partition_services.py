@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from netCDF4 import Dataset
 
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.sdk import CubeEncoderSDK
@@ -351,10 +352,11 @@ def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
 def test_supported_carbon_product_types_are_registered():
     service = CarbonSatellitePartitionService()
 
-    assert service.supported_product_types == ("xco2", "tansat")
-    assert supported_carbon_product_types() == ("xco2", "tansat")
+    assert service.supported_product_types == ("xco2", "tansat", "sif")
+    assert supported_carbon_product_types() == ("xco2", "tansat", "sif")
     assert get_carbon_product_adapter("oco2_lite").product_type == "xco2"
     assert get_carbon_product_adapter("tansat_xco2").product_type == "tansat"
+    assert get_carbon_product_adapter("tansat_sif_l2").product_type == "sif"
 
 
 def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path: Path):
@@ -1323,6 +1325,39 @@ def test_carbon_loader_reads_tansat_style_h5_via_generic_netcdf4_schema(monkeypa
     assert observations[0].footprint is None
     assert observations[1].acq_time == "2020-01-01T00:01:00Z"
     assert observations[1].metadata["schema_kind"] == "generic_xco2_netcdf"
+
+
+def test_carbon_loader_reads_tansat_sif_l2_netcdf4(tmp_path: Path):
+    source = tmp_path / "20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4"
+    with Dataset(source, mode="w") as dataset:
+        dataset.createDimension("sounding_dim", 2)
+        dataset.createDimension("vertex_dim", 4)
+        latitude = dataset.createVariable("Latitude", "f4", ("sounding_dim",))
+        longitude = dataset.createVariable("Longitude", "f4", ("sounding_dim",))
+        time_var = dataset.createVariable("Time", "f8", ("sounding_dim",))
+        sif_758 = dataset.createVariable("SIF_758nm", "f4", ("sounding_dim",))
+        sif_771 = dataset.createVariable("SIF_771nm", "f4", ("sounding_dim",))
+        lat_vertex = dataset.createVariable("LatVertex", "f4", ("vertex_dim", "sounding_dim"))
+        lon_vertex = dataset.createVariable("LongVertex", "f4", ("vertex_dim", "sounding_dim"))
+        latitude[:] = [39.9, 40.0]
+        longitude[:] = [116.4, 116.5]
+        time_var[:] = [0, 20.5]
+        sif_758[:] = [1.25, 0.75]
+        sif_771[:] = [0.25, -0.1]
+        lat_vertex[:] = [[39.8, 39.9], [39.8, 39.9], [40.0, 40.1], [40.0, 40.1]]
+        lon_vertex[:] = [[116.3, 116.4], [116.5, 116.6], [116.5, 116.6], [116.3, 116.4]]
+
+    observations = load_observations_from_file(source, product_type="sif")
+
+    assert len(observations) == 2
+    assert observations[0].source_uri == str(source)
+    assert observations[0].satellite == "TanSat"
+    assert observations[0].observation_id == "20170209-00000000"
+    assert observations[0].acq_time == "2017-02-09T00:00:00Z"
+    assert observations[0].metadata["source_format"] == "netcdf"
+    assert observations[0].metadata["schema_kind"] == "tansat_sif_l2"
+    assert observations[0].metadata["measurement_values"] == {"SIF_758nm": 1.25, "SIF_771nm": 0.25}
+    assert len(observations[0].footprint or []) == 4
 
 
 def test_carbon_loader_reads_tansat_style_h5_slice(monkeypatch, tmp_path: Path):
