@@ -134,6 +134,108 @@ def test_carbon_discovery_stats_and_hashes_unique_nc4() -> None:
     assert asset["s3_uri"].endswith("sample.nc4")
 
 
+def test_carbon_discovery_reports_tansat_sif_product_from_netcdf4() -> None:
+    content = b"real-sif-sample"
+
+    class Response:
+        def stream(self, _size):
+            yield content
+
+        def close(self):
+            pass
+
+        def release_conn(self):
+            pass
+
+    class Minio:
+        def list_objects(self, bucket, prefix, recursive):
+            assert (bucket, prefix, recursive) == ("cube", "cube/source/carbon/", True)
+            return [type("Object", (), {"object_name": "cube/source/carbon/20260725_TanSat_SIF_L2_20170209.nc4"})()]
+
+        def stat_object(self, _bucket, _key):
+            return type("Stat", (), {"size": len(content), "metadata": {}})()
+
+        def get_object(self, _bucket, _key):
+            return Response()
+
+    asset = runner.discover_carbon_asset(Minio(), bucket="cube")
+
+    assert asset["source_format"] == "netcdf"
+    assert asset["product_type"] == "sif"
+    assert asset["s3_uri"].endswith("20260725_TanSat_SIF_L2_20170209.nc4")
+
+
+def test_carbon_discovery_requires_explicit_uri_when_formats_coexist() -> None:
+    content = b"real-sif-sample"
+
+    class Response:
+        def stream(self, _size):
+            yield content
+
+        def close(self):
+            pass
+
+        def release_conn(self):
+            pass
+
+    class Minio:
+        def list_objects(self, bucket, prefix, recursive):
+            assert (bucket, prefix, recursive) == ("cube", "cube/source/carbon/", True)
+            return [
+                type("Object", (), {"object_name": "cube/source/carbon/oco2.nc4"})(),
+                type("Object", (), {"object_name": "cube/source/carbon/sample.sif"})(),
+            ]
+
+        def stat_object(self, _bucket, _key):
+            return type("Stat", (), {"size": len(content), "metadata": {}})()
+
+        def get_object(self, _bucket, _key):
+            return Response()
+
+    with pytest.raises(RuntimeError, match="choose one explicitly"):
+        runner.discover_carbon_asset(Minio(), bucket="cube")
+
+    asset = runner.discover_carbon_asset(
+        Minio(), bucket="cube", explicit_uri="s3://cube/cube/source/carbon/sample.sif"
+    )
+    assert asset["source_format"] == "sif"
+
+
+def test_carbon_discovery_accepts_explicit_sif_uri_in_user_bucket() -> None:
+    content = b"real-user-sif-sample"
+    requested: list[tuple[str, str]] = []
+
+    class Response:
+        def stream(self, _size):
+            yield content
+
+        def close(self):
+            pass
+
+        def release_conn(self):
+            pass
+
+    class Minio:
+        def stat_object(self, bucket, key):
+            requested.append((bucket, key))
+            return type("Stat", (), {"size": len(content), "metadata": {}})()
+
+        def get_object(self, bucket, key):
+            requested.append((bucket, key))
+            return Response()
+
+    uri = "s3://user-1/cog/20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4"
+    asset = runner.discover_carbon_asset(Minio(), bucket="cube", explicit_uri=uri)
+
+    assert asset["s3_uri"] == uri
+    assert asset["product_type"] == "sif"
+    assert asset["source_format"] == "netcdf"
+    assert requested == [
+        ("user-1", "cog/20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4"),
+        ("user-1", "cog/20260725_192050_TanSat_SIF_L2_20170209_ACGS_ND_V01.nc4"),
+    ]
+
+
 def test_namespace_is_complete_deterministic_and_preserves_source_uris() -> None:
     original = _manifest()
     namespaced = runner.namespace_manifest(original, "accept-123")
@@ -274,6 +376,49 @@ def test_partition_failure_is_never_reported_as_acceptance_success() -> None:
         runner.assert_partition_success([{"task_id": "bad", "final": {"status": "failed", "error": "boom"}}])
     with pytest.raises(RuntimeError, match="missing Ray execution evidence"):
         runner.assert_partition_success([{"task_id": "local", "final": {"status": "completed", "result": {}}}])
+
+
+def test_collect_ray_evidence_uses_kuberay_jobs_api(monkeypatch) -> None:
+    from cube_split import runtime_config
+
+    calls = {}
+
+    class Client:
+        def __init__(self, address):
+            calls["address"] = address
+
+        def submit_job(self, **kwargs):
+            calls["submit"] = kwargs
+            return "probe-job"
+
+        def get_job_status(self, job_id):
+            assert job_id == "probe-job"
+            return "SUCCEEDED"
+
+        def get_job_logs(self, job_id):
+            assert job_id == "probe-job"
+            return 'CUBE_RAY_PROBE={"worker_hostname":"ray-worker","live_nodes":2,"nodes":3,"cpu":1.0}'
+
+    monkeypatch.setattr(
+        runtime_config,
+        "env_text",
+        lambda name, default="": {
+            "CUBE_WEB_RAY_JOB_ADDRESS": "http://10.3.100.183:30826",
+            "CUBE_WEB_RAY_JOB_TIMEOUT_SECONDS": "10",
+        }.get(name, default),
+    )
+    import ray.job_submission
+
+    monkeypatch.setattr(ray.job_submission, "JobSubmissionClient", Client)
+    evidence = runner.collect_ray_evidence()
+
+    assert evidence["backend"] == "ray"
+    assert evidence["execution_engine"] == "ray_job"
+    assert evidence["ray_job_address"] == "http://10.3.100.183:30826"
+    assert evidence["worker_hostname"] == "ray-worker"
+    assert calls["submit"]["runtime_env"] == {"env_vars": {}}
+    assert "address=" in calls["submit"]["entrypoint"]
+    assert "auto" in calls["submit"]["entrypoint"]
 
 
 def test_repeated_partition_submission_must_return_original_task_id() -> None:
