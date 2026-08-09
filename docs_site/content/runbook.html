@@ -1,7 +1,7 @@
 <h2 id="before">A. 开始前签字检查</h2>
 <table class="grid-table"><thead><tr><th>检查项</th><th>证据</th><th>结果</th></tr></thead><tbody><tr><td>运行目标已确认</td><td>环境名、操作人、时间窗口</td><td>□</td></tr><tr><td>OpenGauss 可连接</td><td>不打印密码的连接测试</td><td>□</td></tr><tr><td>Ray 集群可连接</td><td>head 地址、worker 数、资源</td><td>□</td></tr><tr><td>MinIO 对象已 stat</td><td>bucket、key、size、checksum</td><td>□</td></tr><tr><td>源数据不是本地路径</td><td>manifest 中全部是 s3://</td><td>□</td></tr><tr><td>认证已开启</td><td>CUBE_WEB_AUTH_REQUIRED 不为 0</td><td>□</td></tr></tbody></table>
 <h2 id="load">B. 导入检查</h2>
-<ol><li>记录 <code>load_batch_id</code>，确认它由载入方生成且可复用。</li><li>确认 datasets 非空；每个 Dataset 有 dataset_id、dataset_code、title、data_type。</li><li>确认每个 Scene 有稳定 scene_id、采集时间和空间信息。</li><li>确认每个资产有 checksum；非碳数据有 COG、bbox、crs；碳数据有 NetCDF/HDF5 source_uri。</li><li>确认 bands 非空且 band_code 稳定，不让前端猜波段语义。</li><li>导入后通过批次详情对账，不以 HTTP 202 单独证明数据完整。</li></ol>
+<ol><li>记录 <code>load_batch_id</code>，确认它由载入方生成且可复用。</li><li>确认 datasets 非空；每个 Dataset 有 dataset_id、dataset_code、title、data_type。</li><li>确认每个 Scene 有稳定 scene_id、采集时间和空间信息。</li><li>确认每个资产有 checksum；非碳数据有 COG、bbox、crs；碳数据有 NetCDF/HDF5 source_uri。TanSat SIF 还需声明 <code>product_type=sif</code> 和两个 SIF 变量波段。</li><li>确认 bands 非空且 band_code 稳定，不让前端猜波段语义。</li><li>导入后通过批次详情对账，不以 HTTP 202 单独证明数据完整。</li></ol>
 <h2 id="partition">C. 剖分检查</h2>
 <ol><li>创建或确认 partition_run_id，并记录 source_batch_ids。</li><li>确认选中的 Scene 不重复，BandUnit 不重复。</li><li>确认本次运行的所有 Dataset 使用相同 grid_type 和 requested_grid_level。</li><li>确认格网方式：geohash/mgrs → logical；isea4h → entity。</li><li>确认 max_cells_per_asset=0 是正式任务；小正数只用于 smoke。</li><li>记录 task_id，轮询任务详情，不重复提交。</li></ol>
 <h2 id="quality">D. 质检和入库检查</h2>

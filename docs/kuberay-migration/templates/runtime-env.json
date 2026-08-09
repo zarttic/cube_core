@@ -1,0 +1,5 @@
+{
+  "env_vars": {
+    "CUBE_SOURCE_CACHE_DIR": "/data/cube_split_source_cache"
+  }
+}
