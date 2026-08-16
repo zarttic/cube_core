@@ -119,7 +119,10 @@ def cache_source_cog(
     target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_name(f"{target.name}.lock")
-    cache_lock_path = cache_dir / ".cache.lock"
+    # Keep the coordination inode outside the directory that ENOSPC cleanup
+    # removes; otherwise a concurrent caller could recreate a new lock file
+    # while the purge still holds the old inode.
+    cache_lock_path = cache_dir.parent / f".{cache_dir.name}.cache.lock"
     cache_started = time.perf_counter()
     cache_hit = False
     download_elapsed = 0.0
