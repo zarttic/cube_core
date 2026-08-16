@@ -115,14 +115,20 @@ def cache_source_cog(
         raise ValueError(f"invalid source COG URI: {cog_uri}")
     source_bucket = parsed.netloc
     key = unquote(parsed.path).lstrip("/")
+    cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_name(f"{target.name}.lock")
+    cache_lock_path = cache_dir / ".cache.lock"
     cache_started = time.perf_counter()
     cache_hit = False
     download_elapsed = 0.0
-    with lock_path.open("a+") as lock:
+    with lock_path.open("a+") as lock, cache_lock_path.open("a+") as cache_lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        # Acquire the shared root lock only after the target lock.  This keeps
+        # the lock order deadlock-free when an ENOSPC retry upgrades to an
+        # exclusive purge lock while another target is finishing a download.
+        fcntl.flock(cache_lock.fileno(), fcntl.LOCK_SH)
         try:
             remote_identity = _object_identity(minio_client.stat_object(source_bucket, key))
             identity = _read_identity_sidecar(target) if target.exists() else {}
@@ -149,6 +155,8 @@ def cache_source_cog(
                         raise
                     # Worker-local loader cache is disposable; reclaim a stale cache once.
                     temporary.unlink(missing_ok=True)
+                    fcntl.flock(cache_lock.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(cache_lock.fileno(), fcntl.LOCK_EX)
                     _clear_source_cache(cache_dir)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     minio_client.fget_object(source_bucket, key, str(temporary))
@@ -160,7 +168,10 @@ def cache_source_cog(
                     local=_local_file_identity(target),
                 )
         finally:
+            # Release the target lock before the root lock so a purge cannot
+            # unlink a lock file that is still held by a completed operation.
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(cache_lock.fileno(), fcntl.LOCK_UN)
     if metrics is not None:
         metrics.update({
             "cache_hit": cache_hit,
@@ -174,10 +185,9 @@ def _object_identity(stat: Any) -> str:
     etag = str(getattr(stat, "etag", "") or "").strip().strip('"')
     if etag:
         return f"etag:{etag}"
-    last_modified = getattr(stat, "last_modified", None)
-    if last_modified is not None:
-        return f"mtime:{last_modified}"
-    return f"size:{getattr(stat, 'size', '')}"
+    # Last-modified and size-only identities cannot prove that the remote bytes
+    # are unchanged.  Disable cache reuse when MinIO cannot provide an ETag.
+    return ""
 
 
 def _identity_sidecar_path(target: Path) -> Path:
@@ -211,8 +221,11 @@ def _write_identity_sidecar(target: Path, **identity: str) -> None:
 
 
 def _local_file_identity(path: Path) -> str:
-    stat = path.stat()
-    return f"size:{stat.st_size}|mtime_ns:{stat.st_mtime_ns}"
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def create_unique_run_dir(output_dir: Path, *, prefix: str = "run") -> Path:

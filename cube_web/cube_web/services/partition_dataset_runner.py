@@ -1432,10 +1432,13 @@ class NormalizedPartitionDatasetRunner:
             self._payload(ray_address=ray_address, **{key: value for key, value in run.items() if key in payload_fields})
             for run in runs
         ]
-        preflight_timing = TimingRecorder("source_preflight")
-        with preflight_timing.phase("minio.stat"):
-            self._verify_assets_exist(payloads)
-        preflight_record = preflight_timing.finish()
+        preflight_records: list[dict[str, Any]] = []
+        for payload in payloads:
+            preflight_timing = TimingRecorder("source_preflight")
+            preflight_timing.set_attribute("dataset_id", payload["dataset"].get("dataset_id"))
+            with preflight_timing.phase("minio.stat"):
+                self._verify_assets_exist([payload])
+            preflight_records.append(preflight_timing.finish())
         outcomes: list[dict[str, Any] | None] = [None] * len(payloads)
         logical_positions = [
             index for index, payload in enumerate(payloads)
@@ -1469,13 +1472,20 @@ class NormalizedPartitionDatasetRunner:
             except Exception as exc:
                 outcomes[index] = {"error": str(exc)}
         completed_outcomes = [outcome for outcome in outcomes if outcome is not None]
-        for outcome in completed_outcomes:
-            result = outcome.get("result") if isinstance(outcome, dict) else None
-            if not isinstance(result, dict):
+        for index, outcome in enumerate(outcomes):
+            if outcome is None:
                 continue
-            timings = dict(result.get("timings") or {})
-            timings["source_preflight"] = preflight_record
-            result["timings"] = timings
+            result = outcome.get("result") if isinstance(outcome, dict) else None
+            if not isinstance(outcome, dict):
+                continue
+            if isinstance(result, dict):
+                timings = dict(result.get("timings") or {})
+                timings["source_preflight"] = preflight_records[index]
+                result["timings"] = timings
+            else:
+                timings = dict(outcome.get("timings") or {})
+                timings["source_preflight"] = preflight_records[index]
+                outcome["timings"] = timings
         return completed_outcomes
 
     def run_dataset(

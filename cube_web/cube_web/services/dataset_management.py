@@ -79,6 +79,10 @@ class DatasetManagementRepository(Protocol):
         self, dataset_id: str, object_uris: tuple[str, ...], *, error: str | None, actor: str
     ) -> None: ...
 
+    def mark_object_cleanup_complete(
+        self, dataset_id: str, cleanup_id: str, *, actor: str
+    ) -> None: ...
+
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
@@ -168,7 +172,13 @@ class DatasetManagementService:
             if value is None:
                 continue
             parsed = urlparse(str(value))
-            if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+            if (
+                parsed.scheme.lower() != "s3"
+                or not parsed.netloc
+                or not parsed.path.strip("/")
+                or parsed.query
+                or parsed.fragment
+            ):
                 raise DatasetManagementConflict(f"{field} must be a valid s3:// URI")
         checksum = changes.get("checksum")
         if checksum is not None and re.fullmatch(r"[0-9a-f]{64}", str(checksum)) is None:
@@ -201,11 +211,25 @@ class DatasetManagementService:
         try:
             recorder(dataset_id, object_uris, error=error, actor=actor)
         except Exception as exc:  # pragma: no cover - persistence failure is environment-specific.
-            pending["durable"] = False
-            pending["persistence_error"] = type(exc).__name__
+            raise DatasetManagementConflict(
+                "object cleanup failed and its durable retry record could not be persisted"
+            ) from exc
         else:
             pending["durable"] = True
         return pending
+
+    def _ack_object_cleanup(self, dataset_id: str, cleanup_id: str | None, *, actor: str) -> None:
+        if not cleanup_id:
+            return
+        marker = getattr(self.repository, "mark_object_cleanup_complete", None)
+        if marker is None:
+            raise DatasetManagementConflict("object cleanup acknowledgement is not configured")
+        try:
+            marker(dataset_id, cleanup_id, actor=actor)
+        except Exception as exc:  # pragma: no cover - persistence failure is environment-specific.
+            raise DatasetManagementConflict(
+                "object cleanup completed but its durable acknowledgement failed; pending record retained"
+            ) from exc
 
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
@@ -237,28 +261,52 @@ class DatasetManagementService:
             raise ValueError(f"unsupported grid type: {grid_type}")
         result = self.repository.delete_band_grid(dataset_id, band_unit_id, grid_type, actor=actor)
         object_uris = tuple(str(value) for value in result.pop("object_uris", ()) if value)
+        cleanup_id = str(result.pop("object_cleanup_id", "") or "") or None
         if object_uris and self.grid_object_cleanup is not None:
             try:
                 cleanup_result = self.grid_object_cleanup(object_uris)
             except Exception as exc:  # pragma: no cover - storage failure is environment-specific.
-                result["object_cleanup"] = self._pending_object_cleanup(
-                    dataset_id, object_uris, actor=actor, error=type(exc).__name__
-                )
+                if cleanup_id:
+                    result["object_cleanup"] = {
+                        "status": "pending", "error": type(exc).__name__,
+                        "object_count": len(object_uris), "object_uris": list(object_uris),
+                        "cleanup_id": cleanup_id, "durable": True,
+                    }
+                else:
+                    result["object_cleanup"] = self._pending_object_cleanup(
+                        dataset_id, object_uris, actor=actor, error=type(exc).__name__
+                    )
             else:
                 if isinstance(cleanup_result, dict) and cleanup_result.get("status") == "pending":
-                    result["object_cleanup"] = self._pending_object_cleanup(
-                        dataset_id,
-                        object_uris,
-                        actor=actor,
-                        error=str(cleanup_result.get("error") or "cleanup_pending"),
-                        details=cleanup_result,
-                    )
+                    if cleanup_id:
+                        result["object_cleanup"] = {
+                            **cleanup_result,
+                            "status": "pending", "object_count": len(object_uris),
+                            "object_uris": list(object_uris), "cleanup_id": cleanup_id,
+                            "durable": True,
+                        }
+                    else:
+                        result["object_cleanup"] = self._pending_object_cleanup(
+                            dataset_id,
+                            object_uris,
+                            actor=actor,
+                            error=str(cleanup_result.get("error") or "cleanup_pending"),
+                            details=cleanup_result,
+                        )
                 else:
+                    self._ack_object_cleanup(dataset_id, cleanup_id, actor=actor)
                     result["object_cleanup"] = cleanup_result
         elif object_uris:
-            result["object_cleanup"] = self._pending_object_cleanup(
-                dataset_id, object_uris, actor=actor
-            )
+            if cleanup_id:
+                result["object_cleanup"] = {
+                    "status": "pending", "object_count": len(object_uris),
+                    "object_uris": list(object_uris), "cleanup_id": cleanup_id,
+                    "durable": True,
+                }
+            else:
+                result["object_cleanup"] = self._pending_object_cleanup(
+                    dataset_id, object_uris, actor=actor
+                )
         return result
 
     def request_ingest(self, dataset_id: str, actor: Any) -> dict[str, Any]:
@@ -560,6 +608,11 @@ class InMemoryDatasetManagementRepository:
                 "actor": actor,
                 "created_at": _now_text(),
             })
+
+    def mark_object_cleanup_complete(
+        self, dataset_id: str, cleanup_id: str, *, actor: str
+    ) -> None:
+        del dataset_id, cleanup_id, actor
 
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         with self._lock:
@@ -1158,6 +1211,27 @@ class OpenGaussDatasetManagementRepository:
                 if not cursor.fetchone()["referenced"]:
                     object_uris.discard(uri)
 
+            object_cleanup_id = None
+            if object_uris:
+                object_cleanup_id = f"cleanup-{uuid4()}"
+                cursor.execute("SELECT attributes FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
+                dataset_row = cursor.fetchone()
+                if dataset_row is None:
+                    raise ManagedDatasetNotFound(dataset_id)
+                attributes = dict(dataset_row.get("attributes") or {})
+                pending = list(attributes.get("object_cleanup_pending") or [])
+                pending.append({
+                    "cleanup_id": object_cleanup_id,
+                    "status": "pending",
+                    "object_uris": sorted(object_uris),
+                    "created_at": _now_text(),
+                })
+                attributes["object_cleanup_pending"] = pending
+                cursor.execute(
+                    "UPDATE datasets SET attributes=%s,updated_at=now() WHERE dataset_id=%s",
+                    (Jsonb(attributes), dataset_id),
+                )
+
         return {
             "dataset_id": dataset_id,
             "band_unit_id": band_unit_id,
@@ -1169,6 +1243,7 @@ class OpenGaussDatasetManagementRepository:
             "deleted_ingest_records": deleted_ingest_records,
             "affected_output_versions": sorted(affected_versions),
             "object_uris": sorted(object_uris),
+            "object_cleanup_id": object_cleanup_id,
         }
 
     def record_object_cleanup_pending(
@@ -1187,6 +1262,33 @@ class OpenGaussDatasetManagementRepository:
                 "actor": actor,
                 "created_at": _now_text(),
             })
+            attributes["object_cleanup_pending"] = pending
+            cursor.execute(
+                "UPDATE datasets SET attributes=%s,updated_at=now() WHERE dataset_id=%s",
+                (Jsonb(attributes), dataset_id),
+            )
+
+    def mark_object_cleanup_complete(
+        self, dataset_id: str, cleanup_id: str, *, actor: str
+    ) -> None:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT attributes FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise ManagedDatasetNotFound(dataset_id)
+            attributes = dict(row.get("attributes") or {})
+            pending = list(attributes.get("object_cleanup_pending") or [])
+            found = False
+            for record in pending:
+                if str(record.get("cleanup_id") or "") != cleanup_id:
+                    continue
+                record["status"] = "completed"
+                record["completed_by"] = actor
+                record["completed_at"] = _now_text()
+                found = True
+                break
+            if not found:
+                raise DatasetManagementConflict(f"unknown object cleanup record: {cleanup_id}")
             attributes["object_cleanup_pending"] = pending
             cursor.execute(
                 "UPDATE datasets SET attributes=%s,updated_at=now() WHERE dataset_id=%s",

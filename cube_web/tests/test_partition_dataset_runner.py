@@ -382,6 +382,8 @@ def test_batch_runner_submits_all_logical_units_to_one_ray_queue(monkeypatch) ->
     assert [outcome["result"]["dataset_id"] for outcome in outcomes] == ["first", "second"]
     assert outcomes[0]["result"]["timings"]["source_preflight"]["scope"] == "source_preflight"
     assert outcomes[1]["result"]["timings"]["source_preflight"]["scope"] == "source_preflight"
+    assert outcomes[0]["result"]["timings"]["source_preflight"]["attributes"]["dataset_id"] == "first"
+    assert outcomes[1]["result"]["timings"]["source_preflight"]["attributes"]["dataset_id"] == "second"
 
 
 def test_carbon_observation_budget_is_shared_across_assets() -> None:

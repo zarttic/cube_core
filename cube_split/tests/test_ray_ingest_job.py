@@ -311,7 +311,7 @@ def test_upload_assets_to_minio_reuploads_when_identity_changes(monkeypatch, tmp
     assert uploaded
     assert mapping[str(source)].startswith("s3://cube/cube/raw/")
     identity_text = source.with_name(f"{source.name}.identity").read_text(encoding="utf-8")
-    assert "local=size:4|mtime_ns:" in identity_text
+    assert "local=sha256:" in identity_text
     assert "remote=etag:remote-new" in identity_text
 
 
