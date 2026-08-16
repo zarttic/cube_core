@@ -6,7 +6,11 @@ from typing import Any
 import pytest
 
 from cube_web.services import partition_dataset_runner as runner_module
-from cube_web.services.dataset_management import DatasetManagementService, InMemoryDatasetManagementRepository
+from cube_web.services.dataset_management import (
+    DatasetManagementConflict,
+    DatasetManagementService,
+    InMemoryDatasetManagementRepository,
+)
 from cube_web.services.partition_contracts import StrictPartitionRequest
 from cube_web.services.partition_service import PartitionService
 from cube_web.services.partition_workflow import PartitionWorkflowService
@@ -189,3 +193,61 @@ def test_update_dataset_asset_syncs_authoritative_asset_definition() -> None:
     stored = repository.details["dataset-a"]["assets"][0]
     assert stored["source_uri"] == "s3://cube/new.tif"
     assert stored["checksum"] == "1" * 64
+
+
+def test_update_dataset_asset_does_not_mutate_same_asset_id_in_another_dataset() -> None:
+    repository = InMemoryDatasetManagementRepository(
+        datasets={
+            dataset_id: {
+                "dataset_id": dataset_id, "dataset_code": dataset_id.upper(),
+                "dataset_title": dataset_id, "data_type": "optical", "status": "active",
+            }
+            for dataset_id in ("dataset-a", "dataset-b")
+        },
+        details={
+            "dataset-a": {"assets": [{"asset_id": "a1", "source_uri": "s3://cube/a.tif", "cog_uri": "s3://cube/a.tif"}]},
+            "dataset-b": {"assets": [{"asset_id": "a1", "source_uri": "s3://cube/b.tif", "cog_uri": "s3://cube/b.tif"}]},
+        },
+    )
+    service = DatasetManagementService(repository)
+
+    service.update_dataset_asset("dataset-a", "a1", {"source_uri": "s3://cube/a-new.tif"}, actor="admin")
+
+    assert repository.details["dataset-a"]["assets"][0]["source_uri"] == "s3://cube/a-new.tif"
+    assert repository.details["dataset-b"]["assets"][0]["source_uri"] == "s3://cube/b.tif"
+
+
+def test_update_dataset_asset_rejects_non_s3_source_uri() -> None:
+    repository = InMemoryDatasetManagementRepository(
+        datasets={"dataset-a": {"dataset_id": "dataset-a", "dataset_code": "DS-A", "dataset_title": "A", "data_type": "optical", "status": "active"}},
+    )
+    service = DatasetManagementService(repository)
+
+    with pytest.raises(DatasetManagementConflict, match="valid s3:// URI"):
+        service.update_dataset_asset("dataset-a", "a1", {"source_uri": "/tmp/source.tif"}, actor="admin")
+
+
+class _ObjectCleanupRepository(InMemoryDatasetManagementRepository):
+    def delete_band_grid(self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str) -> dict[str, Any]:
+        return {"dataset_id": dataset_id, "object_uris": [f"s3://cube/partition/{dataset_id}/versions/v1/tile.tif"]}
+
+
+def test_failed_object_cleanup_is_recorded_for_retry() -> None:
+    repository = _ObjectCleanupRepository(
+        datasets={"dataset-a": {"dataset_id": "dataset-a", "dataset_code": "DS-A", "dataset_title": "A", "data_type": "optical", "status": "active"}},
+    )
+
+    def fail_cleanup(_object_uris: tuple[str, ...]) -> dict[str, Any]:
+        raise RuntimeError("storage unavailable")
+
+    service = DatasetManagementService(repository, grid_object_cleanup=fail_cleanup)
+    result = service.delete_band_grid("dataset-a", "band-1", "geohash", actor="admin")
+
+    assert result["object_cleanup"] == {
+        "status": "pending",
+        "error": "RuntimeError",
+        "object_count": 1,
+        "object_uris": ["s3://cube/partition/dataset-a/versions/v1/tile.tif"],
+        "durable": True,
+    }
+    assert repository.object_cleanup_pending[0]["object_uris"] == result["object_cleanup"]["object_uris"]

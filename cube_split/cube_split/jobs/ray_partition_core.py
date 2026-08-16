@@ -93,6 +93,14 @@ def _minio_client(options: dict[str, Any] | None = None):
     )
 
 
+def _clear_source_cache(cache_dir: Path) -> None:
+    """Clear only a worker-owned source cache after an ENOSPC failure."""
+    resolved = cache_dir.expanduser().resolve()
+    if "cube_split_source_cache" not in resolved.parts or resolved in {Path("/"), Path("/tmp")}:
+        raise RuntimeError(f"refusing to clear an unscoped source cache directory: {resolved}")
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def cache_source_cog(
     cog_uri: str,
     cache_dir: Path,
@@ -116,9 +124,22 @@ def cache_source_cog(
     with lock_path.open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            remote_identity = _object_identity(minio_client.stat_object(source_bucket, key))
+            identity = _read_identity_sidecar(target) if target.exists() else {}
+            local_identity = ""
             if target.exists():
-                cache_hit = True
-            else:
+                try:
+                    local_identity = _local_file_identity(target)
+                except OSError:
+                    local_identity = ""
+            cache_hit = bool(
+                local_identity
+                and identity.get("remote") == remote_identity
+                and identity.get("local") == local_identity
+            )
+            if not cache_hit:
+                target.unlink(missing_ok=True)
+                _identity_sidecar_path(target).unlink(missing_ok=True)
                 temporary = target.with_suffix(f"{target.suffix}.part")
                 download_started = time.perf_counter()
                 try:
@@ -128,11 +149,16 @@ def cache_source_cog(
                         raise
                     # Worker-local loader cache is disposable; reclaim a stale cache once.
                     temporary.unlink(missing_ok=True)
-                    shutil.rmtree(cache_dir.parent, ignore_errors=True)
+                    _clear_source_cache(cache_dir)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     minio_client.fget_object(source_bucket, key, str(temporary))
                 download_elapsed = time.perf_counter() - download_started
                 temporary.replace(target)
+                _write_identity_sidecar(
+                    target,
+                    remote=remote_identity,
+                    local=_local_file_identity(target),
+                )
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     if metrics is not None:

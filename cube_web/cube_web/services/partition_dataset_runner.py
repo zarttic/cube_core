@@ -1469,16 +1469,13 @@ class NormalizedPartitionDatasetRunner:
             except Exception as exc:
                 outcomes[index] = {"error": str(exc)}
         completed_outcomes = [outcome for outcome in outcomes if outcome is not None]
-        preflight_attached = False
         for outcome in completed_outcomes:
             result = outcome.get("result") if isinstance(outcome, dict) else None
             if not isinstance(result, dict):
                 continue
-            if not preflight_attached:
-                timings = dict(result.get("timings") or {})
-                timings["source_preflight"] = preflight_record
-                result["timings"] = timings
-                preflight_attached = True
+            timings = dict(result.get("timings") or {})
+            timings["source_preflight"] = preflight_record
+            result["timings"] = timings
         return completed_outcomes
 
     def run_dataset(

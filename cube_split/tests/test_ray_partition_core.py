@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -72,9 +74,17 @@ class RecordingMinio:
     def __init__(self) -> None:
         self.downloads: list[tuple[str, str, str]] = []
         self.uploads: list[tuple[object, ...]] = []
+        self.etag = "etag-1"
+        self.fail_with_enospc = False
+
+    def stat_object(self, bucket: str, key: str) -> SimpleNamespace:
+        return SimpleNamespace(etag=self.etag, size=len(b"loader-owned-cog"))
 
     def fget_object(self, bucket: str, key: str, target: str) -> None:
         self.downloads.append((bucket, key, target))
+        if self.fail_with_enospc:
+            self.fail_with_enospc = False
+            raise OSError(errno.ENOSPC, "no space left on device")
         Path(target).write_bytes(b"loader-owned-cog")
 
     def fput_object(self, *args: object) -> None:
@@ -100,6 +110,47 @@ def test_cache_source_cog_reads_an_accessible_source_bucket_different_from_outpu
 
     assert cached.read_bytes() == b"loader-owned-cog"
     assert client.downloads == [("user-1", "cog/a.tif", str(cached.with_suffix(".tif.part")))]
+
+
+def test_cache_source_cog_reuses_only_a_matching_remote_identity(tmp_path: Path) -> None:
+    client = RecordingMinio()
+    cache_dir = tmp_path / "cube_split_source_cache"
+
+    first = cache_source_cog("s3://cube/loader/dataset/a.tif", cache_dir, client, "cube")
+    second = cache_source_cog("s3://cube/loader/dataset/a.tif", cache_dir, client, "cube")
+    assert first == second
+    assert len(client.downloads) == 1
+
+    client.etag = "etag-2"
+    cache_source_cog("s3://cube/loader/dataset/a.tif", cache_dir, client, "cube")
+    assert len(client.downloads) == 2
+
+
+def test_cache_source_cog_enospc_cleanup_is_scoped_to_worker_cache(tmp_path: Path) -> None:
+    client = RecordingMinio()
+    cache_dir = tmp_path / "cube_split_source_cache"
+    unrelated = tmp_path / "unrelated.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    client.fail_with_enospc = True
+
+    cached = cache_source_cog("s3://cube/loader/dataset/a.tif", cache_dir, client, "cube")
+
+    assert cached.read_bytes() == b"loader-owned-cog"
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert len(client.downloads) == 2
+
+
+def test_cache_source_cog_rejects_unscoped_enospc_cleanup(tmp_path: Path) -> None:
+    client = RecordingMinio()
+    cache_dir = tmp_path / "unsafe-cache"
+    unrelated = tmp_path / "unrelated.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    client.fail_with_enospc = True
+
+    with pytest.raises(RuntimeError, match="unscoped source cache"):
+        cache_source_cog("s3://cube/loader/dataset/a.tif", cache_dir, client, "cube")
+
+    assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
 def test_build_manifest_supports_landsat_collection_filenames(tmp_path: Path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -73,6 +74,10 @@ class DatasetManagementRepository(Protocol):
     def delete_band_grid(
         self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str
     ) -> dict[str, Any]: ...
+
+    def record_object_cleanup_pending(
+        self, dataset_id: str, object_uris: tuple[str, ...], *, error: str | None, actor: str
+    ) -> None: ...
 
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]: ...
 
@@ -158,8 +163,49 @@ class DatasetManagementService:
         quality rules. Updating both keeps the two read paths consistent so a
         source fix takes effect everywhere.
         """
+        for field in ("source_uri", "cog_uri"):
+            value = changes.get(field)
+            if value is None:
+                continue
+            parsed = urlparse(str(value))
+            if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+                raise DatasetManagementConflict(f"{field} must be a valid s3:// URI")
+        checksum = changes.get("checksum")
+        if checksum is not None and re.fullmatch(r"[0-9a-f]{64}", str(checksum)) is None:
+            raise DatasetManagementConflict("checksum must be 64 lowercase hexadecimal characters")
         self.get_dataset(dataset_id)
         return self.repository.update_dataset_asset(dataset_id, source_asset_id, changes, actor=actor)
+
+    def _pending_object_cleanup(
+        self,
+        dataset_id: str,
+        object_uris: tuple[str, ...],
+        *,
+        actor: str,
+        error: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        pending = dict(details or {})
+        pending.update({
+            "status": "pending",
+            "object_count": len(object_uris),
+            "object_uris": list(object_uris),
+        })
+        if error:
+            pending["error"] = error
+        recorder = getattr(self.repository, "record_object_cleanup_pending", None)
+        if recorder is None:
+            pending["durable"] = False
+            pending["persistence_error"] = "repository does not support pending cleanup records"
+            return pending
+        try:
+            recorder(dataset_id, object_uris, error=error, actor=actor)
+        except Exception as exc:  # pragma: no cover - persistence failure is environment-specific.
+            pending["durable"] = False
+            pending["persistence_error"] = type(exc).__name__
+        else:
+            pending["durable"] = True
+        return pending
 
     def reassign_scene(
         self, dataset_id: str, scene_id: str, target_dataset_id: str, *, reason: str, actor: str
@@ -193,15 +239,26 @@ class DatasetManagementService:
         object_uris = tuple(str(value) for value in result.pop("object_uris", ()) if value)
         if object_uris and self.grid_object_cleanup is not None:
             try:
-                result["object_cleanup"] = self.grid_object_cleanup(object_uris)
+                cleanup_result = self.grid_object_cleanup(object_uris)
             except Exception as exc:  # pragma: no cover - storage failure is environment-specific.
-                result["object_cleanup"] = {
-                    "status": "pending",
-                    "error": type(exc).__name__,
-                    "object_count": len(object_uris),
-                }
+                result["object_cleanup"] = self._pending_object_cleanup(
+                    dataset_id, object_uris, actor=actor, error=type(exc).__name__
+                )
+            else:
+                if isinstance(cleanup_result, dict) and cleanup_result.get("status") == "pending":
+                    result["object_cleanup"] = self._pending_object_cleanup(
+                        dataset_id,
+                        object_uris,
+                        actor=actor,
+                        error=str(cleanup_result.get("error") or "cleanup_pending"),
+                        details=cleanup_result,
+                    )
+                else:
+                    result["object_cleanup"] = cleanup_result
         elif object_uris:
-            result["object_cleanup"] = {"status": "pending", "object_count": len(object_uris)}
+            result["object_cleanup"] = self._pending_object_cleanup(
+                dataset_id, object_uris, actor=actor
+            )
         return result
 
     def request_ingest(self, dataset_id: str, actor: Any) -> dict[str, Any]:
@@ -255,6 +312,7 @@ class InMemoryDatasetManagementRepository:
         self.details = copy.deepcopy(details or {})
         self.metadata_audit: list[dict[str, Any]] = []
         self.scene_audit: list[dict[str, Any]] = []
+        self.object_cleanup_pending: list[dict[str, Any]] = []
         self.hidden_roles: dict[str, set[str]] = {}
         self._lock = RLock()
 
@@ -490,6 +548,19 @@ class InMemoryDatasetManagementRepository:
                 "object_cleanup": {"status": "not_applicable", "object_count": 0},
             }
 
+    def record_object_cleanup_pending(
+        self, dataset_id: str, object_uris: tuple[str, ...], *, error: str | None, actor: str
+    ) -> None:
+        with self._lock:
+            self._dataset(dataset_id)
+            self.object_cleanup_pending.append({
+                "dataset_id": dataset_id,
+                "object_uris": list(object_uris),
+                "error": error,
+                "actor": actor,
+                "created_at": _now_text(),
+            })
+
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         with self._lock:
             row = self._dataset(dataset_id)
@@ -717,8 +788,10 @@ class OpenGaussDatasetManagementRepository:
             if cursor.fetchone() is None:
                 raise ManagedDatasetNotFound(dataset_id)
             cursor.execute(
-                "SELECT scene_id FROM scene_assets WHERE asset_id=%s AND asset_role='data' ORDER BY scene_id LIMIT 1",
-                (source_asset_id,),
+                "SELECT sa.scene_id FROM scene_assets sa JOIN scenes s ON s.scene_id=sa.scene_id "
+                "WHERE s.dataset_id=%s AND sa.asset_id=%s AND sa.asset_role='data' "
+                "ORDER BY sa.scene_id LIMIT 1",
+                (dataset_id, source_asset_id),
             )
             if cursor.fetchone() is None:
                 raise ManagedSceneNotFound(source_asset_id)
@@ -727,8 +800,9 @@ class OpenGaussDatasetManagementRepository:
             checksum = updates.get("checksum")
             cursor.execute(
                 "UPDATE scene_assets SET source_uri=COALESCE(%s, source_uri), cog_uri=COALESCE(%s, cog_uri), "
-                "checksum=COALESCE(%s, checksum) WHERE asset_id=%s AND asset_role='data'",
-                (source_uri, cog_uri, checksum, source_asset_id),
+                "checksum=COALESCE(%s, checksum) WHERE scene_id IN "
+                "(SELECT scene_id FROM scenes WHERE dataset_id=%s) AND asset_id=%s AND asset_role='data'",
+                (source_uri, cog_uri, checksum, dataset_id, source_asset_id),
             )
             cursor.execute(
                 "UPDATE partition_dataset_assets SET source_uri=COALESCE(%s, source_uri), cog_uri=COALESCE(%s, cog_uri), "
@@ -1096,6 +1170,28 @@ class OpenGaussDatasetManagementRepository:
             "affected_output_versions": sorted(affected_versions),
             "object_uris": sorted(object_uris),
         }
+
+    def record_object_cleanup_pending(
+        self, dataset_id: str, object_uris: tuple[str, ...], *, error: str | None, actor: str
+    ) -> None:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT attributes FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise ManagedDatasetNotFound(dataset_id)
+            attributes = dict(row.get("attributes") or {})
+            pending = list(attributes.get("object_cleanup_pending") or [])
+            pending.append({
+                "object_uris": list(object_uris),
+                "error": error,
+                "actor": actor,
+                "created_at": _now_text(),
+            })
+            attributes["object_cleanup_pending"] = pending
+            cursor.execute(
+                "UPDATE datasets SET attributes=%s,updated_at=now() WHERE dataset_id=%s",
+                (Jsonb(attributes), dataset_id),
+            )
 
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
