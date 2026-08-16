@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 
 from cube_split import runtime_config
+from cube_split.partition_timing import TimingRecorder
+
 from cube_web.services.partition_contracts import StrictPartitionRequest
 from cube_web.services.partition_dataset_runner import NormalizedPartitionDatasetRunner
 from cube_web.services.partition_domain_store import OpenGaussPartitionDomainStore
@@ -18,12 +20,15 @@ def main() -> None:
     parser.add_argument("--task-id", required=True)
     args = parser.parse_args()
 
-    store = get_partition_job_store()
-    attempt = store.get_attempt(args.task_id)
-    if attempt is None:
-        raise RuntimeError(f"Partition attempt not found: {args.task_id}")
-    if not store.start_attempt(args.task_id):
-        return
+    driver_timing = TimingRecorder("ray_job_driver")
+    with driver_timing.phase("driver.bootstrap"):
+        store = get_partition_job_store()
+        attempt = store.get_attempt(args.task_id)
+        if attempt is None:
+            raise RuntimeError(f"Partition attempt not found: {args.task_id}")
+    with driver_timing.phase("task.start_attempt"):
+        if not store.start_attempt(args.task_id):
+            return
     payload = dict(attempt.get("payload") or {})
     payload.pop("strict_partition_request", None)
     payload.pop("dataset_partitions", None)
@@ -36,11 +41,16 @@ def main() -> None:
     )
     scene_repository = OpenGaussSceneRepository(runtime_config.require_postgres_dsn())
     try:
-        result = workflow.run(task_id=args.task_id, request=request)
+        with driver_timing.phase("workflow.run"):
+            result = workflow.run(task_id=args.task_id, request=request)
     except Exception as exc:
         workflow.on_task_failed(args.task_id, str(exc))
         scene_repository.update_partition_task(args.task_id, "failed", {"error": str(exc)})
         raise
+    result["timings"] = {
+        **dict(result.get("timings") or {}),
+        "job_driver": driver_timing.finish(),
+    }
     workflow.on_task_succeeded(args.task_id, result)
     scene_repository.update_partition_task(args.task_id, str(result.get("status") or "completed"), result)
     if result.get("status") in {"failed", "partial_failure"}:

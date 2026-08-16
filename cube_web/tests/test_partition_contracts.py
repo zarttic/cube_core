@@ -64,7 +64,7 @@ def test_accepts_exact_dataset_level_normalized_bands() -> None:
 
 @pytest.mark.parametrize(
     ("grid_type", "minimum", "maximum"),
-    [("geohash", 1, 12), ("mgrs", 0, 5), ("isea4h", 0, 15)],
+    [("geohash", 1, 12), ("mgrs", 0, 5), ("isea4h", 1, 6)],
 )
 def test_strict_request_uses_exact_production_level_ranges(grid_type: str, minimum: int, maximum: int) -> None:
     for level in (minimum, maximum):
@@ -249,7 +249,7 @@ def test_dataset_partition_overrides_resolve_and_validate_independently() -> Non
     payload = normalized_request()
     payload["datasets"][0]["partition"] = {
         "grid_type": "isea4h",
-        "requested_grid_level": 1,
+        "requested_grid_level": 6,
         "partition_method": "entity",
         "max_cells_per_asset": 50,
     }
@@ -258,7 +258,7 @@ def test_dataset_partition_overrides_resolve_and_validate_independently() -> Non
     effective = effective_dataset_request(request, request.datasets[0])
 
     assert effective.grid_type == "isea4h"
-    assert effective.requested_grid_level == 1
+    assert effective.requested_grid_level == 6
     assert effective.partition_method == "entity"
     assert effective.max_cells_per_asset == 0
 

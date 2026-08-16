@@ -93,7 +93,14 @@ def _minio_client(options: dict[str, Any] | None = None):
     )
 
 
-def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: str) -> Path:
+def cache_source_cog(
+    cog_uri: str,
+    cache_dir: Path,
+    minio_client: Any,
+    bucket: str,
+    *,
+    metrics: dict[str, Any] | None = None,
+) -> Path:
     """Cache one loader-owned COG locally without altering its content."""
     parsed = urlparse(cog_uri)
     if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
@@ -103,25 +110,37 @@ def cache_source_cog(cog_uri: str, cache_dir: Path, minio_client: Any, bucket: s
     target = cache_dir / hashlib.sha256(cog_uri.encode("utf-8")).hexdigest() / Path(key).name
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_name(f"{target.name}.lock")
+    cache_started = time.perf_counter()
+    cache_hit = False
+    download_elapsed = 0.0
     with lock_path.open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             if target.exists():
-                return target
-            temporary = target.with_suffix(f"{target.suffix}.part")
-            try:
-                minio_client.fget_object(source_bucket, key, str(temporary))
-            except OSError as exc:
-                if exc.errno != errno.ENOSPC:
-                    raise
-                # Worker-local loader cache is disposable; reclaim a stale cache once.
-                temporary.unlink(missing_ok=True)
-                shutil.rmtree(cache_dir.parent, ignore_errors=True)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                minio_client.fget_object(source_bucket, key, str(temporary))
-            temporary.replace(target)
+                cache_hit = True
+            else:
+                temporary = target.with_suffix(f"{target.suffix}.part")
+                download_started = time.perf_counter()
+                try:
+                    minio_client.fget_object(source_bucket, key, str(temporary))
+                except OSError as exc:
+                    if exc.errno != errno.ENOSPC:
+                        raise
+                    # Worker-local loader cache is disposable; reclaim a stale cache once.
+                    temporary.unlink(missing_ok=True)
+                    shutil.rmtree(cache_dir.parent, ignore_errors=True)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    minio_client.fget_object(source_bucket, key, str(temporary))
+                download_elapsed = time.perf_counter() - download_started
+                temporary.replace(target)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    if metrics is not None:
+        metrics.update({
+            "cache_hit": cache_hit,
+            "cache_elapsed_sec": round(time.perf_counter() - cache_started, 6),
+            "download_elapsed_sec": round(download_elapsed, 6),
+        })
     return target
 
 

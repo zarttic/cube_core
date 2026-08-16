@@ -388,7 +388,7 @@ def test_batch_commits_successful_dataset_when_sibling_fails() -> None:
 
     result = _workflow(domain_store, runner, FakeJobStore()).run(task_id="task-batch", request=request)
 
-    assert result == {
+    expected = {
         "batch_id": "batch-01",
         "status": "partial_failure",
         "datasets": [
@@ -406,6 +406,12 @@ def test_batch_commits_successful_dataset_when_sibling_fails() -> None:
             },
         ],
     }
+    assert {
+        **result,
+        "datasets": [{key: value for key, value in item.items() if key != "timings"} for item in result["datasets"]],
+    } == expected
+    assert result["datasets"][0]["timings"]["workflow"]["scope"] == "workflow_dataset"
+    assert result["datasets"][1]["timings"]["workflow"]["scope"] == "workflow_dataset"
     assert domain_store.resolve_output_version("dataset-ok") == make_output_version("dataset-ok", "task-batch")
     assert domain_store.completed[0]["ray_parallelism"] == 16
     with pytest.raises(KeyError):

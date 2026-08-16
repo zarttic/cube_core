@@ -3,11 +3,10 @@ from __future__ import annotations
 from hashlib import sha256
 from typing import Any, Literal
 
+from cube_split.partition.carbon_products import normalize_carbon_product_type
 from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from cube_split.partition.carbon_products import normalize_carbon_product_type
 
 GridType = Literal["geohash", "mgrs", "isea4h"]
 PartitionMethod = Literal["logical", "entity"]
@@ -158,6 +157,9 @@ class PartitionDatasetResult(StrictModel):
     tiles: tuple[dict[str, Any], ...]
     indexes: tuple[dict[str, Any], ...]
     grid_cells: tuple[dict[str, Any], ...]
+    # Execution diagnostics are persisted with the managed task result, not
+    # copied into normalized tile/index business tables.
+    timings: dict[str, Any] = Field(default_factory=dict)
     # Logical Ray runs persist their rows as immutable MinIO chunks.  Keeping
     # only these descriptors in the result prevents the coordinator from
     # materialising a global grid in memory.

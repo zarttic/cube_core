@@ -11,8 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 from cube_split import runtime_config
+from cube_split.partition_timing import TimingRecorder
+
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import (
+    DatasetInput,
     PartitionDatasetResult,
     StrictPartitionRequest,
     effective_dataset_request,
@@ -22,9 +25,9 @@ from cube_web.services.partition_contracts import (
 )
 from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.partition_job_store import (
+    InMemoryPartitionJobStore,
     PartitionBatchAlreadyActiveError,
     PartitionBatchArchivedError,
-    InMemoryPartitionJobStore,
     PartitionJobStore,
     get_partition_job_store,
     normalized_dataset_asset_id,
@@ -136,25 +139,28 @@ class PartitionWorkflowService:
             output_version = make_output_version(dataset_id, execution_task_id)
             effective_request = effective_dataset_request(request, dataset)
             effective_partition = resolve_dataset_partition(request, dataset)
+            workflow_timing = TimingRecorder("workflow_dataset")
             started = False
             try:
-                started_version = selected_domain_store.start_output(effective_request, dataset, execution_task_id)
+                with workflow_timing.phase("opengauss.start_output"):
+                    started_version = selected_domain_store.start_output(effective_request, dataset, execution_task_id)
                 started = True
                 if started_version != output_version:
                     raise ValueError("domain store returned a non-deterministic output version")
-                result, scene_outcomes = _run_dataset_by_scene(
-                    selected_runner,
-                    dataset=dataset,
-                    task_id=execution_task_id,
-                    output_version=output_version,
-                    grid_type=effective_request.grid_type,
-                    requested_grid_level=effective_request.requested_grid_level,
-                    cover_mode=effective_request.cover_mode,
-                    max_cells_per_asset=effective_request.max_cells_per_asset,
-                    time_granularity=effective_request.time_granularity,
-                    max_observations=effective_partition.max_observations,
-                    cancellation_check=lambda: _is_cancelled(selected_job_store, task_id),
-                )
+                with workflow_timing.phase("runner.execute"):
+                    result, scene_outcomes = _run_dataset_by_scene(
+                        selected_runner,
+                        dataset=dataset,
+                        task_id=execution_task_id,
+                        output_version=output_version,
+                        grid_type=effective_request.grid_type,
+                        requested_grid_level=effective_request.requested_grid_level,
+                        cover_mode=effective_request.cover_mode,
+                        max_cells_per_asset=effective_request.max_cells_per_asset,
+                        time_granularity=effective_request.time_granularity,
+                        max_observations=effective_partition.max_observations,
+                        cancellation_check=lambda: _is_cancelled(selected_job_store, task_id),
+                    )
                 if self.after_ray is not None:
                     self.after_ray()
                 if _is_cancelled(selected_job_store, task_id):
@@ -163,14 +169,21 @@ class PartitionWorkflowService:
                     raise ValueError("dataset result identity does not match the active attempt")
                 record_chunks = getattr(selected_domain_store, "record_output_chunks", None)
                 if result.chunks and callable(record_chunks):
-                    record_chunks(result)
+                    with workflow_timing.phase("opengauss.record_output_chunks"):
+                        record_chunks(result)
                     verify_chunks = getattr(selected_domain_store, "verify_output_chunks", None)
                     if callable(verify_chunks):
-                        verify_chunks(result)
+                        with workflow_timing.phase("opengauss.verify_output_chunks"):
+                            verify_chunks(result)
                     promote_chunks = getattr(selected_domain_store, "promote_logical_staging", None)
                     if callable(promote_chunks):
-                        promote_chunks(result)
-                committed = selected_domain_store.complete_output(result)
+                        with workflow_timing.phase("opengauss.promote_logical_staging"):
+                            promote_chunks(result)
+                with workflow_timing.phase("opengauss.complete_output"):
+                    committed = selected_domain_store.complete_output(result)
+                result = result.model_copy(update={
+                    "timings": {**result.timings, "workflow": workflow_timing.finish()},
+                })
                 completed_result = _completed_dataset_result(result, committed)
                 if dataset.selection_id is not None:
                     completed_result["selection_id"] = dataset.selection_id
@@ -191,6 +204,7 @@ class PartitionWorkflowService:
                     "dataset_id": dataset_id,
                     "output_version": output_version,
                     "status": "cancelled",
+                    "timings": {"workflow": workflow_timing.finish()},
                     **({"selection_id": dataset.selection_id} if dataset.selection_id is not None else {}),
                 })
             except Exception as exc:
@@ -207,6 +221,7 @@ class PartitionWorkflowService:
                         "output_version": output_version,
                         "status": "failed",
                         "error": {"code": "partition_execution_failed", "message": message},
+                        "timings": {"workflow": workflow_timing.finish()},
                     }
                 if dataset.selection_id is not None:
                     failed_result["selection_id"] = dataset.selection_id
@@ -245,9 +260,11 @@ class PartitionWorkflowService:
             output_version = make_output_version(dataset_id, execution_task_id)
             effective_request = effective_dataset_request(request, dataset)
             effective_partition = resolve_dataset_partition(request, dataset)
+            workflow_timing = TimingRecorder("workflow_dataset")
             started = False
             try:
-                started_version = domain_store.start_output(effective_request, dataset, execution_task_id)
+                with workflow_timing.phase("opengauss.start_output"):
+                    started_version = domain_store.start_output(effective_request, dataset, execution_task_id)
                 started = True
                 if started_version != output_version:
                     raise ValueError("domain store returned a non-deterministic output version")
@@ -270,6 +287,7 @@ class PartitionWorkflowService:
                     "output_version": output_version,
                     "units": units,
                     "track_scenes": track_scenes,
+                    "workflow_timing": workflow_timing,
                 })
             except Exception as exc:
                 message = _safe_dataset_error(exc)
@@ -331,14 +349,21 @@ class PartitionWorkflowService:
                     raise ValueError("dataset result identity does not match the active attempt")
                 record_chunks = getattr(domain_store, "record_output_chunks", None)
                 if result.chunks and callable(record_chunks):
-                    record_chunks(result)
+                    with item["workflow_timing"].phase("opengauss.record_output_chunks"):
+                        record_chunks(result)
                     verify_chunks = getattr(domain_store, "verify_output_chunks", None)
                     if callable(verify_chunks):
-                        verify_chunks(result)
+                        with item["workflow_timing"].phase("opengauss.verify_output_chunks"):
+                            verify_chunks(result)
                     promote_chunks = getattr(domain_store, "promote_logical_staging", None)
                     if callable(promote_chunks):
-                        promote_chunks(result)
-                committed = domain_store.complete_output(result)
+                        with item["workflow_timing"].phase("opengauss.promote_logical_staging"):
+                            promote_chunks(result)
+                with item["workflow_timing"].phase("opengauss.complete_output"):
+                    committed = domain_store.complete_output(result)
+                result = result.model_copy(update={
+                    "timings": {**result.timings, "workflow": item["workflow_timing"].finish()},
+                })
                 completed = _completed_dataset_result(result, committed)
                 if dataset.selection_id is not None:
                     completed["selection_id"] = dataset.selection_id
@@ -1153,6 +1178,7 @@ def _combine_batch_unit_outcomes(item: dict[str, Any]) -> tuple[PartitionDataset
         "indexes": _merge_scene_rows(successful, "indexes"),
         "grid_cells": _merge_scene_rows(successful, "grid_cells"),
         "chunks": tuple(chunk for result in successful for chunk in result.chunks),
+        "timings": {"units": [result.timings for result in successful if result.timings]},
     }), scene_outcomes
 
 
@@ -1241,6 +1267,7 @@ def _run_dataset_by_scene(runner: Any, *, dataset: Any, **kwargs: Any) -> tuple[
             "indexes": _merge_scene_rows(results, "indexes"),
             "grid_cells": _merge_scene_rows(results, "grid_cells"),
             "chunks": tuple(chunk for result in results for chunk in result.chunks),
+            "timings": {"units": [result.timings for result in results if result.timings]},
         }
     )
     return combined, outcomes
@@ -1319,6 +1346,7 @@ def _completed_dataset_result(result: PartitionDatasetResult, committed: Any) ->
             "indexes": int(counts.get("indexes") or 0),
             "grid_cells": int(counts.get("grid_cells") or 0),
         },
+        "timings": result.timings,
     }
     if result.execution_engine:
         completed["execution_engine"] = result.execution_engine

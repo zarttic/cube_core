@@ -8,10 +8,10 @@ from collections import deque
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Callable, Iterator
-from urllib.parse import urlparse
 
 from cube_split import runtime_config
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
+from cube_split.partition_timing import TimingRecorder
 
 
 def _ray_init_runtime_env(runtime_env: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -133,6 +133,7 @@ def _logical_task_values(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
 
 
 def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
+    import socket
     from io import BytesIO
 
     from grid_core.app.core.enums import BoundaryType
@@ -141,6 +142,10 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
     from minio import Minio
 
     dataset, asset = value["dataset"], value["asset"]
+    timing = TimingRecorder("logical_worker")
+    timing.set_attribute("worker_hostname", socket.gethostname())
+    timing.set_attribute("shard_id", value["shard_id"])
+    timing.set_attribute("source_asset_id", asset["source_asset_id"])
     sdk = CubeEncoderSDK()
     grid_type, level = value["grid_type"], int(value["requested_grid_level"])
     bucket = _time_bucket(asset["time_start"], value["time_granularity"])
@@ -149,23 +154,40 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
     cells: dict[tuple[str, int, str | None], dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
     for shard in value["shards"]:
-        for cell in sdk.cover(grid_type=grid_type, requested_grid_level=level, cover_mode=value["cover_mode"], boundary_type=BoundaryType.BBOX, bbox=shard, crs="EPSG:4326"):
-            address = GridAddress(grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code)
-            cell_key = (cell.space_code, int(cell.grid_level), cell.topology_code)
-            if cell_key not in cells:
-                cells[cell_key] = {
-                    "output_id": logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id="_grid", band_code="_cell", grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket="_", window_identity="cell"),
-                    "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
-                    "bbox": cell.bbox, "geometry": cell.geometry or sdk.code_to_geometry(address=address),
-                }
-            for band in bands:
-                output_id = logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"], band_code=band["band_code"], grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket=bucket, window_identity="logical-reference")
-                base = {"source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code, "time_bucket": bucket}
-                rows.append({"kind": "tiles", "row": {"output_id": output_id, **base, "tile_uri": asset["cog_uri"], "tile_kind": "logical_reference", "bbox": cell.bbox}})
-                rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": sdk.generate_st_code(address=address, timestamp=timestamp, time_granularity=value["time_granularity"]).st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
+        with timing.phase("grid.cover"):
+            covered = sdk.cover(
+                grid_type=grid_type,
+                requested_grid_level=level,
+                cover_mode=value["cover_mode"],
+                boundary_type=BoundaryType.BBOX,
+                bbox=shard,
+                crs="EPSG:4326",
+            )
+        timing.add_counter("grid_shard_count")
+        with timing.phase("logical.row_generation"):
+            for cell in covered:
+                timing.add_counter("grid_cell_count")
+                address = GridAddress(grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code)
+                cell_key = (cell.space_code, int(cell.grid_level), cell.topology_code)
+                if cell_key not in cells:
+                    geometry = cell.geometry
+                    if geometry is None:
+                        with timing.phase("grid.geometry"):
+                            geometry = sdk.code_to_geometry(address=address)
+                    cells[cell_key] = {
+                        "output_id": logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id="_grid", band_code="_cell", grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket="_", window_identity="cell"),
+                        "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
+                        "bbox": cell.bbox, "geometry": geometry,
+                    }
+                for band in bands:
+                    output_id = logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"], band_code=band["band_code"], grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket=bucket, window_identity="logical-reference")
+                    base = {"source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code, "time_bucket": bucket}
+                    rows.append({"kind": "tiles", "row": {"output_id": output_id, **base, "tile_uri": asset["cog_uri"], "tile_kind": "logical_reference", "bbox": cell.bbox}})
+                    rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": sdk.generate_st_code(address=address, timestamp=timestamp, time_granularity=value["time_granularity"]).st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
     rows = [{"kind": "grid_cells", "row": row} for row in cells.values()] + rows
-    content = serialize_logical_chunk_rows(rows)
-    body = compress_logical_chunk(content)
+    with timing.phase("logical.chunk_serialize"):
+        content = serialize_logical_chunk_rows(rows)
+        body = compress_logical_chunk(content)
     checksum = sha256(body).hexdigest()
     chunk_id = logical_chunk_id(
         dataset_id=dataset["dataset_id"], output_version=value["output_version"],
@@ -174,23 +196,37 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
     settings = runtime_config.minio_settings()
     key = f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/logical-chunks/{chunk_id}.jsonl.gz"
     client = Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure)
-    try:
-        existing = client.stat_object(settings.bucket, key)
-    except Exception as exc:
-        if getattr(exc, "code", None) not in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
-            raise
-        existing = None
+    with timing.phase("minio.chunk_stat"):
+        try:
+            existing = client.stat_object(settings.bucket, key)
+        except Exception as exc:
+            if getattr(exc, "code", None) not in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
+                raise
+            existing = None
     if existing is None:
-        client.put_object(settings.bucket, key, BytesIO(body), len(body), content_type="application/gzip", metadata={"checksum-sha256": checksum})
+        with timing.phase("minio.chunk_upload"):
+            client.put_object(settings.bucket, key, BytesIO(body), len(body), content_type="application/gzip", metadata={"checksum-sha256": checksum})
     else:
         metadata = {str(name).lower(): str(item) for name, item in (getattr(existing, "metadata", {}) or {}).items()}
         if int(getattr(existing, "size", -1)) != len(body) or (metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")) != checksum:
             raise RuntimeError(f"immutable logical chunk collision for {key}")
-    _stage_chunk_rows(
-        dataset_id=dataset["dataset_id"], output_version=value["output_version"],
-        chunk_id=chunk_id, rows=rows,
-    )
-    return {"chunk_id": chunk_id, "object_uri": f"s3://{settings.bucket}/{key}", "checksum": checksum, "byte_size": len(body), "grid_cell_count": len(cells), "tile_count": sum(row["kind"] == "tiles" for row in rows), "index_count": sum(row["kind"] == "indexes" for row in rows)}
+    with timing.phase("opengauss.logical_stage"):
+        _stage_chunk_rows(
+            dataset_id=dataset["dataset_id"], output_version=value["output_version"],
+            chunk_id=chunk_id, rows=rows,
+        )
+    timing.add_counter("tile_row_count", sum(row["kind"] == "tiles" for row in rows))
+    timing.add_counter("index_row_count", sum(row["kind"] == "indexes" for row in rows))
+    return {
+        "chunk_id": chunk_id,
+        "object_uri": f"s3://{settings.bucket}/{key}",
+        "checksum": checksum,
+        "byte_size": len(body),
+        "grid_cell_count": len(cells),
+        "tile_count": sum(row["kind"] == "tiles" for row in rows),
+        "index_count": sum(row["kind"] == "indexes" for row in rows),
+        "timing": timing.finish(),
+    }
 
 
 def run_logical_chunk_jobs(
@@ -200,14 +236,20 @@ def run_logical_chunk_jobs(
     """Plan all logical dataset chunks through one bounded Ray queue."""
     import ray
 
+    driver_timing = TimingRecorder("logical_batch_driver")
+    driver_timing.set_attribute("ray_address", payloads[0]["ray_address"])
+    driver_timing.set_attribute("payload_count", len(payloads))
     if not ray.is_initialized():
-        ray.init(
-            address=payloads[0]["ray_address"],
-            ignore_reinit_error=True,
-            include_dashboard=False,
-            logging_level=40,
-            runtime_env=_ray_init_runtime_env(runtime_env),
-        )
+        with driver_timing.phase("ray.init"):
+            ray.init(
+                address=payloads[0]["ray_address"],
+                ignore_reinit_error=True,
+                include_dashboard=False,
+                logging_level=40,
+                runtime_env=_ray_init_runtime_env(runtime_env),
+            )
+    else:
+        driver_timing.add_counter("ray_init_reused")
     plan_chunk = ray.remote(_plan_logical_chunk)
     queued = deque(range(len(payloads)))
     task_values = [iter(_logical_task_values(payload)) for payload in payloads]
@@ -221,10 +263,13 @@ def run_logical_chunk_jobs(
             if errors[index] is not None:
                 continue
             try:
-                value = next(task_values[index])
+                with driver_timing.phase("ray.task_prepare"):
+                    value = next(task_values[index])
             except StopIteration:
                 continue
-            pending[plan_chunk.options(num_cpus=1).remote(value)] = index
+            with driver_timing.phase("ray.task_submit"):
+                pending[plan_chunk.options(num_cpus=1).remote(value)] = index
+            driver_timing.add_counter("ray_task_submit_count")
             queued.append(index)
         if cancellation_check and cancellation_check():
             for ref in pending:
@@ -233,29 +278,53 @@ def run_logical_chunk_jobs(
             raise PartitionCancelledError("Partition task cancelled")
         if not pending:
             continue
-        ready, _ = ray.wait(list(pending), num_returns=1, timeout=1.0)
+        with driver_timing.phase("ray.wait"):
+            ready, _ = ray.wait(list(pending), num_returns=1, timeout=1.0)
         for ref in ready:
             index = pending.pop(ref)
             try:
-                chunks[index].append(ray.get(ref))
+                with driver_timing.phase("ray.result_get"):
+                    chunks[index].append(ray.get(ref))
             except Exception as exc:
                 errors[index] = str(exc)
                 for active_ref, active_index in tuple(pending.items()):
                     if active_index == index:
                         ray.cancel(active_ref, force=True)
                         pending.pop(active_ref)
+    result_payloads: list[tuple[dict[str, Any], list[dict[str, Any]]] | None] = []
+    with driver_timing.phase("driver.result_merge"):
+        for index, payload in enumerate(payloads):
+            if errors[index] is not None:
+                result_payloads.append(None)
+                continue
+            worker_timings = [chunk["timing"] for chunk in chunks[index] if isinstance(chunk.get("timing"), dict)]
+            result_payloads.append((payload, worker_timings))
+    driver_record = driver_timing.finish()
+    first_success_index = next(
+        (index for index, outcome in enumerate(result_payloads) if outcome is not None),
+        None,
+    )
     results = []
     for index, payload in enumerate(payloads):
         if errors[index] is not None:
             results.append({"error": errors[index]})
             continue
+        result_payload = result_payloads[index]
+        if result_payload is None:
+            results.append({"error": "logical result assembly failed"})
+            continue
+        _payload, worker_timings = result_payload
+        timings = {"workers": worker_timings}
+        if index == first_success_index:
+            timings["driver"] = driver_record
         results.append({"result": {
-            "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"],
-            "output_version": payload["output_version"], "grid_type": payload["grid_type"],
-            "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical",
-            "execution_engine": "ray",
-            "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/",
-            "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks[index],
+                "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"],
+                "output_version": payload["output_version"], "grid_type": payload["grid_type"],
+                "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical",
+                "execution_engine": "ray",
+                "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/",
+                "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks[index],
+                "timings": timings,
         }})
     return results
 

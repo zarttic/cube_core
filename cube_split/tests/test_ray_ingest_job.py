@@ -163,7 +163,7 @@ def test_build_cube_fact_records_respects_quality_rule():
 
 def test_cell_geometry_uses_sdk_boundaries_for_all_production_grids():
     sdk = CubeEncoderSDK()
-    cases = (("geohash", 5, 5), ("mgrs", 3, 5), ("isea4h", 2, 7))
+    cases = (("geohash", 5, 5), ("mgrs", 3, 5), ("isea4h", 6, 7))
 
     for grid_type, grid_level, expected_points in cases:
         cell = sdk.locate(grid_type=grid_type, requested_grid_level=grid_level, point=[116.3, 39.9])
@@ -189,7 +189,7 @@ def test_mgrs_cell_geometry_reduces_latitude_band_clipped_boundary_to_four_corne
     geometry = json.loads(
         cell_geometry_geojson(
             grid_type="mgrs",
-            grid_level=2,
+            grid_level=6,
             space_code="50SMK1428",
         )
     )
@@ -225,7 +225,7 @@ def test_mgrs_cell_geometry_preserves_non_quadrilateral_boundary_cells():
 
 def test_isea4h_cell_geometry_is_actual_hexagon_not_bbox():
     sdk = CubeEncoderSDK()
-    cell = sdk.locate(grid_type="isea4h", requested_grid_level=2, point=[116.3, 39.9])
+    cell = sdk.locate(grid_type="isea4h", requested_grid_level=6, point=[116.3, 39.9])
     geometry = json.loads(
         cell_geometry_geojson(
             grid_type="isea4h",

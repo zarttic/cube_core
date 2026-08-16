@@ -61,5 +61,10 @@ def test_partition_batch_job_uses_opengauss_domain_store(monkeypatch) -> None:
 
     assert captured["dsn"] == "postgresql://test"
     assert captured["domain_store"] is sentinel_domain_store
-    assert captured["succeeded"] == ("partition-task", {"status": "completed"})
-    assert captured["scene_update"] == ("partition-task", "completed", {"status": "completed"})
+    succeeded_task_id, succeeded_result = captured["succeeded"]
+    assert succeeded_task_id == "partition-task"
+    assert succeeded_result["status"] == "completed"
+    assert succeeded_result["timings"]["job_driver"]["scope"] == "ray_job_driver"
+    scene_task_id, scene_status, scene_result = captured["scene_update"]
+    assert (scene_task_id, scene_status) == ("partition-task", "completed")
+    assert scene_result["timings"]["job_driver"]["scope"] == "ray_job_driver"

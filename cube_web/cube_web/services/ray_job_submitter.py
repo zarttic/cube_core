@@ -1,14 +1,13 @@
 """Submit managed partition attempts as independent Ray Jobs."""
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from threading import Lock, local
-import time
-
-from requests import Timeout as RequestsTimeout
 
 from cube_split import runtime_config
 from cube_split.jobs.ray_logical_partition_job import _ray_runtime_env_from_env
+from requests import Timeout as RequestsTimeout
 
 DEFAULT_JOB_CLIENT_TIMEOUT_SECONDS = 30.0
 MIN_JOB_CLIENT_TIMEOUT_SECONDS = 1.0
@@ -110,6 +109,16 @@ class RayJobPartitionSubmitter:
             "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
             "CUBE_WEB_MINIO_BUCKET": minio.bucket,
         })
+        for name in (
+            "CUBE_WEB_RAY_BATCH_SCHEDULER",
+            "CUBE_ENTITY_RAY_PARALLELISM",
+            "CUBE_ENTITY_BANDS_PER_TASK",
+            "CUBE_ENTITY_UPLOAD_WORKERS",
+            "CUBE_ENTITY_MINIO_PARALLEL_UPLOADS",
+        ):
+            value = runtime_config.env_text(name)
+            if value is not None:
+                env_vars[name] = value
         runtime_env["env_vars"] = env_vars
         job_id = f"partition-{task_id.removeprefix('partition-')}"
 

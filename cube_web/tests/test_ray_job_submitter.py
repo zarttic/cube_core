@@ -49,3 +49,39 @@ def test_transport_timeout_is_reported_without_background_executor(monkeypatch) 
         assert "after 3s" in str(exc)
     else:  # pragma: no cover - assertion guard
         raise AssertionError("transport timeout must be translated")
+
+
+def test_submit_propagates_ray_batch_runtime_options(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _SubmitClient:
+        def submit_job(self, **kwargs):
+            captured.update(kwargs)
+            return "job-1"
+
+    module._JOB_CLIENT_LOCAL.clients = {"http://ray:8265": _SubmitClient()}
+    monkeypatch.setattr(module, "_call_job_client", lambda _operation, _context, call: call())
+    monkeypatch.setattr(module.runtime_config, "env_text", lambda name, default=None: {
+        "CUBE_WEB_RAY_BATCH_SCHEDULER": "1",
+        "CUBE_ENTITY_RAY_PARALLELISM": "16",
+        "CUBE_ENTITY_BANDS_PER_TASK": "1",
+        "CUBE_ENTITY_UPLOAD_WORKERS": "4",
+        "CUBE_ENTITY_MINIO_PARALLEL_UPLOADS": "1",
+    }.get(name, default))
+    monkeypatch.setattr(module.runtime_config, "require_postgres_dsn", lambda: "dsn")
+    monkeypatch.setattr(module.runtime_config, "require_ray_address", lambda: "ray-address")
+    monkeypatch.setattr(module.runtime_config, "minio_settings", lambda: type(
+        "Settings", (), {
+            "endpoint": "minio:9000", "access_key": "access", "secret_key": "secret", "bucket": "cube",
+        },
+    )())
+    monkeypatch.setattr(module, "_ray_runtime_env_from_env", lambda: {"env_vars": {}})
+
+    RayJobPartitionSubmitter("http://ray:8265").submit("partition-task-1")
+
+    env_vars = captured["runtime_env"]["env_vars"]
+    assert env_vars["CUBE_WEB_RAY_BATCH_SCHEDULER"] == "1"
+    assert env_vars["CUBE_ENTITY_RAY_PARALLELISM"] == "16"
+    assert env_vars["CUBE_ENTITY_BANDS_PER_TASK"] == "1"
+    assert env_vars["CUBE_ENTITY_UPLOAD_WORKERS"] == "4"
+    assert env_vars["CUBE_ENTITY_MINIO_PARALLEL_UPLOADS"] == "1"
