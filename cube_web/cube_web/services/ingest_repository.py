@@ -63,6 +63,18 @@ class IngestRepository(Protocol):
 
     def summarize_runs(self, *, keyword: str | None, dataset_id: str | None, status: str | None) -> IngestSummary: ...
 
+    def list_collections(
+        self,
+        *,
+        keyword: str | None,
+        dataset_id: str | None,
+        data_type: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def count_collections(self, *, keyword: str | None, dataset_id: str | None, data_type: str | None) -> int: ...
+
     def start_scene(self, ingest_run_id: str, scene_id: str) -> IngestRun: ...
 
     def complete_scene(self, ingest_run_id: str, scene_id: str) -> IngestRun: ...
@@ -193,6 +205,26 @@ class InMemoryIngestRepository:
     def count_runs(self, *, keyword: str | None = None, dataset_id: str | None = None, status: str | None = None) -> int:
         with self._lock:
             return len(self._filtered(keyword=keyword, dataset_id=dataset_id, status=status))
+
+    def list_collections(
+        self,
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[dict[str, Any], ...]:
+        return ()
+
+    def count_collections(
+        self,
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+    ) -> int:
+        return 0
 
     def summarize_runs(self, *, keyword: str | None = None, dataset_id: str | None = None, status: str | None = None) -> IngestSummary:
         with self._lock:
@@ -399,34 +431,89 @@ class OpenGaussIngestRepository:
             raise IngestConflict("one or more scene outputs already have an ingest owner") from exc
         return self.get(ingest_run_id)
 
-    def list_collections(self, *, limit: int = 100, offset: int = 0) -> tuple[dict[str, Any], ...]:
+    @staticmethod
+    def _collection_filters(
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        clauses = [
+            "pr.status='completed'",
+            "g.partition_status='completed'",
+            "g.quality_status IN ('pass','warn')",
+            "(irs.status IS NULL OR irs.status <> 'completed')",
+        ]
+        params: list[Any] = []
+        term = (keyword or '').strip()
+        if term:
+            pattern = f"%{term}%"
+            clauses.append(
+                "(CAST(pr.partition_run_id AS text) ILIKE %s "
+                "OR CAST(d.dataset_id AS text) ILIKE %s "
+                "OR COALESCE(d.dataset_code, '') ILIKE %s "
+                "OR COALESCE(d.dataset_title, '') ILIKE %s "
+                "OR COALESCE(s.scene_key, '') ILIKE %s)"
+            )
+            params.extend([pattern] * 5)
+        if dataset_id and dataset_id.strip():
+            clauses.append("CAST(d.dataset_id AS text) = %s")
+            params.append(dataset_id.strip())
+        if data_type and data_type.strip():
+            clauses.append("d.data_type = %s")
+            params.append(data_type.strip())
+        return " AND ".join(clauses), tuple(params)
+
+    def list_collections(
+        self,
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[dict[str, Any], ...]:
+        where, params = self._collection_filters(keyword=keyword, dataset_id=dataset_id, data_type=data_type)
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """
-                SELECT pr.partition_run_id, pr.created_at AS partition_created_at,
-                       prs.scene_id, s.scene_key, prs.dataset_id, prs.output_version, g.band_unit_id,
-                       d.dataset_code, d.dataset_title, d.data_type,
-                       sb.band_code, sb.band_name, sb.band_type, sb.unit, sb.display_order,
-                       g.grid_type, g.grid_level, g.quality_status,
-                       irs.status AS ingest_status
-                FROM partition_runs pr
-                JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
-                JOIN partition_data_unit_grid_status g ON g.partition_run_id=prs.partition_run_id AND g.scene_id=prs.scene_id
-                JOIN datasets d ON d.dataset_id=prs.dataset_id
-                JOIN scenes s ON s.scene_id=prs.scene_id
-                JOIN scene_bands sb ON sb.band_unit_id=g.band_unit_id
-                LEFT JOIN LATERAL (
-                  SELECT irs.status FROM ingest_run_scenes irs
-                  WHERE irs.scene_id=prs.scene_id AND irs.output_version=prs.output_version
-                    AND (EXISTS (
-                           SELECT 1 FROM jsonb_array_elements_text(irs.band_unit_ids) AS selected(band_unit_id)
-                           WHERE selected.band_unit_id=g.band_unit_id
-                         ) OR jsonb_array_length(irs.band_unit_ids)=0)
-                  ORDER BY irs.updated_at DESC LIMIT 1
-                ) irs ON true
-                WHERE pr.status='completed' AND g.partition_status='completed'
-                ORDER BY pr.created_at DESC, pr.partition_run_id, prs.dataset_id, prs.scene_id, g.band_unit_id
+                f"""
+                WITH filtered_units AS (
+                    SELECT pr.partition_run_id, pr.created_at AS partition_created_at,
+                           prs.scene_id, s.scene_key, prs.dataset_id, prs.output_version, g.band_unit_id,
+                           d.dataset_code, d.dataset_title, d.data_type,
+                           sb.band_code, sb.band_name, sb.band_type, sb.unit, sb.display_order,
+                           g.grid_type, g.grid_level, g.quality_status,
+                           irs.status AS ingest_status
+                    FROM partition_runs pr
+                    JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
+                    JOIN partition_data_unit_grid_status g ON g.partition_run_id=prs.partition_run_id AND g.scene_id=prs.scene_id
+                    JOIN datasets d ON d.dataset_id=prs.dataset_id
+                    JOIN scenes s ON s.scene_id=prs.scene_id
+                    JOIN scene_bands sb ON sb.band_unit_id=g.band_unit_id
+                    LEFT JOIN LATERAL (
+                      SELECT irs.status FROM ingest_run_scenes irs
+                      WHERE irs.scene_id=prs.scene_id AND irs.output_version=prs.output_version
+                        AND (EXISTS (
+                               SELECT 1 FROM jsonb_array_elements_text(irs.band_unit_ids) AS selected(band_unit_id)
+                               WHERE selected.band_unit_id=g.band_unit_id
+                             ) OR jsonb_array_length(irs.band_unit_ids)=0)
+                      ORDER BY irs.updated_at DESC LIMIT 1
+                    ) irs ON true
+                    WHERE {where}
+                ), paged_collections AS (
+                    SELECT partition_run_id, MAX(partition_created_at) AS partition_created_at
+                    FROM filtered_units
+                    GROUP BY partition_run_id
+                    ORDER BY MAX(partition_created_at) DESC, partition_run_id
+                    LIMIT %s OFFSET %s
+                )
+                SELECT filtered_units.*
+                FROM filtered_units
+                JOIN paged_collections USING (partition_run_id)
+                ORDER BY filtered_units.partition_created_at DESC, filtered_units.partition_run_id,
+                         filtered_units.dataset_id, filtered_units.scene_id, filtered_units.band_unit_id
                 """,
+                (*params, limit, offset),
             )
             rows = cur.fetchall()
         grouped: dict[str, dict[str, Any]] = {}
@@ -448,7 +535,7 @@ class OpenGaussIngestRepository:
                 "ingest_status": row["ingest_status"],
             })
         collections = []
-        for collection in list(grouped.values())[offset:offset + limit]:
+        for collection in grouped.values():
             units = collection["units"]
             collection.update(
                 dataset_count=len({unit["dataset_id"] for unit in units}),
@@ -469,9 +556,37 @@ class OpenGaussIngestRepository:
             collections.append(collection)
         return tuple(collections)
 
-    def count_collections(self) -> int:
+    def count_collections(
+        self,
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+    ) -> int:
+        where, params = self._collection_filters(keyword=keyword, dataset_id=dataset_id, data_type=data_type)
         with self.pool.connection() as connection, connection.cursor() as cur:
-            cur.execute("SELECT count(*) FROM partition_runs WHERE status='completed'")
+            cur.execute(
+                f"""
+                SELECT COUNT(DISTINCT pr.partition_run_id)
+                FROM partition_runs pr
+                JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id AND prs.status='completed'
+                JOIN partition_data_unit_grid_status g ON g.partition_run_id=prs.partition_run_id AND g.scene_id=prs.scene_id
+                JOIN datasets d ON d.dataset_id=prs.dataset_id
+                JOIN scenes s ON s.scene_id=prs.scene_id
+                JOIN scene_bands sb ON sb.band_unit_id=g.band_unit_id
+                LEFT JOIN LATERAL (
+                  SELECT irs.status FROM ingest_run_scenes irs
+                  WHERE irs.scene_id=prs.scene_id AND irs.output_version=prs.output_version
+                    AND (EXISTS (
+                           SELECT 1 FROM jsonb_array_elements_text(irs.band_unit_ids) AS selected(band_unit_id)
+                           WHERE selected.band_unit_id=g.band_unit_id
+                         ) OR jsonb_array_length(irs.band_unit_ids)=0)
+                  ORDER BY irs.updated_at DESC LIMIT 1
+                ) irs ON true
+                WHERE {where}
+                """,
+                params,
+            )
             return int(cur.fetchone()[0])
 
     def _existing_request(self, request: CreateIngestRun) -> IngestRun | None:

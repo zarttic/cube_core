@@ -144,7 +144,7 @@ npm run build
 - 取值为 `1/true/yes/on` 时，前端会跳转统一认证，后端 `/v1/*` 也会校验 Bearer Token。
 - 取值为 `false` 或未设置时，适合本地自测，可直接进入剖分、质检、编码页面。
 - 开启认证时，`POST /v1/partition/schemas/import` 是载入系统公开交付入口；其余 `/v1/*` 默认要求 Bearer Token。
-- 非管理员前端只显示公共编码导航；剖分页直接访问会跳回门户首页。前端可见性不替代后端授权。
+- 前端导航和页面显示按主认证系统 `/api/me` 返回的 `user.permissions` 控制；`data_import:view`、`resource_schedule:view` 和 `system_config:view` 分别对应数据载入/剖分/编码、资源调度和系统配置。页面可见性不替代后端授权。
 
 ## 5.2 当前剖分矩阵
 

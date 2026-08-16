@@ -19,7 +19,7 @@ export const DATA_TYPES = ['optical', 'radar', 'product', 'carbon'];
 const LEVEL_RANGES = Object.freeze({
   geohash: [1, 12],
   mgrs: [0, 5],
-  isea4h: [0, 15],
+  isea4h: [1, 6],
 });
 
 export function derivedPartitionMethod(gridType) {
@@ -225,7 +225,7 @@ const DATASETS = [
     resolution_unit: 'm',
     resolution_m: 3000,
     suggested_grid_type: 'geohash',
-    suggested_grid_levels: { geohash: 2, mgrs: 1, isea4h: 5 },
+    suggested_grid_levels: { geohash: 2, mgrs: 1, isea4h: 6 },
     time_start: '2020-12-31T00:00:00+08:00',
     time_end: '2020-12-31T23:59:59+08:00',
     scenes: [

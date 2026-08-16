@@ -21,10 +21,14 @@ const collapsedManualScenes = ref(new Set());
 
 async function refresh() {
   store.pageState.page = 1;
+  store.manualPageState.page = 1;
   await Promise.all([store.loadList(), store.loadManualCandidates()]);
 }
 function setPage(page) { store.pageState.page = page; return store.loadList(); }
 function setPageSize(pageSize) { Object.assign(store.pageState, { page: 1, pageSize }); return store.loadList(); }
+function applyManualFilters() { store.manualPageState.page = 1; return store.loadManualCandidates(); }
+function setManualPage(page) { store.manualPageState.page = page; return store.loadManualCandidates(); }
+function setManualPageSize(pageSize) { Object.assign(store.manualPageState, { page: 1, pageSize }); return store.loadManualCandidates(); }
 
 onMounted(() => { refresh().catch(() => {}); });
 onUnmounted(() => store.dispose());
@@ -159,7 +163,12 @@ async function openManualIngest(partitionRunId = '') {
   <section class="ingest-view" :class="{ embedded }">
     <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
     <section class="pending-ingest-panel">
-      <div class="pending-ingest-heading"><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
+      <div class="pending-ingest-heading"><div><h3>待入库集合 <span>{{ store.manualPageState.total }} 条</span></h3><span>按剖分批次或数据集筛选</span></div><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
+      <el-form class="pending-filter-bar" inline @submit.prevent="applyManualFilters">
+        <el-form-item><el-input v-model="store.manualFilters.keyword" :prefix-icon="Search" clearable placeholder="剖分批次或数据集" /></el-form-item>
+        <el-form-item><el-input v-model="store.manualFilters.datasetId" clearable placeholder="数据集 ID" /></el-form-item>
+        <el-form-item><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
+      </el-form>
       <div v-if="store.manualCandidatesLoading" class="pending-state">正在加载待入库集合</div>
       <div v-else-if="!store.manualCandidates.length" class="pending-state">暂无满足入库条件的剖分批次数据集合</div>
       <div v-else class="pending-ingest-list">
@@ -168,6 +177,7 @@ async function openManualIngest(partitionRunId = '') {
           <el-button type="primary" size="small" @click="openManualIngest(collection.partition_run_id)">选择数据入库</el-button>
         </div>
       </div>
+      <div v-if="store.manualPageState.total" class="pending-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :current-page="store.manualPageState.page" :page-size="store.manualPageState.pageSize" :page-sizes="[10, 20, 50]" :total="store.manualPageState.total" @current-change="setManualPage" @size-change="setManualPageSize" /></div>
     </section>
     <details class="ingest-history">
       <summary>入库记录 <span>{{ store.pageState.total }} 条</span></summary>
@@ -263,9 +273,12 @@ async function openManualIngest(partitionRunId = '') {
 .pending-ingest-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .pending-ingest-heading h3 { margin: 0 0 3px; color: #263247; font-size: 15px; }
 .pending-ingest-heading span, .pending-state { color: #8993a4; font-size: 12px; }
+.pending-filter-bar { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(180px, 1fr) auto; gap: 0 12px; margin-bottom: 12px; }
+.pending-filter-bar :deep(.el-form-item) { margin-bottom: 0; }
 .pending-state { padding: 18px 0 4px; text-align: center; }
 .pending-ingest-list { display: flex; flex-direction: column; gap: 8px; }
 .pending-ingest-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid #e6eaf0; border-radius: 5px; background: #fafbfd; }
+.pending-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
 .ingest-history { margin-top: 18px; border: 1px solid #dfe4ec; border-radius: 6px; background: #fff; }
 .ingest-history summary { padding: 13px 16px; color: #263247; font-size: 14px; font-weight: 600; cursor: pointer; list-style: none; }
 .ingest-history summary::-webkit-details-marker { display: none; }
@@ -307,5 +320,5 @@ async function openManualIngest(partitionRunId = '') {
 .manual-band-chip { display: flex; flex-direction: column; padding: 3px 7px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
 .manual-band-chip small { color: #748095; font-size: 10px; }
 .manual-tree-empty { padding: 18px; color: #8993a4; text-align: center; font-size: 12px; }
-@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } .manual-tree-header-row, .manual-scene-header-row { align-items: stretch; flex-direction: column; gap: 2px; } .manual-select-all { margin-left: 0; } }
+@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar, .pending-filter-bar { grid-template-columns: 1fr; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } .manual-tree-header-row, .manual-scene-header-row { align-items: stretch; flex-direction: column; gap: 2px; } .manual-select-all { margin-left: 0; } }
 </style>

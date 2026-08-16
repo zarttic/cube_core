@@ -30,7 +30,7 @@ function confirmCancel() {
 </script>
 
 <template>
-  <DetailDrawer :visible="visible" :title="title" :loading="loading" test-id="ingest-run-detail-drawer" size="820px" @update:visible="(value) => !value && emit('close')" @closed="emit('close')">
+  <DetailDrawer :visible="visible" :title="title" :loading="loading" :lock-scroll="false" test-id="ingest-run-detail-drawer" size="820px" @update:visible="(value) => !value && emit('close')" @closed="emit('close')">
     <div class="drawer-actions">
       <el-button v-if="writeEnabled && failedBandUnitIds.length" type="primary" plain :loading="actionLoading" @click="emit('retry-band-units', failedBandUnitIds)">重试全部失败波段</el-button>
       <el-button v-if="writeEnabled && cancellable" type="danger" plain :loading="actionLoading" @click="cancelDialog = true">取消运行</el-button>

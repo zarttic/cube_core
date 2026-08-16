@@ -25,7 +25,10 @@
     │      ├─ 调用认证服务 /api/exchange_code 换 token
     │      └─ 返回 token，前端存入 localStorage
     │
-    └─ 4. 后续请求
+    ├─ 4. 前端调用 cube_project /api/me
+    │      └─ cube_project 刷新主系统返回的 user.permissions
+    │
+    └─ 5. 后续请求
            └─ Authorization: Bearer <token>
 ```
 
@@ -48,6 +51,7 @@ CUBE_WEB_AUTH_REDIRECT_URI=http://<cube-web-host>:50040/callback
 CUBE_WEB_AUTH_TOKEN_PATH=/api/exchange_code
 CUBE_WEB_AUTH_AUTHORIZE_PATH=/api/authorize
 CUBE_WEB_AUTH_LOGOUT_PATH=/api/logout
+CUBE_WEB_AUTH_USER_INFO_PATH=/api/me
 
 # JWT 验证配置（必须与认证服务完全一致）
 CUBE_WEB_AUTH_JWT_SECRET_KEY=<jwt-secret>
@@ -70,7 +74,9 @@ curl -X POST http://localhost:50039/v1/config/get \
   -H "Authorization: Bearer <your-token>"
 ```
 
-载入系统交付批次时，`POST /v1/partition/schemas/import` 是认证开启状态下的公开导入入口；它只登记 schema/资产，不启动剖分。除该入口外，`/v1/*` 默认需要 Bearer Token。前端非管理员只显示公共编码入口，页面隐藏不替代后端鉴权。
+载入系统交付批次时，`POST /v1/partition/schemas/import` 是认证开启状态下的公开导入入口；它只登记 schema/资产，不启动剖分。除该入口外，`/v1/*` 默认需要 Bearer Token。
+
+前端显示权限以主系统 `/api/me` 返回的 `user.permissions` 为准：`data_import:view` 控制 ARD 载入、剖分和格网编码，`resource_schedule:view` 控制资源调度，`system_config:view` 控制系统配置，后台管理入口按各管理类 `*:view` 权限任一命中显示。超级管理员全量可见。页面隐藏只改善体验，不替代后端接口鉴权。
 
 ## 注意事项
 

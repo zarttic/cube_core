@@ -199,13 +199,47 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
   });
 
+  it('automatically loads the selected dataset grid on the partition page', async () => {
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub,
+          ...layoutStubs,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+    requestJson.mockClear();
+
+    wrapper.vm.updateDatasets([{
+      dataset_id: 'dataset-selected',
+      data_type: 'optical',
+      scenes: [{ scene_id: 'scene-selected' }],
+      assets: [{ source_asset_id: 'asset-selected', bbox: [100, 20, 101, 21] }],
+      partition: { grid_type: 'mgrs', requested_grid_level: 2, partition_method: 'logical' },
+    }]);
+    await flushPromises();
+
+    expect(requestJson).toHaveBeenCalledWith('/v1/grid/cover', expect.objectContaining({
+      grid_type: 'mgrs',
+      requested_grid_level: 2,
+      bbox: [100, 20, 101, 21],
+    }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+  });
+
   it('loads selected carbon source footprints onto the map', async () => {
     const store = usePartitionStore();
     store.setDatasets('carbon', [{
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
       scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
       assets: [{ source_asset_id: 'asset-carbon', bbox: [100, 20, 101, 21] }],
-      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+      partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
     }]);
     requestJson.mockImplementation(async (path) => (
       path === '/v1/partition/carbon/footprints'
@@ -236,7 +270,7 @@ describe('PartitionView map workspace', () => {
     store.setDatasets('carbon', [{
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon', product_type: 'tansat',
       scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
-      assets: [], partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+      assets: [], partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
     }]);
     requestJson.mockResolvedValue({
       items: [{ observation_id: 'obs-1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } }],
@@ -259,7 +293,7 @@ describe('PartitionView map workspace', () => {
 
     expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/grid-preview', expect.objectContaining({
       source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'],
-      grid_type: 'isea4h', requested_grid_level: 5,
+      grid_type: 'isea4h', requested_grid_level: 6,
     }));
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
@@ -270,10 +304,14 @@ describe('PartitionView map workspace', () => {
       dataset_id: 'carbon-a', dataset_title: 'TanSat A', data_type: 'carbon',
       scenes: [{ scene_id: 'scene-a', source_batch_ids: ['load-a'] }],
       assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
-      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+      partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
     }]);
-    let resolvePreview;
-    requestJson.mockReturnValue(new Promise((resolve) => { resolvePreview = resolve; }));
+    let resolveFootprints;
+    let resolveGridPreview;
+    requestJson.mockImplementation((path) => new Promise((resolve) => {
+      if (path === '/v1/partition/carbon/footprints') resolveFootprints = resolve;
+      else resolveGridPreview = resolve;
+    }));
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -289,9 +327,10 @@ describe('PartitionView map workspace', () => {
       dataset_id: 'carbon-b', dataset_title: 'TanSat B', data_type: 'carbon',
       scenes: [{ scene_id: 'scene-b', source_batch_ids: ['load-b'] }],
       assets: [{ source_asset_id: 'asset-b', bbox: [110, 30, 111, 31] }],
-      partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+      partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
     }]);
-    resolvePreview({ items: [{ observation_id: 'stale', geometry: { type: 'Point', coordinates: [100.5, 20.5] } }] });
+    resolveFootprints({ items: [{ observation_id: 'stale', geometry: { type: 'Point', coordinates: [100.5, 20.5] } }] });
+    resolveGridPreview({ cells: [] });
     await flushPromises();
 
     expect(wrapper.vm.activeCarbonFootprints).toEqual([]);
@@ -540,7 +579,7 @@ describe('PartitionView map workspace', () => {
     store.setDatasets('carbon', [{
         dataset_id: 'dataset-carbon', data_type: 'carbon', assets: [],
         scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
-        partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+        partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
       }]);
     const wrapper = mount(PartitionView, {
       global: {
@@ -606,7 +645,7 @@ describe('PartitionView map workspace', () => {
         data_type: 'carbon',
         scenes: [{ scene_id: 'scene-carbon', source_batch_ids: ['load-carbon'] }],
         assets: [{ source_asset_id: 'asset-carbon', bbox: [110, 30, 111, 31] }],
-        partition: { grid_type: 'isea4h', requested_grid_level: 5, partition_method: 'entity' },
+        partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
       }]);
     vi.spyOn(store, 'submit').mockResolvedValue({ task_id: 'optical-task', status: 'queued' });
     const wrapper = mount(PartitionView, {

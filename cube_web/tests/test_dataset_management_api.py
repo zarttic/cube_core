@@ -39,10 +39,10 @@ def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[st
                 "bands": [{"scene_id": "scene-a1", "asset_id": "asset-a1", "band_unit_id": "band-a1-b01", "band_code": "B01"}],
                 "outputs": [{"output_version": "out-a", "status": "completed"}],
                 "grid": [{"output_id": "grid-a", "space_code": "wx4"}],
-                "tiles": [{"output_id": "tile-a", "status": "ready"}],
+                "tiles": [{"output_id": "tile-a", "output_version": "out-a", "status": "ready"}],
                 "indexes": [{"output_id": "index-a", "st_code": "wx4-2026"}],
-                "ingest-records": [{"ingest_run_id": "ingest-a", "scene_id": "scene-a2", "band_unit_ids": ["band-a2-b01"], "status": "failed", "error_message": "bad tile"}],
-                "quality": [{"quality_run_id": "quality-a", "status": "pass"}],
+                "ingest-records": [{"ingest_run_id": "ingest-a", "scene_id": "scene-a2", "band_unit_ids": ["band-a2-b01"], "status": "failed", "error_message": "bad tile", "provenance": {"quality_run_id": "quality-a"}}],
+                "quality": [{"quality_run_id": "quality-a", "output_version": "out-a", "status": "pass"}],
                 "publications": [{"publication_id": "11111111-1111-1111-1111-111111111111", "status": "active"}],
                 "provenance": [{"relation_type": "load_batch", "load_batch_id": "load-1", "status": "succeeded"}],
             },
@@ -158,6 +158,16 @@ def test_scene_detail_embeds_band_units_for_three_level_management() -> None:
     }]
 
 
+def test_tile_and_ingest_detail_rows_expose_the_concrete_quality_record() -> None:
+    client, _, _ = _fixture()
+
+    tile = client.get("/v1/datasets/dataset-a/tiles").json()["items"][0]
+    ingest = client.get("/v1/datasets/dataset-a/ingest-records").json()["items"][0]
+
+    assert tile["quality_run_id"] == "quality-a"
+    assert ingest["quality_run_id"] == "quality-a"
+
+
 def test_metadata_and_scene_reassignment_are_audited() -> None:
     client, repository, _ = _fixture()
     updated = client.patch("/v1/datasets/dataset-a", json={
@@ -209,6 +219,87 @@ def test_failed_band_retry_and_actions_use_injected_domain_hooks() -> None:
     unsupported = client.post("/v1/datasets/dataset-b/quality-runs", json={})
     assert unsupported.status_code == 409
     assert unsupported.json()["detail"]["code"] == "dataset_action_conflict"
+
+
+def test_admin_deletes_one_band_grid_without_touching_other_grid_types() -> None:
+    client, repository, _ = _fixture()
+    details = repository.details["dataset-a"]
+    details["bands"][0]["grid_statuses"] = [{
+        "grid_type": "geohash", "grid_level": 5,
+        "partition_status": "completed", "quality_status": "pass", "ingest_status": "pending",
+    }, {
+        "grid_type": "mgrs", "grid_level": 1,
+        "partition_status": "completed", "quality_status": "pass", "ingest_status": "pending",
+    }]
+    details["grid"] = [
+        {"output_id": "grid-geohash", "band_unit_id": "band-a1-b01", "grid_type": "geohash"},
+        {"output_id": "grid-mgrs", "band_unit_id": "band-a1-b01", "grid_type": "mgrs"},
+    ]
+    details["tiles"] = [
+        {"output_id": "tile-geohash", "source_asset_id": "asset-a1", "band_code": "B01", "grid_type": "geohash"},
+        {"output_id": "tile-mgrs", "source_asset_id": "asset-a1", "band_code": "B01", "grid_type": "mgrs"},
+    ]
+    details["indexes"] = [
+        {"output_id": "index-geohash", "source_asset_id": "asset-a1", "band_code": "B01", "grid_type": "geohash"},
+        {"output_id": "index-mgrs", "source_asset_id": "asset-a1", "band_code": "B01", "grid_type": "mgrs"},
+    ]
+
+    response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_statuses"] == 1
+    assert response.json()["deleted_tiles"] == 1
+    assert response.json()["deleted_indexes"] == 1
+    assert [row["grid_type"] for row in details["grid"]] == ["mgrs"]
+    assert [row["grid_type"] for row in details["tiles"]] == ["mgrs"]
+    assert [row["grid_type"] for row in details["indexes"]] == ["mgrs"]
+    assert [row["grid_type"] for row in details["bands"][0]["grid_statuses"]] == ["mgrs"]
+
+
+def test_admin_deletes_ingested_band_grid_and_ingest_record() -> None:
+    client, repository, _ = _fixture()
+    details = repository.details["dataset-a"]
+    repository.details["dataset-a"]["bands"][0]["grid_statuses"] = [{
+        "grid_type": "geohash", "grid_level": 5,
+        "partition_status": "completed", "quality_status": "pass", "ingest_status": "completed",
+        "output_version": "out-a",
+    }]
+    details["grid"] = [{"output_id": "grid-geohash", "band_unit_id": "band-a1-b01", "grid_type": "geohash"}]
+    details["tiles"] = [{
+        "output_id": "tile-geohash", "output_version": "out-a", "source_asset_id": "asset-a1",
+        "band_code": "B01", "grid_type": "geohash",
+    }]
+    details["indexes"] = [{
+        "output_id": "index-geohash", "output_version": "out-a", "source_asset_id": "asset-a1",
+        "band_code": "B01", "grid_type": "geohash",
+    }]
+    details["ingest-records"] = [{
+        "ingest_run_id": "ingest-a1", "scene_id": "scene-a1", "output_version": "out-a",
+        "band_unit_ids": ["band-a1-b01"], "status": "completed",
+    }]
+
+    response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_ingest_records"] == 1
+    assert details["grid"] == []
+    assert details["tiles"] == []
+    assert details["indexes"] == []
+    assert details["ingest-records"] == []
+    assert details["bands"][0]["grid_statuses"] == []
+
+
+def test_active_grid_workflow_cannot_be_deleted() -> None:
+    client, repository, _ = _fixture()
+    repository.details["dataset-a"]["bands"][0]["grid_statuses"] = [{
+        "grid_type": "geohash", "grid_level": 5,
+        "partition_status": "running", "quality_status": "pending", "ingest_status": "pending",
+    }]
+
+    response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
+
+    assert response.status_code == 409
+    assert "剖分中" in response.json()["detail"]["message"]
 
 
 def test_publish_requires_passed_quality_even_after_ingest_completed() -> None:
@@ -294,6 +385,10 @@ def test_opengauss_provenance_uses_formal_domain_relations() -> None:
     assert "migration_lineage" not in tile_sql
     assert "st.st_code" in tile_sql
     assert "i.time_bucket=t.time_bucket" in tile_sql
+    assert "partition_quality_runs" in tile_sql
+    assert "quality_run_id" in tile_sql
+    ingest_sql, _ = OpenGaussDatasetManagementRepository._detail_sql("ingest-records", "dataset-a")
+    assert "provenance->>'quality_run_id' AS quality_run_id" in ingest_sql
     assert "migration_lineage" not in index_sql
 
 

@@ -98,6 +98,17 @@ def test_entity_tile_reuses_only_verified_identical_object(fake_minio: FakeMinio
         objects.put_entity_tile("dataset-a", "version-a", "tile-1.tif", b"other")
 
 
+def test_remove_objects_only_removes_exact_partition_uris(fake_minio: FakeMinio, object_record: dict[str, object]) -> None:
+    objects = PartitionObjectStore(fake_minio, bucket="cube")
+
+    assert objects.remove_objects([str(object_record["tile_uri"])]) == [str(object_record["object_key"])]
+    assert fake_minio.keys() == []
+    with pytest.raises(ValueError, match="only partition objects"):
+        objects.remove_objects(["s3://cube/cube/source/optocal/source.tif"])
+    with pytest.raises(ValueError, match="only partition objects"):
+        objects.remove_objects(["s3://cube/partition/dataset-a/versions/../source.tif"])
+
+
 def test_verify_manifest_rejects_checksum_mismatch(fake_minio: FakeMinio, object_record: dict[str, object]) -> None:
     objects = PartitionObjectStore(fake_minio, bucket="cube")
     fake_minio.objects[str(object_record["object_key"])]["metadata"] = {"checksum-sha256": "0" * 64}

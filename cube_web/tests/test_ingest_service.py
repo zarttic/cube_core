@@ -223,6 +223,14 @@ def _sql_repository(cursor: _RecordingCursor) -> OpenGaussIngestRepository:
     return repository
 
 
+def test_pending_collection_filter_keeps_null_ingest_status_rows() -> None:
+    where, params = OpenGaussIngestRepository._collection_filters(keyword="minio4", dataset_id="dataset-a")
+
+    assert "irs.status IS NULL OR irs.status <> 'completed'" in where
+    assert "COALESCE(irs.status" not in where
+    assert params == ("%minio4%", "%minio4%", "%minio4%", "%minio4%", "%minio4%", "dataset-a")
+
+
 def test_open_gauss_mutations_lock_run_before_scene_and_replay_completed_start() -> None:
     finish_cursor = _RecordingCursor()
     assert _sql_repository(finish_cursor).complete_scene("run-a", "scene-a") == "persisted-run"

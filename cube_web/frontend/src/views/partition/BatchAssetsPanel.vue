@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Collection, FolderOpened, Picture, Refresh, Search, Unlock } from '@element-plus/icons-vue';
 
 import { requestGet } from '@/api/client';
+import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { bandDisplayLabel, dataUnitTypeLabel, sceneBands, sceneMatchesBand } from '@/utils/bands';
 import { derivedPartitionMethod, gridDefinition, gridDefinitions, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 import { formatShanghaiTime } from '@/utils/time';
@@ -21,9 +22,13 @@ const availableBatches = ref([]);
 const selectedBatchIds = ref([]);
 const availableDatasets = ref([]);
 const availableBatchGroups = ref([]);
+const datasetOptions = ref([]);
 const selectedSceneIds = ref([]);
 const selectedBandUnitIds = ref([]);
+const batchKeyword = ref('');
+const datasetFilter = ref('');
 const bandKeyword = ref('');
+const batchPage = ref({ page: 1, pageSize: 20, total: 0 });
 const collapsedBatches = ref(new Set());
 const collapsedDatasets = ref(new Set());
 const collapsedScenes = ref(new Set());
@@ -35,10 +40,10 @@ let committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneId
 const REFRESH_INTERVAL_MS = 20_000;
 
 function sceneSourceBatchIds(scene) {
-  return [...new Set([
-    ...(Array.isArray(scene?.source_batch_ids) ? scene.source_batch_ids : []),
-    scene?.load_batch_id,
-  ].map((value) => String(value || '').trim()).filter(Boolean))];
+  const sourceBatchIds = Array.isArray(scene?.source_batch_ids) && scene.source_batch_ids.length
+    ? scene.source_batch_ids
+    : [scene?.load_batch_id];
+  return [...new Set(sourceBatchIds.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
 function batchGroupKey(batch) { return String(batch.load_batch_id); }
@@ -102,7 +107,7 @@ function suggestedLevel(dataset, gridType) {
 
 function fallbackGridLevel(dataset, gridType) {
   if (gridType === 'mgrs') return 1;
-  if (gridType === 'isea4h') return dataset?.data_type === 'carbon' ? 5 : 6;
+  if (gridType === 'isea4h') return 6;
   return 4;
 }
 
@@ -151,17 +156,34 @@ async function loadAvailable({ preserveSelection = false, preserveExpansion = fa
   loading.value = true;
   error.value = '';
   try {
-    const query = new URLSearchParams({ limit: '100', status: 'succeeded' });
-    if (dataTypeFilter) query.set('data_type', dataTypeFilter);
-    const response = await requestGet(`/v1/partition/load-batches?${query.toString()}`);
+    const query = pageQuery({
+      status: 'succeeded',
+      page: batchPage.value.page,
+      page_size: batchPage.value.pageSize,
+      keyword: batchKeyword.value.trim(),
+      dataset_id: datasetFilter.value,
+      data_type: dataTypeFilter,
+    });
+    const response = await requestGet(`/v1/partition/load-batches?${query}`);
     if (generation !== batchRequestGeneration || dataTypeFilter !== props.dataTypeFilter) return;
-    availableBatches.value = Array.isArray(response?.load_batches)
-      ? response.load_batches.filter((batch) => batch.status === 'succeeded')
-      : [];
+    const page = normalizePageResponse(response, batchPage.value.page, batchPage.value.pageSize);
+    const items = page.items.length
+      ? page.items
+      : (Array.isArray(response?.load_batches) ? response.load_batches : []);
+    availableBatches.value = items.filter((batch) => batch.status === 'succeeded');
+    datasetOptions.value = Array.isArray(response?.dataset_options) ? response.dataset_options : [];
+    Object.assign(batchPage.value, {
+      page: page.page,
+      pageSize: page.pageSize,
+      total: Number(response?.total ?? (page.items.length || response?.load_batches?.length || 0)),
+    });
+    if (!availableBatches.value.length && batchPage.value.total > 0 && batchPage.value.page > 1) {
+      batchPage.value.page = Math.max(1, Math.ceil(batchPage.value.total / batchPage.value.pageSize));
+      await loadAvailable({ preserveSelection, preserveExpansion });
+      return;
+    }
     const requestedBatchIds = preserveSelection ? priorBatchIds : selectedBatchesFromModel();
-    selectedBatchIds.value = requestedBatchIds.filter((batchId) => (
-      queueBatches.value.some((batch) => batch.load_batch_id === batchId)
-    ));
+    selectedBatchIds.value = [...new Set(requestedBatchIds)];
     selectedSceneIds.value = preserveSelection ? priorSceneIds : selectedScenesFromModel();
     selectedBandUnitIds.value = preserveSelection ? priorBandUnitIds : selectedBandsFromModel();
     if (selectedBatchIds.value.length) {
@@ -183,19 +205,30 @@ function mergeBatchDatasets(responses) {
     (response?.datasets || []).forEach((dataset) => {
       const key = `${batchId}:${dataset.dataset_id}`;
       const queueBatch = queueBatches.value.find((batch) => batch.load_batch_id === batchId);
-      const reloadSelection = queueBatch?.attributes?.reload_selection?.datasets
+      const responseBatch = response?.load_batch || {};
+      const reloadSelection = (responseBatch.attributes?.reload_selection || queueBatch?.attributes?.reload_selection)?.datasets
         ?.find((item) => item.dataset_id === dataset.dataset_id) || null;
+      const reloadBandUnitIds = Array.isArray(reloadSelection?.band_unit_ids)
+        ? new Set(reloadSelection.band_unit_ids.map((value) => String(value || '').trim()).filter(Boolean))
+        : null;
       const sourceBatchIdsForResponse = [batchId];
+      const responseScenes = (dataset.scenes || []).map((scene) => ({
+        ...scene,
+        bands: reloadBandUnitIds
+          ? (scene.bands || []).filter((band) => reloadBandUnitIds.has(String(band.band_unit_id || '').trim()))
+          : scene.bands,
+      }));
       const existing = datasets.get(key) || {
         ...dataset,
         source_batch_id: batchId,
         selection_id: key,
+        band_unit_ids: reloadSelection?.band_unit_ids || dataset.band_unit_ids,
         partition: reloadSelection?.partition,
         grid_config_locked: reloadSelection?.grid_config_locked === true,
         selection_source: reloadSelection?.selection_source || 'load_batch',
         scenes: new Map(),
       };
-      (dataset.scenes || []).forEach((scene) => {
+      responseScenes.forEach((scene) => {
         const prior = existing.scenes.get(scene.scene_id);
         const sourceBatchIds = sourceBatchIdsForResponse;
         const sourceLoadStatuses = {
@@ -250,7 +283,8 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
   loading.value = true;
   error.value = '';
   try {
-    const query = props.dataTypeFilter ? `?data_type=${encodeURIComponent(props.dataTypeFilter)}` : '';
+    const sceneQuery = pageQuery({ data_type: props.dataTypeFilter });
+    const query = sceneQuery ? `?${sceneQuery}` : '';
     const responses = await Promise.all(ids.map(async (batchId) => {
       return {
         batchId,
@@ -311,6 +345,27 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
   } finally {
     if (generation === sceneRequestGeneration) loading.value = false;
   }
+}
+
+function updateBatchSelection(batchIds) {
+  const visibleBatchIds = new Set(queueBatches.value.map((batch) => String(batch.load_batch_id)));
+  const hiddenSelectedIds = selectedBatchIds.value.filter((batchId) => !visibleBatchIds.has(String(batchId)));
+  return loadSelectedBatches([...new Set([...hiddenSelectedIds, ...batchIds])], { preserveExpansion: true });
+}
+
+function applyBatchFilters() {
+  batchPage.value.page = 1;
+  return loadAvailable({ preserveSelection: true, preserveExpansion: true });
+}
+
+function setBatchPage(page) {
+  batchPage.value.page = page;
+  return loadAvailable({ preserveSelection: true, preserveExpansion: true });
+}
+
+function setBatchPageSize(pageSize) {
+  Object.assign(batchPage.value, { page: 1, pageSize });
+  return loadAvailable({ preserveSelection: true, preserveExpansion: true });
 }
 
 function scenePreviewAsset(scene) {
@@ -583,6 +638,10 @@ watch(() => props.dataTypeFilter, () => {
   selectedBandUnitIds.value = [];
   availableDatasets.value = [];
   availableBatchGroups.value = [];
+  datasetOptions.value = [];
+  batchKeyword.value = '';
+  datasetFilter.value = '';
+  batchPage.value.page = 1;
   committedBatchState = { batchIds: [], datasets: [], batchGroups: [], sceneIds: [], bandUnitIds: [] };
   loadAvailable();
 });
@@ -607,8 +666,24 @@ onBeforeUnmount(() => {
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 
     <div class="partition-batch-picker">
-      <div class="partition-section-title"><strong>待剖分批次</strong><span>{{ queueBatches.length }} 个可用批次</span></div>
-      <el-checkbox-group :model-value="selectedBatchIds" data-testid="load-batch-selector" @update:model-value="loadSelectedBatches">
+      <div class="partition-section-title"><strong>待剖分批次</strong><span>{{ batchPage.total }} 个可用批次</span></div>
+      <el-form class="batch-filter-toolbar" inline @submit.prevent="applyBatchFilters">
+        <el-form-item>
+          <el-input v-model="batchKeyword" :prefix-icon="Search" clearable placeholder="载入批次名称或 ID" @keyup.enter="applyBatchFilters" />
+        </el-form-item>
+        <el-form-item>
+          <el-select v-model="datasetFilter" filterable clearable placeholder="按数据集筛选" style="width: 240px">
+            <el-option v-for="dataset in datasetOptions" :key="dataset.dataset_id" :label="dataset.dataset_title || dataset.dataset_code || dataset.dataset_id" :value="dataset.dataset_id">
+              <span>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</span>
+              <small>{{ dataset.dataset_code || dataset.dataset_id }}</small>
+            </el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :icon="Search" native-type="submit">筛选</el-button>
+        </el-form-item>
+      </el-form>
+      <el-checkbox-group :model-value="selectedBatchIds" data-testid="load-batch-selector" @update:model-value="updateBatchSelection">
         <el-checkbox v-for="batch in queueBatches" :key="batch.load_batch_id" :value="batch.load_batch_id" :data-testid="`load-batch-${batch.load_batch_id}`">
           <span class="partition-batch-option">
             <strong>{{ batch.batch_name || batch.load_batch_id }}</strong>
@@ -617,6 +692,18 @@ onBeforeUnmount(() => {
         </el-checkbox>
       </el-checkbox-group>
       <div v-if="!loading && !queueBatches.length" class="empty-state">暂无可用待剖分批次</div>
+      <el-pagination
+        v-if="batchPage.total"
+        class="batch-pagination"
+        :current-page="batchPage.page"
+        :page-size="batchPage.pageSize"
+        :page-sizes="[20, 50, 100]"
+        :total="batchPage.total"
+        background
+        layout="total, sizes, prev, pager, next"
+        @current-change="setBatchPage"
+        @size-change="setBatchPageSize"
+      />
     </div>
 
     <div class="band-filter-toolbar">
@@ -723,6 +810,11 @@ onBeforeUnmount(() => {
 .partition-batch-picker { padding: 12px 0 18px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .partition-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .partition-section-title span { color: var(--el-text-color-secondary); font-size: 12px; }
+.batch-filter-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 0 10px; margin-bottom: 8px; }
+.batch-filter-toolbar :deep(.el-form-item) { margin-bottom: 8px; }
+.batch-filter-toolbar :deep(.el-input) { width: min(300px, 42vw); }
+.batch-filter-toolbar :deep(.el-option small) { display: block; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; }
+.batch-pagination { margin-top: 12px; }
 .partition-batch-picker :deep(.el-checkbox-group) { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px 16px; }
 .partition-batch-picker :deep(.el-checkbox) { align-items: flex-start; height: auto; margin: 0; padding: 8px 0; }
 .partition-batch-picker :deep(.el-checkbox__label), .scene-band-list :deep(.el-checkbox__label) { min-width: 0; white-space: normal; }
@@ -778,6 +870,7 @@ onBeforeUnmount(() => {
   .partition-dataset-tree { padding-left: 10px; }
   .partition-dataset-grid { grid-template-columns: minmax(0, 1fr) 32px; width: 100%; }
   .partition-dataset-grid > :first-child { grid-column: 1 / -1; }
+  .batch-filter-toolbar :deep(.el-form-item), .batch-filter-toolbar :deep(.el-input), .batch-filter-toolbar :deep(.el-select) { width: 100%; }
   .band-filter-toolbar { align-items: stretch; flex-direction: column; }
   .band-filter-toolbar .el-input { width: 100%; }
 }

@@ -23,9 +23,22 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = Query(default=100, ge=1, le=500),
+        dataset_id: str | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        limit: int | None = Query(default=None, ge=1, le=500),
     ) -> dict:
-        return service.list_load_batches(status=status, data_type=data_type, keyword=keyword, limit=limit)
+        if limit is not None:
+            page = 1
+            page_size = limit
+        return service.list_load_batches(
+            status=status,
+            data_type=data_type,
+            keyword=keyword,
+            dataset_id=dataset_id,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/load-batches/{load_batch_id}")
     def get_load_batch(load_batch_id: str) -> dict:
@@ -102,8 +115,24 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
         return service.mark_partition_draft_submitted(draft_id, payload.partition_run_id)
 
     @router.get("/runs")
-    def list_partition_quality_runs(limit: int = Query(default=100, ge=1, le=500)) -> dict:
-        return service.list_partition_quality_batches(limit=limit)
+    def list_partition_quality_runs(
+        keyword: str | None = None,
+        data_type: str | None = None,
+        status: str | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=500),
+        limit: int | None = Query(default=None, ge=1, le=500),
+    ) -> dict:
+        if limit is not None:
+            page = 1
+            page_size = limit
+        return service.list_partition_quality_batches(
+            keyword=keyword,
+            data_type=data_type,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/runs/{partition_run_id}/quality")
     def get_partition_quality_run(partition_run_id: str) -> dict:

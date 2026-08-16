@@ -19,7 +19,10 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
   const actionLoading = ref(false);
   const manualCandidates = ref([]);
   const manualCandidatesLoading = ref(false);
+  const manualFilters = reactive({ keyword: '', datasetId: '' });
+  const manualPageState = reactive({ page: 1, pageSize: 20, total: 0 });
   const listScope = createRequestScope();
+  const manualListScope = createRequestScope();
   const detailScope = createRequestScope();
   let detailGeneration = 0;
 
@@ -124,16 +127,35 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
     }
   }
 
-  async function loadManualCandidates() {
+  async function loadManualCandidates({ resetPage = false } = {}) {
+    if (resetPage) manualPageState.page = 1;
+    const request = manualListScope.begin();
     manualCandidatesLoading.value = true;
     try {
-      const response = await requestGet('/v1/ingest-runs/collections?page=1&page_size=100');
-      manualCandidates.value = (Array.isArray(response?.items) ? response.items : []).filter((item) => (
+      const query = pageQuery({
+        keyword: manualFilters.keyword.trim(),
+        dataset_id: manualFilters.datasetId.trim(),
+        page: manualPageState.page,
+        page_size: manualPageState.pageSize,
+      });
+      const response = await requestGet(`/v1/ingest-runs/collections?${query}`, { signal: request.signal });
+      if (!manualListScope.isCurrent(request.token)) return manualCandidates.value;
+      const page = normalizePageResponse(response, manualPageState.page, manualPageState.pageSize);
+      manualCandidates.value = (Array.isArray(page.items) ? page.items : []).filter((item) => (
         Number(item.quality_pass_count || 0) > Number(item.ingested_count || 0)
       ));
+      Object.assign(manualPageState, { page: page.page, pageSize: page.pageSize, total: page.total });
+      if (!manualCandidates.value.length && manualPageState.total > 0 && manualPageState.page > 1) {
+        manualPageState.page = Math.max(1, Math.ceil(manualPageState.total / manualPageState.pageSize));
+        await loadManualCandidates();
+      }
       return manualCandidates.value;
+    } catch (requestError) {
+      if (request.signal.aborted || !manualListScope.isCurrent(request.token)) return manualCandidates.value;
+      error.value = requestError.message || '待入库集合加载失败';
+      throw requestError;
     } finally {
-      manualCandidatesLoading.value = false;
+      if (manualListScope.isCurrent(request.token)) manualCandidatesLoading.value = false;
     }
   }
 
@@ -144,12 +166,14 @@ export const useIngestRunsStore = defineStore('ingest-runs', () => {
 
   function dispose() {
     listScope.dispose();
+    manualListScope.dispose();
     resetDetail();
   }
 
   return {
     filters, pageState, records, summary, loading, error, selectedRunId, detailVisible, detail,
-    detailLoading, actionLoading, manualCandidates, manualCandidatesLoading, loadList, openDetail, retryFailedBandUnits, cancelRun,
+    detailLoading, actionLoading, manualCandidates, manualCandidatesLoading, manualFilters, manualPageState,
+    loadList, openDetail, retryFailedBandUnits, cancelRun,
     requestManualCollection, loadManualCandidates, closeDetail, dispose,
   };
 });

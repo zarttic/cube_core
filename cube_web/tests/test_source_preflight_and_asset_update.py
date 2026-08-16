@@ -28,6 +28,14 @@ class _FakeMinio:
         return SimpleNamespace(size=1024)
 
 
+class _CountingMinio(_FakeMinio):
+    calls: list[tuple[str, str]] = []
+
+    def stat_object(self, bucket: str, key: str) -> Any:
+        self.calls.append((bucket, key))
+        return super().stat_object(bucket, key)
+
+
 def _payload(uri: str) -> list[dict[str, Any]]:
     return [{
         "dataset": {"assets": [{"source_asset_id": "a1", "source_uri": uri, "cog_uri": uri}]},
@@ -64,6 +72,29 @@ def test_preflight_passes_when_sources_exist(monkeypatch: pytest.MonkeyPatch) ->
     )
     monkeypatch.setattr("minio.Minio", _FakeMinio)
     runner_module.NormalizedPartitionDatasetRunner._verify_assets_exist(_payload("s3://cube/good.tif"))
+
+
+def test_preflight_deduplicates_same_source_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner_module.runtime_config,
+        "minio_settings",
+        lambda **_: SimpleNamespace(endpoint="minio:9000", access_key="k", secret_key="s", bucket="cube", secure=False),
+    )
+    _CountingMinio.calls = []
+    monkeypatch.setattr("minio.Minio", _CountingMinio)
+    uri = "s3://cube/source/scene%20full.tif"
+    payloads = [{
+        "dataset": {
+            "assets": [
+                {"source_asset_id": "a1", "cog_uri": uri},
+                {"source_asset_id": "a2", "cog_uri": uri},
+            ],
+        },
+    }]
+
+    runner_module.NormalizedPartitionDatasetRunner._verify_assets_exist(payloads)
+
+    assert _CountingMinio.calls == [("cube", "source/scene full.tif")]
 
 
 class _FakeSceneRepository:

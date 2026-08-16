@@ -52,11 +52,25 @@ class IngestRunService:
             summary=self.repository.summarize_runs(**filters),
         )
 
-    def list_collections(self, *, page: int = 1, page_size: int = 20) -> dict:
+    def list_collections(
+        self,
+        *,
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
         if page < 1:
             raise ValueError("page must be positive")
-        items = self.repository.list_collections(limit=page_size, offset=(page - 1) * page_size)
-        return {"items": items, "total": self.repository.count_collections(), "page": page, "page_size": page_size}
+        filters = {"keyword": keyword, "dataset_id": dataset_id, "data_type": data_type}
+        items = self.repository.list_collections(limit=page_size, offset=(page - 1) * page_size, **filters)
+        return {
+            "items": items,
+            "total": self.repository.count_collections(**filters),
+            "page": page,
+            "page_size": page_size,
+        }
 
     def request_collection_ingest(self, partition_run_id: str, band_unit_ids: tuple[str, ...], *, requested_by: str) -> dict:
         return request_manual_ingest_collection(partition_run_id, set(band_unit_ids), requested_by=requested_by)

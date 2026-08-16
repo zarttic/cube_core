@@ -30,6 +30,8 @@ Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址�
   `cube_encoder`、`cube_split`、`cube_web` 和栅格、对象存储、OpenGauss 驱动依赖。
 - Worker 允许 `minReplicas: 0`，并设置明确的 `maxReplicas`。容量、CPU、内存
   与临时盘按真实影像大小和并发度配置；不能依赖节点本地源码目录或镜像携带影像。
+- 生产集群的空闲 Worker 回收时间为 600 秒（`autoscalerOptions.idleTimeoutSeconds: 600`）。
+  这个参数由 RayCluster 运行时配置控制，不写入业务配置表。
 - 源影像和成果均使用 MinIO `s3://` URI。Worker 在自己的缓存目录下载源对象、
   校验哈希、处理后把成果写回 MinIO。
 - Pod 必须能访问 MinIO、OpenGauss 与 Head Service。OpenGauss 的访问控制必须

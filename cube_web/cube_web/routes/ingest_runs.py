@@ -41,9 +41,21 @@ def create_ingest_runs_router(service: IngestRunService) -> APIRouter:
             raise HTTPException(status_code=422, detail={"code": "invalid_ingest_query", "message": str(exc)}) from exc
 
     @router.get("/collections")
-    def list_collections(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)) -> dict:
+    def list_collections(
+        keyword: str | None = None,
+        dataset_id: str | None = None,
+        data_type: str | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ) -> dict:
         try:
-            return service.list_collections(page=page, page_size=page_size)
+            return service.list_collections(
+                keyword=keyword,
+                dataset_id=dataset_id,
+                data_type=data_type,
+                page=page,
+                page_size=page_size,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "invalid_ingest_query", "message": str(exc)}) from exc
 

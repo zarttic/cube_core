@@ -1,9 +1,10 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 import { List, Refresh } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
 import { requestGet, requestPost } from '@/api/client';
+import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useQualityStore } from '@/stores/quality';
@@ -14,6 +15,8 @@ const props = defineProps({ embedded: Boolean });
 const store = useQualityStore();
 
 const batches = ref([]);
+const filters = reactive({ keyword: '', dataType: '', status: '' });
+const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
 const loading = ref(false);
 const error = ref('');
 const selectedId = ref('');
@@ -31,6 +34,7 @@ const dataTypeLabels = {
   product: '信息产品',
   carbon: '碳卫星',
 };
+let batchRequestGeneration = 0;
 
 function dataTypeLabel(value) {
   return dataTypeLabels[value] || value || '-';
@@ -64,17 +68,47 @@ async function openRuleCatalog() {
   }
 }
 
-async function loadBatches() {
+async function loadBatches({ resetPage = false } = {}) {
+  if (resetPage) pageState.page = 1;
+  const generation = ++batchRequestGeneration;
   loading.value = true;
   error.value = '';
   try {
-    const response = await requestGet('/v1/partition/runs?limit=100');
-    batches.value = response.items || [];
+    const query = pageQuery({
+      keyword: filters.keyword.trim(),
+      data_type: filters.dataType,
+      status: filters.status,
+      page: pageState.page,
+      page_size: pageState.pageSize,
+    });
+    const response = await requestGet(`/v1/partition/runs?${query}`);
+    if (generation !== batchRequestGeneration) return;
+    const page = normalizePageResponse(response, pageState.page, pageState.pageSize);
+    batches.value = page.items;
+    Object.assign(pageState, { page: page.page, pageSize: page.pageSize, total: page.total });
+    if (!batches.value.length && pageState.total > 0 && pageState.page > 1) {
+      pageState.page = Math.max(1, Math.ceil(pageState.total / pageState.pageSize));
+      await loadBatches();
+    }
   } catch (requestError) {
-    error.value = requestError.message || '剖分批次质检记录加载失败';
+    if (generation === batchRequestGeneration) error.value = requestError.message || '剖分批次质检记录加载失败';
   } finally {
-    loading.value = false;
+    if (generation === batchRequestGeneration) loading.value = false;
   }
+}
+
+function applyFilters() {
+  return loadBatches({ resetPage: true });
+}
+
+function setPage(page) {
+  pageState.page = page;
+  return loadBatches();
+}
+
+function setPageSize(pageSize) {
+  Object.assign(pageState, { page: 1, pageSize });
+  return loadBatches();
 }
 
 async function openBatch(row) {
@@ -147,8 +181,32 @@ onMounted(() => { loadBatches(); });
         <el-button :icon="Refresh" :loading="loading" @click="loadBatches">刷新</el-button>
       </div>
     </header>
+    <el-form class="filter-bar" inline @submit.prevent="applyFilters">
+      <el-form-item>
+        <el-input v-model="filters.keyword" clearable placeholder="剖分批次、载入批次或数据集" @keyup.enter="applyFilters" />
+      </el-form-item>
+      <el-form-item>
+        <el-select v-model="filters.dataType" clearable placeholder="数据类型" style="width: 150px">
+          <el-option v-for="(label, value) in dataTypeLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <el-select v-model="filters.status" clearable placeholder="批次状态" style="width: 150px">
+          <el-option label="待处理" value="pending" />
+          <el-option label="排队中" value="queued" />
+          <el-option label="运行中" value="running" />
+          <el-option label="已完成" value="completed" />
+          <el-option label="部分失败" value="partial_failure" />
+          <el-option label="失败" value="failed" />
+          <el-option label="已取消" value="cancelled" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <el-button type="primary" native-type="submit">查询</el-button>
+      </el-form-item>
+    </el-form>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-    <AppTable :data="batches" :loading="loading" :pagination="false" row-key="partition_run_id" @row-click="openBatch">
+    <AppTable :data="batches" :loading="loading" row-key="partition_run_id" :page="pageState.page" :page-size="pageState.pageSize" :total="pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="openBatch">
       <el-table-column label="剖分批次" min-width="240"><template #default="{ row }"><div class="batch-cell"><strong>{{ row.partition_run_id }}</strong><span :title="(row.source_load_batch_ids || []).join('、')">来源 {{ (row.source_load_batch_names || row.source_load_batch_ids || []).join('、') || '-' }}</span></div></template></el-table-column>
       <el-table-column label="数据范围" min-width="150"><template #default="{ row }">{{ row.dataset_count }} 个数据集 · {{ row.scene_count }} 景 · {{ row.band_count }} 波段</template></el-table-column>
       <el-table-column label="剖分" width="105"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
@@ -246,6 +304,9 @@ onMounted(() => { loadBatches(); });
 .quality-view.embedded { padding: 0; }
 .view-header { display: flex; justify-content: flex-end; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
 .header-actions { display: flex; gap: 8px; }
+.filter-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 0 10px; margin-bottom: 16px; }
+.filter-bar :deep(.el-form-item) { margin-bottom: 8px; }
+.filter-bar :deep(.el-input) { width: min(330px, 44vw); }
 .batch-cell { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
 .batch-cell strong, .batch-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-cell strong { color: #263247; }

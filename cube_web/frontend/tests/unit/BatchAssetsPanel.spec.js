@@ -23,7 +23,7 @@ function group(datasetId, scenes, dataType = 'optical', resolution = 10) {
     data_type: dataType,
     product_type: 'L2A',
     resolution_m: resolution,
-    suggested_grid_levels: dataType === 'carbon' ? {} : { geohash: 5, mgrs: 0, isea4h: 11 },
+    suggested_grid_levels: dataType === 'carbon' ? {} : { geohash: 5, mgrs: 0, isea4h: 6 },
     scenes,
   };
 }
@@ -63,6 +63,8 @@ function responseFor(batchId) {
 
 const stubs = {
   'el-alert': true,
+  'el-form': { template: '<form><slot /></form>' },
+  'el-form-item': { template: '<div><slot /></div>' },
   'el-input': { props: ['modelValue'], template: '<input :value="modelValue" />' },
   'el-checkbox-group': { props: ['modelValue'], template: '<div><slot /></div>' },
   'el-checkbox': { props: ['value', 'disabled'], template: '<label><slot /></label>' },
@@ -70,6 +72,7 @@ const stubs = {
   'el-select': { props: ['disabled'], template: '<select :disabled="disabled"><slot /></select>' },
   'el-option': { template: '<option><slot /></option>' },
   'el-button': { template: '<button v-bind="$attrs"><slot /></button>' },
+  'el-pagination': { template: '<div />' },
   'el-tooltip': { template: '<span><slot /></span>' },
 };
 
@@ -84,7 +87,7 @@ function mountPanel(props = {}) {
 
 beforeEach(() => {
   requestGet.mockReset().mockImplementation((url) => {
-    if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
+    if (url === '/v1/partition/load-batches?status=succeeded&page=1&page_size=20&data_type=optical') return Promise.resolve(batches);
     const batchId = url.includes('/load-a/') ? 'load-a' : 'load-b';
     return Promise.resolve(responseFor(batchId));
   });
@@ -97,12 +100,18 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
       load_batch_id: 'dataset-reload-a', batch_name: '山东光学重新载入', scene_count: 1, status: 'succeeded',
       attributes: { reload_selection: { datasets: [{
         dataset_id: 'dataset-a', grid_config_locked: true, selection_source: 'dataset_reload',
+        band_unit_ids: ['band-scene-a-B04'],
         partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
       }] } },
     };
     requestGet.mockImplementation((url) => {
       if (url.includes('/load-batches?')) return Promise.resolve({ load_batches: [reloadBatch] });
-      return Promise.resolve({ load_batch: reloadBatch, datasets: [group('dataset-a', [scene('scene-a', 'dataset-reload-a')])] });
+      const selectedScene = scene('scene-a', 'dataset-reload-a');
+      selectedScene.bands.push({
+        band_unit_id: 'band-scene-a-B08', asset_id: 'asset-scene-a',
+        band_code: 'B08', band_name: '近红外', band_type: 'spectral',
+      });
+      return Promise.resolve({ load_batch: reloadBatch, datasets: [group('dataset-a', [selectedScene])] });
     });
     const selected = {
       ...group('dataset-a', [scene('scene-a', 'dataset-reload-a')]),
@@ -115,6 +124,7 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
 
     expect(wrapper.get('[data-testid="load-batch-dataset-reload-a"]').text()).toContain('山东光学重新载入');
     expect(wrapper.vm.availableBatchGroups.map((batch) => batch.load_batch_id)).toEqual(['dataset-reload-a']);
+    expect(wrapper.vm.availableDatasets[0].scenes[0].bands.map((band) => band.band_unit_id)).toEqual(['band-scene-a-B04']);
     expect(wrapper.emitted('update:modelValue').at(-1)[0][0]).toMatchObject({
       dataset_id: 'dataset-a',
       band_unit_ids: ['band-scene-a-B04'],
@@ -322,13 +332,13 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
   });
 
   it('supports partial scene selection and keeps each dataset grid independent', async () => {
-    const wrapper = mountPanel({ defaultGridType: 'isea4h', defaultRequestedGridLevel: 4 });
+    const wrapper = mountPanel({ defaultGridType: 'isea4h', defaultRequestedGridLevel: 6 });
     await flushPromises();
     await wrapper.vm.loadSelectedBatches(['load-a']);
     wrapper.vm.updateBandSelection(['band-scene-a-B04']);
     let emitted = wrapper.emitted('update:modelValue').at(-1)[0];
     expect(emitted[0].partition).toMatchObject({
-      grid_type: 'isea4h', requested_grid_level: 11, partition_method: 'entity',
+      grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity',
       cover_mode: 'intersect', time_granularity: 'day', max_cells_per_asset: 0,
     });
 
@@ -366,7 +376,7 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
 
   it('falls back to 10 km MGRS when source data has no resolution', async () => {
     requestGet.mockImplementation((url) => {
-      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
+      if (url === '/v1/partition/load-batches?status=succeeded&page=1&page_size=20&data_type=optical') return Promise.resolve(batches);
       const response = responseFor('load-a');
       response.datasets.forEach((dataset) => {
         delete dataset.resolution_m;
@@ -402,7 +412,7 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
   it('preserves selections accumulated on another product page', async () => {
     const carbon = {
       dataset_id: 'dataset-carbon', data_type: 'carbon', scenes: [{ scene_id: 'carbon-scene', source_batch_ids: ['load-b'] }],
-      partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'entity' },
+      partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
     };
     const wrapper = mountPanel({ modelValue: [carbon] });
     await flushPromises();
@@ -417,8 +427,8 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
 
   it('clears the displayed batch tree when the product page changes', async () => {
     requestGet.mockImplementation((url) => {
-      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
-      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=radar') return Promise.resolve({ load_batches: [] });
+      if (url === '/v1/partition/load-batches?status=succeeded&page=1&page_size=20&data_type=optical') return Promise.resolve(batches);
+      if (url === '/v1/partition/load-batches?status=succeeded&page=1&page_size=20&data_type=radar') return Promise.resolve({ load_batches: [] });
       return Promise.resolve(responseFor('load-a'));
     });
     const wrapper = mountPanel();
@@ -438,7 +448,7 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
   it('discards a stale batch detail response after the batch selection changes', async () => {
     let resolveOld;
     requestGet.mockImplementation((url) => {
-      if (url === '/v1/partition/load-batches?limit=100&status=succeeded&data_type=optical') return Promise.resolve(batches);
+      if (url === '/v1/partition/load-batches?status=succeeded&page=1&page_size=20&data_type=optical') return Promise.resolve(batches);
       if (url.includes('/load-a/')) return new Promise((resolve) => { resolveOld = resolve; });
       return Promise.resolve(responseFor('load-b'));
     });

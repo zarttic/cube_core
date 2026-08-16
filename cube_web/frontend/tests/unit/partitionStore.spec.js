@@ -140,7 +140,7 @@ describe('partition store scene request', () => {
     ['no scenes', [dataset('dataset-a', [])], /至少选择一个景/],
     ['no source batch', [dataset('dataset-a', [scene('scene-a', [])])], /来源载入批次/],
     ['invalid grid level', [dataset('dataset-a', [scene('scene-a', ['load-a'])], 'geohash', 99)], /层级/],
-    ['invalid partition method', [{ ...dataset('dataset-a', [scene('scene-a', ['load-a'])]), partition: { grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'logical' } }], /剖分方式/],
+    ['invalid partition method', [{ ...dataset('dataset-a', [scene('scene-a', ['load-a'])]), partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'logical' } }], /剖分方式/],
   ])('rejects %s before submission', (_name, datasets, message) => {
     const store = usePartitionStore();
     store.setDatasets('optical', datasets);

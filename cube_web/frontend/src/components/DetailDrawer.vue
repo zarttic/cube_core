@@ -7,6 +7,7 @@ const props = defineProps({
   loading: Boolean,
   size: { type: [String, Number], default: '720px' },
   testId: { type: String, default: '' },
+  lockScroll: { type: Boolean, default: true },
 });
 const emit = defineEmits(['update:visible', 'closed']);
 const open = computed({
@@ -16,7 +17,7 @@ const open = computed({
 </script>
 
 <template>
-  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" :modal="false" modal-class="detail-drawer-overlay" @closed="$emit('closed')">
+  <el-drawer v-model="open" :data-testid="testId || undefined" :title="title" :size="size" :modal="false" :lock-scroll="lockScroll" modal-class="detail-drawer-overlay" @closed="$emit('closed')">
     <div v-loading="loading">
       <slot />
     </div>

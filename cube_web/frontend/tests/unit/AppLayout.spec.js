@@ -30,6 +30,7 @@ describe('AppLayout navigation', () => {
       '资源调度',
       '后台管理',
       '全球离散格网模型与编码',
+      '系统配置',
     ]);
     expect(wrapper.findAll('.portal-nav a').find((item) => item.text() === '分析就绪数据剖分').attributes('href')).toBe('/partition');
   });

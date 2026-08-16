@@ -59,7 +59,7 @@ const REPARTITION_SPECS = [
   {
     key: 'radar', module: 'radar', label: '雷达遥感', dataType: 'radar',
     batch: 'radar-batch', dataset: 'radar-standard', datasetTitle: '雷达遥感标准验收数据集',
-    gridType: 'isea4h', gridTypeLabel: '六边形格网', level: 11,
+    gridType: 'isea4h', gridTypeLabel: '六边形格网', level: 6,
     partitionedBand: 'band-radar-vv',
     selectBandUnitIds: ['band-radar-vh'],
     expandSceneIds: ['radar-scene'],

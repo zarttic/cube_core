@@ -11,7 +11,7 @@ from grid_core.sdk import CubeEncoderSDK
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
-from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, DatasetReloadBatchRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest
+from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, DatasetReloadBatchRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest, reload_selection_band_unit_ids
 
 
 class SceneRepository(Protocol):
@@ -23,8 +23,11 @@ class SceneRepository(Protocol):
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]: ...
+        dataset_id: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]]: ...
 
     def get_load_batch(self, load_batch_id: str) -> dict[str, Any] | None: ...
 
@@ -61,7 +64,16 @@ class SceneRepository(Protocol):
 
     def update_partition_task(self, task_id: str, status: str, result: dict[str, Any] | None = None) -> str | None: ...
 
-    def list_partition_quality_batches(self, *, limit: int = 100) -> list[dict[str, Any]]: ...
+    def list_partition_quality_batches(
+        self,
+        *,
+        keyword: str | None = None,
+        data_type: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]]: ...
 
     def get_partition_quality_batch(self, partition_run_id: str) -> dict[str, Any] | None: ...
 
@@ -142,15 +154,39 @@ class SceneDomainService:
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = 100,
+        dataset_id: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
     ) -> dict[str, Any]:
+        if limit is not None:
+            page = 1
+            page_size = limit
+        result = self.repository.list_load_batches(
+            status=status,
+            data_type=data_type,
+            keyword=keyword,
+            dataset_id=dataset_id,
+            page=page,
+            page_size=page_size,
+        )
+        if isinstance(result, dict):
+            items = result.get("items", result.get("load_batches", []))
+            return {
+                **result,
+                "items": items,
+                "load_batches": result.get("load_batches", items),
+                "total": int(result.get("total", len(items))),
+                "page": int(result.get("page", page)),
+                "page_size": int(result.get("page_size", page_size)),
+            }
         return {
-            "load_batches": self.repository.list_load_batches(
-                status=status,
-                data_type=data_type,
-                keyword=keyword,
-                limit=limit,
-            )
+            "items": result,
+            "load_batches": result,
+            "total": len(result),
+            "page": page,
+            "page_size": page_size,
+            "dataset_options": [],
         }
 
     def import_load_schema(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -179,6 +215,15 @@ class SceneDomainService:
         )
         grouped: dict[str, dict[str, Any]] = {}
         for scene in scenes:
+            selected_band_unit_ids = reload_selection_band_unit_ids(
+                batch.get("attributes"),
+                str(scene["dataset_id"]),
+            )
+            if selected_band_unit_ids is not None:
+                scene["bands"] = [
+                    band for band in scene.get("bands", [])
+                    if str(band.get("band_unit_id") or "") in selected_band_unit_ids
+                ]
             group_id = str(scene["dataset_id"])
             group = grouped.setdefault(
                 group_id,
@@ -351,9 +396,41 @@ class SceneDomainService:
             "operation": task_value["operation"],
         }
 
-    def list_partition_quality_batches(self, *, limit: int = 100) -> dict[str, Any]:
-        items = self.repository.list_partition_quality_batches(limit=limit)
-        return {"items": items, "total": len(items)}
+    def list_partition_quality_batches(
+        self,
+        *,
+        keyword: str | None = None,
+        data_type: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        if limit is not None:
+            page = 1
+            page_size = limit
+        result = self.repository.list_partition_quality_batches(
+            keyword=keyword,
+            data_type=data_type,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
+        if isinstance(result, dict):
+            items = result.get("items", [])
+            return {
+                **result,
+                "items": items,
+                "total": int(result.get("total", len(items))),
+                "page": int(result.get("page", page)),
+                "page_size": int(result.get("page_size", page_size)),
+            }
+        return {
+            "items": result,
+            "total": len(result),
+            "page": page,
+            "page_size": page_size,
+        }
 
     def get_partition_quality_batch(self, partition_run_id: str) -> dict[str, Any]:
         batch = self.repository.get_partition_quality_batch(partition_run_id)
@@ -428,8 +505,11 @@ class SceneDomainService:
         selection = dict(payload.datasets[0])
         dataset_id = str(selection.get("dataset_id") or "").strip()
         scene_ids = tuple(str(scene.get("scene_id") or "").strip() for scene in selection.get("scenes", ()))
+        band_unit_ids = selection.get("band_unit_ids")
         if not dataset_id or not scene_ids or any(not scene_id for scene_id in scene_ids):
             raise ValueError("dataset reload requires one dataset and one or more scenes")
+        if not isinstance(band_unit_ids, (list, tuple)) or not band_unit_ids or any(not str(value).strip() for value in band_unit_ids):
+            raise ValueError("dataset reload requires one or more selected band units")
         request = ScenePartitionRunRequest.model_validate({
             "partition_run_id": f"reload-validation-{uuid4().hex[:12]}",
             "source_batch_ids": payload.source_batch_ids,

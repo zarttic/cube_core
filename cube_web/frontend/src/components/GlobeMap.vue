@@ -380,7 +380,12 @@ function focusToPoints(points) {
     north = Math.max(north, lat);
   });
   if (![west, east, south, north].every(Number.isFinite)) return;
-  if (points.length === 1 || Math.abs(east - west) < 0.01 || Math.abs(north - south) < 0.01) {
+  // A narrow grid cell can have one dimension below 0.01 degrees. Treating
+  // that as a point sends the camera back to the world-level default height,
+  // which makes small cells (for example geohash level 6) effectively invisible.
+  // Only use the fixed-height view for an actual point; polygons and lines must
+  // be fitted from their full geographic extent, even when the cell is tiny.
+  if (points.length === 1) {
     viewer.camera.flyTo({
       destination: Cartesian3.fromDegrees(west, south, cameraHeight()),
       duration: 0.35,

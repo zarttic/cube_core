@@ -16,13 +16,16 @@ function emptyDetail() {
 }
 
 function emptyTabPages() {
-  return Object.fromEntries(paginatedTabs.map((tab) => [tab, { page: 1, pageSize: 20, total: 0 }]));
+  return Object.fromEntries(paginatedTabs.map((tab) => [
+    tab,
+    { page: 1, pageSize: tab === 'grid' ? 120 : 20, total: 0 },
+  ]));
 }
 
 export const useDatasetsStore = defineStore('datasets', () => {
   const filters = reactive({
     keyword: '', dataType: '', productType: '', ingestStatus: '', qualityStatus: '',
-    publishStatus: '', archived: '', timeStart: '', timeEnd: '', sortBy: 'updated_at', sortOrder: 'desc',
+    publishStatus: '', timeStart: '', timeEnd: '', sortBy: 'updated_at', sortOrder: 'desc',
   });
   const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
   const records = ref([]);
@@ -50,7 +53,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return {
       keyword: filters.keyword.trim(), data_type: filters.dataType, product_type: filters.productType,
       ingest_status: filters.ingestStatus, quality_status: filters.qualityStatus,
-      publish_status: filters.publishStatus, archived: filters.archived,
+      publish_status: filters.publishStatus,
       time_start: filters.timeStart, time_end: filters.timeEnd,
       page: pageState.page, page_size: pageState.pageSize, sort_by: filters.sortBy, sort_order: filters.sortOrder,
     };
@@ -172,6 +175,8 @@ export const useDatasetsStore = defineStore('datasets', () => {
     try {
       const response = method === 'PATCH'
         ? await requestJson(path, payload, { method: 'PATCH' })
+        : method === 'DELETE'
+          ? await requestJson(path, payload, { method: 'DELETE' })
         : await requestPost(path, payload);
       await openDetail(selectedDatasetId.value);
       if (refreshTab) {
@@ -218,10 +223,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
     }, 'POST', 'scenes');
   }
 
-  function rerunQuality() {
-    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/quality-runs`, {}, 'POST', 'quality');
-  }
-
   function requestIngest() {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/ingest`, {}, 'POST', 'ingest-records');
   }
@@ -230,16 +231,19 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/bands/${encodeURIComponent(bandUnitId)}/ingest-retry`, {}, 'POST', 'ingest-records');
   }
 
+  function deleteBandGrid(bandUnitId, gridType) {
+    return runAction(
+      `/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/bands/${encodeURIComponent(bandUnitId)}/grids/${encodeURIComponent(gridType)}`,
+      {}, 'DELETE', 'scenes',
+    );
+  }
+
   function publish(targets = []) {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publish`, { targets }, 'POST', 'publications');
   }
 
   function withdraw(publicationId) {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publications/${encodeURIComponent(publicationId)}/withdraw`, {}, 'POST', 'publications');
-  }
-
-  function archive(reason) {
-    return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/archive`, { reason }, 'POST');
   }
 
   function closeDetail() {
@@ -255,7 +259,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   return {
     filters, pageState, records, summary, loading, error, actionLoading, hiddenRoles, roleRestrictionsLoading, selectedDatasetId, selectedDataset,
     detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
-    setActiveTab, setTabPage, setTabPageSize, updateMetadata, updateRoleRestrictions, reassignScene, rerunQuality, requestIngest,
-    retryBandIngest, publish, withdraw, archive, closeDetail, dispose,
+    setActiveTab, setTabPage, setTabPageSize, updateMetadata, updateRoleRestrictions, reassignScene, requestIngest,
+    retryBandIngest, deleteBandGrid, publish, withdraw, closeDetail, dispose,
   };
 });

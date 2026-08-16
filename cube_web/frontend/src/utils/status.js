@@ -28,7 +28,6 @@ const presentations = {
     processing: ['处理中', 'primary'],
     completed: ['已完成', 'success'],
     failed: ['失败', 'danger'],
-    archived: ['已归档', 'info'],
   },
   quality: {
     pending: ['等待中', 'info'],

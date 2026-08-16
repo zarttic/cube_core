@@ -146,9 +146,11 @@ describe('DatasetDetailDrawer', () => {
     expect(wrapper.get('[data-testid="dataset-grid-summary-geohash"]').text()).toContain('入库 0/1');
     expect(wrapper.get('[data-testid="dataset-grid-summary-mgrs"]').text()).toContain('质检 1/1');
     expect(wrapper.findAll('.grid-summary-row')).toHaveLength(3);
+    expect(wrapper.find('[data-testid="dataset-grid-preview"]').exists()).toBe(false);
     const gridTags = wrapper.findAll('.band-grid-status');
     expect(gridTags.find((tag) => tag.text().includes('经纬度格网')).classes()).toContain('is-empty');
     expect(gridTags.find((tag) => tag.text().includes('平面格网')).classes()).toContain('is-ingested');
+    expect(wrapper.get('[data-testid="delete-grid-band-1-mgrs"]').text()).toBe('删除');
     expect(wrapper.find('.band-workflow').exists()).toBe(false);
   });
 
@@ -189,6 +191,11 @@ describe('DatasetDetailDrawer', () => {
     expect(wrapper.text()).not.toContain('发布');
     expect(wrapper.text()).toContain('入库记录');
     expect(wrapper.text()).toContain('来源追踪');
+    expect(wrapper.text()).not.toContain('重新质检');
+
+    wrapper.vm.openQualityRecord('quality-a');
+    expect(wrapper.vm.linkedQualityRunId).toBe('quality-a');
+    expect(wrapper.emitted('tab-change')).toContainEqual(['quality']);
   });
 
   it('does not expose manual ingest in the data-management detail', async () => {

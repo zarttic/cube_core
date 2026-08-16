@@ -49,9 +49,29 @@ function authRedirectUri() {
 export function useSubUserStore() {
   const username = computed(() => state.userInfo.username || '');
   const role = computed(() => state.userInfo.role || '普通用户');
-  const isAdmin = computed(() => ['admin', 'administrator', '管理员'].includes(String(role.value).trim().toLowerCase()) || String(role.value).trim() === 'ADMIN');
+  const permissions = computed(() => (
+    Array.isArray(state.userInfo.permissions)
+      ? state.userInfo.permissions.map((permission) => String(permission).trim()).filter(Boolean)
+      : []
+  ));
+  const isSuperAdmin = computed(() => (
+    state.userInfo.is_super_admin === true
+    || state.userInfo.isSuperAdmin === true
+    || ['admin', 'administrator', '管理员'].includes(String(role.value).trim().toLowerCase())
+    || String(role.value).trim() === 'ADMIN'
+  ));
+  const isAdmin = computed(() => isSuperAdmin.value);
   const avatarUrl = computed(() => state.userInfo.avatarUrl || state.userInfo.avatar_url || '');
   const isAuthenticated = computed(() => Boolean(state.token));
+
+  function can(permission) {
+    const normalized = String(permission || '').trim();
+    return isSuperAdmin.value || (Boolean(normalized) && permissions.value.includes(normalized));
+  }
+
+  function canAny(requiredPermissions) {
+    return (Array.isArray(requiredPermissions) ? requiredPermissions : [requiredPermissions]).some(can);
+  }
 
   async function fetchUserInfo() {
     if (!state.token) return null;
@@ -102,7 +122,11 @@ export function useSubUserStore() {
     state,
     username,
     role,
+    permissions,
+    isSuperAdmin,
     isAdmin,
+    can,
+    canAny,
     avatarUrl,
     isAuthenticated,
     persistToken,

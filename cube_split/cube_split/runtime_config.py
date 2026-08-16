@@ -18,6 +18,7 @@ DEFAULT_AUTH_REDIRECT_URI = "/callback"
 DEFAULT_AUTH_AUTHORIZE_PATH = "/api/authorize"
 DEFAULT_AUTH_TOKEN_PATH = "/api/exchange_code"
 DEFAULT_AUTH_LOGOUT_PATH = "/api/logout"
+DEFAULT_AUTH_USER_INFO_PATH = "/api/me"
 DEFAULT_PORTAL_DATA_PATH = "/ard"
 DEFAULT_PORTAL_ADMIN_PATH = "/admin"
 DEFAULT_PORTAL_HOME_URL = ""
@@ -47,6 +48,7 @@ class AuthSettings:
     authorize_path: str
     token_path: str
     logout_path: str
+    user_info_path: str
     required: bool
 
 
@@ -125,6 +127,7 @@ def auth_settings() -> AuthSettings:
         authorize_path=env_text("CUBE_WEB_AUTH_AUTHORIZE_PATH") or DEFAULT_AUTH_AUTHORIZE_PATH,
         token_path=env_text("CUBE_WEB_AUTH_TOKEN_PATH") or DEFAULT_AUTH_TOKEN_PATH,
         logout_path=env_text("CUBE_WEB_AUTH_LOGOUT_PATH") or DEFAULT_AUTH_LOGOUT_PATH,
+        user_info_path=env_text("CUBE_WEB_AUTH_USER_INFO_PATH") or DEFAULT_AUTH_USER_INFO_PATH,
         required=bool_option(env_text("CUBE_WEB_AUTH_REQUIRED") or None, True),
     )
 

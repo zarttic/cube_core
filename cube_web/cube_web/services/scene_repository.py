@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
-from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest
+from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest, reload_selection_band_unit_ids
 
 
 class OpenGaussSceneRepository:
@@ -17,9 +17,53 @@ class OpenGaussSceneRepository:
         self.dsn = dsn
         self.connection_factory = connection_factory
 
-    def list_partition_quality_batches(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        if not 1 <= limit <= 500:
-            raise ValueError("limit must be between 1 and 500")
+    def list_partition_quality_batches(
+        self,
+        *,
+        keyword: str | None = None,
+        data_type: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        if limit is not None:
+            page = 1
+            page_size = limit
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 500))
+
+        clauses = ["1=1"]
+        params: list[Any] = []
+        if keyword:
+            keyword_value = f"%{keyword}%"
+            clauses.append(
+                "(pr.partition_run_id ILIKE %s "
+                "OR EXISTS ("
+                "SELECT 1 FROM jsonb_array_elements_text(pr.source_load_batch_ids) "
+                "AS source_batch(load_batch_id) "
+                "LEFT JOIN load_batches source_lb ON source_lb.load_batch_id=source_batch.load_batch_id "
+                "WHERE source_batch.load_batch_id ILIKE %s OR source_lb.batch_name ILIKE %s) "
+                "OR EXISTS ("
+                "SELECT 1 FROM partition_run_scenes search_prs "
+                "JOIN datasets search_d ON search_d.dataset_id=search_prs.dataset_id "
+                "WHERE search_prs.partition_run_id=pr.partition_run_id "
+                "AND (search_d.dataset_id ILIKE %s OR search_d.dataset_code ILIKE %s "
+                "OR search_d.dataset_title ILIKE %s)))"
+            )
+            params.extend([keyword_value] * 6)
+        if data_type:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM partition_run_scenes typed_prs "
+                "JOIN datasets typed_d ON typed_d.dataset_id=typed_prs.dataset_id "
+                "WHERE typed_prs.partition_run_id=pr.partition_run_id AND typed_d.data_type=%s)"
+            )
+            params.append(data_type)
+        if status:
+            clauses.append("pr.status=%s")
+            params.append(status)
+        where = " AND ".join(clauses)
+
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -44,14 +88,22 @@ class OpenGaussSceneRepository:
                     FROM partition_runs pr
                     LEFT JOIN partition_run_scenes prs ON prs.partition_run_id=pr.partition_run_id
                     LEFT JOIN partition_data_unit_grid_status g ON g.partition_run_id=pr.partition_run_id
+                    WHERE """ + where + """
                     GROUP BY pr.partition_run_id
                     ORDER BY pr.created_at DESC, pr.partition_run_id DESC
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                     """,
-                    (limit,),
+                    (*params, page_size, (page - 1) * page_size),
                 )
                 rows = _all(cursor)
-        return [self._partition_quality_summary(row) for row in rows]
+                cursor.execute(
+                    "SELECT COUNT(*) AS total FROM partition_runs pr WHERE " + where,
+                    tuple(params),
+                )
+                count_rows = _all(cursor)
+        items = [self._partition_quality_summary(row) for row in rows]
+        total = int((count_rows[0] if count_rows else {}).get("total") or 0)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     def create_partition_draft(
         self,
@@ -703,33 +755,69 @@ class OpenGaussSceneRepository:
         status: str | None = None,
         data_type: str | None = None,
         keyword: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        where: list[str] = []
-        params: list[Any] = []
-        if status:
-            where.append("lb.status = %s")
-            params.append(status)
-        if data_type:
-            where.append(
-                "EXISTS (SELECT 1 FROM load_batch_scenes typed_lbs "
-                "JOIN scenes typed_scene ON typed_scene.scene_id = typed_lbs.scene_id "
-                "JOIN datasets typed_dataset ON typed_dataset.dataset_id = typed_scene.dataset_id "
-                "WHERE typed_lbs.load_batch_id = lb.load_batch_id AND typed_dataset.data_type = %s)"
-            )
-            params.append(data_type)
-        if keyword:
-            where.append("(lb.load_batch_id ILIKE %s OR lb.batch_name ILIKE %s)")
-            params.extend([f"%{keyword}%", f"%{keyword}%"])
-        where.append(
+        dataset_id: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        if limit is not None:
+            page = 1
+            page_size = limit
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 500))
+
+        pending_condition = (
             "EXISTS (SELECT 1 FROM load_batch_scenes pending_lbs "
             "JOIN scene_bands pending_band ON pending_band.scene_id=pending_lbs.scene_id "
+            "JOIN scenes pending_scene ON pending_scene.scene_id=pending_band.scene_id "
             "JOIN scene_assets pending_asset ON pending_asset.scene_id=pending_band.scene_id "
             "AND pending_asset.asset_id=pending_band.asset_id AND pending_asset.asset_role='data' "
-            "WHERE pending_lbs.load_batch_id=lb.load_batch_id AND NOT EXISTS ("
+            "WHERE pending_lbs.load_batch_id=lb.load_batch_id "
+            "AND ("
+            "COALESCE(lb.source_type, 'subsystem_import') <> 'dataset_reload' "
+            "OR NOT EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(COALESCE(lb.attributes->'reload_selection'->'datasets','[]'::jsonb)) selected_dataset "
+            "WHERE selected_dataset->>'dataset_id'=pending_scene.dataset_id) "
+            "OR EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(COALESCE(lb.attributes->'reload_selection'->'datasets','[]'::jsonb)) selected_dataset "
+            "WHERE selected_dataset->>'dataset_id'=pending_scene.dataset_id "
+            "AND EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements_text(COALESCE(selected_dataset->'band_unit_ids','[]'::jsonb)) selected_band(band_unit_id) "
+            "WHERE selected_band.band_unit_id=pending_band.band_unit_id))) "
+            "AND NOT EXISTS ("
             "SELECT 1 FROM partition_data_unit_grid_status done_grid "
             "WHERE done_grid.band_unit_id=pending_band.band_unit_id AND done_grid.ingest_status='completed'))"
         )
+
+        def build_where(*, include_dataset: bool) -> tuple[list[str], list[Any]]:
+            where: list[str] = []
+            params: list[Any] = []
+            if status:
+                where.append("lb.status = %s")
+                params.append(status)
+            if data_type:
+                where.append(
+                    "EXISTS (SELECT 1 FROM load_batch_scenes typed_lbs "
+                    "JOIN scenes typed_scene ON typed_scene.scene_id = typed_lbs.scene_id "
+                    "JOIN datasets typed_dataset ON typed_dataset.dataset_id = typed_scene.dataset_id "
+                    "WHERE typed_lbs.load_batch_id = lb.load_batch_id AND typed_dataset.data_type = %s)"
+                )
+                params.append(data_type)
+            if keyword:
+                where.append("(lb.load_batch_id ILIKE %s OR lb.batch_name ILIKE %s)")
+                params.extend([f"%{keyword}%", f"%{keyword}%"])
+            where.append(pending_condition)
+            if include_dataset and dataset_id:
+                where.append(
+                    "EXISTS (SELECT 1 FROM load_batch_scenes dataset_lbs "
+                    "JOIN scenes dataset_scene ON dataset_scene.scene_id = dataset_lbs.scene_id "
+                    "WHERE dataset_lbs.load_batch_id = lb.load_batch_id "
+                    "AND dataset_scene.dataset_id = %s)"
+                )
+                params.append(dataset_id)
+            return where, params
+
+        where, params = build_where(include_dataset=True)
         sql = """
             SELECT lb.*, count(DISTINCT s.dataset_id) AS dataset_count,
                    count(lbs.scene_id) AS scene_count
@@ -737,11 +825,36 @@ class OpenGaussSceneRepository:
             LEFT JOIN load_batch_scenes lbs ON lbs.load_batch_id = lb.load_batch_id
             LEFT JOIN scenes s ON s.scene_id = lbs.scene_id
         """
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " GROUP BY lb.load_batch_id ORDER BY lb.created_at DESC LIMIT %s"
-        params.append(limit)
-        return self._read(sql, tuple(params))
+        sql += " WHERE " + " AND ".join(where)
+        sql += " GROUP BY lb.load_batch_id ORDER BY lb.created_at DESC, lb.load_batch_id DESC LIMIT %s OFFSET %s"
+        rows = self._read(sql, (*params, page_size, (page - 1) * page_size))
+
+        count_where, count_params = build_where(include_dataset=True)
+        count_rows = self._read(
+            "SELECT COUNT(*) AS total FROM load_batches lb WHERE " + " AND ".join(count_where),
+            tuple(count_params),
+        )
+        total = int((count_rows[0] if count_rows else {}).get("total") or 0)
+
+        option_where, option_params = build_where(include_dataset=False)
+        dataset_options = self._read(
+            "SELECT DISTINCT d.dataset_id, d.dataset_code, d.dataset_title "
+            "FROM load_batches lb "
+            "JOIN load_batch_scenes lbs ON lbs.load_batch_id = lb.load_batch_id "
+            "JOIN scenes s ON s.scene_id = lbs.scene_id "
+            "JOIN datasets d ON d.dataset_id = s.dataset_id "
+            "WHERE " + " AND ".join(option_where) + " "
+            "ORDER BY d.dataset_code NULLS LAST, d.dataset_id",
+            tuple(option_params),
+        )
+        return {
+            "items": rows,
+            "load_batches": rows,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "dataset_options": dataset_options,
+        }
 
     def get_load_batch(self, load_batch_id: str) -> dict[str, Any] | None:
         rows = self._read(
@@ -841,13 +954,38 @@ class OpenGaussSceneRepository:
     def materialize_partition_datasets(self, request: ScenePartitionRunRequest) -> tuple[DatasetInput, ...]:
         selected_scene_ids = [scene_id for item in request.datasets for scene_id in item.scene_ids]
         batch_rows = self._read(
-            "SELECT load_batch_id FROM load_batches WHERE load_batch_id = ANY(%s::text[]) ORDER BY load_batch_id",
+            "SELECT load_batch_id,attributes FROM load_batches WHERE load_batch_id = ANY(%s::text[]) ORDER BY load_batch_id",
             (list(request.source_batch_ids),),
         )
         known_batches = {str(row["load_batch_id"]) for row in batch_rows}
         missing_batches = sorted(set(request.source_batch_ids) - known_batches)
         if missing_batches:
             raise ValueError(f"source load batches not found: {missing_batches}")
+        reload_band_unit_ids_by_batch: dict[tuple[str, str], set[str]] = {}
+        for row in batch_rows:
+            batch_id = str(row["load_batch_id"])
+            for selection in request.datasets:
+                selected_band_unit_ids = reload_selection_band_unit_ids(
+                    row.get("attributes"),
+                    str(selection.dataset_id),
+                )
+                if selected_band_unit_ids is not None:
+                    reload_band_unit_ids_by_batch[(batch_id, str(selection.dataset_id))] = selected_band_unit_ids
+        for selection in request.datasets:
+            selection_batch_id = selection.source_batch_id or (
+                request.source_batch_ids[0] if len(request.source_batch_ids) == 1 else None
+            )
+            reload_band_unit_ids = reload_band_unit_ids_by_batch.get(
+                (str(selection_batch_id or ""), str(selection.dataset_id)),
+            )
+            if reload_band_unit_ids is None:
+                continue
+            disallowed_band_units = set(selection.band_unit_ids or ()) - reload_band_unit_ids
+            if disallowed_band_units:
+                raise ValueError(
+                    "band units are not part of the selected dataset reload batch: "
+                    + ", ".join(sorted(disallowed_band_units))
+                )
         rows = self._read(
             """
             SELECT s.*, d.dataset_code, d.dataset_title, d.data_type, d.product_type,
@@ -895,7 +1033,9 @@ class OpenGaussSceneRepository:
 
         materialized: list[DatasetInput] = []
         for selection in request.datasets:
-            selection_batch_id = selection.source_batch_id
+            selection_batch_id = selection.source_batch_id or (
+                request.source_batch_ids[0] if len(request.source_batch_ids) == 1 else None
+            )
             scene_rows = [by_scene[scene_id] for scene_id in selection.scene_ids]
             if selection_batch_id:
                 unavailable = [scene_id for scene_id in selection.scene_ids if selection_batch_id not in batches_by_scene[scene_id]]
@@ -909,6 +1049,11 @@ class OpenGaussSceneRepository:
             assets: list[SourceAssetInput] = []
             bands: list[BandInput] = []
             selected_band_units = set(selection.band_unit_ids or ())
+            reload_band_unit_ids = reload_band_unit_ids_by_batch.get(
+                (str(selection_batch_id or ""), str(selection.dataset_id)),
+            )
+            if reload_band_unit_ids is not None:
+                selected_band_units = selected_band_units or set(reload_band_unit_ids)
             if selected_band_units:
                 available_band_units = {
                     str(item.get("band_unit_id") or "")

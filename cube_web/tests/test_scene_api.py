@@ -69,7 +69,7 @@ def _payload() -> dict[str, Any]:
                 "band_unit_ids": ["band-scene-optical-b04"],
                 "partition": {
                     "grid_type": "isea4h",
-                    "requested_grid_level": 1,
+                    "requested_grid_level": 6,
                     "partition_method": "entity",
                     "cover_mode": "intersect",
                 },
@@ -80,7 +80,7 @@ def _payload() -> dict[str, Any]:
                 "band_unit_ids": ["band-scene-carbon-xco2"],
                 "partition": {
                     "grid_type": "isea4h",
-                    "requested_grid_level": 1,
+                    "requested_grid_level": 6,
                     "partition_method": "entity",
                     "max_observations": 50,
                 },
@@ -134,6 +134,7 @@ class _Repository:
         self.reload_batch = None
         self.rebound = None
         self.quality_failed_bands = []
+        self.quality_batch_kwargs = []
 
     def list_load_batches(self, **_kwargs):
         return [{"load_batch_id": "load-001", "batch_name": "Loader batch", "scene_count": 2}]
@@ -234,6 +235,7 @@ class _Repository:
         self.failed_run = (partition_run_id, error_message)
 
     def list_partition_quality_batches(self, **_kwargs):
+        self.quality_batch_kwargs.append(_kwargs)
         return [{"partition_run_id": "partition-run-001", "band_count": 2, "quality_pass_count": 1}]
 
     def get_partition_quality_batch(self, partition_run_id):
@@ -297,6 +299,39 @@ def test_load_batch_scenes_are_grouped_by_dataset(api) -> None:
     assert body["scene_count"] == 2
     assert [item["dataset_id"] for item in body["datasets"]] == ["dataset-optical", "dataset-carbon"]
     assert body["datasets"][0]["scenes"][0]["scene_id"] == "scene-optical"
+
+
+def test_dataset_reload_load_batch_exposes_only_selected_bands(api) -> None:
+    client, repository, _ = api
+    repository.get_load_batch = lambda _load_batch_id: {
+        "load_batch_id": "dataset-reload-001",
+        "batch_name": "B04 重剖分",
+        "attributes": {
+            "reload_selection": {
+                "datasets": [{
+                    "dataset_id": "dataset-optical",
+                    "band_unit_ids": ["band-scene-optical-b04"],
+                }],
+            },
+        },
+    }
+    repository.list_load_batch_scenes = lambda *_args, **_kwargs: [{
+        "scene_id": "scene-optical",
+        "dataset_id": "dataset-optical",
+        "dataset_code": "OPTICAL",
+        "dataset_title": "Optical",
+        "data_type": "optical",
+        "bands": [
+            {"band_unit_id": "band-scene-optical-b04", "band_code": "B04"},
+            {"band_unit_id": "band-scene-optical-b08", "band_code": "B08"},
+        ],
+    }]
+
+    response = client.get("/v1/partition/load-batches/dataset-reload-001/scenes")
+
+    assert response.status_code == 200
+    bands = response.json()["datasets"][0]["scenes"][0]["bands"]
+    assert [band["band_unit_id"] for band in bands] == ["band-scene-optical-b04"]
 
 
 def test_carbon_footprint_preview_reads_selected_source_scene(api, monkeypatch, tmp_path) -> None:
@@ -386,7 +421,7 @@ def test_carbon_grid_preview_covers_observation_footprints(api, monkeypatch, tmp
 
     response = client.post("/v1/partition/carbon/grid-preview", json={
         "source_batch_ids": ["load-001"], "scene_ids": ["scene-carbon"],
-        "grid_type": "isea4h", "requested_grid_level": 1,
+        "grid_type": "isea4h", "requested_grid_level": 6,
     })
 
     assert response.status_code == 200
@@ -460,14 +495,27 @@ def test_scene_partition_run_replay_returns_original_task_without_resubmit(api) 
 
 
 def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_quality(api) -> None:
-    client, _, _ = api
+    client, repository, _ = api
 
     listed = client.get("/v1/partition/runs")
+    filtered = client.get(
+        "/v1/partition/runs?keyword=dataset-optical&data_type=optical&status=completed&page=2&page_size=10"
+    )
     detail = client.get("/v1/partition/runs/partition-run-001/quality")
     submitted = client.post("/v1/partition/runs/partition-run-001/quality")
 
     assert listed.status_code == 200
     assert listed.json()["items"][0]["partition_run_id"] == "partition-run-001"
+    assert filtered.status_code == 200
+    assert filtered.json()["page"] == 2
+    assert filtered.json()["page_size"] == 10
+    assert repository.quality_batch_kwargs[-1] == {
+        "keyword": "dataset-optical",
+        "data_type": "optical",
+        "status": "completed",
+        "page": 2,
+        "page_size": 10,
+    }
     assert detail.json()["source_load_batch_ids"] == ["load-001", "load-002"]
     assert detail.json()["datasets"][0]["scenes"][0]["scene_id"] == "scene-optical"
     assert detail.json()["datasets"][0]["quality_runs"][0]["items"][0]["rule_code"] == "index_schema"
@@ -509,7 +557,7 @@ def test_data_management_selection_creates_a_pending_partition_draft(api) -> Non
             "band_unit_ids": ["band-scene-optical-b04"],
             "scenes": [{"scene_id": "scene-optical", "source_batch_ids": ["load-001"]}],
             "partition": {
-                "grid_type": "isea4h", "requested_grid_level": 1,
+                "grid_type": "isea4h", "requested_grid_level": 6,
                 "partition_method": "entity", "cover_mode": "intersect",
             },
         }],
@@ -855,7 +903,7 @@ def test_create_partition_run_keeps_one_row_per_scene_under_a_shared_selection_i
             "scene_ids": ["scene-carbon-0301", "scene-carbon-0302"],
             "partition": {
                 "grid_type": "isea4h",
-                "requested_grid_level": 5,
+                "requested_grid_level": 6,
                 "partition_method": "entity",
             },
         }],
@@ -911,7 +959,7 @@ def test_scene_contract_rejects_legacy_batch_id_and_allows_separate_source_selec
     "partition_override",
     [
         {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
-        {"grid_type": "isea4h", "requested_grid_level": 2, "partition_method": "entity"},
+        {"grid_type": "isea4h", "requested_grid_level": 5, "partition_method": "entity"},
     ],
     ids=("different-grid-type", "different-grid-level"),
 )
@@ -1246,7 +1294,7 @@ def test_scene_import_is_additive_and_writes_scene_assets_and_bands() -> None:
 
 
 def test_partition_scene_idempotency_is_scoped_to_run() -> None:
-    config = {"grid_type": "isea4h", "requested_grid_level": 1, "partition_method": "entity"}
+    config = {"grid_type": "isea4h", "requested_grid_level": 6, "partition_method": "entity"}
 
     first = _partition_scene_idempotency_key("run-a", "scene-a", config)
     retry = _partition_scene_idempotency_key("run-b", "scene-a", config)
@@ -1280,6 +1328,32 @@ def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:
 
     assert [band["band_code"] for band in rows[0]["bands"]] == ["B04", "B08"]
     assert [band["band_unit_id"] for band in rows[0]["bands"]] == ["band-a-b04", "band-a-b08"]
+
+
+def test_pending_load_batch_filter_uses_selected_bands_for_dataset_reload() -> None:
+    repository = OpenGaussSceneRepository(None)
+    statements: list[tuple[str, Any]] = []
+
+    def read(sql, params):
+        normalized = " ".join(str(sql).split())
+        statements.append((normalized, params))
+        if normalized.startswith("SELECT COUNT(*) AS total FROM load_batches"):
+            return [{"total": 0}]
+        if normalized.startswith("SELECT DISTINCT d.dataset_id"):
+            return []
+        return []
+
+    repository._read = read
+    result = repository.list_load_batches(status="succeeded", page=2, page_size=20)
+
+    assert result["items"] == []
+    pending_sql = statements[0][0]
+    assert "JOIN scenes pending_scene ON pending_scene.scene_id=pending_band.scene_id" in pending_sql
+    assert "lb.source_type, 'subsystem_import') <> 'dataset_reload'" in pending_sql
+    assert "jsonb_array_elements(COALESCE(lb.attributes->'reload_selection'->'datasets'" in pending_sql
+    assert "jsonb_array_elements_text(COALESCE(selected_dataset->'band_unit_ids'" in pending_sql
+    assert "selected_band.band_unit_id=pending_band.band_unit_id" in pending_sql
+    assert len(statements) == 3
 
 
 def test_load_batch_partition_rejects_a_band_already_ingested_for_the_same_grid() -> None:
@@ -1365,6 +1439,46 @@ def test_load_batch_partition_allows_an_ingested_band_for_a_different_grid() -> 
     assert datasets[0].bands[0].source_asset_id == "asset-a"
 
 
+def test_dataset_reload_materialization_rejects_a_band_outside_the_reload_selection() -> None:
+    repository = OpenGaussSceneRepository(None)
+
+    def read(sql, _params):
+        if "FROM load_batches" in sql:
+            return [{
+                "load_batch_id": "dataset-reload-a",
+                "attributes": {
+                    "reload_selection": {
+                        "datasets": [{
+                            "dataset_id": "dataset-a",
+                            "band_unit_ids": ["band-a-b04"],
+                        }],
+                    },
+                },
+            }]
+        if "FROM scenes s" in sql:
+            return [{
+                "scene_id": "scene-a", "dataset_id": "dataset-a", "dataset_code": "DS-A",
+                "dataset_title": "Dataset A", "data_type": "optical", "product_type": None,
+                "dataset_attributes": {}, "load_batch_id": "dataset-reload-a",
+            }]
+        raise AssertionError(sql)
+
+    repository._read = read
+    request = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "partition-run-reload-a",
+        "source_batch_ids": ["dataset-reload-a"],
+        "selection_source": "load_batch",
+        "datasets": [{
+            "dataset_id": "dataset-a", "source_batch_id": "dataset-reload-a",
+            "scene_ids": ["scene-a"], "band_unit_ids": ["band-a-b08"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        }],
+    })
+
+    with pytest.raises(ValueError, match="not part of the selected dataset reload batch"):
+        repository.materialize_partition_datasets(request)
+
+
 def test_load_batch_scene_groups_include_resolution_grid_recommendations() -> None:
     repository = _Repository()
     repository.list_load_batch_scenes = lambda *_args, **_kwargs: [{
@@ -1377,7 +1491,7 @@ def test_load_batch_scene_groups_include_resolution_grid_recommendations() -> No
     result = service.list_load_batch_scenes("load-001")
 
     assert result["datasets"][0]["resolution_m"] == 10
-    assert result["datasets"][0]["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 11}
+    assert result["datasets"][0]["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 6}
 
 
 def test_geographic_scene_resolution_keeps_degrees_and_recommends_geohash() -> None:
@@ -1396,7 +1510,7 @@ def test_geographic_scene_resolution_keeps_degrees_and_recommends_geohash() -> N
     assert dataset["resolution_unit"] == "degree"
     assert dataset["resolution_m"] == pytest.approx(34.403, rel=1e-3)
     assert dataset["suggested_grid_type"] == "geohash"
-    assert dataset["suggested_grid_levels"] == {"geohash": 4, "mgrs": 0, "isea4h": 8}
+    assert dataset["suggested_grid_levels"] == {"geohash": 4, "mgrs": 0, "isea4h": 4}
 
 
 def test_projected_scene_resolution_keeps_meters_and_recommends_mgrs() -> None:
@@ -1414,4 +1528,4 @@ def test_projected_scene_resolution_keeps_meters_and_recommends_mgrs() -> None:
     assert dataset["resolution_unit"] == "m"
     assert dataset["resolution_m"] == 10
     assert dataset["suggested_grid_type"] == "mgrs"
-    assert dataset["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 11}
+    assert dataset["suggested_grid_levels"] == {"geohash": 5, "mgrs": 0, "isea4h": 6}

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue';
+import { ElMessageBox } from 'element-plus';
 import { Lock, Unlock } from '@element-plus/icons-vue';
 
 import AppTable from '@/components/AppTable.vue';
@@ -18,8 +19,8 @@ const props = defineProps({
 });
 const emit = defineEmits([
   'close', 'tab-change', 'tab-page-change', 'tab-page-size-change', 'update-metadata',
-  'reassign-scene', 'rerun-quality', 'retry-band-ingest', 'queue-partition', 'archive',
-  'update-role-restrictions',
+  'reassign-scene', 'retry-band-ingest', 'queue-partition',
+  'update-role-restrictions', 'delete-band-grid',
 ]);
 
 const tabs = [
@@ -28,7 +29,6 @@ const tabs = [
   ['ingest-records', '入库记录'], ['quality', '质检'], ['provenance', '来源追踪'],
 ];
 const title = computed(() => props.detail?.overview?.dataset_code || props.datasetId || '数据集详情');
-const canRequestQuality = computed(() => Boolean(props.detail?.overview?.current_output_version));
 const gridTypes = [
   { value: 'geohash', label: '经纬度格网' },
   { value: 'mgrs', label: '平面格网' },
@@ -52,6 +52,26 @@ function gridStatusClass(status) {
   if (!status || ['pending', 'queued', 'cancelled'].includes(status.partition_status)) return 'is-empty';
   if (status.partition_status === 'failed' || ['fail', 'error'].includes(status.quality_status)) return 'is-error';
   return 'is-progress';
+}
+function canDeleteGrid(status) {
+  return Boolean(status)
+    && !['running', 'queued'].includes(status.partition_status)
+    && status.quality_status !== 'running'
+    && !['running', 'queued'].includes(status.ingest_status);
+}
+async function confirmDeleteGrid(band, gridType) {
+  const status = latestGridStatus(band, gridType);
+  if (!band?.band_unit_id || !canDeleteGrid(status)) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认删除波段“${bandDisplayLabel(band)}”的${gridTypes.find((item) => item.value === gridType)?.label || gridType}成果？`,
+      '删除格网',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  emit('delete-band-grid', { band_unit_id: band.band_unit_id, grid_type: gridType });
 }
 function gridWorkflowSummary(bands, gridType) {
   const list = bands || [];
@@ -151,8 +171,6 @@ const editing = ref(false);
 const metadataForm = reactive({ dataset_title: '', description: '', keywords: '' });
 const reassignDialog = ref(false);
 const reassignForm = reactive({ scene_id: '', target_dataset_id: '', reason: '' });
-const archiveDialog = ref(false);
-const archiveReason = ref('');
 const queueConfirmDialog = ref(false);
 const draftName = ref('');
 const collapsedScenes = ref(new Set());
@@ -160,6 +178,7 @@ const selectedPartitionBandIds = ref([]);
 const repartitionGridType = ref('geohash');
 const repartitionGridLevel = ref(5);
 const repartitionGridLevelLocked = ref(true);
+const linkedQualityRunId = ref('');
 const visibleRoleSelection = ref([]);
 const accessRoles = ['NORMAL', 'ADVANCED', 'SCIENTIST'];
 const allRolesSelected = computed(() => accessRoles.every((role) => visibleRoleSelection.value.includes(role)));
@@ -168,15 +187,14 @@ const rolesPartiallySelected = computed(() => visibleRoleSelection.value.length 
 function resetLocalState() {
   editing.value = false;
   reassignDialog.value = false;
-  archiveDialog.value = false;
   queueConfirmDialog.value = false;
   draftName.value = '';
   Object.assign(reassignForm, { scene_id: '', target_dataset_id: '', reason: '' });
-  archiveReason.value = '';
   collapsedScenes.value = new Set((props.detail?.scenes?.items || []).map((scene) => String(scene.scene_id)));
   selectedPartitionBandIds.value = [];
   repartitionGridLevel.value = recommendedLevel();
   repartitionGridLevelLocked.value = true;
+  linkedQualityRunId.value = '';
   visibleRoleSelection.value = accessRoles.filter((role) => !props.hiddenRoles.includes(role));
   const overview = props.detail?.overview || {};
   Object.assign(metadataForm, {
@@ -193,6 +211,24 @@ function page(tab) { return props.tabPages?.[tab] || { page: 1, pageSize: 20, to
 function rowId(row) {
   return row.scene_id || row.source_asset_id || row.band_code || row.output_version || row.output_id
     || row.index_id || row.ingest_run_id || row.quality_run_id || row.publication_id || row.load_batch_id || '-';
+}
+
+function qualityRecordId(row) {
+  if (row?.quality_run_id) return String(row.quality_run_id);
+  const provenance = row?.provenance;
+  return provenance && typeof provenance === 'object' && provenance.quality_run_id
+    ? String(provenance.quality_run_id)
+    : '';
+}
+
+function openQualityRecord(qualityRunId) {
+  if (!qualityRunId) return;
+  linkedQualityRunId.value = String(qualityRunId);
+  emit('tab-change', 'quality');
+}
+
+function isLinkedQualityRecord(row) {
+  return linkedQualityRunId.value !== '' && qualityRecordId(row) === linkedQualityRunId.value;
 }
 
 function provenanceTypeLabel(type) {
@@ -275,12 +311,6 @@ function confirmReassign() {
   reassignDialog.value = false;
 }
 
-function confirmArchive() {
-  if (!archiveReason.value.trim()) return;
-  emit('archive', archiveReason.value.trim());
-  archiveDialog.value = false;
-}
-
 function toggleScene(sceneId) {
   const next = new Set(collapsedScenes.value);
   const key = String(sceneId);
@@ -297,14 +327,12 @@ function sceneCollapsed(sceneId) {
 <template>
   <DetailDrawer :visible="visible" :test-id="testId" :title="title" :loading="loading" size="min(860px, 100vw)" @update:visible="(value) => !value && emit('close')" @closed="emit('close')">
     <div class="drawer-actions">
-      <el-button v-if="writeEnabled" :disabled="!canRequestQuality" :loading="actionLoading" @click="emit('rerun-quality')">重新质检</el-button>
-      <el-button v-if="writeEnabled" :loading="actionLoading" type="danger" plain @click="archiveDialog = true">归档</el-button>
       <el-button data-testid="dataset-detail-close" link type="primary" @click="emit('close')">关闭</el-button>
     </div>
     <el-tabs :model-value="activeTab" @tab-change="emit('tab-change', $event)">
       <el-tab-pane v-for="[key, label] in tabs" :key="key" :name="key">
         <template #label><span :data-testid="`dataset-detail-tab-${key}`">{{ label }}</span></template>
-        <template v-if="key === 'overview'">
+      <template v-if="key === 'overview'">
           <template v-if="detail?.overview">
             <div v-if="writeEnabled" class="section-actions"><el-button link type="primary" @click="editing = !editing">{{ editing ? '取消编辑' : '编辑元数据' }}</el-button></div>
             <el-form v-if="editing" label-width="92px" class="metadata-form">
@@ -321,9 +349,6 @@ function sceneCollapsed(sceneId) {
               <el-descriptions-item label="产品类型">{{ detail.overview.product_type || '-' }}</el-descriptions-item>
               <el-descriptions-item label="产品族">{{ (detail.overview.product_families || []).join('、') || '-' }}</el-descriptions-item>
               <el-descriptions-item v-if="false" label="空间范围" :span="2">{{ detail.overview.bbox || '-' }}</el-descriptions-item>
-              <el-descriptions-item v-if="false" label="当前版本">{{ detail.overview.current_output_version || '-' }}</el-descriptions-item>
-              <el-descriptions-item label="入库状态"><StatusTag domain="ingest" :value="detail.overview.ingest_status" size="small" /></el-descriptions-item>
-              <el-descriptions-item label="质检状态"><StatusTag domain="quality" :value="detail.overview.quality_status" size="small" /></el-descriptions-item>
               <el-descriptions-item label="描述" :span="2">{{ detail.overview.description || '-' }}</el-descriptions-item>
             </el-descriptions>
             <section v-if="writeEnabled" class="dataset-access-control">
@@ -365,7 +390,7 @@ function sceneCollapsed(sceneId) {
               </header>
               <div v-if="!sceneCollapsed(scene.scene_id) && scene.bands?.length" class="managed-band-list">
                 <div v-for="band in scene.bands" :key="band.band_unit_id || `${band.asset_id}-${band.band_code}`" class="managed-band-row" :data-testid="band.band_unit_id ? `managed-band-${band.band_unit_id}` : undefined">
-                  <div class="managed-band-identity"><el-checkbox v-if="writeEnabled" :model-value="selectedPartitionBandIds.includes(band.band_unit_id)" :disabled="!band.band_unit_id || gridCompleted(band)" @click.stop @change="(value) => togglePartitionBands([band], value)" /><strong>{{ bandDisplayLabel(band) }}</strong><span>{{ band.band_unit_id || '-' }}</span><div class="band-grid-tags"><span v-for="grid in gridTypes" :key="grid.value" class="band-grid-status" :class="[`grid-${grid.value}`, gridStatusClass(latestGridStatus(band, grid.value))]">{{ grid.label }} · {{ gridStatusLabel(latestGridStatus(band, grid.value)) }}</span></div></div>
+                  <div class="managed-band-identity"><el-checkbox v-if="writeEnabled" :model-value="selectedPartitionBandIds.includes(band.band_unit_id)" :disabled="!band.band_unit_id || gridCompleted(band)" @click.stop @change="(value) => togglePartitionBands([band], value)" /><strong>{{ bandDisplayLabel(band) }}</strong><span>{{ band.band_unit_id || '-' }}</span><div class="band-grid-tags"><div v-for="grid in gridTypes" :key="grid.value" class="band-grid-status" :class="[`grid-${grid.value}`, gridStatusClass(latestGridStatus(band, grid.value))]"><span>{{ grid.label }} · {{ gridStatusLabel(latestGridStatus(band, grid.value)) }}</span><el-button v-if="writeEnabled && latestGridStatus(band, grid.value)" :data-testid="`delete-grid-${band.band_unit_id}-${grid.value}`" link type="danger" size="small" :disabled="!canDeleteGrid(latestGridStatus(band, grid.value))" @click.stop="confirmDeleteGrid(band, grid.value)">删除</el-button></div></div></div>
                   <span>{{ dataUnitTypeLabel(detail?.overview?.data_type) }}</span>
                   <span>{{ band.band_type || '-' }}</span>
                   <span>{{ band.asset_id || '-' }}</span>
@@ -387,12 +412,13 @@ function sceneCollapsed(sceneId) {
         </template>
         <template v-else>
           <AppTable :data="collection(key)" :page="page(key).page" :page-size="page(key).pageSize" :total="page(key).total" row-key="scene_id" @current-change="(value) => emit('tab-page-change', { tab: key, page: value })" @size-change="(value) => emit('tab-page-size-change', { tab: key, pageSize: value })">
-            <el-table-column :label="key === 'provenance' ? '数据对象' : '标识'" min-width="185"><template #default="{ row }">{{ key === 'provenance' ? provenanceSubject(row) : rowId(row) }}</template></el-table-column>
+            <el-table-column :label="key === 'provenance' ? '数据对象' : key === 'quality' ? '质检记录' : '标识'" min-width="185"><template #default="{ row }"><span :class="{ 'linked-quality-record': key === 'quality' && isLinkedQualityRecord(row) }">{{ key === 'provenance' ? provenanceSubject(row) : key === 'quality' ? (row.quality_run_id || '-') : rowId(row) }}</span><el-tag v-if="key === 'quality' && isLinkedQualityRecord(row)" type="success" effect="plain" size="small">关联记录</el-tag></template></el-table-column>
             <el-table-column v-if="key === 'scenes'" prop="scene_code" label="景编码" min-width="155" show-overflow-tooltip />
             <el-table-column v-if="key === 'scenes'" label="采集时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.acquisition_time) }}</template></el-table-column>
             <el-table-column v-if="key === 'provenance'" label="处理环节" width="130"><template #default="{ row }">{{ provenanceTypeLabel(row.relation_type) }}</template></el-table-column>
             <el-table-column v-if="key === 'provenance'" label="处理记录" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ provenanceRecordLabel(row) }}</template></el-table-column>
             <el-table-column label="状态" min-width="110"><template #default="{ row }"><StatusTag v-if="row.status" :domain="key === 'quality' ? 'quality' : key === 'scenes' ? 'scene' : 'ingest'" :value="row.status" size="small" /><span v-else>-</span></template></el-table-column>
+            <el-table-column v-if="['tiles', 'ingest-records'].includes(key)" label="质检记录" min-width="220" show-overflow-tooltip><template #default="{ row }"><el-button v-if="qualityRecordId(row)" link type="primary" @click.stop="openQualityRecord(qualityRecordId(row))">{{ qualityRecordId(row) }}</el-button><span v-else>未关联</span></template></el-table-column>
             <el-table-column v-if="key === 'tiles'" prop="st_code" label="时空编码" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.st_code || '-' }}</template></el-table-column>
             <el-table-column v-if="key === 'provenance'" label="关联信息" min-width="200" show-overflow-tooltip><template #default="{ row }">{{ provenanceDetails(row) }}</template></el-table-column>
             <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
@@ -425,15 +451,12 @@ function sceneCollapsed(sceneId) {
       </el-descriptions>
       <template #footer><el-button @click="queueConfirmDialog = false">取消</el-button><el-button type="primary" :disabled="!draftName.trim()" @click="queuePartition">确认加入</el-button></template>
     </el-dialog>
-    <el-dialog v-model="archiveDialog" title="归档数据集" width="480px" append-to-body>
-      <el-input v-model="archiveReason" type="textarea" :rows="3" placeholder="请输入归档原因" />
-      <template #footer><el-button @click="archiveDialog = false">取消</el-button><el-button type="danger" :disabled="!archiveReason.trim()" @click="confirmArchive">确认归档</el-button></template>
-    </el-dialog>
   </DetailDrawer>
 </template>
 
 <style scoped>
 .drawer-actions, .section-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px; }
+.linked-quality-record { color: var(--el-color-success); font-weight: 600; }
 .metadata-form { max-width: 680px; padding-top: 8px; }
 .dataset-access-control { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; margin-top: 16px; padding: 12px; border: 1px solid #dfe5ec; border-radius: 6px; background: #fbfcfd; }
 .dataset-access-control h3 { margin: 0; color: #344054; font-size: 13px; font-weight: 600; }
@@ -480,7 +503,8 @@ function sceneCollapsed(sceneId) {
 .managed-band-row span { color: var(--el-text-color-secondary); font-size: 11px; overflow-wrap: anywhere; }
 .managed-band-identity { align-items: flex-start !important; }
 .band-grid-tags { display: grid; width: min(100%, 220px); grid-template-columns: 1fr; gap: 4px; margin-top: 4px; }
-.band-grid-status { --grid-accent: #52748a; --grid-soft: #eef3f6; padding: 3px 7px; border: 1px solid var(--grid-accent); border-radius: 3px; font-size: 10px !important; line-height: 1.35; }
+.band-grid-status { --grid-accent: #52748a; --grid-soft: #eef3f6; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 3px 7px; border: 1px solid var(--grid-accent); border-radius: 3px; font-size: 10px !important; line-height: 1.35; }
+.band-grid-status :deep(.el-button) { padding: 0; font-size: 10px; }
 .band-grid-status.is-empty { background: transparent; color: var(--grid-accent); }
 .band-grid-status.is-progress { background: var(--grid-soft); color: var(--grid-accent); }
 .band-grid-status.is-ingested { background: var(--grid-accent); color: #fff; }

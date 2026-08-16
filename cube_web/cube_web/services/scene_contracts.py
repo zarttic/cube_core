@@ -2,9 +2,31 @@ from __future__ import annotations
 
 from typing import Literal
 
+from grid_core.app.core.enums import GridType as EncoderGridType
+from grid_core.app.models.request import validate_requested_grid_level
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cube_web.services.partition_contracts import DatasetPartitionConfig
+
+
+def reload_selection_band_unit_ids(attributes: object, dataset_id: str) -> set[str] | None:
+    """Return a dataset reload's selected bands, or None for ordinary batches."""
+    if not isinstance(attributes, dict):
+        return None
+    reload_selection = attributes.get("reload_selection")
+    if not isinstance(reload_selection, dict):
+        return None
+    selections = reload_selection.get("datasets")
+    if not isinstance(selections, (list, tuple)):
+        return None
+    for selection in selections:
+        if not isinstance(selection, dict) or str(selection.get("dataset_id") or "") != str(dataset_id):
+            continue
+        band_unit_ids = selection.get("band_unit_ids")
+        if not isinstance(band_unit_ids, (list, tuple)):
+            return None
+        return {str(value).strip() for value in band_unit_ids if str(value).strip()}
+    return None
 
 
 class SceneStrictModel(BaseModel):
@@ -75,8 +97,13 @@ class CarbonFootprintPreviewRequest(SceneStrictModel):
 
 class CarbonGridPreviewRequest(CarbonFootprintPreviewRequest):
     grid_type: Literal["geohash", "mgrs", "isea4h"]
-    requested_grid_level: int = Field(ge=1, le=15)
+    requested_grid_level: int = Field(ge=0, le=12)
     max_cells: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_grid_level(self) -> "CarbonGridPreviewRequest":
+        validate_requested_grid_level(EncoderGridType(self.grid_type), self.requested_grid_level)
+        return self
 
 
 class PartitionDraftCreateRequest(SceneStrictModel):

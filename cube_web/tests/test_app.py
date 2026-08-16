@@ -56,6 +56,30 @@ def test_auth_config_has_no_runtime_mode_switch() -> None:
     assert "auth_required" in body
 
 
+def test_auth_me_exposes_upstream_effective_permissions(monkeypatch) -> None:
+    from cube_web.services import auth_service
+
+    secret = "test-secret"
+    monkeypatch.setenv("CUBE_WEB_AUTH_JWT_SECRET_KEY", secret)
+    monkeypatch.setenv("CUBE_WEB_AUTH_MAIN_SYSTEM_URL", "http://auth.example")
+    monkeypatch.setattr(
+        auth_service,
+        "_get_json",
+        lambda url, token: {
+            "username": "op_data",
+            "role": "操作员",
+            "is_operator": True,
+            "permissions": ["data_import:view", "data_import:operate"],
+        },
+    )
+
+    response = client.get("/api/me", headers={"Authorization": f"Bearer {_token(secret, 'operator')}"})
+
+    assert response.status_code == 200
+    assert response.json()["permissions"] == ["data_import:view", "data_import:operate"]
+    assert response.json()["is_operator"] is True
+
+
 def test_sdk_locate_endpoint_uses_encoder_contract(monkeypatch) -> None:
     monkeypatch.setenv("CUBE_WEB_AUTH_REQUIRED", "0")
     response = client.post(

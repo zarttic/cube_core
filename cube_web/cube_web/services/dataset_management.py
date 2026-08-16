@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
 from typing import Any, Callable, Iterator, Protocol
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -69,6 +70,10 @@ class DatasetManagementRepository(Protocol):
 
     def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]: ...
 
+    def delete_band_grid(
+        self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str
+    ) -> dict[str, Any]: ...
+
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
@@ -102,12 +107,14 @@ class DatasetManagementService:
         ingest_hook: Callable[[str, Any], dict[str, Any]] | None = None,
         publish_hook: Callable[[str, Any, tuple[dict[str, str], ...]], dict[str, Any]] | None = None,
         withdraw_hook: Callable[[str, str, str, Any], dict[str, Any]] | None = None,
+        grid_object_cleanup: Callable[[tuple[str, ...]], dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.quality_hook = quality_hook
         self.ingest_hook = ingest_hook
         self.publish_hook = publish_hook
         self.withdraw_hook = withdraw_hook
+        self.grid_object_cleanup = grid_object_cleanup
 
     def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]:
         if query.sort_by not in SORT_COLUMNS or query.sort_order not in {"asc", "desc"}:
@@ -175,6 +182,27 @@ class DatasetManagementService:
     def retry_failed_band_ingest(self, dataset_id: str, band_unit_id: str, *, actor: str) -> dict[str, Any]:
         self.get_dataset(dataset_id)
         return self.repository.retry_failed_band_ingest(dataset_id, band_unit_id, actor=actor)
+
+    def delete_band_grid(
+        self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str
+    ) -> dict[str, Any]:
+        self.get_dataset(dataset_id)
+        if grid_type not in {"geohash", "mgrs", "isea4h"}:
+            raise ValueError(f"unsupported grid type: {grid_type}")
+        result = self.repository.delete_band_grid(dataset_id, band_unit_id, grid_type, actor=actor)
+        object_uris = tuple(str(value) for value in result.pop("object_uris", ()) if value)
+        if object_uris and self.grid_object_cleanup is not None:
+            try:
+                result["object_cleanup"] = self.grid_object_cleanup(object_uris)
+            except Exception as exc:  # pragma: no cover - storage failure is environment-specific.
+                result["object_cleanup"] = {
+                    "status": "pending",
+                    "error": type(exc).__name__,
+                    "object_count": len(object_uris),
+                }
+        elif object_uris:
+            result["object_cleanup"] = {"status": "pending", "object_count": len(object_uris)}
+        return result
 
     def request_ingest(self, dataset_id: str, actor: Any) -> dict[str, Any]:
         self.get_dataset(dataset_id)
@@ -282,6 +310,23 @@ class InMemoryDatasetManagementRepository:
                     bands_by_scene.setdefault(str(band.get("scene_id") or ""), []).append(copy.deepcopy(band))
                 for scene in rows:
                     scene["bands"] = bands_by_scene.get(str(scene.get("scene_id") or ""), [])
+            if detail == "tiles":
+                quality_rows = self.details.get(dataset_id, {}).get("quality", [])
+                for row in rows:
+                    if row.get("quality_run_id"):
+                        continue
+                    matching_quality = [
+                        quality for quality in quality_rows
+                        if row.get("output_version") and quality.get("output_version") == row.get("output_version")
+                    ]
+                    if matching_quality:
+                        row["quality_run_id"] = matching_quality[-1].get("quality_run_id")
+                        row["quality_status"] = matching_quality[-1].get("status")
+            if detail == "ingest-records":
+                for row in rows:
+                    provenance = row.get("provenance") or {}
+                    if isinstance(provenance, dict) and provenance.get("quality_run_id"):
+                        row["quality_run_id"] = provenance["quality_run_id"]
             if detail == "provenance":
                 rows.extend(copy.deepcopy([row for row in self.scene_audit if row.get("dataset_id") == dataset_id or row.get("previous_dataset_id") == dataset_id]))
                 rows.extend(copy.deepcopy([row for row in self.metadata_audit if row.get("dataset_id") == dataset_id]))
@@ -349,6 +394,101 @@ class InMemoryDatasetManagementRepository:
                 raise DatasetManagementConflict("only a failed band ingest can be retried")
             row.update(status="queued", error_message=None, updated_at=_now_text(), requested_by=actor)
             return copy.deepcopy(row)
+
+    def delete_band_grid(
+        self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str
+    ) -> dict[str, Any]:
+        del actor
+        with self._lock:
+            self._dataset(dataset_id)
+            bands = self.details.get(dataset_id, {}).get("bands", [])
+            band = next((row for row in bands if row.get("band_unit_id") == band_unit_id), None)
+            if band is None:
+                raise ManagedSceneNotFound(band_unit_id)
+            statuses = [
+                row for row in band.get("grid_statuses", []) if row.get("grid_type") == grid_type
+            ]
+            if any(row.get("partition_status") in {"queued", "running"} for row in statuses):
+                raise DatasetManagementConflict("剖分中的格网不能删除")
+            if any(row.get("quality_status") == "running" for row in statuses):
+                raise DatasetManagementConflict("质检中的格网不能删除")
+            if any(row.get("ingest_status") in {"queued", "running"} for row in statuses):
+                raise DatasetManagementConflict("入库中的格网不能删除")
+            details = self.details.setdefault(dataset_id, {})
+            grid_rows = details.setdefault("grid", [])
+            deleted_cells = sum(
+                1 for row in grid_rows
+                if row.get("grid_type") == grid_type
+                and row.get("band_unit_id") == band_unit_id
+            )
+            details["grid"] = [
+                row for row in grid_rows
+                if not (row.get("grid_type") == grid_type and row.get("band_unit_id") == band_unit_id)
+            ]
+            tiles = details.setdefault("tiles", [])
+            indexes = details.setdefault("indexes", [])
+            source_asset_id = band.get("asset_id") or band.get("source_asset_id")
+            band_code = band.get("band_code")
+            tile_ids = {
+                row.get("output_id") for row in tiles
+                if row.get("source_asset_id") == source_asset_id
+                and row.get("band_code") == band_code
+                and row.get("grid_type") == grid_type
+            }
+            index_ids = {
+                row.get("output_id") for row in indexes
+                if row.get("source_asset_id") == source_asset_id
+                and row.get("band_code") == band_code
+                and row.get("grid_type") == grid_type
+            }
+            details["tiles"] = [row for row in tiles if row.get("output_id") not in tile_ids]
+            details["indexes"] = [row for row in indexes if row.get("output_id") not in index_ids]
+            output_versions = {
+                str(row.get("output_version")) for row in statuses if row.get("output_version")
+            }
+            deleted_ingest_records = 0
+            retained_ingest_records = []
+            for record in details.setdefault("ingest-records", []):
+                record_band_ids = [str(value) for value in (record.get("band_unit_ids") or [])]
+                same_scene = not record.get("scene_id") or record.get("scene_id") == band.get("scene_id")
+                same_version = not output_versions or str(record.get("output_version")) in output_versions
+                if band_unit_id not in record_band_ids or not same_scene or not same_version:
+                    retained_ingest_records.append(record)
+                    continue
+                remaining_band_ids = [value for value in record_band_ids if value != band_unit_id]
+                if remaining_band_ids:
+                    record["band_unit_ids"] = remaining_band_ids
+                    retained_ingest_records.append(record)
+                else:
+                    deleted_ingest_records += 1
+            details["ingest-records"] = retained_ingest_records
+            for row in details["grid"]:
+                if row.get("grid_type") != grid_type:
+                    continue
+                row["tile_count"] = sum(
+                    1 for tile in details["tiles"]
+                    if tile.get("output_version") == row.get("output_version")
+                    and tile.get("grid_type") == row.get("grid_type")
+                    and tile.get("space_code") == row.get("space_code")
+                )
+                row["index_count"] = sum(
+                    1 for index in details["indexes"]
+                    if index.get("output_version") == row.get("output_version")
+                    and index.get("grid_type") == row.get("grid_type")
+                    and index.get("space_code") == row.get("space_code")
+                )
+            band["grid_statuses"] = [row for row in band.get("grid_statuses", []) if row.get("grid_type") != grid_type]
+            return {
+                "dataset_id": dataset_id,
+                "band_unit_id": band_unit_id,
+                "grid_type": grid_type,
+                "deleted_statuses": len(statuses),
+                "deleted_tiles": len(tile_ids),
+                "deleted_indexes": len(index_ids),
+                "deleted_grid_cells": deleted_cells,
+                "deleted_ingest_records": deleted_ingest_records,
+                "object_cleanup": {"status": "not_applicable", "object_count": 0},
+            }
 
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         with self._lock:
@@ -654,6 +794,309 @@ class OpenGaussDatasetManagementRepository:
             cursor.execute("UPDATE ingest_runs SET status='queued',error_message=NULL,completed_at=NULL WHERE ingest_run_id=%s", (row["ingest_run_id"],))
         return result
 
+    def delete_band_grid(
+        self, dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str
+    ) -> dict[str, Any]:
+        """Delete one band's normalized grid result without touching source assets.
+
+        A logical output version can contain several bands.  Therefore only the
+        target band's tile/index rows are removed; shared grid cells are removed
+        only when no remaining band references them.  Immutable logical chunks
+        are intentionally retained and can be reclaimed by the version cleanup
+        workflow later.
+        """
+        if grid_type not in {"geohash", "mgrs", "isea4h"}:
+            raise ValueError(f"unsupported grid type: {grid_type}")
+        del actor
+        object_uris: set[str] = set()
+        affected_versions: set[str] = set()
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """SELECT sb.source_asset_id,sb.band_code,sb.scene_id
+                     FROM scene_bands sb JOIN scenes s ON s.scene_id=sb.scene_id
+                    WHERE sb.band_unit_id=%s AND s.dataset_id=%s
+                    FOR UPDATE""",
+                (band_unit_id, dataset_id),
+            )
+            band = cursor.fetchone()
+            if band is None:
+                raise ManagedSceneNotFound(band_unit_id)
+            source_asset_id = str(band["source_asset_id"])
+            band_code = str(band["band_code"])
+
+            cursor.execute(
+                """SELECT output_version,partition_status,quality_status,ingest_status
+                     FROM partition_data_unit_grid_status
+                    WHERE dataset_id=%s AND band_unit_id=%s AND grid_type=%s
+                    FOR UPDATE""",
+                (dataset_id, band_unit_id, grid_type),
+            )
+            statuses = cursor.fetchall()
+            if any(row["partition_status"] in {"queued", "running"} for row in statuses):
+                raise DatasetManagementConflict("剖分中的格网不能删除")
+            if any(row["quality_status"] == "running" for row in statuses):
+                raise DatasetManagementConflict("质检中的格网不能删除")
+            if any(row["ingest_status"] in {"queued", "running"} for row in statuses):
+                raise DatasetManagementConflict("入库中的格网不能删除")
+            affected_versions.update(
+                str(row["output_version"]) for row in statuses if row.get("output_version")
+            )
+
+            cursor.execute(
+                """SELECT EXISTS (
+                         SELECT 1
+                           FROM partition_publications p
+                          WHERE p.dataset_id=%s
+                            AND p.status IN ('publishing','active','withdrawing')
+                            AND (
+                              NOT EXISTS (
+                                SELECT 1 FROM partition_publication_targets all_targets
+                                 WHERE all_targets.publication_id=p.publication_id
+                              )
+                              OR EXISTS (
+                                SELECT 1 FROM partition_publication_targets target
+                                 WHERE target.publication_id=p.publication_id
+                                   AND target.source_asset_id=%s AND target.band_code=%s
+                              )
+                            )
+                       ) AS referenced""",
+                (dataset_id, source_asset_id, band_code),
+            )
+            if cursor.fetchone()["referenced"]:
+                raise DatasetManagementConflict("已发布格网不能直接删除")
+
+            cursor.execute(
+                """SELECT output_id,output_version,tile_uri
+                     FROM partition_tiles
+                    WHERE dataset_id=%s AND source_asset_id=%s AND band_code=%s AND grid_type=%s
+                    FOR UPDATE""",
+                (dataset_id, source_asset_id, band_code, grid_type),
+            )
+            tile_rows = cursor.fetchall()
+            tile_ids = [str(row["output_id"]) for row in tile_rows]
+            affected_versions.update(str(row["output_version"]) for row in tile_rows if row.get("output_version"))
+            object_uris.update(str(row["tile_uri"]) for row in tile_rows if row.get("tile_uri"))
+
+            cursor.execute(
+                """SELECT output_id,output_version,value_ref_uri
+                     FROM partition_indexes
+                    WHERE dataset_id=%s AND source_asset_id=%s AND band_code=%s AND grid_type=%s
+                    FOR UPDATE""",
+                (dataset_id, source_asset_id, band_code, grid_type),
+            )
+            index_rows = cursor.fetchall()
+            index_ids = [str(row["output_id"]) for row in index_rows]
+            affected_versions.update(str(row["output_version"]) for row in index_rows if row.get("output_version"))
+
+            deleted_ingest_records = 0
+            ingest_run_ids: set[str] = set()
+            if affected_versions:
+                cursor.execute(
+                    """SELECT irs.ingest_run_id,irs.scene_id,irs.output_version,irs.band_unit_ids
+                         FROM ingest_run_scenes irs
+                         JOIN ingest_runs ir ON ir.ingest_run_id=irs.ingest_run_id
+                        WHERE ir.dataset_id=%s AND irs.scene_id=%s
+                          AND irs.output_version = ANY(%s::text[])
+                          AND (irs.band_unit_ids ? %s
+                               OR jsonb_array_length(COALESCE(irs.band_unit_ids,'[]'::jsonb))=0)
+                        FOR UPDATE""",
+                    (dataset_id, band["scene_id"], sorted(affected_versions), band_unit_id),
+                )
+                ingest_rows = cursor.fetchall()
+                all_scene_band_ids: tuple[str, ...] | None = None
+                for ingest_row in ingest_rows:
+                    ingest_run_ids.add(str(ingest_row["ingest_run_id"]))
+                    raw_band_ids = ingest_row.get("band_unit_ids") or []
+                    if isinstance(raw_band_ids, str):
+                        raw_band_ids = [raw_band_ids]
+                    selected_band_ids = [str(value) for value in raw_band_ids]
+                    if not selected_band_ids:
+                        if all_scene_band_ids is None:
+                            cursor.execute(
+                                "SELECT band_unit_id FROM scene_bands WHERE scene_id=%s ORDER BY band_unit_id",
+                                (band["scene_id"],),
+                            )
+                            all_scene_band_ids = tuple(str(row["band_unit_id"]) for row in cursor.fetchall())
+                        selected_band_ids = list(all_scene_band_ids)
+                    remaining_band_ids = [value for value in selected_band_ids if value != band_unit_id]
+                    if remaining_band_ids:
+                        cursor.execute(
+                            "UPDATE ingest_run_scenes SET band_unit_ids=%s,updated_at=now() "
+                            "WHERE ingest_run_id=%s AND scene_id=%s",
+                            (Jsonb(remaining_band_ids), ingest_row["ingest_run_id"], ingest_row["scene_id"]),
+                        )
+                    else:
+                        cursor.execute(
+                            "DELETE FROM ingest_run_scenes WHERE ingest_run_id=%s AND scene_id=%s",
+                            (ingest_row["ingest_run_id"], ingest_row["scene_id"]),
+                        )
+                        deleted_ingest_records += cursor.rowcount
+                for ingest_run_id in ingest_run_ids:
+                    cursor.execute(
+                        "SELECT 1 FROM ingest_run_scenes WHERE ingest_run_id=%s LIMIT 1",
+                        (ingest_run_id,),
+                    )
+                    if cursor.fetchone() is None:
+                        cursor.execute("DELETE FROM ingest_runs WHERE ingest_run_id=%s", (ingest_run_id,))
+
+            quality_output_ids = sorted(set(tile_ids) | set(index_ids))
+            if quality_output_ids:
+                cursor.execute(
+                    """DELETE FROM partition_quality_errors
+                       WHERE dataset_id=%s
+                         AND (output_id = ANY(%s::text[]) OR tile_id = ANY(%s::text[]) OR index_id = ANY(%s::text[]))""",
+                    (dataset_id, quality_output_ids, quality_output_ids, quality_output_ids),
+                )
+
+            cursor.execute(
+                """DELETE FROM partition_indexes
+                       WHERE dataset_id=%s AND grid_type=%s
+                         AND ((source_asset_id=%s AND band_code=%s) OR tile_output_id = ANY(%s::text[]))""",
+                (dataset_id, grid_type, source_asset_id, band_code, tile_ids or ["__none__"]),
+            )
+            deleted_indexes = cursor.rowcount
+            cursor.execute(
+                """DELETE FROM partition_tiles
+                       WHERE dataset_id=%s AND source_asset_id=%s AND band_code=%s AND grid_type=%s""",
+                (dataset_id, source_asset_id, band_code, grid_type),
+            )
+            deleted_tiles = cursor.rowcount
+
+            deleted_grid_cells = 0
+            for output_version in sorted(affected_versions):
+                cursor.execute(
+                    """UPDATE partition_grid_cells g SET
+                             tile_count=(SELECT count(*) FROM partition_tiles t
+                                          WHERE t.dataset_id=g.dataset_id AND t.output_version=g.output_version
+                                            AND t.grid_type=g.grid_type AND t.grid_level=g.grid_level
+                                            AND t.space_code=g.space_code
+                                            AND COALESCE(t.topology_code,'')=COALESCE(g.topology_code,'')),
+                             index_count=(SELECT count(*) FROM partition_indexes i
+                                           WHERE i.dataset_id=g.dataset_id AND i.output_version=g.output_version
+                                             AND i.grid_type=g.grid_type AND i.grid_level=g.grid_level
+                                             AND i.space_code=g.space_code
+                                             AND COALESCE(i.topology_code,'')=COALESCE(g.topology_code,''))
+                       WHERE g.dataset_id=%s AND g.output_version=%s AND g.grid_type=%s""",
+                    (dataset_id, output_version, grid_type),
+                )
+                cursor.execute(
+                    """DELETE FROM partition_grid_cells g
+                       WHERE g.dataset_id=%s AND g.output_version=%s AND g.grid_type=%s
+                         AND NOT EXISTS (
+                               SELECT 1 FROM partition_tiles t
+                                WHERE t.dataset_id=g.dataset_id AND t.output_version=g.output_version
+                                  AND t.grid_type=g.grid_type AND t.grid_level=g.grid_level
+                                  AND t.space_code=g.space_code
+                                  AND COALESCE(t.topology_code,'')=COALESCE(g.topology_code,'')
+                         )
+                         AND NOT EXISTS (
+                               SELECT 1 FROM partition_indexes i
+                                WHERE i.dataset_id=g.dataset_id AND i.output_version=g.output_version
+                                  AND i.grid_type=g.grid_type AND i.grid_level=g.grid_level
+                                  AND i.space_code=g.space_code
+                                  AND COALESCE(i.topology_code,'')=COALESCE(g.topology_code,'')
+                         )""",
+                    (dataset_id, output_version, grid_type),
+                )
+                deleted_grid_cells += cursor.rowcount
+
+            if affected_versions:
+                versions = sorted(affected_versions)
+                cursor.execute(
+                    """UPDATE partition_output_versions o SET
+                             tile_count=(SELECT count(*) FROM partition_tiles t WHERE t.dataset_id=o.dataset_id AND t.output_version=o.output_version),
+                             index_count=(SELECT count(*) FROM partition_indexes i WHERE i.dataset_id=o.dataset_id AND i.output_version=o.output_version),
+                             grid_cell_count=(SELECT count(*) FROM partition_grid_cells g WHERE g.dataset_id=o.dataset_id AND g.output_version=o.output_version),
+                             counts=COALESCE(o.counts,'{}'::jsonb) || json_build_object(
+                               'tiles',(SELECT count(*) FROM partition_tiles t WHERE t.dataset_id=o.dataset_id AND t.output_version=o.output_version),
+                               'indexes',(SELECT count(*) FROM partition_indexes i WHERE i.dataset_id=o.dataset_id AND i.output_version=o.output_version),
+                               'grid_cells',(SELECT count(*) FROM partition_grid_cells g WHERE g.dataset_id=o.dataset_id AND g.output_version=o.output_version)
+                             )::jsonb
+                       WHERE o.dataset_id=%s AND o.output_version = ANY(%s::text[])""",
+                    (dataset_id, versions),
+                )
+                cursor.execute(
+                    """UPDATE partition_data_unit_grid_status SET quality_status='pending',error_message=NULL,updated_at=now()
+                       WHERE dataset_id=%s AND output_version = ANY(%s::text[]) AND partition_status='completed'""",
+                    (dataset_id, versions),
+                )
+
+            cursor.execute(
+                """DELETE FROM partition_data_unit_grid_status
+                       WHERE dataset_id=%s AND band_unit_id=%s AND grid_type=%s""",
+                (dataset_id, band_unit_id, grid_type),
+            )
+            deleted_statuses = cursor.rowcount
+
+            cursor.execute(
+                "SELECT current_output_version FROM partition_datasets WHERE dataset_id=%s FOR UPDATE",
+                (dataset_id,),
+            )
+            current_row = cursor.fetchone()
+            current_version = None if current_row is None else current_row.get("current_output_version")
+            if current_version and str(current_version) in affected_versions:
+                cursor.execute(
+                    """SELECT EXISTS (
+                             SELECT 1 FROM partition_tiles WHERE dataset_id=%s AND output_version=%s
+                             UNION ALL SELECT 1 FROM partition_indexes WHERE dataset_id=%s AND output_version=%s
+                             UNION ALL SELECT 1 FROM partition_grid_cells WHERE dataset_id=%s AND output_version=%s
+                           ) AS has_rows""",
+                    (dataset_id, current_version, dataset_id, current_version, dataset_id, current_version),
+                )
+                has_rows = bool(cursor.fetchone()["has_rows"])
+                if has_rows:
+                    cursor.execute(
+                        """UPDATE partition_datasets SET quality_status='pending',current_quality_run_id=NULL,
+                               quality_error_count=0,quality_warning_count=0,updated_at=now()
+                           WHERE dataset_id=%s""",
+                        (dataset_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """UPDATE partition_output_versions SET status='superseded'
+                           WHERE dataset_id=%s AND output_version=%s AND status='completed'""",
+                        (dataset_id, current_version),
+                    )
+                    cursor.execute(
+                        """UPDATE partition_datasets SET current_output_version=NULL,partition_status='pending',
+                               partition_completed_at=NULL,quality_status='pending',current_quality_run_id=NULL,
+                               quality_error_count=0,quality_warning_count=0,updated_at=now()
+                           WHERE dataset_id=%s""",
+                        (dataset_id,),
+                    )
+                    cursor.execute(
+                        "UPDATE datasets SET current_output_version=NULL,updated_at=now() WHERE dataset_id=%s",
+                        (dataset_id,),
+                    )
+
+            safe_prefix = f"/partition/{dataset_id}/versions/"
+            for uri in sorted(object_uris):
+                parsed = urlparse(uri)
+                if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.startswith(safe_prefix):
+                    continue
+                cursor.execute(
+                    """SELECT EXISTS (
+                             SELECT 1 FROM partition_tiles WHERE tile_uri=%s
+                             UNION ALL SELECT 1 FROM partition_indexes WHERE value_ref_uri=%s
+                           ) AS referenced""",
+                    (uri, uri),
+                )
+                if not cursor.fetchone()["referenced"]:
+                    object_uris.discard(uri)
+
+        return {
+            "dataset_id": dataset_id,
+            "band_unit_id": band_unit_id,
+            "grid_type": grid_type,
+            "deleted_statuses": deleted_statuses,
+            "deleted_tiles": deleted_tiles,
+            "deleted_indexes": deleted_indexes,
+            "deleted_grid_cells": deleted_grid_cells,
+            "deleted_ingest_records": deleted_ingest_records,
+            "affected_output_versions": sorted(affected_versions),
+            "object_uris": sorted(object_uris),
+        }
+
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute("SELECT attributes,status FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
@@ -802,9 +1245,12 @@ class OpenGaussDatasetManagementRepository:
                 ORDER BY created_at DESC
             """,
             "tiles": """
-                SELECT t.output_id,t.output_version,t.space_code,t.tile_uri,t.status,t.created_at,
-                       st.st_code,'partition_tile' AS source_kind,NULL::jsonb AS provenance
+                SELECT t.output_id,t.output_version,t.source_asset_id,t.band_code,t.grid_type,t.grid_level,
+                       t.time_bucket,t.space_code,t.tile_uri,t.status,t.created_at,
+                       st.st_code,qr.quality_run_id,qr.status AS quality_status,
+                       'partition_tile' AS source_kind,NULL::jsonb AS provenance
                   FROM partition_tiles t
+                  LEFT JOIN partition_datasets pd ON pd.dataset_id=t.dataset_id
                   LEFT JOIN LATERAL (
                     SELECT i.st_code
                       FROM partition_indexes i
@@ -815,6 +1261,14 @@ class OpenGaussDatasetManagementRepository:
                      ORDER BY (i.tile_output_id=t.output_id) DESC, i.created_at DESC, i.output_id
                      LIMIT 1
                   ) st ON TRUE
+                  LEFT JOIN LATERAL (
+                    SELECT q.quality_run_id,q.status
+                      FROM partition_quality_runs q
+                     WHERE q.dataset_id=t.dataset_id AND q.output_version=t.output_version
+                     ORDER BY CASE WHEN q.quality_run_id=pd.current_quality_run_id THEN 1 ELSE 0 END DESC,
+                              q.quality_sequence DESC,q.created_at DESC
+                     LIMIT 1
+                  ) qr ON TRUE
                   JOIN datasets d ON d.dataset_id=t.dataset_id WHERE d.dataset_id=%s
                 ORDER BY created_at DESC
             """,
@@ -823,7 +1277,7 @@ class OpenGaussDatasetManagementRepository:
                   FROM partition_indexes i JOIN datasets d ON d.dataset_id=i.dataset_id WHERE d.dataset_id=%s
                 ORDER BY created_at DESC
             """,
-            "ingest-records": "SELECT irs.*,ir.dataset_id,ir.status AS run_status,ir.requested_by FROM ingest_run_scenes irs JOIN ingest_runs ir ON ir.ingest_run_id=irs.ingest_run_id WHERE ir.dataset_id=%s ORDER BY irs.updated_at DESC",
+            "ingest-records": "SELECT irs.*,irs.provenance->>'quality_run_id' AS quality_run_id,ir.dataset_id,ir.status AS run_status,ir.requested_by FROM ingest_run_scenes irs JOIN ingest_runs ir ON ir.ingest_run_id=irs.ingest_run_id WHERE ir.dataset_id=%s ORDER BY irs.updated_at DESC",
             "quality": "SELECT q.* FROM partition_quality_runs q JOIN datasets d ON d.dataset_id=q.dataset_id WHERE d.dataset_id=%s ORDER BY q.created_at DESC",
             "publications": """
                 SELECT p.*,

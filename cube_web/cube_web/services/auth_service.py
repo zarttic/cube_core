@@ -55,15 +55,36 @@ def verify_access_token(token: str, settings: AuthSettings | None = None) -> dic
 
 
 def user_info_from_token(token: str, settings: AuthSettings | None = None) -> dict[str, Any]:
+    settings = settings or auth_settings()
     payload = verify_access_token(token, settings)
+    upstream_user: dict[str, Any] = {}
+    if settings.main_system_url:
+        try:
+            upstream_response = _get_json(_endpoint_url(settings.main_system_url, settings.user_info_path), token=token)
+            candidate = upstream_response.get("user") if isinstance(upstream_response.get("user"), dict) else upstream_response
+            if isinstance(candidate, dict):
+                upstream_user = candidate
+        except HTTPException:
+            # The signed token remains usable for local API authentication when the
+            # optional profile refresh endpoint is temporarily unavailable.
+            upstream_user = {}
+    permissions = upstream_user.get("permissions", payload.get("permissions", []))
+    if not isinstance(permissions, list):
+        permissions = []
     username = payload.get("username") or payload.get("name") or payload.get("sub") or ""
-    role = payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"
-    avatar_url = payload.get("avatar_url") or payload.get("avatarUrl") or payload.get("avatar") or ""
+    username = upstream_user.get("username") or upstream_user.get("name") or username
+    role = upstream_user.get("role") or upstream_user.get("role_name") or payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"
+    avatar_url = upstream_user.get("avatar_url") or upstream_user.get("avatarUrl") or upstream_user.get("avatar") or payload.get("avatar_url") or payload.get("avatarUrl") or payload.get("avatar") or ""
     return {
         "username": username,
         "role": role,
         "avatar_url": avatar_url,
         "avatarUrl": avatar_url,
+        "is_operator": bool(upstream_user.get("is_operator", payload.get("is_operator", False))),
+        "is_super_admin": bool(upstream_user.get("is_super_admin", payload.get("is_super_admin", False))),
+        "operator_template_id": upstream_user.get("operator_template_id", payload.get("operator_template_id")),
+        "admin_permissions": upstream_user.get("admin_permissions", payload.get("admin_permissions", [])),
+        "permissions": permissions,
         "sub": payload.get("sub"),
         "payload": payload,
     }
@@ -167,6 +188,14 @@ def _post_form(url: str, payload: dict[str, Any], token: str | None = None) -> d
         headers=headers,
         method="POST",
     )
+    return _send_request(request)
+
+
+def _get_json(url: str, token: str | None = None) -> dict[str, Any]:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
     return _send_request(request)
 
 

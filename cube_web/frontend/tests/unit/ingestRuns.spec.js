@@ -20,6 +20,29 @@ beforeEach(() => {
 });
 
 describe('ingest run detail drawer', () => {
+  it('keeps the main page scrollable while the detail drawer is open', () => {
+    const wrapper = mount(IngestRunDetailDrawer, {
+      props: { visible: true, runId: 'ingest-a' },
+      global: {
+        stubs: {
+          DetailDrawer: {
+            props: { lockScroll: Boolean },
+            template: '<div data-testid="detail-drawer" :data-lock-scroll="String(lockScroll)"><slot /></div>',
+          },
+          'el-button': true,
+          'el-descriptions': true,
+          'el-descriptions-item': true,
+          'el-table-column': true,
+          'el-empty': true,
+          'el-input': true,
+          'el-dialog': true,
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-testid="detail-drawer"]').attributes('data-lock-scroll')).toBe('false');
+  });
+
   it('treats partial failure as retryable but not cancellable and emits explicit failed band ids', async () => {
     const wrapper = mount(IngestRunDetailDrawer, {
       props: {
@@ -59,6 +82,48 @@ describe('ingest run detail drawer', () => {
 });
 
 describe('ingest runs store', () => {
+  it('uses the configured search filters and server-side pagination', async () => {
+    const store = useIngestRunsStore();
+    Object.assign(store.filters, { keyword: 'landsat', datasetId: 'dataset-1', status: 'failed' });
+    Object.assign(store.pageState, { page: 2, pageSize: 50 });
+    requestGet.mockResolvedValueOnce({
+      items: [{ ingest_run_id: 'ingest-2' }],
+      total: 101,
+      page: 2,
+      page_size: 50,
+    });
+
+    await store.loadList();
+
+    expect(requestGet).toHaveBeenCalledWith(
+      '/v1/ingest-runs?keyword=landsat&dataset_id=dataset-1&status=failed&page=2&page_size=50&sort_by=created_at&sort_order=desc',
+      expect.any(Object),
+    );
+    expect(store.records).toEqual([{ ingest_run_id: 'ingest-2' }]);
+    expect(store.pageState.total).toBe(101);
+  });
+
+  it('uses search filters and server-side pagination for pending collections', async () => {
+    const store = useIngestRunsStore();
+    Object.assign(store.manualFilters, { keyword: 'partition-run', datasetId: 'dataset-a' });
+    Object.assign(store.manualPageState, { page: 2, pageSize: 10 });
+    requestGet.mockResolvedValueOnce({
+      items: [{ partition_run_id: 'partition-run-2', quality_pass_count: 1, ingested_count: 0 }],
+      total: 21,
+      page: 2,
+      page_size: 10,
+    });
+
+    await store.loadManualCandidates();
+
+    expect(requestGet).toHaveBeenCalledWith(
+      '/v1/ingest-runs/collections?keyword=partition-run&dataset_id=dataset-a&page=2&page_size=10',
+      expect.any(Object),
+    );
+    expect(store.manualCandidates).toEqual([{ partition_run_id: 'partition-run-2', quality_pass_count: 1, ingested_count: 0 }]);
+    expect(store.manualPageState.total).toBe(21);
+  });
+
   it('keeps only the most recently opened run detail', async () => {
     const store = useIngestRunsStore();
     const first = store.openDetail('ingest-a');
@@ -136,12 +201,13 @@ describe('manual ingest selection', () => {
           'el-progress': { template: '<div />' },
           'el-table-column': { template: '<div />' },
           'el-input': { template: '<input />' },
+          'el-pagination': { template: '<div />' },
         },
       },
     });
 
     await vi.waitFor(() => expect(wrapper.findAll('button').some((button) => button.text() === '选择数据入库')).toBe(true));
-    const candidateRequestCount = () => requestGet.mock.calls.filter(([url]) => url === '/v1/ingest-runs/collections?page=1&page_size=100').length;
+    const candidateRequestCount = () => requestGet.mock.calls.filter(([url]) => url.startsWith('/v1/ingest-runs/collections?')).length;
     const initialCandidateRequests = candidateRequestCount();
     await wrapper.findAll('button').find((button) => button.text() === '刷新').trigger('click');
     await vi.waitFor(() => expect(candidateRequestCount()).toBeGreaterThan(initialCandidateRequests));

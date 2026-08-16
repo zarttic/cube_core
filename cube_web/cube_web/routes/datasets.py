@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from minio import Minio
 from cube_split import runtime_config
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,6 +30,8 @@ from cube_web.services.publication_service import (
 from cube_web.services.quality_repository import DatasetNotFound, OutputVersionNotFound, QualityRunNotFound
 from cube_web.services.quality_run_service import request_manual_quality_run
 from cube_web.services.quality_ingest_bridge import ManualIngestRejected, request_manual_ingest
+from cube_web.services.partition_object_store import PartitionObjectStore
+from cube_web.services.partition_contracts import GridType
 
 
 class StrictPayload(BaseModel):
@@ -162,6 +165,11 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
         actor = require_admin(current_actor(request))
         return _call(lambda: service.retry_failed_band_ingest(dataset_id, band_unit_id, actor=actor.username))
 
+    @router.delete("/{dataset_id}/bands/{band_unit_id}/grids/{grid_type}")
+    def delete_band_grid(dataset_id: str, band_unit_id: str, grid_type: GridType, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        return _call(lambda: service.delete_band_grid(dataset_id, band_unit_id, grid_type, actor=actor.username))
+
     @router.post("/{dataset_id}/ingest", status_code=202)
     def request_ingest(dataset_id: str, request: Request) -> dict:
         actor = require_admin(current_actor(request))
@@ -235,7 +243,16 @@ def _production_service() -> DatasetManagementService:
     def withdraw_hook(dataset_id, publication_id, reason, actor):
         return withdraw_publication(dataset_id, UUID(publication_id), reason, actor).model_dump(mode="json")
 
+    def grid_object_cleanup(object_uris):
+        settings = runtime_config.minio_settings()
+        store = PartitionObjectStore(
+            Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure),
+            bucket=settings.bucket,
+        )
+        deleted_keys = store.remove_objects(object_uris)
+        return {"status": "completed", "object_count": len(deleted_keys), "deleted_object_keys": deleted_keys}
+
     return DatasetManagementService(
         repository, quality_hook=quality_hook, ingest_hook=ingest_hook,
-        publish_hook=publish_hook, withdraw_hook=withdraw_hook
+        publish_hook=publish_hook, withdraw_hook=withdraw_hook, grid_object_cleanup=grid_object_cleanup
     )

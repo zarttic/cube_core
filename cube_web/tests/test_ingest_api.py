@@ -58,6 +58,16 @@ def test_list_and_get_ingest_runs_match_frontend_contract() -> None:
     assert detail.json()["scenes"][0]["source_load_batch_ids"] == ["load-batch-a"]
 
 
+def test_list_pending_collections_supports_search_and_pagination() -> None:
+    client, _service, _failed_id, _queued_id = _client()
+    response = client.get(
+        "/v1/ingest-runs/collections",
+        params={"keyword": "partition-run", "dataset_id": "dataset-a", "data_type": "optical", "page": 2, "page_size": 10},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0, "page": 2, "page_size": 10}
+
+
 def test_retry_requires_explicit_failed_band_ids() -> None:
     client, _service, failed_id, _queued_id = _client()
     assert client.post(f"/v1/ingest-runs/{failed_id}/retry", json={"band_unit_ids": []}).status_code == 422

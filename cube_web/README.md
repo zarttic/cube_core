@@ -26,7 +26,7 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:a
 
 认证默认开启，并可由运行时环境变量 `CUBE_WEB_AUTH_REQUIRED` 显式控制。本地自测可设置
 `CUBE_WEB_AUTH_REQUIRED=false`，跳过前端登录跳转和后端 `/v1/*` Bearer Token 校验。
-启用认证时，载入系统调用的 `POST /v1/partition/schemas/import` 保持公开；其他 `/v1/*` 默认需要 Bearer Token。非管理员前端只展示公共编码入口，并在直接进入剖分页面时返回门户首页。
+启用认证时，载入系统调用的 `POST /v1/partition/schemas/import` 保持公开；其他 `/v1/*` 默认需要 Bearer Token。前端导航和页面显示按主认证系统 `/api/me` 返回的 `user.permissions` 控制；页面隐藏不替代后端接口鉴权。
 
 剖分运行从运行时配置读取 Ray、MinIO 和 OpenGauss 设置。使用分布式后端时设置
 `CUBE_WEB_RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`、`CUBE_WEB_MINIO_ACCESS_KEY`、

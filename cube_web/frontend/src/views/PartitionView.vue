@@ -4,9 +4,11 @@ import { ElMessage } from 'element-plus';
 import { RefreshLeft } from '@element-plus/icons-vue';
 
 import { requestGet, requestJson } from '@/api/client';
+import { authRequired } from '@/config';
 import router from '@/router';
 import { usePartitionStore } from '@/stores/partition';
 import { takePartitionSelection } from '@/stores/partitionTransfer';
+import { useSubUserStore } from '@/stores/subUser';
 import { derivedPartitionMethod, gridDefinition, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
@@ -22,12 +24,13 @@ const productModules = Object.freeze([
   { value: 'product', label: '信息产品', title: '信息产品数据剖分' },
 ]);
 const modules = Object.freeze([
-  ...productModules,
-  { value: 'quality', label: '自动化质检' },
-  { value: 'ingest', label: '数据管理与入库' },
+  ...productModules.map((module) => ({ ...module, permission: 'data_import:view' })),
+  { value: 'quality', label: '自动化质检', permission: 'data_import:view' },
+  { value: 'ingest', label: '数据管理与入库', permission: 'data_import:view' },
 ]);
 
 const store = usePartitionStore();
+const accessStore = useSubUserStore();
 const activeModule = ref('optical');
 const datasetDrawerVisible = ref(false);
 const gridPreviewLoading = ref(false);
@@ -41,10 +44,14 @@ let carbonFootprintGeneration = 0;
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
 const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [value, {
   gridType: value === 'carbon' ? 'isea4h' : 'geohash',
-  requestedGridLevel: value === 'carbon' ? 5 : 4,
+  requestedGridLevel: value === 'carbon' ? 6 : 4,
 }])));
 
 const activeProduct = computed(() => productModules.find((item) => item.value === activeModule.value) || null);
+const visibleModules = computed(() => modules.filter((module) => (
+  !authRequired() || accessStore.can(module.permission)
+)));
+const canOperate = computed(() => !authRequired() || accessStore.can('data_import:operate'));
 const activeDatasets = computed(() => store.datasetsFor(activeModule.value));
 const gridConfigLocked = computed(() => activeDatasets.value.some((dataset) => (
   dataset.grid_config_locked === true || dataset.selection_source === 'dataset'
@@ -54,7 +61,7 @@ const gridLevelLocked = computed(() => activeDatasets.value.length > 0
 
 function fallbackGridLevel(gridType) {
   if (gridType === 'mgrs') return 1;
-  if (gridType === 'isea4h') return activeModule.value === 'carbon' ? 5 : 6;
+  if (gridType === 'isea4h') return 6;
   return 4;
 }
 
@@ -223,6 +230,7 @@ function selectedCarbonSceneIds() {
 }
 
 function selectModule(moduleName) {
+  if (!visibleModules.value.some((module) => module.value === moduleName)) return;
   const moduleChanged = activeModule.value !== moduleName;
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
@@ -290,6 +298,7 @@ function selectReloadBatch(reloadBatch) {
   gridPreviewGeneration += 1;
   setModuleGridPreview(activeModule.value, []);
   if (activeModule.value === 'carbon') resetCarbonFootprints();
+  refreshGridPreviewForSelection();
   ElMessage.success('已载入正式重新载入批次，请确认后提交。');
 }
 
@@ -304,6 +313,10 @@ function setModuleGridPreview(moduleName, geometries, meta = {}) {
 }
 
 async function submit() {
+  if (!canOperate.value) {
+    ElMessage.warning('当前账号没有数据载入操作权限。');
+    return;
+  }
   const moduleName = activeModule.value;
   const contextVersion = store.contextVersionFor(moduleName);
   try {
@@ -475,6 +488,11 @@ function resetGridPreview() {
   setModuleGridPreview(activeModule.value, []);
 }
 
+function refreshGridPreviewForSelection() {
+  if (!activeDatasets.value.length) return;
+  void loadMap();
+}
+
 function updateDatasets(datasets) {
   store.setDatasets(activeModule.value, datasets);
   mapPreviewVisible.value = true;
@@ -493,13 +511,15 @@ function updateDatasets(datasets) {
   gridPreviewGeneration += 1;
   setModuleGridPreview(activeModule.value, []);
   if (activeModule.value === 'carbon') resetCarbonFootprints();
+  refreshGridPreviewForSelection();
 }
 
 onMounted(() => {
   const pendingSelection = takePartitionSelection();
   if (pendingSelection) queueManagedPartition(pendingSelection);
   const requestedModule = String(router.currentRoute.value.query.module || pendingSelection?.data_type || '');
-  if (productModules.some((item) => item.value === requestedModule)) activeModule.value = requestedModule;
+  if (productModules.some((item) => item.value === requestedModule)
+    && visibleModules.value.some((item) => item.value === requestedModule)) activeModule.value = requestedModule;
   const queued = store.datasetsFor(activeModule.value).find((dataset) => dataset.partition);
   if (queued) {
     moduleForms.value[activeModule.value] = {
@@ -517,7 +537,7 @@ onMounted(() => {
       <div class="container">
         <div class="module-tabs" aria-label="剖分页面导航">
         <button
-          v-for="module in modules"
+          v-for="module in visibleModules"
           :key="module.value"
           type="button"
           class="module-tab"
@@ -547,6 +567,7 @@ onMounted(() => {
             <GridParameters
               v-model="formModel"
               :loading="store.loading.submit"
+              :submit-disabled="!canOperate"
               :data-type-label="activeProduct.label"
               :selected-count="activeBandUnitCount"
               :selected-dataset-count="activeDatasets.length"
@@ -567,7 +588,7 @@ onMounted(() => {
                       <el-tag v-for="legend in activeGridLegends" :key="legend.key" size="small" class="grid-legend-tag">
                         <span class="grid-legend-dot" :style="{ backgroundColor: legend.color }" />{{ legend.label }}
                       </el-tag>
-                      <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">加载格网</el-button>
+                      <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">重新加载格网</el-button>
                       <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
                       <template v-if="activeModule === 'carbon'">
                         <el-tag size="small" type="warning">{{ activeCarbonFootprints.length }} 个足迹</el-tag>

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 _MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}
 
@@ -104,6 +105,25 @@ class PartitionObjectStore:
             "deleted_keys": keys,
             "cleanup_complete": True,
         }
+
+    def remove_objects(self, object_uris: Iterable[str]) -> list[str]:
+        """Remove exact partition objects after database references are gone.
+
+        This is deliberately narrower than version cleanup: callers provide
+        exact ``s3://`` URIs that were already checked against the database.
+        Source objects and keys outside the partition namespace are rejected.
+        """
+        deleted: list[str] = []
+        for uri in object_uris:
+            parsed = urlparse(str(uri))
+            if parsed.scheme != "s3" or parsed.netloc != self._bucket:
+                raise ValueError("partition object URI must target the configured bucket")
+            key = unquote(parsed.path.lstrip("/"))
+            if not key.startswith("partition/") or any(part in {"", ".", ".."} for part in key.split("/")):
+                raise ValueError("only partition objects can be removed")
+            self._remove_if_present(key)
+            deleted.append(key)
+        return deleted
 
     @staticmethod
     def _tile_name(tile_name: str) -> str:

@@ -30,6 +30,7 @@ export function installGuards(routerInstance, dependencies) {
     ready,
     authenticated,
     admin,
+    can = admin,
     redirectToAuth,
   } = dependencies;
 
@@ -39,6 +40,7 @@ export function installGuards(routerInstance, dependencies) {
       redirectToAuth(safeLocalTarget(to.fullPath) || '/');
       return false;
     }
+    if (to.meta.permission && !can(to.meta.permission)) return { name: 'encoding' };
     if (to.meta.requiresAdmin && !admin()) return { name: 'encoding' };
     return true;
   });
@@ -47,11 +49,11 @@ export function installGuards(routerInstance, dependencies) {
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/partition', name: 'partition', component: view('PartitionView'), meta: { requiresAuth: true, requiresAdmin: true } },
-    { path: '/data-management', name: 'data-management', component: view('DataManagementView'), meta: { requiresAuth: true } },
-    { path: '/quality', name: 'quality', component: view('QualityView'), meta: { requiresAuth: true } },
+    { path: '/partition', name: 'partition', component: view('PartitionView'), meta: { requiresAuth: true, permission: 'data_import:view' } },
+    { path: '/data-management', name: 'data-management', component: view('DataManagementView'), meta: { requiresAuth: true, permission: 'data_import:view' } },
+    { path: '/quality', name: 'quality', component: view('QualityView'), meta: { requiresAuth: true, permission: 'data_import:view' } },
     { path: '/encoding', name: 'encoding', component: view('EncodingView'), meta: { requiresAuth: true } },
-    { path: '/config', name: 'config', component: view('ConfigView'), meta: { requiresAuth: true } },
+    { path: '/config', name: 'config', component: view('ConfigView'), meta: { requiresAuth: true, permission: 'system_config:view' } },
     { path: '/callback', name: 'callback', component: view('PartitionView') },
     { path: '/', redirect: '/partition' },
     { path: '/:pathMatch(.*)*', redirect: '/partition' },
@@ -62,6 +64,7 @@ installGuards(router, {
   ready: () => applicationAuthReady,
   authenticated: () => !authRequired() || useSubUserStore().isAuthenticated.value,
   admin: () => !authRequired() || useSubUserStore().isAdmin.value,
+  can: (permission) => !authRequired() || useSubUserStore().can(permission),
   redirectToAuth: (target) => useSubUserStore().redirectToAuth(target),
   portalHomeUrl,
 });

@@ -6,7 +6,10 @@ import { navItems } from '@/data/navigation';
 import { useSubUserStore } from '@/stores/subUser';
 
 const userStore = useSubUserStore();
-const showAdminNavigation = computed(() => !authRequired() || userStore.isAdmin.value);
+const navigationAccess = computed(() => ({
+  isSuperAdmin: !authRequired() || userStore.isSuperAdmin.value,
+  can: (permission) => !authRequired() || userStore.can(permission),
+}));
 
 async function handleLogout() {
   await userStore.logout();
@@ -31,7 +34,7 @@ async function handleLogout() {
           </div>
         </div>
         <nav class="portal-nav" aria-label="主导航">
-          <template v-for="item in navItems(showAdminNavigation)" :key="item.label">
+          <template v-for="item in navItems(navigationAccess)" :key="item.label">
             <RouterLink v-if="item.kind === 'internal' || item.kind === 'admin'" :to="item.path" active-class="active active-nav">{{ item.label }}</RouterLink>
             <a v-else :href="item.url">{{ item.label }}</a>
           </template>

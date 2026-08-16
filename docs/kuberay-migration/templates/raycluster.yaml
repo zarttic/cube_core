@@ -7,6 +7,8 @@ metadata:
 spec:
   rayVersion: "2.55.1"
   enableInTreeAutoscaling: true
+  autoscalerOptions:
+    idleTimeoutSeconds: 600
   headGroupSpec:
     rayStartParams: {}
     template:
