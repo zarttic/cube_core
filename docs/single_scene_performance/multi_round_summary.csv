@@ -1,0 +1,11 @@
+case_id,data_type,grid_type,grid_level,round_count,valid_sample_count,normal_sample_count,excluded_rounds,raw_mean_partition_execution_sec,raw_mean_end_to_end_sec,normal_mean_partition_execution_sec,normal_stdev_partition_execution_sec,normal_min_partition_execution_sec,normal_max_partition_execution_sec,normal_mean_end_to_end_sec,normal_stdev_end_to_end_sec,normal_min_end_to_end_sec,normal_max_end_to_end_sec,raw_pass_count,raw_pass_rate,normal_pass_count,normal_pass_rate
+carbon_isea4h,carbon,isea4h,6,5,5,5,,2.244462,4.543713,2.244462,0.076552,2.191289,2.372387,4.543713,0.059778,4.47647,4.620378,5,1.0,5,1.0
+optical_geohash,optical,geohash,4,5,5,4,round_1,12.644404,15.064174,5.523877,1.641583,3.676624,7.492172,7.863999,1.649087,5.910886,9.838381,4,0.8,4,1.0
+optical_isea4h,optical,isea4h,6,5,5,5,,38.553825,41.851071,38.553825,25.425961,18.925691,67.179935,41.851071,25.128293,22.722638,70.447319,0,0.0,0,0.0
+optical_mgrs,optical,mgrs,1,5,5,5,,5.832279,8.289961,5.832279,2.286123,3.223862,8.838198,8.289961,2.297323,5.473795,11.337565,4,0.8,4,0.8
+product_geohash,product,geohash,4,5,5,5,,1.935303,4.556639,1.935303,0.034515,1.888526,1.979459,4.556639,0.47917,4.18157,5.248654,5,1.0,5,1.0
+product_isea4h,product,isea4h,6,5,5,5,,10.358747,13.175507,10.358747,1.463675,9.216442,12.427219,13.175507,1.397391,12.002609,15.308879,0,0.0,0,0.0
+product_mgrs,product,mgrs,1,5,5,5,,2.514215,4.831815,2.514215,0.238735,2.339295,2.928797,4.831815,0.258922,4.605953,5.269216,5,1.0,5,1.0
+radar_geohash,radar,geohash,4,5,5,5,,4.077481,6.573665,4.077481,1.103082,3.432153,6.040769,6.573665,1.521547,5.728035,9.288527,5,1.0,5,1.0
+radar_isea4h,radar,isea4h,6,5,5,5,,12.566697,14.89438,12.566697,1.710487,11.005278,14.766107,14.89438,1.737821,13.297044,17.165644,0,0.0,0,0.0
+radar_mgrs,radar,mgrs,1,5,5,5,,3.534888,5.84831,3.534888,0.117388,3.405144,3.684809,5.84831,0.143121,5.670289,6.010486,5,1.0,5,1.0

@@ -1,0 +1,5 @@
+data_type,scene_count,asset_count,band_count,spec
+optical,1,1,4,7595x6337/4 band
+radar,1,2,2,2256x4057/1 band; 2256x4057/1 band
+product,1,1,1,4096x4096/1 band
+carbon,1,1,1,raw 50.5 MiB

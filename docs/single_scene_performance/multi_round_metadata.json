@@ -1,0 +1,6 @@
+{
+  "round_count": 5,
+  "sample_count": 50,
+  "outlier_rule": "driver ray.wait/ray.wait_get > 10s and worker scope max < 6s",
+  "excluded_sample_count": 1
+}

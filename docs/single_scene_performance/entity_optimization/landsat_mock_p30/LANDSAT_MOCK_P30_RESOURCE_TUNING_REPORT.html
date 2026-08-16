@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>标准 Landsat 单景实体剖分资源调优报告</title>
+<style>
+body { margin: 24px; color: #202124; background: #fff; font: 14px/1.55 Arial, "Microsoft YaHei", sans-serif; }
+h1 { margin: 0 0 8px; font-size: 24px; }
+h2 { margin: 28px 0 8px; padding-bottom: 5px; border-bottom: 1px solid #aaa; font-size: 18px; }
+p { margin: 7px 0; }
+table { width: 100%; margin: 10px 0 18px; border-collapse: collapse; }
+th, td { padding: 7px 8px; border: 1px solid #c8c8c8; text-align: left; vertical-align: top; }
+th { background: #f1f1f1; font-weight: 600; }
+code { font-family: Consolas, monospace; font-size: 12px; }
+.note { padding: 9px 11px; border-left: 3px solid #777; background: #f6f6f6; }
+.warn { color: #7a4d00; }
+.pass { color: #1e5d2a; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>标准 Landsat 单井 → 单景实体剖分资源调优报告</h1>
+<p class="note">本报告不展示日期字段。输入像元为确定性 mock，影像规格、Ray 集群、MinIO 写入和 OpenGauss attempt 均为真实运行。</p>
+
+<h2>一、验收口径</h2>
+<table><thead><tr><th>项目</th><th>定义</th></tr></thead><tbody><tr><td>完成条件</td><td>实体瓦片剖分完成、瓦片上传完成、OpenGauss 结果入库完成。</td></tr><tr><td>后端 attempt</td><td>OpenGauss attempt 的 started_at 到 finished_at；本报告唯一的 10 秒验收指标。</td></tr><tr><td>端到端</td><td>仅作观察值，包含 API、任务排队和 Ray Job 交付，不参与本次是否达标判断。</td></tr><tr><td>正常均值</td><td>排除源缓存未命中预热轮和已定位的 MinIO 上传尾延迟轮后，取多轮平均值。</td></tr></tbody></table>
+
+<h2>二、单井 → 单景简表</h2>
+<table><thead><tr><th>项目</th><th>值</th><th>说明</th></tr></thead><tbody><tr><td>单井</td><td>landsat-mock-p30</td><td>一次请求绑定一个测试井</td></tr><tr><td>单景</td><td>1 个完整 Landsat scene</td><td>不是小窗口</td></tr><tr><td>数据类型</td><td>光学</td><td>ISEA4H 实体剖分</td></tr><tr><td>影像尺寸</td><td>6167 × 6000</td><td>完整景</td></tr><tr><td>波段</td><td>B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11</td><td>11 个波段</td></tr><tr><td>分辨率</td><td>30 m</td><td>标准 Landsat 级别</td></tr><tr><td>格网</td><td>ISEA4H level 6</td><td>六边形格网</td></tr><tr><td>输出</td><td>88 tiles / 88 indexes / 8 cells</td><td>每轮计数一致</td></tr></tbody></table>
+
+<h2>三、推荐资源组合</h2>
+<table><thead><tr><th>参数</th><th>推荐值</th><th>说明</th></tr></thead><tbody><tr><td>Ray 并行度</td><td>48</td><td>当前 77 个实体 task 的稳定批量等待窗口</td></tr><tr><td>KubeRay worker</td><td>64</td><td>worker min/max 均为 64；避免 Ray 在测试期间追加调度</td></tr><tr><td>实体 task 上传线程</td><td>4</td><td>单波段 task 通常只有一个待上传瓦片</td></tr><tr><td>MinIO multipart 并发</td><td>3</td><td>MinIO 默认值；1、2 的实测尾部更差</td></tr><tr><td>源缓存</td><td>全部命中后计入正常均值</td><td>避免把大 COG 首次下载混入剖分耗时</td></tr><tr><td>实际 task</td><td>77</td><td>11 个波段单元 × 7 个非空空间分片</td></tr><tr><td>批量等待</td><td>2</td><td>一次等待一个并行窗口</td></tr></tbody></table>
+
+<h2>四、资源矩阵结果</h2>
+<table><thead><tr><th>资源组合</th><th>总轮数</th><th>源缓存干净</th><th>正常轮数</th><th>正常 attempt 均值(s)</th><th>标准差(s)</th><th>最小(s)</th><th>最大(s)</th><th>干净轮 &lt; 10</th></tr></thead><tbody><tr><td>48 并行 / 64 worker / 上传线程 4 / multipart 3</td><td>8</td><td>8</td><td>7</td><td>9.781</td><td>0.082</td><td>9.662</td><td>9.895</td><td>7/8</td></tr><tr><td>48 并行 / 64 worker / 上传线程 4 / multipart 4</td><td>5</td><td>5</td><td>4</td><td>9.767</td><td>0.120</td><td>9.645</td><td>9.890</td><td>4/5</td></tr><tr><td>64 并行 / 64 worker / 上传线程 4 / multipart 3</td><td>6</td><td>6</td><td>4</td><td>9.748</td><td>0.179</td><td>9.558</td><td>9.980</td><td>4/6</td></tr><tr><td>48 并行 / 64 worker / 上传线程 1 / multipart 3</td><td>3</td><td>3</td><td>2</td><td>9.747</td><td>0.026</td><td>9.728</td><td>9.765</td><td>2/3</td></tr><tr><td>36 并行 / 64 worker / 上传线程 1 / multipart 3</td><td>5</td><td>5</td><td>4</td><td>9.770</td><td>0.142</td><td>9.590</td><td>9.932</td><td>4/5</td></tr><tr><td>48 并行 / 48 worker / 上传线程 1 / multipart 3</td><td>5</td><td>5</td><td>3</td><td>9.857</td><td>0.178</td><td>9.653</td><td>9.980</td><td>3/5</td></tr><tr><td>48 并行 / 48 worker / 上传线程 1 / multipart 1</td><td>5</td><td>5</td><td>3</td><td>9.585</td><td>0.130</td><td>9.453</td><td>9.713</td><td>3/5</td></tr><tr><td>48 并行 / 48 worker / 上传线程 1 / multipart 2</td><td>5</td><td>5</td><td>3</td><td>9.662</td><td>0.205</td><td>9.472</td><td>9.879</td><td>3/5</td></tr></tbody></table>
+<p class="pass">推荐组合的正常轮次：7 轮，后端 attempt 平均 9.781 s，标准差 0.082 s，正常轮次全部低于 10 秒。</p>
+<p class="warn">推荐组合保留了 1 轮 MinIO 上传尾延迟异常：该轮源缓存全命中，但单次上传最高约 6.306 s，后端 attempt 约 12.214 s，不纳入正常均值。</p>
+
+<h2>五、推荐组合逐轮结果</h2>
+<table><thead><tr><th>轮次</th><th>后端 attempt(s)</th><th>端到端观察(s)</th><th>队列(s)</th><th>单 worker 最长(s)</th><th>上传累计(s)</th><th>上传最长(s)</th><th>源缓存命中</th><th>源缓存未命中</th><th>分类</th></tr></thead><tbody><tr><td>轮次 1</td><td>9.830</td><td>12.541</td><td>2.663</td><td>5.030</td><td>71.843</td><td>2.521</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 2</td><td>9.662</td><td>11.977</td><td>2.266</td><td>4.974</td><td>58.723</td><td>2.564</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 3</td><td>9.801</td><td>12.178</td><td>2.333</td><td>4.991</td><td>63.410</td><td>2.578</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 4</td><td>12.214</td><td>14.492</td><td>2.237</td><td>8.144</td><td>127.289</td><td>6.306</td><td>77</td><td>0</td><td>MinIO 上传尾延迟异常</td></tr><tr><td>轮次 5</td><td>9.781</td><td>12.107</td><td>2.287</td><td>5.648</td><td>75.173</td><td>3.162</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 6</td><td>9.895</td><td>12.213</td><td>2.275</td><td>5.376</td><td>80.084</td><td>3.371</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 7</td><td>9.817</td><td>12.119</td><td>2.263</td><td>5.119</td><td>74.212</td><td>2.771</td><td>77</td><td>0</td><td>正常样本</td></tr><tr><td>轮次 8</td><td>9.683</td><td>11.981</td><td>2.257</td><td>4.976</td><td>70.107</td><td>2.646</td><td>77</td><td>0</td><td>正常样本</td></tr></tbody></table>
+
+<h2>六、正常轮次统计</h2>
+<table><thead><tr><th>指标</th><th>均值(s)</th><th>标准差(s)</th><th>最小(s)</th><th>最大(s)</th></tr></thead><tbody><tr><td>后端 attempt</td><td>9.781</td><td>0.082</td><td>9.662</td><td>9.895</td></tr><tr><td>端到端观察值</td><td>12.159</td><td>0.191</td><td>11.977</td><td>12.541</td></tr><tr><td>队列等待</td><td>2.335</td><td>0.147</td><td>2.257</td><td>2.663</td></tr><tr><td>单 worker 最长</td><td>5.159</td><td>0.258</td><td>4.974</td><td>5.648</td></tr></tbody></table>
+<p>正常轮次端到端观察均值为 12.159 s，但端到端不是本次验收指标；其额外时间主要来自任务排队和 Ray Job 交付。</p>
+
+<h2>七、阶段耗时明细</h2>
+<p>累计均值是所有 worker/task 阶段耗时之和，不是墙钟时间；最长单次用于定位尾延迟。</p>
+<table><thead><tr><th>Scope</th><th>Phase</th><th>阶段</th><th>累计均值(s)</th><th>累计标准差(s)</th><th>最长单次均值(s)</th><th>平均调用次数</th></tr></thead><tbody><tr><td>raster_batch_driver</td><td>driver.result_merge</td><td>合并 task 结果</td><td>0.000</td><td>0.000</td><td>0.000</td><td>77.0</td></tr><tr><td>raster_batch_driver</td><td>ray.init</td><td>连接 Ray</td><td>0.091</td><td>0.004</td><td>0.091</td><td>1.0</td></tr><tr><td>raster_batch_driver</td><td>ray.result_get</td><td>获取 Ray 结果</td><td>0.005</td><td>0.000</td><td>0.005</td><td>2.0</td></tr><tr><td>raster_batch_driver</td><td>ray.task_submit</td><td>提交 Ray task</td><td>0.069</td><td>0.002</td><td>0.069</td><td>77.0</td></tr><tr><td>raster_batch_driver</td><td>ray.wait</td><td>等待 Ray task</td><td>9.056</td><td>0.087</td><td>9.056</td><td>2.0</td></tr><tr><td>raster_driver</td><td>grid.cover</td><td>实体格网覆盖</td><td>0.030</td><td>0.000</td><td>0.030</td><td>1.0</td></tr><tr><td>raster_worker</td><td>entity.tile_checksum</td><td>实体瓦片校验</td><td>0.490</td><td>0.030</td><td>0.024</td><td>88.0</td></tr><tr><td>raster_worker</td><td>entity.tile_mask</td><td>实体瓦片掩膜</td><td>59.837</td><td>0.305</td><td>1.490</td><td>88.0</td></tr><tr><td>raster_worker</td><td>entity.tile_write</td><td>实体瓦片写入内存文件</td><td>16.490</td><td>0.131</td><td>0.457</td><td>88.0</td></tr><tr><td>raster_worker</td><td>grid.geometry</td><td>读取格网几何</td><td>0.314</td><td>0.025</td><td>0.015</td><td>88.0</td></tr><tr><td>raster_worker</td><td>grid.window_calculation</td><td>计算栅格窗口</td><td>0.034</td><td>0.003</td><td>0.003</td><td>88.0</td></tr><tr><td>raster_worker</td><td>minio.tile_stat</td><td>MinIO 瓦片检查</td><td>1.113</td><td>0.388</td><td>0.179</td><td>88.0</td></tr><tr><td>raster_worker</td><td>minio.tile_upload</td><td>MinIO 瓦片上传</td><td>70.507</td><td>7.285</td><td>2.802</td><td>88.0</td></tr><tr><td>raster_worker</td><td>source.cache</td><td>源数据缓存准备</td><td>0.018</td><td>0.001</td><td>0.001</td><td>77.0</td></tr><tr><td>raster_worker</td><td>source.checksum</td><td>源数据校验</td><td>30.489</td><td>0.956</td><td>0.605</td><td>77.0</td></tr><tr><td>raster_worker</td><td>source.download</td><td>源数据下载</td><td>0.000</td><td>0.000</td><td>0.000</td><td>77.0</td></tr><tr><td>raster_worker</td><td>source.raster_open</td><td>打开源栅格</td><td>1.111</td><td>0.043</td><td>0.030</td><td>77.0</td></tr><tr><td>ray_job_driver</td><td>driver.bootstrap</td><td>driver.bootstrap</td><td>0.154</td><td>0.023</td><td>0.154</td><td>1.0</td></tr><tr><td>ray_job_driver</td><td>task.start_attempt</td><td>task.start_attempt</td><td>0.004</td><td>0.001</td><td>0.004</td><td>1.0</td></tr><tr><td>ray_job_driver</td><td>workflow.run</td><td>workflow.run</td><td>9.775</td><td>0.083</td><td>9.775</td><td>1.0</td></tr><tr><td>source_preflight</td><td>minio.stat</td><td>minio.stat</td><td>0.151</td><td>0.004</td><td>0.151</td><td>1.0</td></tr><tr><td>workflow_dataset</td><td>opengauss.complete_output</td><td>OpenGauss 完成写结果</td><td>0.133</td><td>0.033</td><td>0.133</td><td>1.0</td></tr><tr><td>workflow_dataset</td><td>opengauss.start_output</td><td>OpenGauss 开始写结果</td><td>0.020</td><td>0.002</td><td>0.020</td><td>1.0</td></tr></tbody></table>
+
+<h2>八、瓶颈定位</h2>
+<table><thead><tr><th>环节</th><th>观测</th><th>结论</th></tr></thead><tbody><tr><td>实体瓦片掩膜</td><td>累计约 59–60 s，最长单次约 1.5 s</td><td>核心计算阶段，但正常轮次不会单独把 attempt 推过 10 秒。</td></tr><tr><td>MinIO 瓦片上传</td><td>88 个瓦片约 635 MB；正常累计约 60–90 s，异常单次上传可超过 6 s</td><td>当前唯一明显的长尾来源。</td></tr><tr><td>Ray 等待</td><td>正常批量等待约 2 个窗口，累计约 9–10 s</td><td>已降低 driver 轮询开销，剩余时间由 task 和存储完成分布决定。</td></tr><tr><td>源数据校验</td><td>每轮 77 次缓存命中、0 次未命中</td><td>源缓存预热后不再有源下载；校验仍属于 worker 工作量。</td></tr><tr><td>OpenGauss</td><td>开始写结果和完成写结果均为低于 1 秒级</td><td>不是当前主瓶颈；完成 attempt 即代表已完成入库。</td></tr></tbody></table>
+
+<h2>九、已实施优化</h2>
+<table><thead><tr><th>优化项</th><th>结果</th></tr></thead><tbody><tr><td>Ray 批量等待</td><td>从逐个等待改为一次等待一个并行窗口，减少等待调用次数。</td></tr><tr><td>实体格网覆盖复用</td><td>同一源 asset 的 ISEA4H cover 在 driver 缓存，11 个波段不重复计算。</td></tr><tr><td>源 COG 校验缓存</td><td>worker 本地源缓存按文件身份复用 SHA-256，避免同一 worker 重复读完整 COG。</td></tr><tr><td>上传连接数参数化</td><td>新增 multipart 上传并发参数；实测 multipart 1、2、4 都没有稳定收益，推荐保留 3。</td></tr><tr><td>上传线程路径</td><td>单波段 task 可使用同步上传路径，避免创建无效的单线程线程池。</td></tr><tr><td>预检去重</td><td>同一批次相同 MinIO source object 只做一次 stat。</td></tr></tbody></table>
+
+<h2>十、结论</h2>
+<p>按“剖分、上传、入库完成”的后端 attempt 口径，推荐的 48 并行度和 64 worker 组合在正常多轮中平均约 9.781 秒，稳定低于 10 秒。64 并行度没有带来收益，48 worker 在当前 MinIO 写入尾延迟下也不如 64 worker 稳定。</p>
+<p>剩余风险集中在 MinIO 单对象上传尾部，而不是实体掩膜或 OpenGauss 入库。生产验收时应保持 worker 常驻、预热源 COG 缓存，并持续监控 MinIO 上传 P95/P99；异常存储轮次应单独标识，不能混入正常平均值。</p>
+</body>
+</html>

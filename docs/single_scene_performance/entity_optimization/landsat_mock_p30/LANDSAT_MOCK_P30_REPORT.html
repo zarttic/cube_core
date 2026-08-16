@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Landsat 标准单景实体剖分性能报告</title>
+<style>
+body { margin: 24px; color: #202124; background: #fff; font: 14px/1.55 Arial, "Microsoft YaHei", sans-serif; }
+h1 { margin: 0 0 8px; font-size: 24px; }
+h2 { margin: 28px 0 8px; padding-bottom: 5px; border-bottom: 1px solid #bbb; font-size: 18px; }
+p { margin: 7px 0; }
+table { width: 100%; margin: 10px 0 18px; border-collapse: collapse; }
+th, td { padding: 7px 8px; border: 1px solid #c8c8c8; text-align: left; vertical-align: top; }
+th { background: #f1f1f1; font-weight: 600; }
+code { font-family: Consolas, monospace; font-size: 12px; }
+.note { padding: 9px 11px; border-left: 3px solid #777; background: #f6f6f6; }
+.fail { color: #8a1c1c; font-weight: 600; }
+.pass { color: #1e5d2a; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Landsat 标准单景实体剖分性能报告</h1>
+<p class="note">本报告使用 Landsat 8/9 OLI/TIRS 单景尺寸、统一 30 m 网格和 11 波段契约生成的确定性 mock 影像。它用于验证标准负载的处理性能，不代表真实卫星像元值。</p>
+
+<h2>一、单井 → 单景口径</h2>
+<table><thead><tr><th>项目</th><th>值</th><th>说明</th></tr></thead><tbody><tr><td>单井</td><td>landsat-mock-p30</td><td>一次请求只绑定一个测试井</td></tr><tr><td>单景</td><td>1 个完整 Landsat mock scene</td><td>scene_mode=full，不使用裁剪窗口</td></tr><tr><td>数据类型</td><td>光学</td><td>本轮只测 optical 实体剖分</td></tr><tr><td>格网</td><td>isea4h</td><td>六边形格网，level 6</td></tr><tr><td>剖分方式</td><td>entity</td><td>生成实体瓦片并写入索引</td></tr><tr><td>Ray 配置</td><td>30</td><td>36 个预热 worker，单 worker 1 CPU/2 GiB</td></tr></tbody></table>
+
+<h2>二、输入景规格</h2>
+<table><thead><tr><th>项目</th><th>值</th></tr></thead><tbody><tr><td>空间覆盖假设</td><td>185 km × 180 km</td></tr><tr><td>统一分辨率</td><td>30 m</td></tr><tr><td>影像尺寸</td><td>6167 × 6000</td></tr><tr><td>波段数</td><td>11</td></tr><tr><td>波段</td><td>B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11</td></tr><tr><td>源格式</td><td>Cloud Optimized GeoTIFF / uint16</td></tr><tr><td>CRS</td><td>EPSG:32649</td></tr><tr><td>源对象</td><td><code>s3://cube/cube/source/perf/single-well/landsat_mock_p30/optical_scene.tif</code></td></tr><tr><td>源 SHA-256</td><td><code>234a6a01e365999e924867143017d6077b879238589a3926ca7e7b9463ff72f8</code></td></tr></tbody></table>
+
+<h2>三、任务拆分与输出</h2>
+<table><thead><tr><th>指标</th><th>值</th><th>含义</th></tr></thead><tbody><tr><td>场景/波段单元</td><td>11</td><td>每个波段一个实体批次单元</td></tr><tr><td>覆盖格元</td><td>8</td><td>所有波段单元共用同一实体覆盖</td></tr><tr><td>Ray task</td><td>66</td><td>各波段单元的非空空间分片执行数</td></tr><tr><td>实体 cell task</td><td>88</td><td>worker 结果中的 cell 处理数</td></tr><tr><td>空分片</td><td>209</td><td>30 个空间分片中未产生 cell 的分片数</td></tr><tr><td>worker 结果</td><td>66</td><td>各波段单元返回的 worker 结果数</td></tr><tr><td>worker 主机数</td><td>36</td><td>正常样本中观测到的不同 worker</td></tr><tr><td>Ray 并行度</td><td>30</td><td>每个实体批次的配置并行度</td></tr><tr><td>实体瓦片/索引</td><td>88/88</td><td>正常样本输出计数</td></tr></tbody></table>
+
+<h2>四、各轮耗时</h2>
+<p>正常均值只使用 5 个缓存命中且调度正常的样本；预热、首次缓存命中轮和 Ray 调度异常轮保留在下表，但不进入正常均值。</p>
+<table><thead><tr><th>样本</th><th>类别</th><th>后端 attempt(s)</th><th>端到端(s)</th><th>Ray Job(s)</th><th>队列(s)</th><th>单 worker 最长(s)</th><th>attempt &lt; 10</th><th>端到端 &lt; 10</th><th>状态</th></tr></thead><tbody><tr><td>normal-1</td><td>正常样本</td><td>10.090</td><td>12.395</td><td>13.277</td><td>2.264</td><td>5.769</td><td>未通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>normal-2</td><td>正常样本</td><td>9.993</td><td>12.378</td><td>13.303</td><td>2.346</td><td>5.642</td><td>通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>normal-3</td><td>正常样本</td><td>10.060</td><td>12.392</td><td>13.330</td><td>2.291</td><td>5.962</td><td>未通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>normal-4</td><td>正常样本</td><td>9.979</td><td>12.289</td><td>13.175</td><td>2.272</td><td>6.039</td><td>通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>normal-5</td><td>正常样本</td><td>9.973</td><td>12.295</td><td>13.182</td><td>2.280</td><td>5.719</td><td>通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>cache-warmup</td><td>诊断样本</td><td>219.725</td><td>222.536</td><td>223.150</td><td>2.770</td><td>210.838</td><td>未通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>cache-hit-first</td><td>诊断样本</td><td>17.070</td><td>19.343</td><td>20.297</td><td>2.238</td><td>10.175</td><td>未通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr><tr><td>ray-scheduling-outlier</td><td>诊断样本</td><td>139.683</td><td>142.010</td><td>142.968</td><td>2.287</td><td>135.975</td><td>未通过</td><td>未通过</td><td>succeeded/completed/SUCCEEDED</td></tr></tbody></table>
+
+<h2>五、正常样本统计</h2>
+<table><thead><tr><th>指标</th><th>平均(s)</th><th>标准差(s)</th><th>最小(s)</th><th>最大(s)</th></tr></thead><tbody><tr><td>后端 attempt</td><td>10.019</td><td>0.053</td><td>9.973</td><td>10.090</td></tr><tr><td>端到端</td><td>12.350</td><td>0.053</td><td>12.289</td><td>12.395</td></tr><tr><td>Ray Job</td><td>13.253</td><td>0.071</td><td>13.175</td><td>13.330</td></tr><tr><td>队列等待</td><td>2.291</td><td>0.033</td><td>2.264</td><td>2.346</td></tr><tr><td>Ray driver 内部</td><td>10.167</td><td>0.050</td><td>10.125</td><td>10.238</td></tr><tr><td>单 worker 最长</td><td>5.826</td><td>0.167</td><td>5.642</td><td>6.039</td></tr><tr><td>worker 累计</td><td>187.896</td><td>2.472</td><td>185.096</td><td>191.629</td></tr></tbody></table>
+<p>正常样本后端严格小于 10 秒：<span class="fail">3/5</span>；端到端严格小于 10 秒：<span class="fail">0/5</span>。</p>
+<p>后端 attempt 平均为 <strong>10.019 s</strong>，端到端平均为 <strong>12.350 s</strong>。按“平均值也必须严格小于 10 秒”的口径，后端和端到端均未通过。</p>
+
+<h2>六、阶段耗时</h2>
+<p>阶段表中的“平均累计”是五轮中同一阶段所有 worker/task 调用耗时的累计均值，不能直接相加当作墙钟时间；“平均最长单次”用于观察单个调用的最长耗时。</p>
+<table><thead><tr><th>Scope</th><th>Phase</th><th>阶段含义</th><th>平均累计(s)</th><th>平均最长单次(s)</th><th>累计最小(s)</th><th>累计最大(s)</th><th>平均调用次数</th></tr></thead><tbody><tr><td>ray_job_driver</td><td>driver.bootstrap</td><td>Ray Job driver 启动</td><td>0.149</td><td>0.149</td><td>0.141</td><td>0.159</td><td>1.0</td></tr><tr><td>ray_job_driver</td><td>task.start_attempt</td><td>启动后端 attempt</td><td>0.004</td><td>0.004</td><td>0.003</td><td>0.006</td><td>1.0</td></tr><tr><td>ray_job_driver</td><td>workflow.run</td><td>工作流总耗时</td><td>10.013</td><td>10.013</td><td>9.967</td><td>10.084</td><td>1.0</td></tr><tr><td>raster_driver</td><td>grid.cover</td><td>实体格网覆盖</td><td>0.030</td><td>0.030</td><td>0.029</td><td>0.030</td><td>1.0</td></tr><tr><td>raster_batch_driver</td><td>driver.result_merge</td><td>合并 task 结果</td><td>0.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>66.0</td></tr><tr><td>raster_batch_driver</td><td>ray.init</td><td>连接 Ray</td><td>0.086</td><td>0.086</td><td>0.081</td><td>0.089</td><td>1.0</td></tr><tr><td>raster_batch_driver</td><td>ray.result_get</td><td>获取 Ray 结果</td><td>0.014</td><td>0.014</td><td>0.013</td><td>0.016</td><td>27.6</td></tr><tr><td>raster_batch_driver</td><td>ray.task_submit</td><td>提交 Ray task</td><td>0.063</td><td>0.063</td><td>0.061</td><td>0.064</td><td>66.0</td></tr><tr><td>raster_batch_driver</td><td>ray.wait</td><td>等待 Ray task</td><td>9.243</td><td>9.243</td><td>9.179</td><td>9.313</td><td>46.4</td></tr><tr><td>raster_worker</td><td>entity.tile_checksum</td><td>实体瓦片校验</td><td>0.479</td><td>0.024</td><td>0.468</td><td>0.488</td><td>88.0</td></tr><tr><td>raster_worker</td><td>entity.tile_mask</td><td>实体瓦片掩膜</td><td>57.573</td><td>1.644</td><td>57.009</td><td>58.811</td><td>88.0</td></tr><tr><td>raster_worker</td><td>entity.tile_write</td><td>实体瓦片写入</td><td>16.511</td><td>0.523</td><td>16.309</td><td>16.640</td><td>88.0</td></tr><tr><td>raster_worker</td><td>grid.geometry</td><td>读取格网几何</td><td>0.280</td><td>0.024</td><td>0.240</td><td>0.403</td><td>88.0</td></tr><tr><td>raster_worker</td><td>grid.window_calculation</td><td>计算栅格窗口</td><td>0.035</td><td>0.002</td><td>0.034</td><td>0.036</td><td>88.0</td></tr><tr><td>raster_worker</td><td>minio.tile_stat</td><td>MinIO 瓦片检查</td><td>1.093</td><td>0.237</td><td>0.824</td><td>1.948</td><td>88.0</td></tr><tr><td>raster_worker</td><td>minio.tile_upload</td><td>MinIO 瓦片上传</td><td>73.681</td><td>3.165</td><td>69.784</td><td>77.404</td><td>88.0</td></tr><tr><td>raster_worker</td><td>source.cache</td><td>源数据缓存命中/准备</td><td>0.017</td><td>0.000</td><td>0.016</td><td>0.017</td><td>66.0</td></tr><tr><td>raster_worker</td><td>source.checksum</td><td>源数据校验</td><td>37.266</td><td>0.658</td><td>36.457</td><td>38.840</td><td>66.0</td></tr><tr><td>raster_worker</td><td>source.download</td><td>源数据下载</td><td>0.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>66.0</td></tr><tr><td>raster_worker</td><td>source.raster_open</td><td>打开源栅格</td><td>0.728</td><td>0.028</td><td>0.709</td><td>0.756</td><td>66.0</td></tr><tr><td>source_preflight</td><td>minio.stat</td><td>源对象预检</td><td>0.183</td><td>0.183</td><td>0.175</td><td>0.195</td><td>1.0</td></tr><tr><td>workflow_dataset</td><td>opengauss.complete_output</td><td>opengauss.complete_output</td><td>0.082</td><td>0.082</td><td>0.080</td><td>0.085</td><td>1.0</td></tr><tr><td>workflow_dataset</td><td>opengauss.start_output</td><td>opengauss.start_output</td><td>0.019</td><td>0.019</td><td>0.017</td><td>0.022</td><td>1.0</td></tr></tbody></table>
+
+<h2>七、缓存与异常说明</h2>
+<p>预热轮所有 worker 的源缓存下载阶段累计约 6793.019 s，这不是单次墙钟下载值，具体下载由多个 worker 并行完成；正常样本的 <code>source.download</code> 为 0，说明 worker 本地源缓存已命中。</p>
+<p>正常样本仍需要对缓存文件做 SHA-256、打开栅格、读取格网几何、执行实体掩膜、写瓦片、检查并上传 MinIO 对象，因此缓存命中不会消除主体计算。正常样本的阶段表中，源校验、实体掩膜、瓦片写入和上传仍然可见。</p>
+<p>诊断样本中的 Ray 调度异常轮虽然 attempt/final/Ray Job 都成功，但 Ray 等待阶段显著拉长，属于集群调度波动，已从正常均值剔除；它没有被当作业务失败。</p>
+
+<h2>八、结论</h2>
+<p class="fail">在标准 Landsat 单景 mock 口径、30 m、11 波段、ISEA4H level 6、Ray 并行度 30 的条件下，正常缓存命中轮次的后端平均约 10.019 秒，端到端平均约 12.350 秒。后端仅在部分轮次低于 10 秒，端到端没有轮次低于 10 秒，因此不能判定为稳定满足 10 秒要求。</p>
+<p>该结果与上一轮 10 m、10 波段 Sentinel mock 不可直接横向比较；本报告采用的是统一 30 m 的 Landsat 标准单景负载。</p>
+</body>
+</html>

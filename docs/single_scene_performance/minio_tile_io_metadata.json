@@ -1,0 +1,82 @@
+{
+  "schema_version": "minio-tile-io-benchmark-v1",
+  "write_object_types": [
+    "entity_tile"
+  ],
+  "read_object_types": [
+    "logical_chunk",
+    "entity_tile"
+  ],
+  "tile_counts": [
+    1,
+    10,
+    100,
+    1000
+  ],
+  "rounds": 5,
+  "concurrency": 8,
+  "cleanup": true,
+  "samples": {
+    "write_entity_tile": {
+      "object_type": "entity_tile",
+      "case_id": "optical_isea4h",
+      "size_bytes": 22430,
+      "fetch_sec": 0.003201
+    },
+    "read_logical_chunk": {
+      "pool_size": 4,
+      "objects": [
+        {
+          "object_type": "logical_chunk",
+          "case_id": "radar_geohash",
+          "size_bytes": 894
+        },
+        {
+          "object_type": "logical_chunk",
+          "case_id": "radar_geohash",
+          "size_bytes": 895
+        },
+        {
+          "object_type": "logical_chunk",
+          "case_id": "radar_geohash",
+          "size_bytes": 895
+        },
+        {
+          "object_type": "logical_chunk",
+          "case_id": "radar_geohash",
+          "size_bytes": 897
+        }
+      ]
+    },
+    "read_entity_tile": {
+      "pool_size": 4,
+      "objects": [
+        {
+          "object_type": "entity_tile",
+          "case_id": "optical_isea4h",
+          "size_bytes": 22430
+        },
+        {
+          "object_type": "entity_tile",
+          "case_id": "optical_isea4h",
+          "size_bytes": 22430
+        },
+        {
+          "object_type": "entity_tile",
+          "case_id": "optical_isea4h",
+          "size_bytes": 22430
+        },
+        {
+          "object_type": "entity_tile",
+          "case_id": "optical_isea4h",
+          "size_bytes": 22430
+        }
+      ]
+    }
+  },
+  "sample_fetch_sec": {
+    "entity_tile": 0.003201
+  },
+  "sample_count": 60,
+  "valid_sample_count": 60
+}

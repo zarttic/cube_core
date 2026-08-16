@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>质检格网吞吐性能报告</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, "Microsoft YaHei", sans-serif; }
+    body { max-width: 1180px; margin: 0 auto; padding: 28px; color: #202938; background: #fff; line-height: 1.55; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+    h2 { margin: 28px 0 10px; font-size: 17px; font-weight: 600; }
+    p { margin: 6px 0; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; margin: 20px 0; }
+    .metric { padding: 12px 14px; border: 1px solid #d9dee7; border-radius: 4px; }
+    .metric strong { display: block; font-size: 20px; font-weight: 600; }
+    .metric span { color: #667085; font-size: 12px; }
+    .pass { color: #16734b; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 9px; border: 1px solid #d9dee7; text-align: left; vertical-align: top; }
+    th { background: #f5f7fa; font-weight: 600; }
+    .number { text-align: right; white-space: nowrap; }
+    .note { color: #667085; font-size: 12px; }
+    @media (max-width: 760px) {
+      body { padding: 16px; }
+      .summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <h1>质检格网吞吐性能报告</h1>
+  <p>结论：<strong class="pass">达到 2 格网/秒目标</strong>。3 轮完整质检均通过，最低一轮约 19,689 格网/秒。</p>
+
+  <div class="summary">
+    <div class="metric"><strong>69,064</strong><span>真实格网单元</span></div>
+    <div class="metric"><strong>3.210 秒</strong><span>平均质检墙钟耗时</span></div>
+    <div class="metric"><strong>21,631/s</strong><span>平均格网吞吐</span></div>
+    <div class="metric"><strong>19,689/s</strong><span>最低轮格网吞吐</span></div>
+  </div>
+
+  <h2>测试口径</h2>
+  <table>
+    <tbody>
+      <tr><th>数据样本</th><td>真实信息产品当前成果，MGRS 格网，层级 0</td></tr>
+      <tr><th>成果规模</th><td>69,064 个格网单元、69,064 个瓦片、69,064 个索引</td></tr>
+      <tr><th>执行方式</th><td>通过正式 OpenGauss 质检运行链路提交，连续执行 3 轮；每轮完整执行适用规则</td></tr>
+      <tr><th>Worker 配置</th><td>质量执行并发默认值 4；本次按轮次串行提交，避免轮次之间互相争用资源</td></tr>
+      <tr><th>完成定义</th><td>质检运行进入 pass/warn/fail/error/cancelled 终态，并以数据库记录的运行开始至完成区间计算墙钟耗时</td></tr>
+      <tr><th>验收阈值</th><td>格网单元数 ÷ 质检墙钟耗时 ≥ 2 格网/秒</td></tr>
+    </tbody>
+  </table>
+
+  <h2>轮次结果</h2>
+  <table>
+    <thead><tr><th>轮次</th><th>状态</th><th class="number">格网数</th><th class="number">墙钟耗时（秒）</th><th class="number">吞吐（格网/秒）</th><th>阈值</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="pass">pass</td><td class="number">69,064</td><td class="number">3.507718</td><td class="number">19,689.154</td><td class="pass">通过</td></tr>
+      <tr><td>2</td><td class="pass">pass</td><td class="number">69,064</td><td class="number">2.929569</td><td class="number">23,574.799</td><td class="pass">通过</td></tr>
+      <tr><td>3</td><td class="pass">pass</td><td class="number">69,064</td><td class="number">3.193070</td><td class="number">21,629.341</td><td class="pass">通过</td></tr>
+      <tr><th>平均</th><th class="pass">通过</th><th class="number">69,064</th><th class="number">3.210119</th><th class="number">21,631.098</th><th class="pass">通过</th></tr>
+    </tbody>
+  </table>
+
+  <h2>规则耗时明细</h2>
+  <p class="note">以下为每轮数据库质检结果记录中的规则执行耗时；发现数、错误数和告警数均为 0。</p>
+  <table>
+    <thead><tr><th>规则</th><th class="number">第 1 轮（秒）</th><th class="number">第 2 轮（秒）</th><th class="number">第 3 轮（秒）</th><th class="number">平均（秒）</th></tr></thead>
+    <tbody>
+      <tr><td>index_schema</td><td class="number">0.000660</td><td class="number">0.000870</td><td class="number">0.000526</td><td class="number">0.000685</td></tr>
+      <tr><td>output_count_consistency</td><td class="number">0.235226</td><td class="number">0.234083</td><td class="number">0.225540</td><td class="number">0.231616</td></tr>
+      <tr><td>output_reference_integrity</td><td class="number">0.000947</td><td class="number">0.001111</td><td class="number">0.000781</td><td class="number">0.000946</td></tr>
+      <tr><td>grid_method_agreement</td><td class="number">0.604377</td><td class="number">0.603601</td><td class="number">0.599486</td><td class="number">0.602488</td></tr>
+      <tr><td>cell_bbox_validity</td><td class="number">1.252047</td><td class="number">0.746130</td><td class="number">1.013125</td><td class="number">1.003767</td></tr>
+      <tr><td>time_bucket_consistency</td><td class="number">0.448655</td><td class="number">0.425919</td><td class="number">0.425883</td><td class="number">0.433486</td></tr>
+      <tr><td>asset_readability</td><td class="number">0.929620</td><td class="number">0.884084</td><td class="number">0.895304</td><td class="number">0.903003</td></tr>
+      <tr><td>window_bounds</td><td class="number">0.001329</td><td class="number">0.001243</td><td class="number">0.000907</td><td class="number">0.001160</td></tr>
+      <tr><td>asset_crs</td><td class="number">0.006721</td><td class="number">0.006192</td><td class="number">0.006726</td><td class="number">0.006546</td></tr>
+    </tbody>
+  </table>
+
+  <h2>判断</h2>
+  <p>按当前真实样本，质检链路平均约 3.21 秒处理 69,064 个格网单元，吞吐约 21,631 格网/秒。所有轮次均超过 2 格网/秒，当前瓶颈不在质检吞吐；单轮主要耗时规则是格网边界有效性、数据单元可读性和格网方式一致性。</p>
+</body>
+</html>
