@@ -21,7 +21,7 @@ POINT = [116.391, 39.907]
 LEVELS = {
     GridType.GEOHASH: 5,
     GridType.MGRS: 3,
-    GridType.ISEA4H: 3,
+    GridType.ISEA4H: 6,
 }
 
 BBOX_GEOMETRY = {

@@ -19,9 +19,9 @@ def _carbon_row(observation_id: str) -> dict:
         "acq_time": "2020-12-31T00:01:06.700000Z",
         "time_bucket": "20201231",
         "grid_type": "isea4h",
-        "grid_level": 5,
+        "grid_level": 6,
         "space_code": "85230a2ffffffff",
-        "st_code": "hx:5:85230a2ffffffff:20201231",
+        "st_code": "hx:6:85230a2ffffffff:20201231",
         "xco2": 417.384,
         "quality_flag": "1",
         "center_lon": -167.413,
@@ -166,7 +166,7 @@ def test_carbon_query_defaults_match_carbon_partition_grid(monkeypatch):
     args = _parse_args()
 
     assert args.grid_type == "isea4h"
-    assert args.grid_level == 5
+    assert args.grid_level == 6
 
 
 def test_carbon_query_uses_frozen_sdk_cover_signature(monkeypatch):

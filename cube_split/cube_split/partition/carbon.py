@@ -14,6 +14,8 @@ from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable
 
+from grid_core.app.core.enums import GridType
+from grid_core.app.models.request import validate_requested_grid_level
 from grid_core.sdk import CubeEncoderSDK
 
 from cube_split import runtime_config
@@ -35,7 +37,7 @@ _AUTO_CHUNKS_PER_WORKER = 8
 @dataclass(frozen=True)
 class CarbonPartitionConfig:
     grid_type: str = "isea4h"
-    grid_level: int = 5
+    grid_level: int = 6
     time_granularity: str = "day"
     product_type: str = "xco2"
     max_observations: int | None = None
@@ -45,6 +47,9 @@ class CarbonPartitionConfig:
     ray_address: str = ""
     source_uris: tuple[str, ...] | None = None
     cancellation_check: Any | None = None
+
+    def __post_init__(self) -> None:
+        validate_requested_grid_level(GridType(self.grid_type), int(self.grid_level))
 
 
 @dataclass(frozen=True)

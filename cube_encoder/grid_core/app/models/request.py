@@ -16,16 +16,17 @@ from grid_core.app.models.grid_address import GridAddress
 LEVEL_RANGES: dict[GridType, tuple[int, int]] = {
     GridType.GEOHASH: (1, 12),
     GridType.MGRS: (0, 5),
-    GridType.ISEA4H: (0, 15),
+    GridType.ISEA4H: (1, 6),
 }
 
 
-def validate_requested_grid_level(grid_type: GridType, requested_grid_level: int) -> int:
+def validate_requested_grid_level(grid_type: GridType | str, requested_grid_level: int) -> int:
     """Validate that requested_grid_level is within the accepted inclusive range for grid_type.
 
     Raises ValueError with 'requested_grid_level' in the message on out-of-range input.
     Downstream packages import this function rather than duplicating range logic.
     """
+    grid_type = GridType(grid_type)
     minimum, maximum = LEVEL_RANGES[grid_type]
     if not minimum <= requested_grid_level <= maximum:
         raise ValueError(f"{grid_type.value} requested_grid_level must be in [{minimum}, {maximum}]")

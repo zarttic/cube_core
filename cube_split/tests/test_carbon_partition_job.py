@@ -18,11 +18,11 @@ from cube_split.jobs.carbon_partition_job import (
 from cube_split.partition.carbon import CarbonPartitionConfig
 
 
-def test_carbon_partition_config_defaults_to_isea4h_level5():
+def test_carbon_partition_config_defaults_to_isea4h_level6():
     config = CarbonPartitionConfig()
 
     assert config.grid_type == "isea4h"
-    assert config.grid_level == 5
+    assert config.grid_level == 6
     assert config.partition_chunk_size == 0
 
 
@@ -109,7 +109,7 @@ def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
             input_dir=str(input_dir),
             output_dir=str(output_dir),
             grid_type="isea4h",
-            grid_level=5,
+            grid_level=6,
             time_granularity="day",
             product_type="xco2",
             max_observations=0,
@@ -130,12 +130,12 @@ def test_run_carbon_partition_writes_standard_run_dir(tmp_path: Path):
     assert summary["status"] == "completed"
     assert summary["data_type"] == "carbon"
     assert summary["grid_type"] == "isea4h"
-    assert summary["grid_level"] == 5
+    assert summary["grid_level"] == 6
     assert summary["rows"] == 1
     assert report["rows_path"] == str(rows_path.resolve())
     assert row["grid_type"] == "isea4h"
-    assert row["grid_level"] == 5
-    assert row["st_code"].startswith("i4h:5:")
+    assert row["grid_level"] == 6
+    assert row["st_code"].startswith("i4h:6:")
 
 
 def test_run_carbon_partition_normalizes_tansat_alias_in_rows_and_report(tmp_path: Path):
@@ -160,7 +160,7 @@ def test_run_carbon_partition_normalizes_tansat_alias_in_rows_and_report(tmp_pat
 
     summary = run_carbon_partition(
         SimpleNamespace(
-            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=5,
+            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=6,
             time_granularity="day", product_type="tansat_xco2", max_observations=0,
             partition_chunk_size=1000, partition_workers=1, partition_backend="process",
             ray_address="", ray_parallelism=0,
@@ -200,7 +200,7 @@ def test_run_carbon_partition_writes_both_tansat_sif_measurements(tmp_path: Path
 
     summary = run_carbon_partition(
         SimpleNamespace(
-            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=5,
+            input_dir=str(input_dir), output_dir=str(output_dir), grid_type="isea4h", grid_level=6,
             time_granularity="day", product_type="sif", max_observations=0,
             partition_chunk_size=1000, partition_workers=1, partition_backend="process",
             ray_address="", ray_parallelism=0,

@@ -49,7 +49,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
 
     geohash_address = grid_service.locate_space_code(GridType.GEOHASH, 6, [116.391, 39.907])
     mgrs_address = grid_service.locate_space_code(GridType.MGRS, 5, [116.391, 39.907])
-    isea_address = grid_service.locate_space_code(GridType.ISEA4H, 7, [116.391, 39.907])
+    isea_address = grid_service.locate_space_code(GridType.ISEA4H, 6, [116.391, 39.907])
     geohash_neighbors = topology_service.neighbors(geohash_address, k=1)[:8]
 
     polygon = {
@@ -74,7 +74,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             name="isea4h_locate",
             iterations=2000,
             max_avg_ms=_env_float("PERF_MAX_ISEA4H_LOCATE_MS", 3.0),
-            func=lambda: grid_service.locate(GridType.ISEA4H, 7, [116.391, 39.907]),
+            func=lambda: grid_service.locate(GridType.ISEA4H, 6, [116.391, 39.907]),
         ),
         PerfCase(
             name="geohash_cover_intersect",
@@ -136,7 +136,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             max_avg_ms=_env_float("PERF_MAX_ISEA4H_COVER_MS", 300.0),
             func=lambda: grid_service.cover(
                 GridType.ISEA4H,
-                7,
+                6,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",
@@ -150,7 +150,7 @@ def run_perf_smoke(enforce: bool = True) -> dict[str, dict[str, float]]:
             max_avg_ms=_env_float("PERF_MAX_ISEA4H_COMPACT_COVER_MS", 300.0),
             func=lambda: grid_service.cover_compact(
                 GridType.ISEA4H,
-                7,
+                6,
                 geometry=polygon,
                 bbox=None,
                 cover_mode="intersect",

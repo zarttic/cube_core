@@ -18,7 +18,7 @@
 - `isea4h` 为纯 Python 实现，对齐 DGGRID v8.44；运行时不依赖 H3 或 DGGRID。
 - `isea4h` 的 `space_code` 为未补零十进制 DGGRID SEQNUM，`cell_count(r) = 10 * 4**r + 2`；请求使用 `requested_grid_level`，返回 cell 保留实际 `grid_level`。
 
-Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
+Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `1..6`.
 
 ## 运行版本
 

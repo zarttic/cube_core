@@ -82,11 +82,11 @@ function formatGridType(gridType) {
 }
 
 function gridLevelMinimum(gridType) {
-  return gridType === 'geohash' ? 1 : 0;
+  return gridType === 'geohash' || gridType === 'isea4h' ? 1 : 0;
 }
 
 function gridLevelMaximum(gridType) {
-  return gridType === 'mgrs' ? 5 : gridType === 'isea4h' ? 15 : 12;
+  return gridType === 'mgrs' ? 5 : gridType === 'isea4h' ? 6 : 12;
 }
 
 function clampGridLevel(value, gridType) {

@@ -6,6 +6,7 @@ from grid_core.app.engines.registry import GridEngineRegistry
 from grid_core.app.models.compact_grid_cell import CompactGridCell
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.models.grid_cell import GridCell
+from grid_core.app.models.request import validate_requested_grid_level
 from grid_core.app.utils.geometry import bbox_to_polygon, point_from_coords
 
 
@@ -14,12 +15,14 @@ class GridService:
         self._registry = GridEngineRegistry()
 
     def locate(self, grid_type: GridType, requested_grid_level: int, point: list[float]) -> GridCell:
+        validate_requested_grid_level(grid_type, requested_grid_level)
         engine = self._registry.get_engine(grid_type)
         pt = point_from_coords(point)
         lon, lat = float(pt.x), float(pt.y)
         return engine.locate_point(lon=lon, lat=lat, requested_grid_level=requested_grid_level)
 
     def locate_space_code(self, grid_type: GridType, requested_grid_level: int, point: list[float]) -> GridAddress:
+        validate_requested_grid_level(grid_type, requested_grid_level)
         engine = self._registry.get_engine(grid_type)
         if len(point) != 2:
             raise ValidationError("Point must be [lon, lat]")
@@ -36,6 +39,7 @@ class GridService:
         requested_grid_level: int,
         points: list[list[float]],
     ) -> list[GridAddress]:
+        validate_requested_grid_level(grid_type, requested_grid_level)
         engine = self._registry.get_engine(grid_type)
         normalized_points: list[list[float]] = []
         for point in points:
@@ -65,6 +69,7 @@ class GridService:
         boundary_type: BoundaryType,
         crs: str,
     ) -> list[GridCell]:
+        validate_requested_grid_level(grid_type, requested_grid_level)
         engine = self._registry.get_engine(grid_type)
         if crs != "EPSG:4326":
             raise ValidationError("Only EPSG:4326 is supported in MVP")
@@ -107,6 +112,7 @@ class GridService:
         cover_mode: str,
         crs: str,
     ) -> list[CompactGridCell]:
+        validate_requested_grid_level(grid_type, requested_grid_level)
         engine = self._registry.get_engine(grid_type)
         if crs != "EPSG:4326":
             raise ValidationError("Only EPSG:4326 is supported in MVP")

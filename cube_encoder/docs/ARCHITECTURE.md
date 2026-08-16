@@ -25,9 +25,9 @@
 
 - `geohash`（经纬度格网，logical）：定位、覆盖、拓扑和几何反算；`space_code` 为 base32 geohash，层级 `1..12`。
 - `mgrs`（平面格网，logical）：标准 UTM/UPS MGRS 定位、覆盖、拓扑和几何反算；以标准 `space_code` 作为唯一格网身份，`topology_code` 为空，精度 `0..5`。
-- `isea4h`（六边形格网，entity）：纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；`space_code` 为 DGGRID `SEQNUM`，分辨率 `0..15`；运行时不依赖 H3 或 DGGRID，固定权威向量由 DGGRID 生成并提交为测试基线。
+- `isea4h`（六边形格网，entity）：纯 Python 实现，对齐 DGGRID v8.44（ISEA 投影、HEXAGON、PURE aperture 4、WGS84 authalic 半径、朝向 `(11.25°, 58.28252559°, 0°)`）；`space_code` 为 DGGRID `SEQNUM`，生产分辨率 `1..6`；运行时不依赖 H3 或 DGGRID，固定权威向量由 DGGRID 生成并提交为测试基线。
 
-Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
+Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `1..6`.
 
 ## 3. 分层结构
 

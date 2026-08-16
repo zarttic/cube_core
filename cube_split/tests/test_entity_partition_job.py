@@ -226,7 +226,7 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
     _write_tif(worker_source)
     cell = entity_partition_job.CubeEncoderSDK().locate(
         grid_type="isea4h",
-        requested_grid_level=1,
+        requested_grid_level=6,
         point=[116.016, 39.984],
     )
 
@@ -238,7 +238,7 @@ def test_entity_writer_preserves_original_source_asset_path(tmp_path: Path):
             "source_asset_path": str(source),
             "acq_time": "2026-04-21T00:00:00Z",
             "grid_type": "isea4h",
-            "grid_level": 1,
+            "grid_level": 6,
             "space_code": cell.space_code,
             "cover_mode": "intersect",
             "cell_min_lon": float(cell.bbox[0]),
@@ -267,7 +267,7 @@ def test_entity_writer_bounds_outstanding_uploads(monkeypatch, tmp_path: Path):
     _write_tif(source)
     cell = entity_partition_job.CubeEncoderSDK().locate(
         grid_type="isea4h",
-        requested_grid_level=1,
+        requested_grid_level=6,
         point=[116.016, 39.984],
     )
     tasks = [
@@ -278,7 +278,7 @@ def test_entity_writer_bounds_outstanding_uploads(monkeypatch, tmp_path: Path):
             "source_asset_path": str(source),
             "acq_time": "2026-04-21T00:00:00Z",
             "grid_type": "isea4h",
-            "grid_level": 1,
+            "grid_level": 6,
             "space_code": cell.space_code,
             "cover_mode": "intersect",
             "cell_min_lon": float(cell.bbox[0]),
@@ -370,7 +370,7 @@ def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_pa
     source = tmp_path / "source_multiband.tif"
     _write_two_band_tif(source)
     sdk = entity_partition_job.CubeEncoderSDK()
-    cell = sdk.locate(grid_type="isea4h", requested_grid_level=1, point=[116.016, 39.984])
+    cell = sdk.locate(grid_type="isea4h", requested_grid_level=6, point=[116.016, 39.984])
     calls = 0
     original_geometry_mask = entity_partition_job.rasterio.mask.raster_geometry_mask
 
@@ -390,7 +390,7 @@ def test_entity_writer_reuses_exact_mask_for_multiband_tiles(monkeypatch, tmp_pa
                 "source_asset_path": str(source),
                 "acq_time": "2026-04-21T00:00:00Z",
                 "grid_type": "isea4h",
-                "grid_level": 1,
+                "grid_level": 6,
                 "space_code": cell.space_code,
                 "cover_mode": "intersect",
                 "cell_min_lon": float(cell.bbox[0]),
@@ -578,7 +578,7 @@ def test_entity_auto_parallelism_uses_split_groups_after_prefix_batching(monkeyp
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_level=1,
+            grid_level=6,
             target_pixels_per_hex_edge=768,
             cover_mode="intersect",
             time_granularity="day",
@@ -895,7 +895,7 @@ def test_entity_partition_raises_clear_error_when_no_task_groups(monkeypatch, tm
                 cog_level=0,
                 cog_num_threads="ALL_CPUS",
                 target_crs="EPSG:4326",
-                grid_level=1,
+                grid_level=6,
                 target_pixels_per_hex_edge=768,
                 cover_mode="intersect",
                 time_granularity="day",
@@ -1316,7 +1316,7 @@ def test_entity_partition_disables_legacy_cover_cell_limit(monkeypatch, tmp_path
                 "asset_path": asset.path,
                 "acq_time": asset.acq_time,
                 "grid_type": "isea4h",
-                "grid_level": 1,
+                "grid_level": 6,
                 "space_code": "811ffffffffffff",
                 "space_code_prefix": "811",
                 "time_bucket": "19700101",
@@ -1332,7 +1332,7 @@ def test_entity_partition_disables_legacy_cover_cell_limit(monkeypatch, tmp_path
                 "asset_path": asset.path,
                 "acq_time": asset.acq_time,
                 "grid_type": "isea4h",
-                "grid_level": 1,
+                "grid_level": 6,
                 "space_code": "812ffffffffffff",
                 "space_code_prefix": "812",
                 "time_bucket": "19700101",
@@ -1387,7 +1387,7 @@ def test_entity_partition_disables_legacy_cover_cell_limit(monkeypatch, tmp_path
             cog_level=0,
             cog_num_threads="ALL_CPUS",
             target_crs="EPSG:4326",
-            grid_level=1,
+            grid_level=6,
             target_pixels_per_hex_edge=768,
             cover_mode="intersect",
             time_granularity="day",
@@ -1557,10 +1557,10 @@ def test_entity_partition_dispatches_ray_backend(monkeypatch, tmp_path: Path):
                     "output_path": tile_uri,
                     "acq_time": "1970-01-01T00:00:00Z",
                     "grid_type": "isea4h",
-                    "grid_level": 4,
+                    "grid_level": 6,
                     "space_code": "842a107ffffffff",
                     "space_code_prefix": "842",
-                    "st_code": "hx:4:842a107ffffffff:19700101",
+                    "st_code": "hx:6:842a107ffffffff:19700101",
                     "time_bucket": "19700101",
                     "cover_mode": "intersect",
                     "cell_min_lon": 0.0,
@@ -1674,7 +1674,7 @@ def test_entity_ray_prepare_sources_only_actor_assigned_assets(monkeypatch, tmp_
             "asset_path": source_path,
             "acq_time": "2026-04-21T00:00:00Z",
             "grid_type": "isea4h",
-            "grid_level": 1,
+            "grid_level": 6,
             "space_code": space_code,
             "cover_mode": "intersect",
             "cell_min_lon": 0.0,
@@ -1761,7 +1761,7 @@ def test_entity_ray_process_groups_falls_back_to_shared_source_prepare_helper(mo
                         "asset_path": "s3://cube/source/a.tif",
                         "acq_time": "2026-04-21T00:00:00Z",
                         "grid_type": "isea4h",
-                        "grid_level": 1,
+                        "grid_level": 6,
                         "space_code": "811ffffffffffff",
                         "cover_mode": "intersect",
                         "cell_min_lon": 0.0,
@@ -1818,7 +1818,7 @@ def test_entity_ray_initial_cancellation_cleans_up_actors(monkeypatch, tmp_path:
         "asset_path": "/source/scene.tif",
         "acq_time": "2026-04-21T00:00:00Z",
         "grid_type": "isea4h",
-        "grid_level": 1,
+        "grid_level": 6,
         "space_code": "811ffffffffffff",
         "cover_mode": "intersect",
         "cell_min_lon": 0.0,

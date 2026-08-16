@@ -44,7 +44,7 @@ def _entity_args(tmp_path: Path, **overrides) -> SimpleNamespace:
         "cog_num_threads": "ALL_CPUS",
         "target_crs": "EPSG:4326",
         "grid_type": "isea4h",
-        "grid_level": 2,
+        "grid_level": 6,
         "entity_clip_mode": "exact",
         "target_pixels_per_hex_edge": 768,
         "cover_mode": "intersect",

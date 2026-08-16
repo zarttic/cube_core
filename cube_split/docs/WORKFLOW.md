@@ -6,7 +6,7 @@
 
 `cube_split` 负责已交付遥感数据的剖分执行、OpenGauss/MinIO 入库、质量检查和 AOI 回读。格网 locate、cover、topology 和 ST code 能力都来自 `grid_core.sdk.CubeEncoderSDK`；调用方不得复制格网逻辑。
 
-Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `0..15`.
+Current production grid contract: `geohash` and `mgrs` use logical partitioning; `isea4h` uses entity partitioning. Native levels are Geohash `1..12`, MGRS `0..5`, and ISEA4H `1..6`.
 
 ## 2. 输入与执行边界
 
@@ -20,7 +20,7 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 
 ## 3. ISEA4H 约束
 
-ISEA4H 是 entity 格网。其 `space_code` 使用未补零十进制 DGGRID SEQNUM，`cell_count(r) = 10 * 4**r + 2`，分辨率为 `0..15`。ISEA4H 运行时和测试运行时不依赖 H3 或 DGGRID。
+ISEA4H 是 entity 格网。其 `space_code` 使用未补零十进制 DGGRID SEQNUM，`cell_count(r) = 10 * 4**r + 2`，生产分辨率为 `1..6`。ISEA4H 运行时和测试运行时不依赖 H3 或 DGGRID。
 
 ## 4. Ray 实体执行
 

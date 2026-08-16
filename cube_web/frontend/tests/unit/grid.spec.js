@@ -11,13 +11,17 @@ describe('grid contract', () => {
     expect(derivedPartitionMethod('isea4h')).toBe('entity');
     expect(nativeLevelLabel('mgrs', 3)).toBe('层级 3');
     expect(nativeLevelLabel('geohash', 6)).toBe('层级 6');
-    expect(nativeLevelLabel('isea4h', 7)).toBe('层级 7');
+    expect(nativeLevelLabel('isea4h', 6)).toBe('层级 6');
   });
 
   it('recommends a frozen level from the dataset resolution for each grid', () => {
     expect(recommendedGridLevel(10, 'geohash')).toBe(5);
     expect(recommendedGridLevel(10, 'mgrs')).toBe(0);
-    expect(recommendedGridLevel(10, 'isea4h')).toBe(11);
+    expect(recommendedGridLevel(10, 'isea4h')).toBe(6);
+    expect(recommendedGridLevel(30, 'isea4h')).toBe(5);
+    expect(recommendedGridLevel(100, 'isea4h')).toBe(4);
+    expect(recommendedGridLevel(1000, 'isea4h')).toBe(3);
+    expect(recommendedGridLevel(1000.001, 'isea4h')).toBe(2);
     expect(recommendedGridLevel(undefined, 'geohash')).toBe(5);
   });
 });

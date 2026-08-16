@@ -70,11 +70,15 @@ def default_grid_level_for_resolution(
         return fallback if fallback is not None else default_grid_level_for_partition(grid_type, method)
     normalized_grid_type = str(grid_type or "").lower()
     if normalized_grid_type == "isea4h":
-        if parsed < 10:
-            return 12
+        if parsed <= 10:
+            return 6
         if parsed <= 30:
-            return 11
-        return 8
+            return 5
+        if parsed <= 100:
+            return 4
+        if parsed <= 1000:
+            return 3
+        return 2
     if method == "entity":
         return fallback if fallback is not None else DEFAULT_ENTITY_GRID_LEVEL
     if normalized_grid_type == "mgrs":

@@ -9,6 +9,7 @@ from typing import Any
 from cube_split import runtime_config
 from grid_core.app.core.enums import GridType
 from grid_core.app.models.request import validate_requested_grid_level
+from cube_web.services.partition_defaults import DEFAULT_ISEA4H_GRID_LEVEL
 
 CONFIG_SCOPE = "cube_web"
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -292,7 +293,16 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def normalized_stored_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    return normalized_config(copy.deepcopy(config or {}))
+    stored = copy.deepcopy(config or {})
+    optical = ((stored.get("partition") or {}).get("optical") or {})
+    if str(optical.get("grid_type") or "").strip().lower() == "isea4h":
+        try:
+            validate_requested_grid_level(GridType.ISEA4H, int(optical.get("grid_level")))
+        except (TypeError, ValueError):
+            # Config records written under the former 6..15 contract must not
+            # make the service unreadable after the production range is narrowed.
+            stored.setdefault("partition", {}).setdefault("optical", {})["grid_level"] = DEFAULT_ISEA4H_GRID_LEVEL
+    return normalized_config(stored)
 
 
 def stored_config(config: dict[str, Any] | None) -> dict[str, Any]:

@@ -245,6 +245,21 @@ class ISEA4HEngine(BaseGridEngine):
             bounded index makes the default production levels exhaustive while
             retaining the local walk for very fine levels.
             """
+            min_lon, min_lat, max_lon, max_lat = search_target.bounds
+            if (
+                search_target.geom_type == "Polygon"
+                and max_lon - min_lon <= 8.0
+                and max_lat - min_lat <= 8.0
+                and min_lon > -170.0
+                and max_lon < 170.0
+                and min_lat > -80.0
+                and max_lat < 80.0
+            ):
+                # A local AOI is cheaper to traverse from its seed cells than
+                # to build the complete level index. Keep the index path for
+                # dateline/polar and broad geometries where neighbor walking
+                # is less reliable or would visit too many cells.
+                return None
             if cell_count(level) > _INDEXED_LEVEL_MAX_CELLS:
                 return None
             try:

@@ -100,7 +100,7 @@ class SpatiotemporalQueryRequest(CubeWebModel):
     quality_flags: list[str] | None = None
     product_type: str = "xco2"
     grid_type: GridType = "isea4h"
-    grid_level: int = Field(default=5, ge=0)
+    grid_level: int = Field(default=6, ge=0, le=12)
     cube_version: str = "v1"
     limit: int = Field(default=1000, ge=1, le=10000)
 

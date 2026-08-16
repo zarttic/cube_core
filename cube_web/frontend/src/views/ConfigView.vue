@@ -165,7 +165,7 @@ onMounted(loadConfig);
                   </el-select>
                 </el-form-item>
                 <el-form-item label="格网层级">
-                  <el-input-number v-model="optical.grid_level" :min="optical.grid_type === 'geohash' ? 1 : 0" :max="optical.grid_type === 'mgrs' ? 5 : 15" />
+                  <el-input-number v-model="optical.grid_level" :min="optical.grid_type === 'geohash' || optical.grid_type === 'isea4h' ? 1 : 0" :max="optical.grid_type === 'mgrs' ? 5 : optical.grid_type === 'isea4h' ? 6 : 12" />
                 </el-form-item>
                 <el-form-item label="目标 CRS">
                   <el-select v-model="optical.target_crs" filterable allow-create>

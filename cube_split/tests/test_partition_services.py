@@ -167,9 +167,9 @@ def test_carbon_observation_partition_outputs_observation_fact():
     assert row["xco2"] == 421.25
     assert row["time_bucket"] == "20260424"
     assert row["grid_type"] == "isea4h"
-    assert row["grid_level"] == 5
+    assert row["grid_level"] == 6
     assert row["space_code"]
-    assert row["st_code"].startswith("i4h:5:")
+    assert row["st_code"].startswith("i4h:6:")
     assert row["footprint_geojson"]["type"] == "Polygon"
     assert row["source_uri"] == "s3://bucket/oco2.nc4"
     assert row["source_index"] == 7
@@ -178,7 +178,7 @@ def test_carbon_observation_partition_outputs_observation_fact():
 
 @pytest.mark.parametrize(
     ("grid_type", "grid_level"),
-    [("geohash", 6), ("mgrs", 3), ("isea4h", 5)],
+    [("geohash", 6), ("mgrs", 3), ("isea4h", 6)],
 )
 @pytest.mark.parametrize("time_granularity", ["month", "day", "hour", "minute", "second"])
 def test_carbon_partition_chunk_preserves_full_lookup_address_and_st_code(
@@ -262,7 +262,7 @@ def test_carbon_service_partitions_jsonl_to_jsonl_output(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=6),
         workers=1,
     )
 
@@ -336,7 +336,7 @@ def test_carbon_service_filters_selected_source_indexes(tmp_path: Path):
         output_dir=output_dir,
         config=CarbonPartitionConfig(
             grid_type="isea4h",
-            grid_level=7,
+            grid_level=6,
             selected_source_indexes=(1, 3),
         ),
         workers=1,
@@ -381,7 +381,7 @@ def test_carbon_service_can_use_explicit_product_type_for_standard_rows(tmp_path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="isea4h", grid_level=7),
+        config=CarbonPartitionConfig(product_type="oco2_lite", grid_type="isea4h", grid_level=6),
         workers=1,
     )
 
@@ -412,7 +412,7 @@ def test_carbon_service_partitions_tansat_with_its_own_product_type(tmp_path: Pa
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(product_type="tansat_xco2", grid_type="isea4h", grid_level=7),
+        config=CarbonPartitionConfig(product_type="tansat_xco2", grid_type="isea4h", grid_level=6),
         workers=1,
     )
 
@@ -512,7 +512,7 @@ def test_carbon_service_parallelizes_single_file_by_observation_chunks(monkeypat
         output_dir=output_dir,
         config=CarbonPartitionConfig(
             grid_type="isea4h",
-            grid_level=7,
+            grid_level=6,
             partition_chunk_size=1,
             partition_backend="thread",
         ),
@@ -547,7 +547,7 @@ def test_carbon_service_applies_max_observations_across_whole_run(tmp_path: Path
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, max_observations=4),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=6, max_observations=4),
         workers=1,
     )
 
@@ -598,7 +598,7 @@ def test_carbon_service_parallelizes_multiple_input_files(monkeypatch, tmp_path:
         output_dir=output_dir,
         config=CarbonPartitionConfig(
             grid_type="isea4h",
-            grid_level=7,
+            grid_level=6,
             partition_chunk_size=1,
             partition_backend="thread",
         ),
@@ -649,7 +649,7 @@ def test_carbon_service_parallelizes_observation_loading_across_files(monkeypatc
     result = CarbonSatellitePartitionService().run(
         input_dir=input_dir,
         output_dir=output_dir,
-        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, partition_chunk_size=1),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=6, partition_chunk_size=1),
         workers=4,
     )
 
@@ -703,7 +703,7 @@ def test_carbon_partition_chunk_uses_frozen_sdk_address_calls(monkeypatch):
 
     rows = _partition_observation_chunk(
         observations,
-        CarbonPartitionConfig(grid_type="isea4h", grid_level=7),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=6),
     )
 
     assert [row["space_code"] for row in rows] == ["cell-1", "cell-2"]
@@ -753,7 +753,7 @@ def test_carbon_partition_uses_process_backend_by_default(monkeypatch):
         ],
     ]
 
-    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="isea4h", grid_level=7), worker_count=2)
+    rows = _partition_chunks(chunks, CarbonPartitionConfig(grid_type="isea4h", grid_level=6), worker_count=2)
 
     assert len(rows) == 2
     assert executor_calls == [2]
@@ -843,7 +843,7 @@ def test_carbon_partition_can_use_ray_backend(monkeypatch):
 
     rows = _partition_chunks(
         chunks,
-        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=6, partition_backend="ray"),
         worker_count=2,
     )
 
@@ -881,7 +881,7 @@ def test_carbon_partition_source_slice_uses_resolved_path_but_keeps_source_uri(m
 
     rows = _partition_source_slice_chunk(
         CarbonObservationSourceSlice("s3://cube/cube/source/carbon/oco2.nc4", 2, 3),
-        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=6, partition_backend="ray"),
         resolved_source_path="/tmp/worker-cache/oco2.nc4",
     )
 
@@ -1084,7 +1084,7 @@ def test_carbon_partition_ray_retries_on_head_when_runtime_env_disk_is_full(monk
 
     rows = _partition_chunks(
         chunks,
-        CarbonPartitionConfig(grid_type="isea4h", grid_level=5, partition_backend="ray"),
+        CarbonPartitionConfig(grid_type="isea4h", grid_level=6, partition_backend="ray"),
         worker_count=1,
         on_chunk=lambda _chunk_index, part: streamed.extend(part),
     )
@@ -1153,7 +1153,7 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
                 "grid_type": config.grid_type,
                 "grid_level": config.grid_level,
                 "space_code": "cell-a",
-                "st_code": "i4h:5:cell-a:20260424",
+                "st_code": "i4h:6:cell-a:20260424",
                 "source_uri": "s3://cube/cube/source/carbon/oco2.nc4",
             }
         ]
@@ -1168,7 +1168,7 @@ def test_carbon_service_can_use_ray_source_uri_without_local_input_files(monkeyp
         output_dir=output_dir,
         config=CarbonPartitionConfig(
             grid_type="isea4h",
-            grid_level=5,
+            grid_level=6,
             partition_backend="ray",
             source_uris=("s3://cube/cube/source/carbon/oco2.nc4",),
         ),
@@ -1217,7 +1217,7 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
                 "grid_type": config.grid_type,
                 "grid_level": config.grid_level,
                 "space_code": "cell-a",
-                "st_code": "i4h:5:cell-a:20260424",
+                "st_code": "i4h:6:cell-a:20260424",
                 "source_uri": chunks[0][0].source_uri,
             }
         ]
@@ -1232,7 +1232,7 @@ def test_carbon_service_loads_source_uri_when_ray_slice_fast_path_is_unavailable
         output_dir=output_dir,
         config=CarbonPartitionConfig(
             grid_type="isea4h",
-            grid_level=5,
+            grid_level=6,
             partition_backend="thread",
             source_uris=("s3://cube/cube/source/carbon/oco2.nc4",),
         ),
@@ -1467,7 +1467,7 @@ def test_carbon_service_reads_uploaded_oco2_lite_nc4_sample(tmp_path: Path):
     result = CarbonSatellitePartitionService().run(
         input_dir=sample_path.parent,
         output_dir=tmp_path / "out",
-        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=7, max_observations=3),
+        config=CarbonPartitionConfig(grid_type="isea4h", grid_level=6, max_observations=3),
         workers=1,
     )
 

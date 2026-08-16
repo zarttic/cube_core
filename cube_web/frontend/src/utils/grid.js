@@ -1,7 +1,7 @@
 export const gridDefinitions = Object.freeze([
   { value: 'geohash', label: '经纬度格网', minLevel: 1, maxLevel: 12 },
   { value: 'mgrs', label: '平面格网', minLevel: 0, maxLevel: 5 },
-  { value: 'isea4h', label: '六边形格网', minLevel: 0, maxLevel: 15 },
+  { value: 'isea4h', label: '六边形格网', minLevel: 1, maxLevel: 6 },
 ]);
 
 export const fixedPartitionOptions = Object.freeze({
@@ -35,7 +35,13 @@ export function recommendedGridLevel(resolutionM, gridType) {
   if (!Number.isFinite(resolution) || resolution <= 0) {
     return gridType === 'isea4h' ? 6 : gridType === 'mgrs' ? 1 : 5;
   }
-  if (gridType === 'isea4h') return resolution < 10 ? 12 : resolution <= 30 ? 11 : 8;
+  if (gridType === 'isea4h') {
+    if (resolution <= 10) return 6;
+    if (resolution <= 30) return 5;
+    if (resolution <= 100) return 4;
+    if (resolution <= 1000) return 3;
+    return 2;
+  }
   if (gridType === 'mgrs') return resolution < 10 ? 1 : 0;
   if (resolution >= 1000) return 2;
   if (resolution >= 500) return 3;

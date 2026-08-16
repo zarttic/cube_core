@@ -41,7 +41,7 @@ def test_grid_cell_carries_result_level_and_dual_mgrs_identity() -> None:
     [
         (GridType.GEOHASH, (1, 12)),
         (GridType.MGRS, (0, 5)),
-        (GridType.ISEA4H, (0, 15)),
+        (GridType.ISEA4H, (1, 6)),
     ],
 )
 def test_validate_requested_grid_level_exports_exact_production_ranges(
