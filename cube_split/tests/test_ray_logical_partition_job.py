@@ -277,6 +277,7 @@ def test_ray_runtime_env_passes_source_cache_dir(monkeypatch):
     assert runtime_env is not None
     assert runtime_env["env_vars"]["CUBE_SOURCE_CACHE_DIR"] == "/data/cube_split_source_cache"
     assert ".codegraph/**" in runtime_env["excludes"]
+    assert ".run/**" in runtime_env["excludes"]
     assert ".tmp/**" in runtime_env["excludes"]
     assert ".run/**" in runtime_env["excludes"]
     assert "cube_web/frontend/test-results/**" in runtime_env["excludes"]

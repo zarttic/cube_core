@@ -197,6 +197,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             ".cache/**",
             ".codegraph/**",
             ".codex/**",
+            ".run/**",
             ".mypy_cache/**",
             ".ruff_cache/**",
             ".tmp/**",
