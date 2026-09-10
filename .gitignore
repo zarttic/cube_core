@@ -26,3 +26,7 @@ cube_split/CarbonCube.gz
 cube_split/data/
 .worktrees/
 .dggrid_src/
+
+# Local build output and run artifacts.
+build/
+.run/

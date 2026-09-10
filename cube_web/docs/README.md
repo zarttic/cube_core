@@ -18,6 +18,8 @@
 - [PARTITION_GRID_CONTRACT.md](PARTITION_GRID_CONTRACT.md)：当前三类格网和剖分方式契约。
 - [SCENE_DOMAIN_OPERATIONS.md](SCENE_DOMAIN_OPERATIONS.md)：正式 Dataset/Scene/LoadBatch
   关系、Schema 安装和 API 交接说明。
+- [LOAD_BATCH_PARTITION_STATUS.md](LOAD_BATCH_PARTITION_STATUS.md)：按 `load_batch_id`
+  获取数据单元、格网配置和对应剖分状态的方法，以及与 `partition_run_id` 的关联规则。
 - [KUBERAY_OPERATIONS.md](KUBERAY_OPERATIONS.md)：Ray Jobs 与长期 KubeRay
   RayCluster 的运行约束、扩缩容和验收要求。
 - [QUALITY_RULE_CATALOG.md](QUALITY_RULE_CATALOG.md)：当前质检规则集的必选/可选属性和产品适用范围。
@@ -91,6 +93,9 @@ npm run build
 - `POST /v1/code/parse`
 
 这些接口直接调用进程内 `CubeEncoderSDK`，不需要独立启动 `cube_encoder` HTTP 服务。
+网页地图预览请求 MGRS 覆盖时可附带 `preview_mode=continuous` 和源数据的 `preview_crs`；
+服务仍在 `cells` 中返回真实 MGRS 单元，并在 `preview_cells` 中单独返回仅用于显示的连续方格，
+不会改变剖分编码、源影像 CRS 或入库几何。
 
 ### 4.2 剖分接口
 
