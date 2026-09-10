@@ -47,6 +47,15 @@ _SOURCE_CHECKSUM_CACHE: dict[tuple[str, int, int], tuple[str, int]] = {}
 _SOURCE_CHECKSUM_CACHE_LOCK = Lock()
 
 
+def _requested_worker_container_limit(payload: dict[str, Any]) -> int | None:
+    """Return an explicit per-task Worker limit; zero keeps legacy defaults."""
+    try:
+        value = int(payload.get("worker_container_limit") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else None
+
+
 def _sha256_file(path: Path) -> tuple[str, int]:
     digest = sha256()
     size = 0
@@ -425,20 +434,33 @@ def _run_logical_dataset_on_ray(
         for start in range(0, len(asset_shards), shards_per_task):
             shards = asset_shards[start:start + shards_per_task]
             task_values.append({**payload, "asset": asset, "shards": shards, "shard_id": f"{asset['source_asset_id']}:{start // shards_per_task}"})
-    from cube_split.jobs.ray_logical_partition_job import _ray_actor_options_from_env
-
-    options = {"num_cpus": 1, **_ray_actor_options_from_env()}
-    pending = [plan_chunk.options(**options).remote(value) for value in task_values]
     chunks: list[dict[str, Any]] = []
-    while pending:
-        if cancellation_check is not None and cancellation_check():
-            for ref in pending:
-                ray.cancel(ref, force=True)
-            from cube_split.jobs.cancellation import PartitionCancelledError
-            raise PartitionCancelledError("Partition task cancelled")
-        ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
-        if ready:
+    max_in_flight = _requested_worker_container_limit(payload) or max(1, len(task_values))
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
+
+    pending: list[Any] = []
+
+    def collect_one() -> None:
+        nonlocal pending
+        while True:
+            if cancellation_check is not None and cancellation_check():
+                for ref in pending:
+                    ray.cancel(ref, force=True)
+                from cube_split.jobs.cancellation import PartitionCancelledError
+                raise PartitionCancelledError("Partition task cancelled")
+            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not ready:
+                continue
             chunks.append(ray.get(ready[0]))
+            return
+
+    for value in task_values:
+        while len(pending) >= max_in_flight:
+            collect_one()
+        options = _ray_partition_task_options(value.get("worker_container_limit"))
+        pending.append(plan_chunk.options(**options).remote(value))
+    while pending:
+        collect_one()
     return {
         "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"], "output_version": payload["output_version"],
         "grid_type": payload["grid_type"], "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical",
@@ -631,10 +653,12 @@ def _run_carbon_dataset_on_ray(
             )
     else:
         driver_timing.add_counter("ray_init_reused")
-    from cube_split.jobs.ray_logical_partition_job import _ray_actor_options_from_env
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
 
     with driver_timing.phase("ray.task_submit"):
-        reference = execute.options(**_ray_actor_options_from_env()).remote(payload)
+        reference = execute.options(**_ray_partition_task_options(
+            payload.get("worker_container_limit"), include_num_cpus=False,
+        )).remote(payload)
     with driver_timing.phase("ray.wait_get"):
         result = _wait_for_ray_result(ray, reference, cancellation_check)
     with driver_timing.phase("driver.result_merge"):
@@ -955,14 +979,19 @@ def _run_dataset_on_ray(
                 )
         else:
             driver_timing.add_counter("ray_init_reused")
-    from cube_split.jobs.ray_logical_partition_job import _ray_actor_options_from_env
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
 
     assets = list((payload.get("dataset") or {}).get("assets") or [])
+    worker_container_limit = _requested_worker_container_limit(payload)
     ray_parallelism = _entity_ray_parallelism()
+    if worker_container_limit is not None:
+        ray_parallelism = min(ray_parallelism, worker_container_limit)
     driver_timing.set_attribute("ray_parallelism", ray_parallelism)
     if not assets:
         with driver_timing.phase("ray.task_submit"):
-            reference = execute.options(**_ray_actor_options_from_env()).remote(payload)
+            reference = execute.options(**_ray_partition_task_options(
+                payload.get("worker_container_limit"), include_num_cpus=False,
+            )).remote(payload)
         with driver_timing.phase("ray.wait_get"):
             result = _wait_for_ray_result(ray, reference, cancellation_check)
         with driver_timing.phase("driver.result_merge"):
@@ -972,8 +1001,41 @@ def _run_dataset_on_ray(
             "workers": [existing_timings["worker"]] if isinstance(existing_timings.get("worker"), dict) else [],
         }
         return result
-    options = {"num_cpus": 1, **_ray_actor_options_from_env()}
-    pending = []
+    options = _ray_partition_task_options(payload.get("worker_container_limit"))
+    pending: list[Any] = []
+    merged: dict[str, dict[str, Any]] = {"tiles": {}, "indexes": {}, "grid_cells": {}}
+    worker_timings: list[dict[str, Any]] = []
+
+    def consume_one() -> None:
+        nonlocal pending
+        if cancellation_check is not None and cancellation_check():
+            for ref in pending:
+                ray.cancel(ref, force=True)
+            from cube_split.jobs.cancellation import PartitionCancelledError
+
+            raise PartitionCancelledError("Partition task cancelled")
+        while True:
+            with driver_timing.phase("ray.wait"):
+                ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if ready:
+                break
+            if cancellation_check is not None and cancellation_check():
+                for ref in pending:
+                    ray.cancel(ref, force=True)
+                from cube_split.jobs.cancellation import PartitionCancelledError
+
+                raise PartitionCancelledError("Partition task cancelled")
+        for ref in ready:
+            with driver_timing.phase("ray.result_get"):
+                result = ray.get(ref)
+            result_timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+            if isinstance(result_timings.get("worker"), dict):
+                worker_timings.append(result_timings["worker"])
+            with driver_timing.phase("driver.result_merge"):
+                for kind in merged:
+                    for row in result.get(kind, []):
+                        merged[kind].setdefault(str(row["output_id"]), row)
+
     for asset in assets:
         asset_bbox = asset.get("bbox")
         if not isinstance(asset_bbox, (list, tuple)) or len(asset_bbox) != 4:
@@ -999,31 +1061,15 @@ def _run_dataset_on_ray(
             task_payload = {**payload, "dataset": task_dataset}
             if shard_cells is not None:
                 task_payload["entity_cover_cells"] = shard_cells
+            while worker_container_limit is not None and len(pending) >= worker_container_limit:
+                consume_one()
             with driver_timing.phase("ray.task_submit"):
                 pending.append(execute.options(**options).remote(task_payload))
             driver_timing.add_counter("entity_cell_task_count", len(shard_cells))
             driver_timing.add_counter("ray_task_submit_count")
 
-    merged: dict[str, dict[str, Any]] = {"tiles": {}, "indexes": {}, "grid_cells": {}}
-    worker_timings: list[dict[str, Any]] = []
     while pending:
-        if cancellation_check is not None and cancellation_check():
-            for ref in pending:
-                ray.cancel(ref, force=True)
-            from cube_split.jobs.cancellation import PartitionCancelledError
-            raise PartitionCancelledError("Partition task cancelled")
-        with driver_timing.phase("ray.wait"):
-            ready, pending = ray.wait(pending, num_returns=1, timeout=1.0)
-        for ref in ready:
-            with driver_timing.phase("ray.result_get"):
-                result = ray.get(ref)
-            result_timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
-            if isinstance(result_timings.get("worker"), dict):
-                worker_timings.append(result_timings["worker"])
-            with driver_timing.phase("driver.result_merge"):
-                for kind in merged:
-                    for row in result.get(kind, []):
-                        merged[kind].setdefault(str(row["output_id"]), row)
+        consume_one()
     return {
         "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"],
         "output_version": payload["output_version"], "grid_type": payload["grid_type"],
@@ -1175,7 +1221,10 @@ def _run_entity_dataset_batch_on_ray(
     batch_timing.set_attribute("entity_bands_per_task", _entity_bands_per_task())
     batch_timing.set_attribute("entity_upload_workers", _entity_upload_workers())
     batch_timing.set_attribute("entity_minio_parallel_uploads", _entity_minio_parallel_uploads())
+    worker_container_limit = _requested_worker_container_limit(payloads[0])
     ray_parallelism = _entity_ray_parallelism()
+    if worker_container_limit is not None:
+        ray_parallelism = min(ray_parallelism, worker_container_limit)
     batch_timing.set_attribute("ray_parallelism", ray_parallelism)
     unit_timings = [TimingRecorder("raster_driver") for _ in payloads]
     for index, (timing, payload) in enumerate(zip(unit_timings, payloads, strict=True)):
@@ -1199,9 +1248,9 @@ def _run_entity_dataset_batch_on_ray(
             batch_timing.add_counter("ray_init_reused")
 
     execute = _run_dataset_on_ray({}, runtime_env, _executor_only=True)
-    from cube_split.jobs.ray_logical_partition_job import _ray_actor_options_from_env
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
 
-    options = {"num_cpus": 1, **_ray_actor_options_from_env()}
+    options = _ray_partition_task_options(payloads[0].get("worker_container_limit"))
     pending: list[Any] = []
     ref_to_group: dict[int, int] = {}
     unit_to_group: dict[int, int] = {
@@ -1215,6 +1264,46 @@ def _run_entity_dataset_batch_on_ray(
     ]
     group_errors: list[str | None] = [None] * len(groups)
     group_worker_timings: list[list[dict[str, Any]]] = [[] for _ in groups]
+
+    max_in_flight = worker_container_limit
+
+    def consume_ready(wait_parallelism: int) -> None:
+        nonlocal pending
+        if cancellation_check is not None and cancellation_check():
+            for reference in pending:
+                ray.cancel(reference, force=True)
+            from cube_split.jobs.cancellation import PartitionCancelledError
+            raise PartitionCancelledError("Partition task cancelled")
+        with batch_timing.phase("ray.wait"):
+            ready, pending = _wait_for_ray_batch(ray, pending, wait_parallelism)
+        batch_timing.add_counter("ray_wait_batch_count")
+        batch_timing.add_counter("ray_ready_ref_count", len(ready))
+        ready_results: list[tuple[Any, dict[str, Any] | None, Exception | None]] = []
+        if ready:
+            with batch_timing.phase("ray.result_get"):
+                try:
+                    ready_results = [
+                        (reference, result, None)
+                        for reference, result in zip(ready, ray.get(ready), strict=True)
+                    ]
+                except Exception:
+                    for reference in ready:
+                        try:
+                            ready_results.append((reference, ray.get(reference), None))
+                        except Exception as exc:
+                            ready_results.append((reference, None, exc))
+        for reference, result, result_error in ready_results:
+            group_index = ref_to_group.pop(id(reference))
+            if result_error is not None:
+                group_errors[group_index] = str(result_error)
+                continue
+            result_timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+            if isinstance(result_timings.get("worker"), dict):
+                group_worker_timings[group_index].append(result_timings["worker"])
+            with batch_timing.phase("driver.result_merge"):
+                for kind in group_merged[group_index]:
+                    for row in result.get(kind, []):
+                        group_merged[group_index][kind].setdefault(str(row["output_id"]), row)
 
     for group_index, group in enumerate(groups):
         payload = group["payload"]
@@ -1244,6 +1333,8 @@ def _run_entity_dataset_batch_on_ray(
                 task_payload["entity_cover_cells"] = shard_cells
                 task_payload["entity_upload_workers"] = _entity_upload_workers()
                 task_payload["entity_minio_parallel_uploads"] = _entity_minio_parallel_uploads()
+                while max_in_flight is not None and len(pending) >= max_in_flight:
+                    consume_ready(1)
                 with batch_timing.phase("ray.task_submit"):
                     reference = execute.options(**options).remote(task_payload)
                 pending.append(reference)
@@ -1253,41 +1344,7 @@ def _run_entity_dataset_batch_on_ray(
                 batch_timing.add_counter("ray_task_submit_count")
 
     while pending:
-        if cancellation_check is not None and cancellation_check():
-            for reference in pending:
-                ray.cancel(reference, force=True)
-            from cube_split.jobs.cancellation import PartitionCancelledError
-            raise PartitionCancelledError("Partition task cancelled")
-        with batch_timing.phase("ray.wait"):
-            ready, pending = _wait_for_ray_batch(ray, pending, ray_parallelism)
-        batch_timing.add_counter("ray_wait_batch_count")
-        batch_timing.add_counter("ray_ready_ref_count", len(ready))
-        ready_results: list[tuple[Any, dict[str, Any] | None, Exception | None]] = []
-        if ready:
-            with batch_timing.phase("ray.result_get"):
-                try:
-                    ready_results = [
-                        (reference, result, None)
-                        for reference, result in zip(ready, ray.get(ready), strict=True)
-                    ]
-                except Exception:
-                    for reference in ready:
-                        try:
-                            ready_results.append((reference, ray.get(reference), None))
-                        except Exception as exc:
-                            ready_results.append((reference, None, exc))
-        for reference, result, result_error in ready_results:
-            group_index = ref_to_group.pop(id(reference))
-            if result_error is not None:
-                group_errors[group_index] = str(result_error)
-                continue
-            result_timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
-            if isinstance(result_timings.get("worker"), dict):
-                group_worker_timings[group_index].append(result_timings["worker"])
-            with batch_timing.phase("driver.result_merge"):
-                for kind in group_merged[group_index]:
-                    for row in result.get(kind, []):
-                        group_merged[group_index][kind].setdefault(str(row["output_id"]), row)
+        consume_ready(min(ray_parallelism, len(pending)))
 
     batch_record = batch_timing.finish()
     outcomes: list[dict[str, Any]] = []
@@ -1388,6 +1445,9 @@ class NormalizedPartitionDatasetRunner:
             "CUBE_WEB_MINIO_SECRET_KEY": minio.secret_key,
             "CUBE_WEB_MINIO_BUCKET": minio.bucket,
         })
+        worker_resource = runtime_config.env_text("CUBE_WEB_RAY_WORKER_RESOURCE")
+        if worker_resource:
+            env_vars["CUBE_WEB_RAY_WORKER_RESOURCE"] = worker_resource
         ray_runtime_env["env_vars"] = env_vars
         return ray_address, ray_runtime_env
 
@@ -1395,13 +1455,15 @@ class NormalizedPartitionDatasetRunner:
     def _payload(
         *, dataset: Any, task_id: str, output_version: str, grid_type: str,
         requested_grid_level: int, cover_mode: str, max_cells_per_asset: int,
-        time_granularity: str, max_observations: int | None, ray_address: str,
+        time_granularity: str, max_observations: int | None, worker_container_limit: int = 0,
+        ray_address: str,
     ) -> dict[str, Any]:
         return {
             "dataset": dataset.model_dump(mode="json"), "task_id": task_id, "output_version": output_version,
             "grid_type": grid_type, "requested_grid_level": requested_grid_level, "cover_mode": cover_mode,
             "time_granularity": time_granularity, "max_cells_per_asset": max_cells_per_asset,
-            "max_observations": max_observations, "ray_address": ray_address,
+            "max_observations": max_observations, "worker_container_limit": worker_container_limit,
+            "ray_address": ray_address,
         }
 
     @staticmethod
@@ -1427,6 +1489,7 @@ class NormalizedPartitionDatasetRunner:
         payload_fields = {
             "dataset", "task_id", "output_version", "grid_type", "requested_grid_level",
             "cover_mode", "max_cells_per_asset", "time_granularity", "max_observations",
+            "worker_container_limit",
         }
         payloads = [
             self._payload(ray_address=ray_address, **{key: value for key, value in run.items() if key in payload_fields})
@@ -1500,6 +1563,7 @@ class NormalizedPartitionDatasetRunner:
         max_cells_per_asset: int = 0,
         time_granularity: str = "day",
         max_observations: int | None = None,
+        worker_container_limit: int = 0,
         cancellation_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         ray_address, runtime_env = self._ray_execution_context()
@@ -1513,6 +1577,7 @@ class NormalizedPartitionDatasetRunner:
             max_cells_per_asset=max_cells_per_asset,
             time_granularity=time_granularity,
             max_observations=max_observations,
+            worker_container_limit=worker_container_limit,
             ray_address=ray_address,
         )
         preflight_timing = TimingRecorder("source_preflight")

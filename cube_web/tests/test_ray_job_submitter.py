@@ -67,6 +67,7 @@ def test_submit_propagates_ray_batch_runtime_options(monkeypatch) -> None:
         "CUBE_ENTITY_BANDS_PER_TASK": "1",
         "CUBE_ENTITY_UPLOAD_WORKERS": "4",
         "CUBE_ENTITY_MINIO_PARALLEL_UPLOADS": "1",
+        "CUBE_WEB_RAY_WORKER_RESOURCE": "cube_partition_worker",
     }.get(name, default))
     monkeypatch.setattr(module.runtime_config, "require_postgres_dsn", lambda: "dsn")
     monkeypatch.setattr(module.runtime_config, "require_ray_address", lambda: "ray-address")
@@ -85,3 +86,4 @@ def test_submit_propagates_ray_batch_runtime_options(monkeypatch) -> None:
     assert env_vars["CUBE_ENTITY_BANDS_PER_TASK"] == "1"
     assert env_vars["CUBE_ENTITY_UPLOAD_WORKERS"] == "4"
     assert env_vars["CUBE_ENTITY_MINIO_PARALLEL_UPLOADS"] == "1"
+    assert env_vars["CUBE_WEB_RAY_WORKER_RESOURCE"] == "cube_partition_worker"

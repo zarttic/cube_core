@@ -4,7 +4,7 @@ from typing import Literal
 
 from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cube_web.services.partition_contracts import DatasetPartitionConfig
 
@@ -57,7 +57,18 @@ class ScenePartitionRunRequest(SceneStrictModel):
     partition_run_id: str = Field(min_length=1)
     source_batch_ids: tuple[str, ...] = Field(min_length=1)
     selection_source: Literal["load_batch", "dataset"] = "load_batch"
+    worker_container_limit: int = Field(
+        default=0,
+        description="本次剖分任务最多使用的 KubeRay Worker 数量，0 表示按系统默认值运行",
+    )
     datasets: tuple[SceneDatasetSelection, ...] = Field(min_length=1)
+
+    @field_validator("worker_container_limit")
+    @classmethod
+    def validate_worker_container_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("容器数量必须是大于等于 0 的整数，0 表示按系统默认值运行")
+        return value
 
     @model_validator(mode="after")
     def validate_identity(self) -> "ScenePartitionRunRequest":

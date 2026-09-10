@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from cube_split import runtime_config
-from cube_split.partition_timing import TimingRecorder
+from cube_split.partition_timing import TimingRecorder, partition_timing_from_workers
 
 from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import (
@@ -94,8 +95,36 @@ class PartitionWorkflowService:
             try:
                 listener(task_id, status, result)
             except Exception:
-                # Projection failures are reconciled independently from task execution.
-                continue
+                # Projection failures must not abort the worker, but they must be
+                # visible so reconciliation can be investigated rather than silently
+                # leaving the scene-domain projection stale.
+                logger.exception("Partition task projection failed for task %s status=%s", task_id, status)
+
+    @staticmethod
+    def _safe_fail_output(
+        domain_store: Any,
+        dataset_id: str,
+        output_version: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        try:
+            domain_store.fail_output(
+                dataset_id,
+                output_version,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        except Exception:
+            # The execution error is the primary failure. A cleanup error is
+            # logged separately and must not replace the actionable root cause.
+            logger.exception(
+                "Failed to close partition output %s/%s after %s",
+                dataset_id,
+                output_version,
+                error_code,
+            )
 
     @property
     def store(self) -> PartitionJobStore:
@@ -159,6 +188,7 @@ class PartitionWorkflowService:
                         max_cells_per_asset=effective_request.max_cells_per_asset,
                         time_granularity=effective_request.time_granularity,
                         max_observations=effective_partition.max_observations,
+                        worker_container_limit=effective_request.worker_container_limit,
                         cancellation_check=lambda: _is_cancelled(selected_job_store, task_id),
                     )
                 if self.after_ray is not None:
@@ -181,6 +211,8 @@ class PartitionWorkflowService:
                             promote_chunks(result)
                 with workflow_timing.phase("opengauss.complete_output"):
                     committed = selected_domain_store.complete_output(result)
+                if scene_outcomes is None or all(item["status"] == "completed" for item in scene_outcomes):
+                    result = _attach_partition_timing(result)
                 result = result.model_copy(update={
                     "timings": {**result.timings, "workflow": workflow_timing.finish()},
                 })
@@ -194,7 +226,8 @@ class PartitionWorkflowService:
                 results.append(completed_result)
             except PartitionCancelledError:
                 if started:
-                    selected_domain_store.fail_output(
+                    self._safe_fail_output(
+                        selected_domain_store,
                         dataset_id,
                         output_version,
                         error_code="partition_cancelled",
@@ -210,7 +243,8 @@ class PartitionWorkflowService:
             except Exception as exc:
                 message = _safe_dataset_error(exc)
                 if started:
-                    selected_domain_store.fail_output(
+                    self._safe_fail_output(
+                        selected_domain_store,
                         dataset_id,
                         output_version,
                         error_code="partition_execution_failed",
@@ -279,6 +313,7 @@ class PartitionWorkflowService:
                         "max_cells_per_asset": effective_request.max_cells_per_asset,
                         "time_granularity": effective_request.time_granularity,
                         "max_observations": effective_partition.max_observations,
+                        "worker_container_limit": effective_request.worker_container_limit,
                     })
                 prepared.append({
                     "dataset": dataset,
@@ -292,7 +327,8 @@ class PartitionWorkflowService:
             except Exception as exc:
                 message = _safe_dataset_error(exc)
                 if started:
-                    domain_store.fail_output(
+                    self._safe_fail_output(
+                        domain_store,
                         dataset_id,
                         output_version,
                         error_code="partition_execution_failed",
@@ -321,7 +357,8 @@ class PartitionWorkflowService:
         except Exception as exc:
             message = _safe_dataset_error(exc)
             for item in prepared:
-                domain_store.fail_output(
+                self._safe_fail_output(
+                    domain_store,
                     item["dataset_id"],
                     item["output_version"],
                     error_code="partition_execution_failed",
@@ -361,6 +398,8 @@ class PartitionWorkflowService:
                             promote_chunks(result)
                 with item["workflow_timing"].phase("opengauss.complete_output"):
                     committed = domain_store.complete_output(result)
+                if scene_outcomes is None or all(outcome["status"] == "completed" for outcome in scene_outcomes):
+                    result = _attach_partition_timing(result)
                 result = result.model_copy(update={
                     "timings": {**result.timings, "workflow": item["workflow_timing"].finish()},
                 })
@@ -373,7 +412,8 @@ class PartitionWorkflowService:
                         completed["status"] = "partial_failure"
                 results.append(completed)
             except PartitionCancelledError:
-                domain_store.fail_output(
+                self._safe_fail_output(
+                    domain_store,
                     item["dataset_id"],
                     item["output_version"],
                     error_code="partition_cancelled",
@@ -382,7 +422,8 @@ class PartitionWorkflowService:
                 results.append(_cancelled_batch_dataset(item))
             except Exception as exc:
                 message = _safe_dataset_error(exc)
-                domain_store.fail_output(
+                self._safe_fail_output(
+                    domain_store,
                     item["dataset_id"],
                     item["output_version"],
                     error_code="partition_execution_failed",
@@ -397,7 +438,8 @@ class PartitionWorkflowService:
     @staticmethod
     def _cancel_ray_batch(prepared: list[dict[str, Any]], results: list[dict[str, Any]], batch_id: str, domain_store: Any) -> dict[str, Any]:
         for item in prepared:
-            domain_store.fail_output(
+            PartitionWorkflowService._safe_fail_output(
+                domain_store,
                 item["dataset_id"],
                 item["output_version"],
                 error_code="partition_cancelled",
@@ -712,12 +754,23 @@ class PartitionWorkflowService:
         attempt = self.store.request_cancel(task_id)
         ray_job_id = str((attempt or {}).get("ray_job_id") or "")
         if ray_job_id and ray_job_executor_enabled():
+            stop_error: Exception | None = None
             try:
                 (self.ray_job_submitter or RayJobPartitionSubmitter()).stop(ray_job_id)
+            except Exception as exc:
+                stop_error = exc
+                logger.warning("Ray stop failed for cancelled task %s job %s", task_id, ray_job_id, exc_info=True)
             finally:
-                cancelled = self.store.mark_cancelled(task_id)
+                try:
+                    cancelled = self.store.mark_cancelled(task_id)
+                except Exception:
+                    cancelled = None
+                    logger.exception("Failed to persist cancellation for task %s", task_id)
                 self._notify_task_event(task_id, "cancelled", None)
-            return cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
+            response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
+            if stop_error is not None and isinstance(response, dict):
+                response = {**response, "warning": "Ray 终止请求未确认，任务已标记为取消并进入恢复流程"}
+            return response
         if attempt is not None and attempt.get("status") == "cancelled":
             self._notify_task_event(task_id, "cancelled", None)
         task: PartitionTask | None = None
@@ -735,6 +788,91 @@ class PartitionWorkflowService:
                 raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
             return task.to_dict()
         return self.store.get_attempt(task_id) or attempt
+
+    def force_cancel_task(self, task_id: str) -> dict[str, Any]:
+        """Terminate a partition attempt and publish cancellation immediately.
+
+        Ray jobs are stopped through the job API.  Local workers receive the
+        same cancellation marker and are prevented from committing a result;
+        their Python thread exits at its next cancellation checkpoint.
+        """
+        attempt = self.store.request_cancel(task_id)
+        ray_job_id = str((attempt or {}).get("ray_job_id") or "")
+        if ray_job_id and ray_job_executor_enabled():
+            stop_error: Exception | None = None
+            try:
+                (self.ray_job_submitter or RayJobPartitionSubmitter()).stop(ray_job_id)
+            except Exception as exc:
+                stop_error = exc
+                logger.warning("Ray force-stop failed for task %s job %s", task_id, ray_job_id, exc_info=True)
+            finally:
+                try:
+                    cancelled = self.store.mark_cancelled(task_id)
+                except Exception:
+                    cancelled = None
+                    logger.exception("Failed to persist forced cancellation for task %s", task_id)
+                self._fail_active_partition_outputs(task_id, attempt)
+                self._notify_task_event(task_id, "cancelled", None)
+            response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
+            if stop_error is not None and isinstance(response, dict):
+                response = {**response, "warning": "Ray 终止请求未确认，任务已标记为取消并进入恢复流程"}
+            return response
+
+        if attempt is None:
+            task = self.partition_service.force_cancel_task(task_id)
+            return task.to_dict()
+
+        # A queued managed attempt is already terminal after request_cancel;
+        # a running one is finalized here so the detail page can immediately
+        # offer the retry action instead of waiting for the worker callback.
+        try:
+            self.partition_service.force_cancel_task(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+        cancelled = self.store.mark_cancelled(task_id) or self.store.get_attempt(task_id) or attempt
+        self._fail_active_partition_outputs(task_id, attempt)
+        self._notify_task_event(task_id, "cancelled", None)
+        return cancelled
+
+    def _fail_active_partition_outputs(self, task_id: str, attempt: dict[str, Any] | None) -> None:
+        """Close staging outputs when a managed task is force-stopped.
+
+        A Ray job can disappear before its worker reaches the normal
+        ``PartitionCancelledError`` path.  Marking those output versions failed
+        makes the database immediately consistent with the cancelled task and
+        allows a subsequent retry or dataset deletion.
+        """
+        domain_store = self.domain_store
+        payload = (attempt or {}).get("payload")
+        if domain_store is None or not isinstance(payload, dict) or payload.get("strict_partition_request") is not True:
+            return
+        for dataset in payload.get("datasets") or ():
+            if not isinstance(dataset, dict) or not dataset.get("dataset_id"):
+                continue
+            dataset_id = str(dataset["dataset_id"])
+            selection_id = str(dataset.get("selection_id") or "")
+            execution_task_id = f"{task_id}:{selection_id}" if selection_id else task_id
+            output_version = make_output_version(dataset_id, execution_task_id)
+            try:
+                self._safe_fail_output(
+                    domain_store,
+                    dataset_id,
+                    output_version,
+                    error_code="partition_cancelled",
+                    error_message="Partition task cancelled",
+                )
+            except (KeyError, ValueError):
+                # No output may have been started yet, or the worker may have
+                # already closed it.  The cancellation itself remains valid.
+                continue
+            except Exception:
+                logger.warning(
+                    "failed to close cancelled partition output %s/%s",
+                    dataset_id,
+                    output_version,
+                    exc_info=True,
+                )
 
     def on_task_started(self, task_id: str) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -762,6 +900,7 @@ class PartitionWorkflowService:
         self._notify_task_event(task_id, projected_status, result)
 
     def on_task_failed(self, task_id: str, error: str) -> None:
+        error = _safe_dataset_error(error)
         attempt = self.store.get_attempt(task_id)
         if attempt is None:
             self._notify_task_event(task_id, "failed", {"error": error})
@@ -1353,6 +1492,21 @@ def _completed_dataset_result(result: PartitionDatasetResult, committed: Any) ->
     return completed
 
 
-def _safe_dataset_error(exc: Exception) -> str:
-    message = str(exc).strip() or exc.__class__.__name__
+def _attach_partition_timing(result: PartitionDatasetResult) -> PartitionDatasetResult:
+    """Persist the worker-ready marker until the later ingest completion."""
+    timing = partition_timing_from_workers(result.timings)
+    if timing is None:
+        return result
+    return result.model_copy(update={"timings": {**result.timings, "partition": timing}})
+
+
+def _safe_dataset_error(exc: Exception | str) -> str:
+    message = str(exc).strip() or (exc.__class__.__name__ if isinstance(exc, Exception) else "任务异常")
+    message = re.sub(
+        r"(?i)\b(?:password|passwd|secret|token|access[_-]?key)\s*[:=]\s*[^\s,;]+",
+        "[credential redacted]",
+        message,
+    )
+    message = re.sub(r"(?i)s3://[^\s\"'<>]+", "[object URI redacted]", message)
+    message = re.sub(r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|redis)://[^\s\"'<>]+", "[connection URI redacted]", message)
     return message[:1000]

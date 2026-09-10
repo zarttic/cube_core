@@ -1989,6 +1989,7 @@ def _task_row_from_attempt(
         asset_count = sum(1 for asset in assets.values() if asset.get("batch_id") == batch_id)
     raw_result = attempt.get("runner_result")
     result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+    payload = attempt.get("payload") if isinstance(attempt.get("payload"), dict) else {}
     return {
         "task_id": attempt.get("task_id"),
         "status": attempt.get("status"),
@@ -2014,6 +2015,7 @@ def _task_row_from_attempt(
         "finished_at": attempt.get("finished_at"),
         "error_type": attempt.get("error_type"),
         "error_message": attempt.get("error_message"),
+        "worker_container_limit": _worker_container_limit(payload),
         "result_summary": _task_result_summary(result),
     }
 
@@ -2021,6 +2023,7 @@ def _task_row_from_attempt(
 def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
     raw_result = row.get("runner_result")
     result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     asset_ids = [str(item) for item in row.get("asset_ids") or [] if item]
     return {
         "task_id": row.get("task_id"),
@@ -2047,6 +2050,7 @@ def _task_row_from_joined_attempt(row: dict[str, Any]) -> dict[str, Any]:
         "finished_at": row.get("finished_at"),
         "error_type": row.get("error_type"),
         "error_message": row.get("error_message"),
+        "worker_container_limit": _worker_container_limit(payload),
         "result_summary": _task_result_summary(result),
     }
 
@@ -2070,6 +2074,14 @@ def _task_result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "rows_path": result.get("rows_path") or result.get("output_path"),
         "execution_engine": result.get("execution_engine") or result.get("partition_backend"),
     }
+
+
+def _worker_container_limit(payload: dict[str, Any]) -> int:
+    try:
+        value = int(payload.get("worker_container_limit") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 
 def _task_search_text(row: dict[str, Any]) -> str:

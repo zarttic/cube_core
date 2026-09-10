@@ -261,11 +261,40 @@ def _ensure_ray_worker_project_paths() -> None:
             _prepend_sys_paths([package_parent])
 
 
+DEFAULT_PARTITION_WORKER_RESOURCE = "cube_partition_worker"
+
+
 def _ray_actor_options_from_env() -> dict[str, Any]:
     node_resource = runtime_config.env_text("RAY_ACTOR_NODE_RESOURCE")
     if not node_resource:
         return {}
     return {"resources": {node_resource: 0.001}}
+
+
+def _ray_partition_task_options(
+    worker_container_limit: int | None = None,
+    *,
+    include_num_cpus: bool = True,
+) -> dict[str, Any]:
+    """Request one logical Worker slot when a task-level limit is configured."""
+    options: dict[str, Any] = {
+        **({"num_cpus": 1} if include_num_cpus else {}),
+        **_ray_actor_options_from_env(),
+    }
+    try:
+        configured_limit = int(worker_container_limit or 0)
+    except (TypeError, ValueError):
+        configured_limit = 0
+    if configured_limit <= 0:
+        return options
+    resources = dict(options.get("resources") or {})
+    resource_name = runtime_config.env_text(
+        "CUBE_WEB_RAY_WORKER_RESOURCE",
+        DEFAULT_PARTITION_WORKER_RESOURCE,
+    ) or DEFAULT_PARTITION_WORKER_RESOURCE
+    resources[resource_name] = 1
+    options["resources"] = resources
+    return options
 
 
 def _should_run_ingest(args: argparse.Namespace) -> bool:

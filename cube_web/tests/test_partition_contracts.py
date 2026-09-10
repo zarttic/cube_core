@@ -62,6 +62,19 @@ def test_accepts_exact_dataset_level_normalized_bands() -> None:
     assert validate_partition_method(request.grid_type, request.partition_method) == "logical"
 
 
+def test_worker_container_limit_is_non_negative_and_defaults_to_zero() -> None:
+    request = StrictPartitionRequest.model_validate(normalized_request())
+    assert request.worker_container_limit == 0
+
+    payload = normalized_request()
+    payload["worker_container_limit"] = 3
+    assert StrictPartitionRequest.model_validate(payload).worker_container_limit == 3
+
+    payload["worker_container_limit"] = -1
+    with pytest.raises(ValidationError, match="容器数量必须是大于等于 0 的整数"):
+        StrictPartitionRequest.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("grid_type", "minimum", "maximum"),
     [("geohash", 1, 12), ("mgrs", 0, 5), ("isea4h", 1, 6)],

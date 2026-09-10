@@ -24,6 +24,34 @@ CUBE_WEB_RAY_ADDRESS=auto
 Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址和凭据
 同样只从运行时环境读取。凭据不可写入任务业务 payload、业务配置表或仓库。
 
+## 单任务容器数量限制
+
+前端“容器数量”对应请求字段 `worker_container_limit`，表示一次剖分任务最多
+占用的 KubeRay Worker Pod 逻辑槽位：
+
+- `0` 表示不设置单任务上限，沿用系统默认并发，兼容历史请求；
+- 大于 `0` 时，每个剖分 Ray task 请求一个 `cube_partition_worker` 逻辑资源，
+  同一任务的 driver 同时最多保持该数量的活动 task；
+- 该限制属于共享 RayCluster 中的任务级上限，不会为该任务独占一套 RayCluster。
+  多个任务仍可共享集群容量，所有任务合计容量受 `maxReplicas`、CPU、内存和
+  Kubernetes 配额约束；
+- 逻辑剖分限制规划 task 的活动数量，实体剖分同时限制实体 task 的 fan-out，
+  碳卫星任务当前为一个 Worker task。
+
+Worker Pod 必须在启动时声明一个逻辑槽位；模板
+`docs/kuberay-migration/templates/raycluster.yaml` 已配置：
+
+```yaml
+rayStartParams:
+  resources: '"{\"cube_partition_worker\": 1}"'
+```
+
+如果平台方修改资源名，Web 运行时的 `CUBE_WEB_RAY_WORKER_RESOURCE` 必须使用
+同一个名称。`minReplicas` 和 `maxReplicas` 由平台方按集群容量设置；任务提交后
+Ray 会因待调度的逻辑资源请求触发 KubeRay 扩容，空闲超时后回缩到配置的
+`minReplicas`。该资源是 Ray 的逻辑调度资源，实际 Pod 的 CPU、内存仍由
+Kubernetes requests/limits 控制。
+
 ## 集群与镜像要求
 
 - Head 与 Worker 使用同一兼容 Ray 版本的运行镜像，镜像应包含

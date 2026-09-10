@@ -136,6 +136,29 @@ def test_mark_cancelled_does_not_override_terminal_states() -> None:
     assert store.get_batch("batch-01")["status"] == "succeeded"
 
 
+def test_list_tasks_exposes_worker_container_limit_from_attempt_payload() -> None:
+    store = InMemoryPartitionJobStore()
+    payload = {
+        "strict_partition_request": True,
+        "worker_container_limit": 3,
+        "datasets": [],
+    }
+    store.ensure_runtime_batch(
+        batch_id="batch-workers",
+        batch_name="batch-workers",
+        data_type="optical",
+        payload=payload,
+    )
+    store.create_attempt(
+        task_id="task-workers",
+        batch_id="batch-workers",
+        operation="optical_run",
+        payload=payload,
+    )
+
+    assert store.list_tasks()[0]["worker_container_limit"] == 3
+
+
 class _RecordingCursor:
     def __init__(self, connection: "_RecordingConnection") -> None:
         self._connection = connection

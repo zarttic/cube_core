@@ -16,6 +16,11 @@
 - [ ] namespace CPU、内存、GPU 和临时存储配额。
 - [ ] 可用节点标签、污点、容忍、GPU resource name，以及必须使用的 nodeSelector 或 affinity。
 - [ ] 是否允许 Ray autoscaler；若允许，Worker 最小/最大副本范围。
+- [ ] Worker `rayStartParams.resources` 声明 `cube_partition_worker: 1`，且与
+  `CUBE_WEB_RAY_WORKER_RESOURCE`（未配置时默认同名）保持一致；该逻辑资源用于
+  实现单个剖分任务的 Worker 容器数量上限。
+- [ ] 确认 `minReplicas`、`maxReplicas`、CPU/内存配额和并发任务总量；任务请求的
+  容器数量是共享集群中的逻辑槽位上限，不会绕过集群最大副本数。
 
 ## 网络、存储和密钥
 

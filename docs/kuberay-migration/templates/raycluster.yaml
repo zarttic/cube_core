@@ -44,10 +44,13 @@ spec:
               sizeLimit: 20Gi
   workerGroupSpecs:
     - groupName: partition-workers
-      replicas: 1
-      minReplicas: 1
+      replicas: 0
+      minReplicas: 0
       maxReplicas: <max-worker-replicas>
-      rayStartParams: {}
+      # One logical slot represents one partition Worker Pod. The web task
+      # limit requests this resource and the Ray autoscaler uses it to scale.
+      rayStartParams:
+        resources: '"{\"cube_partition_worker\": 1}"'
       template:
         spec:
           serviceAccountName: <service-account>

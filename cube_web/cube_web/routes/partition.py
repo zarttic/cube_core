@@ -67,6 +67,14 @@ def create_partition_router(
         require_admin(current_actor(request))
         return workflow_service.cancel_task(task_id)
 
+    @router.post("/tasks/{task_id}/terminate")
+    def terminate_partition_task(task_id: str, request: Request) -> dict:
+        require_admin(current_actor(request))
+        force_cancel = getattr(workflow_service, "force_cancel_task", None)
+        if force_cancel is None:
+            return workflow_service.cancel_task(task_id)
+        return force_cancel(task_id)
+
     @router.post("/tasks/{task_id}/retry", response_model=PartitionTaskCreateResponse, status_code=202)
     def retry_partition_task(task_id: str, request: Request) -> dict:
         require_admin(current_actor(request))

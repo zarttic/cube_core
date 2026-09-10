@@ -9,6 +9,7 @@ from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
     _ray_actor_options_from_env,
+    _ray_partition_task_options,
     _ray_runtime_env_from_env,
     _resolve_ray_actor_parallelism,
     _resolve_ray_chunk_size,
@@ -102,6 +103,35 @@ class _FakeLogicalChunkRay(_FakeRay):
         return _FakeLogicalChunkRemote(func, self._events)
 
 
+class _BoundedLogicalChunkRemote:
+    def __init__(self, func, tracker):
+        self._func = func
+        self._tracker = tracker
+
+    def options(self, **kwargs):
+        self._tracker["options"].append(kwargs)
+        return self
+
+    def remote(self, value):
+        self._tracker["active"] += 1
+        self._tracker["maximum"] = max(self._tracker["maximum"], self._tracker["active"])
+        return _FakeObjectRef(self._func(value))
+
+
+class _BoundedLogicalChunkRay(_FakeRay):
+    def __init__(self, tracker):
+        super().__init__()
+        self._tracker = tracker
+
+    def remote(self, func):
+        return _BoundedLogicalChunkRemote(func, self._tracker)
+
+    def wait(self, pending, num_returns=1, timeout=1.0):
+        ready, remaining = super().wait(pending, num_returns=num_returns, timeout=timeout)
+        self._tracker["active"] -= len(ready)
+        return ready, remaining
+
+
 def test_chunk_tasks_for_ray_preserves_order_and_chunk_size():
     tasks = [{"id": i} for i in range(7)]
     chunks = _chunk_tasks_for_ray(tasks, chunk_size=3)
@@ -148,6 +178,35 @@ def test_logical_chunk_scheduler_consumes_dataset_iterators_lazily_and_round_rob
     assert [chunk["chunk_id"] for chunk in outcomes[1]["result"]["chunks"]] == ["dataset-b:0", "dataset-b:1", "dataset-b:2"]
 
 
+def test_logical_chunk_scheduler_respects_worker_container_limit(monkeypatch):
+    tracker = {"active": 0, "maximum": 0, "options": []}
+    fake_ray = _BoundedLogicalChunkRay(tracker)
+
+    monkeypatch.setitem(__import__("sys").modules, "ray", fake_ray)
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job._logical_task_values",
+        lambda payload: ({**payload, "name": f"{payload['dataset']['dataset_id']}:{index}"} for index in range(5)),
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job._plan_logical_chunk",
+        lambda value: {"chunk_id": value["name"]},
+    )
+
+    outcomes = run_logical_chunk_jobs([{
+        "dataset": {"dataset_id": "dataset-limited"},
+        "task_id": "task-limited",
+        "output_version": "v1",
+        "grid_type": "geohash",
+        "requested_grid_level": 5,
+        "worker_container_limit": 2,
+        "ray_address": "auto",
+    }], runtime_env=None)
+
+    assert tracker["maximum"] == 2
+    assert all(item["resources"] == {"cube_partition_worker": 1} for item in tracker["options"])
+    assert len(outcomes[0]["result"]["chunks"]) == 5
+
+
 def test_chunk_task_groups_by_actor_keeps_asset_groups_together():
     groups = [
         [{"asset_path": "/source/a.tif", "space_code": "35f4"}],
@@ -192,6 +251,19 @@ def test_ray_actor_options_reads_runtime_config(monkeypatch):
     )
 
     assert _ray_actor_options_from_env() == {"resources": {"node:10.3.100.180": 0.001}}
+
+
+def test_partition_task_options_merges_worker_slot_with_node_resource(monkeypatch):
+    monkeypatch.setenv("RAY_ACTOR_NODE_RESOURCE", "node:10.3.100.180")
+    monkeypatch.setenv("CUBE_WEB_RAY_WORKER_RESOURCE", "cube_partition_worker")
+
+    assert _ray_partition_task_options(3) == {
+        "num_cpus": 1,
+        "resources": {
+            "node:10.3.100.180": 0.001,
+            "cube_partition_worker": 1,
+        },
+    }
 
 
 def test_logical_chunk_identity_matches_partition_contract():

@@ -115,6 +115,7 @@ class RayJobPartitionSubmitter:
             "CUBE_ENTITY_BANDS_PER_TASK",
             "CUBE_ENTITY_UPLOAD_WORKERS",
             "CUBE_ENTITY_MINIO_PARALLEL_UPLOADS",
+            "CUBE_WEB_RAY_WORKER_RESOURCE",
         ):
             value = runtime_config.env_text(name)
             if value is not None:

@@ -224,6 +224,52 @@ def test_batch_runner_receives_all_datasets_after_outputs_enter_staging(monkeypa
     assert runner.staging_snapshots == [["staging", "staging"]]
 
 
+def test_workflow_persists_partition_start_after_all_workers_started() -> None:
+    class TimedRunner(FakeRunner):
+        def run_dataset(self, **kwargs):
+            result = super().run_dataset(
+                dataset=kwargs["dataset"],
+                task_id=kwargs["task_id"],
+                output_version=kwargs["output_version"],
+                grid_type=kwargs["grid_type"],
+                requested_grid_level=kwargs["requested_grid_level"],
+                cover_mode=kwargs["cover_mode"],
+            )
+            result["timings"] = {
+                "workers": [
+                    {"scope": "raster_worker", "started_at": "2026-08-25T10:00:01Z"},
+                    {"scope": "raster_worker", "started_at": "2026-08-25T10:00:03Z"},
+                ]
+            }
+            return result
+
+    result = _workflow(FakeDomainStore(), TimedRunner(), FakeJobStore()).run(task_id="task-timed", request=_request())
+
+    assert result["datasets"][0]["timings"]["partition"] == {
+        "schema_version": 1,
+        "scope": "partition_to_ingest",
+        "started_at": "2026-08-25T10:00:03Z",
+        "finished_at": None,
+        "elapsed_sec": None,
+        "start_condition": "all_workers_started_partitioning",
+        "end_condition": "all_ingest_completed",
+        "worker_count": 2,
+        "worker_scopes": ["raster_worker"],
+    }
+
+
+def test_batch_runner_receives_task_worker_container_limit(monkeypatch) -> None:
+    monkeypatch.setattr(workflow_module, "ray_batch_scheduler_enabled", lambda: True)
+    request = _request().model_copy(update={"worker_container_limit": 3})
+    domain_store = FakeDomainStore()
+    runner = BatchRunner(domain_store)
+
+    result = _workflow(domain_store, runner, FakeJobStore()).run(task_id="task-workers", request=request)
+
+    assert result["status"] == "completed"
+    assert runner.batch_calls[0][0]["worker_container_limit"] == 3
+
+
 def test_batch_scheduler_toggle_preserves_legacy_dataset_execution(monkeypatch) -> None:
     monkeypatch.setattr(workflow_module, "ray_batch_scheduler_enabled", lambda: False)
     domain_store = FakeDomainStore()
@@ -445,6 +491,9 @@ def test_same_dataset_tracks_scene_partial_failure_and_commits_successful_scene(
             )
             for noun in ("tiles", "indexes", "grid_cells"):
                 result[noun][0]["output_id"] += f"-{scene_id}"
+            result["timings"] = {
+                "workers": [{"scope": "raster_worker", "started_at": "2026-08-25T10:00:03Z"}]
+            }
             return result
 
     domain_store = FakeDomainStore()
@@ -461,6 +510,7 @@ def test_same_dataset_tracks_scene_partial_failure_and_commits_successful_scene(
             "error": {"code": "partition_execution_failed", "message": "scene source unreadable"},
         },
     ]
+    assert "partition" not in result["datasets"][0]["timings"]
     assert domain_store.resolve_output_version("dataset-ok") == make_output_version("dataset-ok", "task-scenes")
 
 

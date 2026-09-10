@@ -65,3 +65,77 @@ class TimingRecorder:
             "attributes": dict(self._attributes),
         }
         return self._finished
+
+
+_WORKER_SCOPE_SUFFIX = "_worker"
+
+
+def _timing_records(value: Any) -> Iterator[dict[str, Any]]:
+    """Yield nested timing records without depending on one result shape."""
+    if isinstance(value, dict):
+        if isinstance(value.get("scope"), str):
+            yield value
+        for child in value.values():
+            yield from _timing_records(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _timing_records(child)
+
+
+def _timing_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def partition_timing_from_workers(timings: Any) -> dict[str, Any] | None:
+    """Build the start marker for the partition-to-ingest wall-clock metric.
+
+    A worker timing starts immediately before the worker begins partitioning.
+    The latest worker start is therefore the first instant at which every
+    recorded worker has started partitioning.  No fallback timestamp is
+    invented when a backend does not expose worker timings.
+    """
+    workers = [
+        record
+        for record in _timing_records(timings)
+        if str(record.get("scope") or "").endswith(_WORKER_SCOPE_SUFFIX)
+        and _timing_datetime(record.get("started_at")) is not None
+    ]
+    if not workers:
+        return None
+    latest = max(workers, key=lambda record: _timing_datetime(record["started_at"]))
+    return {
+        "schema_version": 1,
+        "scope": "partition_to_ingest",
+        "started_at": latest["started_at"],
+        "finished_at": None,
+        "elapsed_sec": None,
+        "start_condition": "all_workers_started_partitioning",
+        "end_condition": "all_ingest_completed",
+        "worker_count": len(workers),
+        "worker_scopes": sorted({str(record["scope"]) for record in workers}),
+    }
+
+
+def finish_partition_timing(timing: dict[str, Any] | None, finished_at: Any) -> dict[str, Any] | None:
+    """Attach the ingest completion timestamp and elapsed seconds."""
+    if not isinstance(timing, dict):
+        return None
+    started = _timing_datetime(timing.get("started_at"))
+    finished = _timing_datetime(finished_at)
+    if started is None or finished is None or finished < started:
+        return dict(timing)
+    completed = dict(timing)
+    completed["finished_at"] = finished_at
+    completed["elapsed_sec"] = round((finished - started).total_seconds(), 6)
+    return completed

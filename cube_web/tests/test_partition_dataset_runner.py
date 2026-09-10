@@ -351,6 +351,7 @@ def test_ray_client_uses_node_local_credentials_without_runtime_env(monkeypatch)
         "dataset": {"dataset_id": "dataset-1"}, "task_id": "task-1", "output_version": "version-1",
         "grid_type": "quadtree", "requested_grid_level": 1, "cover_mode": "covers",
         "time_granularity": "day", "max_cells_per_asset": 0, "max_observations": None,
+        "worker_container_limit": 0,
         "ray_address": "ray://10.3.100.182:10001",
     }
 

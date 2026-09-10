@@ -117,10 +117,21 @@ class StrictPartitionRequest(StrictModel):
     grid_type: GridType
     requested_grid_level: int
     partition_method: PartitionMethod
+    worker_container_limit: int = Field(
+        default=0,
+        description="本次剖分任务最多使用的 KubeRay Worker 数量，0 表示按系统默认值运行",
+    )
     cover_mode: Literal["intersect", "contain", "minimal"] = "intersect"
     time_granularity: Literal["second", "minute", "hour", "day", "month"] = "day"
     max_cells_per_asset: int = Field(default=0, ge=0)
     datasets: tuple[DatasetInput, ...] = Field(min_length=1)
+
+    @field_validator("worker_container_limit")
+    @classmethod
+    def validate_worker_container_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("容器数量必须是大于等于 0 的整数，0 表示按系统默认值运行")
+        return value
 
     @model_validator(mode="after")
     def validate_grid_contract(self) -> "StrictPartitionRequest":

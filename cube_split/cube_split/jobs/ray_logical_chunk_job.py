@@ -95,7 +95,13 @@ def _shards(bbox: list[float] | tuple[float, float, float, float], degrees: floa
     return list(_iter_shards(bbox, degrees))
 
 
-def _logical_task_limit() -> int:
+def _logical_task_limit(requested_limit: int | None = None) -> int:
+    try:
+        explicit_limit = int(requested_limit or 0)
+    except (TypeError, ValueError):
+        explicit_limit = 0
+    if explicit_limit > 0:
+        return explicit_limit
     raw = runtime_config.env_text("CUBE_LOGICAL_MAX_IN_FLIGHT", "4")
     try:
         return max(1, int(raw))
@@ -256,7 +262,10 @@ def run_logical_chunk_jobs(
     chunks: list[list[dict[str, Any]]] = [[] for _ in payloads]
     errors: list[str | None] = [None for _ in payloads]
     pending: dict[Any, int] = {}
-    limit = _logical_task_limit()
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
+
+    requested_limit = payloads[0].get("worker_container_limit")
+    limit = _logical_task_limit(requested_limit) if requested_limit else _logical_task_limit()
     while queued or pending:
         while queued and len(pending) < limit:
             index = queued.popleft()
@@ -268,7 +277,8 @@ def run_logical_chunk_jobs(
             except StopIteration:
                 continue
             with driver_timing.phase("ray.task_submit"):
-                pending[plan_chunk.options(num_cpus=1).remote(value)] = index
+                options = _ray_partition_task_options(value.get("worker_container_limit"))
+                pending[plan_chunk.options(**options).remote(value)] = index
             driver_timing.add_counter("ray_task_submit_count")
             queued.append(index)
         if cancellation_check and cancellation_check():
