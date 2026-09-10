@@ -30,3 +30,11 @@ cube_split/data/
 # Local build output and run artifacts.
 build/
 .run/
+
+# Local artifacts that must never be committed: editor/source backups, user
+# uploads and screenshots kept only on disk.
+*.bak
+*.bak_*
+*.orig
+微信图片_*.jpg
+分析就绪数据剖分管理系统*.docx
