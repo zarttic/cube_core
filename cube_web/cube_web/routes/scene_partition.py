@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from cube_web.routes.auth import current_actor, require_admin
 from cube_web.services.scene_contracts import (
@@ -13,6 +16,10 @@ from cube_web.services.scene_contracts import (
     ScenePartitionRunResponse,
 )
 from cube_web.services.scene_service import SceneDomainService
+
+
+class ArchiveLoadBatchRequest(BaseModel):
+    reason: str = Field(default="ARD 删除归档", min_length=1, max_length=2000)
 
 
 def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
@@ -43,6 +50,15 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
     @router.get("/load-batches/{load_batch_id}")
     def get_load_batch(load_batch_id: str) -> dict:
         return service.get_load_batch(load_batch_id)
+
+    @router.post("/load-batches/{load_batch_id}/archive")
+    def archive_load_batch(load_batch_id: str, payload: ArchiveLoadBatchRequest, request: Request) -> dict:
+        current_actor(request)
+        batch = service.archive_load_batch(load_batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="Load batch not found")
+        batch["reason"] = payload.reason
+        return batch
 
     @router.get("/load-batches/{load_batch_id}/scenes")
     def list_load_batch_scenes(
@@ -119,6 +135,8 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
         keyword: str | None = None,
         data_type: str | None = None,
         status: str | None = None,
+        created_from: date | None = Query(default=None, description="创建时间起始日期，包含当天"),
+        created_to: date | None = Query(default=None, description="创建时间结束日期，包含当天"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=500),
         limit: int | None = Query(default=None, ge=1, le=500),
@@ -130,6 +148,8 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
             keyword=keyword,
             data_type=data_type,
             status=status,
+            created_from=created_from,
+            created_to=created_to,
             page=page,
             page_size=page_size,
         )
@@ -137,6 +157,11 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
     @router.get("/runs/{partition_run_id}/quality")
     def get_partition_quality_run(partition_run_id: str) -> dict:
         return service.get_partition_quality_batch(partition_run_id)
+
+    @router.post("/runs/{partition_run_id}/cancel")
+    def cancel_partition_run(partition_run_id: str, request: Request) -> dict:
+        require_admin(current_actor(request))
+        return service.cancel_partition_run(partition_run_id)
 
     @router.post("/runs/{partition_run_id}/quality", status_code=202)
     def request_partition_quality_run(partition_run_id: str, request: Request) -> dict:

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any, Iterator
 from uuid import uuid4
 
+from cube_split.partition_timing import finish_partition_timing, partition_timing_from_workers
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
+from cube_web.services.quality_contracts import quality_run_metrics
 from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest, reload_selection_band_unit_ids
 
 
@@ -23,6 +25,8 @@ class OpenGaussSceneRepository:
         keyword: str | None = None,
         data_type: str | None = None,
         status: str | None = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
         page: int = 1,
         page_size: int = 20,
         limit: int | None = None,
@@ -62,6 +66,12 @@ class OpenGaussSceneRepository:
         if status:
             clauses.append("pr.status=%s")
             params.append(status)
+        if created_from:
+            clauses.append("pr.created_at >= %s::date")
+            params.append(created_from)
+        if created_to:
+            clauses.append("pr.created_at < (%s::date + INTERVAL '1 day')")
+            params.append(created_to)
         where = " AND ".join(clauses)
 
         with self._connection() as connection:
@@ -74,6 +84,21 @@ class OpenGaussSceneRepository:
                                FROM jsonb_array_elements_text(pr.source_load_batch_ids) WITH ORDINALITY AS source_batch(load_batch_id, ordinality)
                                LEFT JOIN load_batches lb ON lb.load_batch_id=source_batch.load_batch_id
                            ), '[]'::json) AS source_load_batch_names,
+                           COALESCE((
+                               SELECT json_agg(
+                                   json_build_object(
+                                       'dataset_id', run_dataset.dataset_id,
+                                       'dataset_code', run_dataset.dataset_code,
+                                       'dataset_title', run_dataset.dataset_title
+                                   ) ORDER BY run_dataset.dataset_code, run_dataset.dataset_id
+                               )
+                               FROM (
+                                   SELECT DISTINCT d.dataset_id, d.dataset_code, d.dataset_title
+                                   FROM partition_run_scenes run_prs
+                                   JOIN datasets d ON d.dataset_id=run_prs.dataset_id
+                                   WHERE run_prs.partition_run_id=pr.partition_run_id
+                               ) run_dataset
+                           ), '[]'::json) AS datasets,
                            pr.error_message,
                            pr.created_at, pr.started_at, pr.completed_at,
                            count(DISTINCT prs.dataset_id) AS dataset_count,
@@ -304,11 +329,45 @@ class OpenGaussSceneRepository:
                       WHERE partition_run_id=%s AND output_version IS NOT NULL
                     )
                     SELECT q.quality_run_id, q.dataset_id, q.output_version, q.status AS quality_status,
-                           q.result_complete, q.started_at, q.completed_at,
-                           r.rule_code, r.status AS rule_status, r.finding_count, r.error_count, r.warning_count
+                           q.result_complete, q.last_error AS execution_error, q.started_at, q.completed_at,
+                           o.grid_cell_count AS checked_grid_count,
+                           COALESCE((
+                               SELECT json_agg(
+                                   json_build_object(
+                                       'quality_error_id', quality_error.quality_error_id,
+                                       'error_code', quality_error.error_code,
+                                       'message', quality_error.message,
+                                       'source_asset_id', quality_error.source_asset_id,
+                                       'band_code', quality_error.band_code,
+                                       'output_id', quality_error.output_id,
+                                       'index_id', quality_error.index_id,
+                                       'tile_id', quality_error.tile_id,
+                                       'row_number', quality_error.row_number,
+                                       'field', quality_error.field_name,
+                                       'context', quality_error.context
+                                   ) ORDER BY quality_error.created_at
+                               )
+                               FROM (
+                                   SELECT e.quality_error_id, e.error_code, e.message, e.source_asset_id, e.band_code,
+                                          e.output_id, e.index_id, e.tile_id, e.row_number, e.field_name, e.context, e.created_at
+                                   FROM partition_quality_errors e
+                                   WHERE e.quality_run_id=q.quality_run_id
+                                   ORDER BY e.created_at
+                                   LIMIT 20
+                               ) quality_error
+                           ), '[]'::json) AS error_logs,
+                           r.rule_code, r.status AS rule_status, r.finding_count, r.error_count, r.warning_count,
+                           r.execution_error AS rule_execution_error
                     FROM targets t
-                    JOIN partition_datasets d ON d.dataset_id=t.dataset_id AND d.current_output_version=t.output_version
-                    JOIN partition_quality_runs q ON q.quality_run_id=d.current_quality_run_id
+                    JOIN LATERAL (
+                        SELECT quality_run.*
+                        FROM partition_quality_runs quality_run
+                        WHERE quality_run.dataset_id=t.dataset_id
+                          AND quality_run.output_version=t.output_version
+                        ORDER BY quality_run.quality_sequence DESC, quality_run.created_at DESC, quality_run.quality_run_id DESC
+                        LIMIT 1
+                    ) q ON TRUE
+                    LEFT JOIN partition_output_versions o ON o.dataset_id=q.dataset_id AND o.output_version=q.output_version
                     LEFT JOIN partition_quality_results r ON r.quality_run_id=q.quality_run_id
                     ORDER BY q.dataset_id, q.output_version, r.rule_code
                     """,
@@ -318,18 +377,49 @@ class OpenGaussSceneRepository:
                 cursor.execute(
                     """
                     SELECT task_id, status, operation, attempt_no, retry_strategy, error_type,
-                           error_message, failure_reason, source_task_id, created_at, started_at, finished_at
+                           error_message, failure_reason, source_task_id, created_at, started_at, finished_at, runner_result
                     FROM partition_job_attempts WHERE batch_id=%s
                     ORDER BY attempt_no, created_at, task_id
                     """,
                     (partition_run_id,),
                 )
                 attempts = _all(cursor)
+                cursor.execute(
+                    "SELECT count(*) AS total, count(*) FILTER (WHERE ingest_status='completed') AS completed "
+                    "FROM partition_data_unit_grid_status WHERE partition_run_id=%s",
+                    (partition_run_id,),
+                )
+                ingest_state = _one(cursor) or {}
+                cursor.execute(
+                    "SELECT max(completed_at) AS completed_at FROM ingest_runs "
+                    "WHERE partition_run_id=%s AND status='completed'",
+                    (partition_run_id,),
+                )
+                ingest_completion = _one(cursor) or {}
         batch = self._partition_quality_summary(run)
+        batch["partition_compute_timing"] = _partition_compute_timing(attempts)
+        batch["partition_write_timing"] = _partition_write_timing(attempts)
+        batch["partition_execution_timing"] = _partition_execution_timing(attempts)
+        batch["partition_timing"] = _partition_batch_timing(
+            attempts,
+            ingest_total=int(ingest_state.get("total") or 0),
+            ingest_completed=int(ingest_state.get("completed") or 0),
+            ingest_completed_at=ingest_completion.get("completed_at"),
+        )
+        for attempt in attempts:
+            attempt.pop("runner_result", None)
         quality_runs: dict[tuple[str, str], dict[str, Any]] = {}
         for row in quality_rows:
             dataset_id = str(row["dataset_id"])
             output_version = str(row["output_version"])
+            error_logs = row.get("error_logs") or []
+            if isinstance(error_logs, str):
+                try:
+                    error_logs = json.loads(error_logs)
+                except json.JSONDecodeError:
+                    error_logs = []
+            if not isinstance(error_logs, list):
+                error_logs = []
             quality_run = quality_runs.setdefault(
                 (dataset_id, output_version),
                 {
@@ -337,8 +427,15 @@ class OpenGaussSceneRepository:
                     "output_version": output_version,
                     "status": row["quality_status"],
                     "results_complete": bool(row["result_complete"]),
+                    "execution_error": row.get("execution_error"),
+                    "error_logs": [item for item in error_logs if isinstance(item, dict)],
                     "started_at": row["started_at"],
                     "completed_at": row["completed_at"],
+                    "metrics": quality_run_metrics(
+                        checked_grid_count=row.get("checked_grid_count", 0),
+                        started_at=row["started_at"],
+                        completed_at=row["completed_at"],
+                    ),
                     "items": [],
                 },
             )
@@ -350,6 +447,7 @@ class OpenGaussSceneRepository:
                         "finding_count": int(row["finding_count"] or 0),
                         "error_count": int(row["error_count"] or 0),
                         "warning_count": int(row["warning_count"] or 0),
+                        "execution_error": row.get("rule_execution_error"),
                     }
                 )
         datasets: dict[str, dict[str, Any]] = {}
@@ -468,6 +566,23 @@ class OpenGaussSceneRepository:
         if not isinstance(source_names, list):
             source_names = []
         value["source_load_batch_names"] = [str(item) for item in source_names]
+        datasets = value.get("datasets")
+        if isinstance(datasets, str):
+            try:
+                datasets = json.loads(datasets)
+            except json.JSONDecodeError:
+                datasets = []
+        if not isinstance(datasets, list):
+            datasets = []
+        value["datasets"] = [
+            {
+                "dataset_id": str(item.get("dataset_id") or ""),
+                "dataset_code": str(item.get("dataset_code") or ""),
+                "dataset_title": str(item.get("dataset_title") or ""),
+            }
+            for item in datasets
+            if isinstance(item, dict) and item.get("dataset_id")
+        ]
         for key in (
             "dataset_count", "scene_count", "band_count", "partitioned_count", "partition_failed_count",
             "quality_pass_count", "quality_failed_count", "ingested_count", "ingest_failed_count",
@@ -770,9 +885,12 @@ class OpenGaussSceneRepository:
             "EXISTS (SELECT 1 FROM load_batch_scenes pending_lbs "
             "JOIN scene_bands pending_band ON pending_band.scene_id=pending_lbs.scene_id "
             "JOIN scenes pending_scene ON pending_scene.scene_id=pending_band.scene_id "
+            "JOIN datasets pending_dataset ON pending_dataset.dataset_id=pending_scene.dataset_id "
             "JOIN scene_assets pending_asset ON pending_asset.scene_id=pending_band.scene_id "
             "AND pending_asset.asset_id=pending_band.asset_id AND pending_asset.asset_role='data' "
             "WHERE pending_lbs.load_batch_id=lb.load_batch_id "
+            "AND COALESCE(pending_dataset.status, '') <> 'archived' "
+            "AND COALESCE(pending_scene.status, '') <> 'archived' "
             "AND ("
             "COALESCE(lb.source_type, 'subsystem_import') <> 'dataset_reload' "
             "OR NOT EXISTS ("
@@ -795,12 +913,17 @@ class OpenGaussSceneRepository:
             if status:
                 where.append("lb.status = %s")
                 params.append(status)
+            else:
+                where.append("lb.status NOT IN ('succeeded', 'archived')")
             if data_type:
                 where.append(
                     "EXISTS (SELECT 1 FROM load_batch_scenes typed_lbs "
                     "JOIN scenes typed_scene ON typed_scene.scene_id = typed_lbs.scene_id "
                     "JOIN datasets typed_dataset ON typed_dataset.dataset_id = typed_scene.dataset_id "
-                    "WHERE typed_lbs.load_batch_id = lb.load_batch_id AND typed_dataset.data_type = %s)"
+                    "WHERE typed_lbs.load_batch_id = lb.load_batch_id "
+                    "AND COALESCE(typed_dataset.status, '') <> 'archived' "
+                    "AND COALESCE(typed_scene.status, '') <> 'archived' "
+                    "AND typed_dataset.data_type = %s)"
                 )
                 params.append(data_type)
             if keyword:
@@ -844,6 +967,8 @@ class OpenGaussSceneRepository:
             "JOIN scenes s ON s.scene_id = lbs.scene_id "
             "JOIN datasets d ON d.dataset_id = s.dataset_id "
             "WHERE " + " AND ".join(option_where) + " "
+            "AND COALESCE(d.status, '') <> 'archived' "
+            "AND COALESCE(s.status, '') <> 'archived' "
             "ORDER BY d.dataset_code NULLS LAST, d.dataset_id",
             tuple(option_params),
         )
@@ -855,6 +980,27 @@ class OpenGaussSceneRepository:
             "page_size": page_size,
             "dataset_options": dataset_options,
         }
+
+    def archive_load_batch(self, load_batch_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE load_batches
+                    SET status = 'archived',
+                        updated_at = now()
+                    WHERE load_batch_id = %s
+                    RETURNING *
+                    """,
+                    (load_batch_id,),
+                )
+                row = cursor.fetchone()
+                archived = None
+                if row is not None:
+                    columns = [column[0] for column in cursor.description or []]
+                    archived = dict(zip(columns, row))
+            connection.commit()
+        return archived
 
     def get_load_batch(self, load_batch_id: str) -> dict[str, Any] | None:
         rows = self._read(
@@ -869,7 +1015,12 @@ class OpenGaussSceneRepository:
             """,
             (load_batch_id,),
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = rows[0]
+        if str(row.get("status") or "") == "archived":
+            return None
+        return row
 
     def list_load_batch_scenes(
         self,
@@ -879,6 +1030,12 @@ class OpenGaussSceneRepository:
         data_type: str | None = None,
         dataset_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        batch_rows = self._read(
+            "SELECT status FROM load_batches WHERE load_batch_id = %s",
+            (load_batch_id,),
+        )
+        if batch_rows and str(batch_rows[0].get("status") or "") == "archived":
+            return []
         where = ["lbs.load_batch_id = %s"]
         params: list[Any] = [load_batch_id]
         if status:
@@ -1289,7 +1446,7 @@ class OpenGaussSceneRepository:
                 cursor.execute(
                     """
                     UPDATE partition_runs
-                    SET status = 'queued',
+                    SET status = CASE WHEN status = 'pending' THEN 'queued' ELSE status END,
                         attributes = (attributes - 'claim_token') || %s::jsonb
                     WHERE partition_run_id = %s
                     """,
@@ -1413,8 +1570,18 @@ class OpenGaussSceneRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT partition_run_id FROM partition_runs WHERE attributes ->> 'task_id' = %s FOR UPDATE",
-                    (task_id,),
+                    """
+                    SELECT pr.partition_run_id
+                    FROM partition_runs pr
+                    WHERE pr.attributes ->> 'task_id' = %s
+                       OR pr.partition_run_id = (
+                           SELECT attempt.batch_id
+                           FROM partition_job_attempts attempt
+                           WHERE attempt.task_id = %s
+                       )
+                    FOR UPDATE
+                    """,
+                    (task_id, task_id),
                 )
                 row = cursor.fetchone()
                 if row is None:
@@ -1434,7 +1601,7 @@ class OpenGaussSceneRepository:
                           WHEN 'queued' THEN 1
                           WHEN 'running' THEN 2
                           ELSE 3
-                        END < %s OR status = %s
+                        END < %s
                       )
                     """,
                     (
@@ -1444,7 +1611,6 @@ class OpenGaussSceneRepository:
                         _error_text(None if result is None else result.get("error")),
                         partition_run_id,
                         _partition_status_rank(run_status),
-                        run_status,
                     ),
                 )
                 if cursor.rowcount == 0:
@@ -1953,6 +2119,226 @@ def _partition_batch_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
         "ingested_count": sum(row.get("ingest_status") == "completed" for row in values),
         "ingest_failed_count": sum(row.get("ingest_status") == "failed" for row in values),
     }
+
+
+def _partition_batch_timing(
+    attempts: list[dict[str, Any]],
+    *,
+    ingest_total: int,
+    ingest_completed: int,
+    ingest_completed_at: Any,
+) -> dict[str, Any] | None:
+    """Return the current or completed partition-to-ingest timing marker."""
+    marker: dict[str, Any] | None = None
+    for attempt in reversed(attempts):
+        if str(attempt.get("status") or "") != "succeeded":
+            continue
+        result = attempt.get("runner_result")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                result = None
+        marker = partition_timing_from_workers(result)
+        if marker is not None:
+            break
+    if marker is None:
+        return None
+    if ingest_total > 0 and ingest_completed == ingest_total and ingest_completed_at is not None:
+        return finish_partition_timing(marker, ingest_completed_at)
+    return marker
+
+
+def _partition_execution_timing(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the complete partition workflow time, excluding quality and ingest waits."""
+    for attempt in reversed(attempts):
+        if str(attempt.get("status") or "") != "succeeded":
+            continue
+        records = list(_attempt_timing_records(attempt))
+        workflow = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("scope") == "workflow_dataset"
+                and record.get("started_at")
+                and record.get("finished_at")
+                and record.get("elapsed_sec") is not None
+            ),
+            None,
+        )
+        if workflow is not None:
+            timing = dict(workflow)
+            timing["scope"] = "partition_execution"
+            timing["start_condition"] = "workflow_started"
+            timing["end_condition"] = "output_committed"
+            return timing
+    return None
+
+
+def _partition_compute_timing(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return Ray partition execution time without output persistence phases."""
+    for attempt in reversed(attempts):
+        if str(attempt.get("status") or "") != "succeeded":
+            continue
+        records = list(_attempt_timing_records(attempt))
+        # Batch drivers cover the complete set of units.  If a legacy or
+        # single-unit result has no batch driver, use its individual drivers.
+        drivers = [
+            record for record in records
+            if str(record.get("scope") or "").endswith("_batch_driver")
+        ]
+        if not drivers:
+            drivers = [
+                record for record in records
+                if str(record.get("scope") or "").endswith("_driver")
+                and record.get("scope") != "ray_job_driver"
+            ]
+        if drivers:
+            return _rename_timing(
+                _combine_timing_records(drivers),
+                scope="partition_compute",
+                start_condition="partition_driver_started",
+                end_condition="partition_driver_completed",
+            )
+    return None
+
+
+_PARTITION_WRITE_PHASES = (
+    "opengauss.record_output_chunks",
+    "opengauss.verify_output_chunks",
+    "opengauss.promote_logical_staging",
+    "opengauss.complete_output",
+)
+
+
+def _partition_write_timing(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return output persistence time measured by the OpenGauss workflow phases."""
+    for attempt in reversed(attempts):
+        if str(attempt.get("status") or "") != "succeeded":
+            continue
+        records = [
+            record for record in _attempt_timing_records(attempt)
+            if record.get("scope") == "workflow_dataset"
+        ]
+        phases: dict[str, dict[str, float | int]] = {}
+        for record in records:
+            record_phases = record.get("phases")
+            if not isinstance(record_phases, dict):
+                continue
+            for name in _PARTITION_WRITE_PHASES:
+                phase = record_phases.get(name)
+                if not isinstance(phase, dict):
+                    continue
+                elapsed = phase.get("elapsed_sec")
+                if not isinstance(elapsed, (int, float)):
+                    continue
+                current = phases.setdefault(name, {"elapsed_sec": 0.0, "count": 0})
+                current["elapsed_sec"] = float(current["elapsed_sec"]) + max(0.0, float(elapsed))
+                current["count"] = int(current["count"]) + int(phase.get("count") or 1)
+        if not phases:
+            continue
+        normalized_phases = {
+            name: {
+                "elapsed_sec": round(float(value["elapsed_sec"]), 6),
+                "count": int(value["count"]),
+            }
+            for name, value in phases.items()
+        }
+        return {
+            "schema_version": 1,
+            "scope": "partition_write",
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_sec": round(sum(item["elapsed_sec"] for item in normalized_phases.values()), 6),
+            "start_condition": "output_write_started",
+            "end_condition": "output_committed",
+            "phases": normalized_phases,
+            "attributes": {"dataset_count": len(records)},
+        }
+    return None
+
+
+def _attempt_timing_records(attempt: dict[str, Any]):
+    result = attempt.get("runner_result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            result = None
+    yield from _timing_records(result)
+
+
+def _combine_timing_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(records) == 1:
+        return dict(records[0])
+    dated = []
+    for record in records:
+        started = _parse_timing_datetime(record.get("started_at"))
+        finished = _parse_timing_datetime(record.get("finished_at"))
+        if started is not None and finished is not None and finished >= started:
+            dated.append((started, finished))
+    elapsed = max(
+        (float(record.get("elapsed_sec")) for record in records if isinstance(record.get("elapsed_sec"), (int, float))),
+        default=0.0,
+    )
+    combined: dict[str, Any] = {
+        "schema_version": 1,
+        "started_at": None,
+        "finished_at": None,
+        "elapsed_sec": round(elapsed, 6),
+        "attributes": {"driver_count": len(records), "driver_scopes": sorted({str(record.get("scope")) for record in records})},
+    }
+    if dated:
+        started = min(item[0] for item in dated)
+        finished = max(item[1] for item in dated)
+        combined["started_at"] = _format_timing_datetime(started)
+        combined["finished_at"] = _format_timing_datetime(finished)
+        combined["elapsed_sec"] = round((finished - started).total_seconds(), 6)
+    return combined
+
+
+def _rename_timing(
+    timing: dict[str, Any],
+    *,
+    scope: str,
+    start_condition: str,
+    end_condition: str,
+) -> dict[str, Any]:
+    timing = dict(timing)
+    timing["scope"] = scope
+    timing["start_condition"] = start_condition
+    timing["end_condition"] = end_condition
+    return timing
+
+
+def _parse_timing_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timing_datetime(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _timing_records(value: Any):
+    if isinstance(value, dict):
+        if isinstance(value.get("scope"), str):
+            yield value
+        for child in value.values():
+            yield from _timing_records(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _timing_records(child)
 
 
 def _partition_draft(row: dict[str, Any]) -> dict[str, Any]:

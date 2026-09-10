@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pytest
@@ -19,6 +20,10 @@ from cube_web.services.scene_contracts import ScenePartitionRunRequest
 from cube_web.services.scene_repository import (
     OpenGaussSceneRepository,
     _load_schema_datasets,
+    _partition_batch_timing,
+    _partition_compute_timing,
+    _partition_execution_timing,
+    _partition_write_timing,
     _partition_scene_idempotency_key,
 )
 from cube_web.services.scene_service import SceneDomainService, build_partition_execution_request
@@ -105,6 +110,7 @@ class _Workflow:
     def __init__(self) -> None:
         self.request = None
         self.retry = None
+        self.cancelled = None
 
     def submit_mixed(self, request):
         self.request = request
@@ -117,6 +123,10 @@ class _Workflow:
     def retry_task(self, task_id, **kwargs):
         self.retry = (task_id, kwargs)
         return _Task()
+
+    def force_cancel_task(self, task_id):
+        self.cancelled = task_id
+        return {"task_id": task_id, "status": "cancelled"}
 
     def get_task(self, _task_id):
         return _Task()
@@ -236,7 +246,10 @@ class _Repository:
 
     def list_partition_quality_batches(self, **_kwargs):
         self.quality_batch_kwargs.append(_kwargs)
-        return [{"partition_run_id": "partition-run-001", "band_count": 2, "quality_pass_count": 1}]
+        return [{
+            "partition_run_id": "partition-run-001", "band_count": 2, "quality_pass_count": 1,
+            "datasets": [{"dataset_id": "dataset-optical", "dataset_code": "OPTICAL-001", "dataset_title": "光学数据集"}],
+        }]
 
     def get_partition_quality_batch(self, partition_run_id):
         if partition_run_id != "partition-run-001":
@@ -247,6 +260,8 @@ class _Repository:
             "summary": {"band_count": 2, "quality_pass_count": 1},
             "datasets": [{
                 "dataset_id": "dataset-optical",
+                "dataset_code": "OPTICAL-001",
+                "dataset_title": "光学数据集",
                 "scenes": [{"scene_id": "scene-optical", "bands": []}],
                 "quality_runs": [{
                     "quality_run_id": "quality-run-001", "output_version": "output-001", "status": "pass",
@@ -434,8 +449,10 @@ def test_carbon_grid_preview_covers_observation_footprints(api, monkeypatch, tmp
 
 def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None:
     client, repository, workflow = api
+    payload = _payload()
+    payload["worker_container_limit"] = 2
 
-    response = client.post("/v1/partition/runs", json=_payload())
+    response = client.post("/v1/partition/runs", json=payload)
 
     assert response.status_code == 202
     assert response.json() == {
@@ -452,6 +469,7 @@ def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None
     assert repository.run_request.datasets[0].band_unit_ids == ("band-scene-optical-b04",)
     assert [dataset.dataset_id for dataset in workflow.request.datasets] == ["dataset-optical", "dataset-carbon"]
     assert workflow.request.datasets[1].partition.grid_type == "isea4h"
+    assert workflow.request.worker_container_limit == 2
 
 
 def test_scene_partition_run_requires_admin(api) -> None:
@@ -499,13 +517,17 @@ def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_qua
 
     listed = client.get("/v1/partition/runs")
     filtered = client.get(
-        "/v1/partition/runs?keyword=dataset-optical&data_type=optical&status=completed&page=2&page_size=10"
+        "/v1/partition/runs?keyword=dataset-optical&data_type=optical&status=completed"
+        "&created_from=2026-08-01&created_to=2026-08-24&page=2&page_size=10"
     )
     detail = client.get("/v1/partition/runs/partition-run-001/quality")
     submitted = client.post("/v1/partition/runs/partition-run-001/quality")
 
     assert listed.status_code == 200
     assert listed.json()["items"][0]["partition_run_id"] == "partition-run-001"
+    assert listed.json()["items"][0]["datasets"][0] == {
+        "dataset_id": "dataset-optical", "dataset_code": "OPTICAL-001", "dataset_title": "光学数据集",
+    }
     assert filtered.status_code == 200
     assert filtered.json()["page"] == 2
     assert filtered.json()["page_size"] == 10
@@ -513,16 +535,284 @@ def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_qua
         "keyword": "dataset-optical",
         "data_type": "optical",
         "status": "completed",
+        "created_from": date(2026, 8, 1),
+        "created_to": date(2026, 8, 24),
         "page": 2,
         "page_size": 10,
     }
     assert detail.json()["source_load_batch_ids"] == ["load-001", "load-002"]
+    assert detail.json()["datasets"][0]["dataset_title"] == "光学数据集"
     assert detail.json()["datasets"][0]["scenes"][0]["scene_id"] == "scene-optical"
     assert detail.json()["datasets"][0]["quality_runs"][0]["items"][0]["rule_code"] == "index_schema"
     assert submitted.status_code == 202
     assert submitted.json()["quality_runs"] == [{
         "dataset_id": "dataset-optical", "output_version": "output-001", "requested_by": "admin",
     }]
+
+
+def test_partition_run_can_be_force_cancelled_from_its_detail(api) -> None:
+    client, _, workflow = api
+
+    response = client.post("/v1/partition/runs/partition-run-001/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "partition_run_id": "partition-run-001",
+        "task_id": "partition-task-001",
+        "status": "cancelled",
+    }
+    assert workflow.cancelled == "partition-task-001"
+
+
+def test_partition_quality_repository_filters_creation_dates_inclusive() -> None:
+    statements = []
+
+    class Cursor:
+        def __init__(self):
+            self.description = []
+            self.current_sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            self.current_sql = sql
+            statements.append((sql, params))
+            if "COUNT(*)" in sql:
+                self.description = [("total",)]
+            else:
+                self.description = [("partition_run_id",)]
+
+        def fetchall(self):
+            return [(1,)] if "COUNT(*)" in self.current_sql else [("partition-run-001",)]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    result = OpenGaussSceneRepository(None, connection_factory=Connection).list_partition_quality_batches(
+        created_from=date(2026, 8, 1),
+        created_to=date(2026, 8, 24),
+    )
+
+    list_sql, list_params = statements[0]
+    count_sql, count_params = statements[1]
+    assert "pr.created_at >= %s::date" in list_sql
+    assert "pr.created_at < (%s::date + INTERVAL '1 day')" in list_sql
+    assert list_params[:2] == (date(2026, 8, 1), date(2026, 8, 24))
+    assert count_params == (date(2026, 8, 1), date(2026, 8, 24))
+    assert result["total"] == 1
+
+
+def test_partition_quality_detail_keeps_historical_output_quality_results() -> None:
+    statements = []
+    run_id = "partition-run-history"
+    output_version = "output-history"
+
+    class Cursor:
+        def __init__(self):
+            self.current_sql = ""
+            self.description = []
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            self.current_sql = sql
+            statements.append((sql, params))
+            if "SELECT pr.partition_run_id, pr.status" in sql:
+                self._set_rows({
+                    "partition_run_id": run_id,
+                    "status": "completed",
+                    "source_load_batch_ids": "[]",
+                    "source_load_batch_names": "[]",
+                    "error_message": None,
+                    "created_at": datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    "started_at": None,
+                    "completed_at": None,
+                })
+            elif "SELECT prs.dataset_id" in sql:
+                self._set_rows({
+                    "dataset_id": "dataset-history",
+                    "dataset_code": "DATASET-HISTORY",
+                    "dataset_title": "历史输出数据集",
+                    "data_type": "optical",
+                    "product_type": "surface_reflectance",
+                    "scene_id": "scene-history",
+                    "scene_key": "SCENE-HISTORY",
+                    "acquisition_time": None,
+                    "source_load_batch_id": "load-history",
+                    "source_load_batch_name": "历史载入",
+                    "band_unit_id": "band-history",
+                    "band_code": "B04",
+                    "band_name": "Red",
+                    "band_type": "spectral",
+                    "unit": None,
+                    "display_order": 1,
+                    "grid_type": "geohash",
+                    "grid_level": 5,
+                    "partition_status": "completed",
+                    "quality_status": "pass",
+                    "ingest_status": "pending",
+                    "output_version": output_version,
+                    "attempt_no": 1,
+                    "error_message": None,
+                })
+            elif "WITH targets AS" in sql:
+                self._set_rows({
+                    "quality_run_id": "quality-run-history",
+                    "dataset_id": "dataset-history",
+                    "output_version": output_version,
+                    "quality_status": "pass",
+                    "result_complete": True,
+                    "execution_error": None,
+                    "started_at": datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+                    "completed_at": datetime(2026, 8, 24, 1, 1, tzinfo=timezone.utc),
+                    "checked_grid_count": 10,
+                    "error_logs": "[]",
+                    "rule_code": "index_schema",
+                    "rule_status": "pass",
+                    "finding_count": 0,
+                    "error_count": 0,
+                    "warning_count": 0,
+                    "rule_execution_error": None,
+                })
+            elif "SELECT task_id, status, operation" in sql:
+                self._set_rows({}, rows=[])
+            elif "SELECT count(*) AS total" in sql:
+                self._set_rows({"total": 1, "completed": 0})
+            elif "SELECT max(completed_at) AS completed_at" in sql:
+                self._set_rows({}, rows=[])
+
+        def _set_rows(self, row, *, rows=None):
+            self.description = [(key,) for key in row]
+            self.rows = list(rows if rows is not None else [tuple(row.values())])
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    detail = OpenGaussSceneRepository(None, connection_factory=Connection).get_partition_quality_batch(run_id)
+
+    quality_run = detail["datasets"][0]["quality_runs"][0]
+    assert quality_run["quality_run_id"] == "quality-run-history"
+    assert quality_run["items"][0]["rule_code"] == "index_schema"
+    quality_sql = next(sql for sql, _ in statements if "WITH targets AS" in sql)
+    assert "JOIN LATERAL" in quality_sql
+    assert "d.current_output_version" not in quality_sql
+
+
+def test_partition_batch_timing_finishes_only_after_all_ingest_units_complete() -> None:
+    timing = _partition_batch_timing(
+        [{
+            "status": "succeeded",
+            "runner_result": {
+                "datasets": [{
+                    "timings": {
+                        "partition": {
+                            "scope": "partition_to_ingest",
+                            "started_at": "2026-08-25T10:00:03Z",
+                        },
+                        "workers": [{"scope": "raster_worker", "started_at": "2026-08-25T10:00:03Z"}],
+                    },
+                }],
+            },
+        }],
+        ingest_total=2,
+        ingest_completed=2,
+        ingest_completed_at=datetime(2026, 8, 25, 10, 0, 13, tzinfo=timezone.utc),
+    )
+
+    assert timing is not None
+    assert timing["started_at"] == "2026-08-25T10:00:03Z"
+    assert timing["elapsed_sec"] == 10.0
+
+
+def test_partition_execution_timing_excludes_quality_and_ingest_waits() -> None:
+    timing = _partition_execution_timing([{
+        "status": "succeeded",
+        "runner_result": {
+            "datasets": [{
+                "timings": {
+                    "workflow": {
+                        "scope": "workflow_dataset",
+                        "started_at": "2026-08-25T10:00:01Z",
+                        "finished_at": "2026-08-25T10:00:06.906950Z",
+                        "elapsed_sec": 5.90695,
+                    },
+                },
+            }],
+        },
+    }])
+
+    assert timing is not None
+    assert timing["scope"] == "partition_execution"
+    assert timing["elapsed_sec"] == 5.90695
+
+
+def test_partition_compute_and_write_timings_are_separated() -> None:
+    timing_records = {
+        "datasets": [{
+            "timings": {
+                "driver": {
+                    "scope": "logical_batch_driver",
+                    "started_at": "2026-08-25T10:00:01Z",
+                    "finished_at": "2026-08-25T10:00:03.250000Z",
+                    "elapsed_sec": 2.25,
+                },
+                "workflow": {
+                    "scope": "workflow_dataset",
+                    "started_at": "2026-08-25T10:00:00Z",
+                    "finished_at": "2026-08-25T10:00:20Z",
+                    "elapsed_sec": 20.0,
+                    "phases": {
+                        "opengauss.start_output": {"elapsed_sec": 0.01, "count": 1},
+                        "opengauss.record_output_chunks": {"elapsed_sec": 0.1, "count": 1},
+                        "opengauss.verify_output_chunks": {"elapsed_sec": 0.2, "count": 1},
+                        "opengauss.promote_logical_staging": {"elapsed_sec": 16.3, "count": 1},
+                        "opengauss.complete_output": {"elapsed_sec": 0.3, "count": 1},
+                    },
+                },
+            },
+        }]}
+    attempts = [{"status": "succeeded", "runner_result": timing_records}]
+
+    compute = _partition_compute_timing(attempts)
+    write = _partition_write_timing(attempts)
+
+    assert compute is not None
+    assert compute["scope"] == "partition_compute"
+    assert compute["elapsed_sec"] == 2.25
+    assert write is not None
+    assert write["scope"] == "partition_write"
+    assert write["elapsed_sec"] == 16.9
+    assert "opengauss.start_output" not in write["phases"]
+    assert write["phases"]["opengauss.promote_logical_staging"]["elapsed_sec"] == 16.3
 
 
 def test_partition_quality_failure_can_resubmit_only_failed_band_units(api) -> None:
@@ -762,7 +1052,84 @@ def test_partition_projection_advances_dataset_current_output() -> None:
     )
     run_update = next(sql for sql, _ in statements if "UPDATE partition_runs SET status" in sql)
     assert "CASE status" in run_update
-    assert "END < %s OR status = %s\n                      )" in run_update
+    assert "END < %s\n                      )" in run_update
+    lookup_sql, lookup_params = next(sql_params for sql_params in statements if "SELECT pr.partition_run_id" in sql_params[0])
+    assert "partition_job_attempts" in lookup_sql
+    assert lookup_params == ("partition-task-001", "partition-task-001")
+
+
+def test_partition_projection_skips_duplicate_terminal_callback() -> None:
+    statements = []
+
+    class Cursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            statements.append((sql, params))
+
+        def fetchone(self):
+            return ("partition-run-001",)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    repository = OpenGaussSceneRepository(None, connection_factory=Connection)
+    repository.update_partition_task(
+        "partition-task-001",
+        "completed",
+        {"datasets": [{"dataset_id": "dataset-optical", "status": "completed", "output_version": "output-v2"}]},
+    )
+
+    assert not any("UPDATE partition_run_scenes" in sql for sql, _ in statements)
+
+
+def test_partition_task_binding_does_not_regress_running_projection() -> None:
+    statements = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            statements.append((sql, params))
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    repository = OpenGaussSceneRepository(None, connection_factory=Connection)
+    repository.bind_partition_task("partition-run-001", "partition-task-001")
+
+    run_bind_sql = next(sql for sql, _ in statements if "UPDATE partition_runs" in sql)
+    assert "CASE WHEN status = 'pending' THEN 'queued' ELSE status END" in run_bind_sql
 
 
 def test_retry_rebind_preserves_completed_scene_outputs() -> None:
@@ -982,6 +1349,7 @@ def test_execution_request_does_not_copy_source_batch_ids_into_dataset_identity(
     dumped = adapted.model_dump(mode="json")
     assert dumped["batch_id"] == "partition-run-001"
     assert "source_batch_ids" not in dumped
+    assert dumped["worker_container_limit"] == 0
     assert deepcopy(request.source_batch_ids) == ("load-001",)
 
 
@@ -1307,6 +1675,8 @@ def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:
     repository = OpenGaussSceneRepository(None)
 
     def read(sql, _params):
+        if "SELECT status FROM load_batches" in sql:
+            return [{"status": "succeeded"}]
         if "FROM load_batch_scenes" in sql:
             return [{
                 "scene_id": "scene-a", "dataset_id": "dataset-a", "dataset_code": "DS-A",

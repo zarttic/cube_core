@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from threading import Event
+
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -11,6 +14,7 @@ from cube_web.services.dataset_management import (
     ManagedDatasetQuery,
     OpenGaussDatasetManagementRepository,
 )
+from cube_web.services.partition_service import PartitionTaskStore
 
 
 def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[str, list]]:
@@ -49,6 +53,8 @@ def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[st
             "dataset-b": {"scenes": []},
         },
     )
+    task_store = PartitionTaskStore(max_workers=1)
+    repository.task_store = task_store
     hooks: dict[str, list] = {"quality": [], "publish": [], "withdraw": []}
 
     def quality(dataset_id, actor):
@@ -72,8 +78,20 @@ def _fixture() -> tuple[TestClient, InMemoryDatasetManagementRepository, dict[st
         request.state.actor = Actor(username=role, role=role)
         return await call_next(request)
 
-    app.include_router(create_datasets_router(service), prefix="/v1")
+    app.include_router(create_datasets_router(service, task_store=task_store), prefix="/v1")
     return TestClient(app), repository, hooks
+
+
+def _wait_for_task(repository, task_id: str) -> dict:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        task = repository.task_store.get(task_id)
+        if task is not None and task.status in {"completed", "failed", "cancelled"}:
+            return task.to_dict()
+        time.sleep(0.01)
+    task = repository.task_store.get(task_id)
+    assert task is not None
+    return task.to_dict()
 
 
 def test_list_exposes_scene_aggregates_filters_and_stable_paging() -> None:
@@ -246,14 +264,42 @@ def test_admin_deletes_one_band_grid_without_touching_other_grid_types() -> None
 
     response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
 
-    assert response.status_code == 200
-    assert response.json()["deleted_statuses"] == 1
-    assert response.json()["deleted_tiles"] == 1
-    assert response.json()["deleted_indexes"] == 1
+    assert response.status_code == 202
+    task = _wait_for_task(repository, response.json()["task_id"])
+    assert task["status"] == "completed"
+    assert task["result"]["deleted_statuses"] == 1
+    assert task["result"]["deleted_tiles"] == 1
+    assert task["result"]["deleted_indexes"] == 1
     assert [row["grid_type"] for row in details["grid"]] == ["mgrs"]
     assert [row["grid_type"] for row in details["tiles"]] == ["mgrs"]
     assert [row["grid_type"] for row in details["indexes"]] == ["mgrs"]
     assert [row["grid_type"] for row in details["bands"][0]["grid_statuses"]] == ["mgrs"]
+
+
+def test_admin_grid_delete_returns_before_long_running_cleanup_finishes() -> None:
+    client, repository, _ = _fixture()
+    details = repository.details["dataset-a"]
+    details["bands"][0]["grid_statuses"] = [{
+        "grid_type": "geohash", "grid_level": 5,
+        "partition_status": "completed", "quality_status": "pass", "ingest_status": "pending",
+    }]
+    started = Event()
+    release = Event()
+    original_delete = repository.delete_band_grid
+
+    def blocking_delete(dataset_id: str, band_unit_id: str, grid_type: str, *, actor: str) -> dict:
+        started.set()
+        assert release.wait(timeout=5)
+        return original_delete(dataset_id, band_unit_id, grid_type, actor=actor)
+
+    repository.delete_band_grid = blocking_delete  # type: ignore[method-assign]
+    response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
+
+    assert response.status_code == 202
+    assert started.wait(timeout=5)
+    assert repository.task_store.get(response.json()["task_id"]).status == "running"
+    release.set()
+    assert _wait_for_task(repository, response.json()["task_id"])["status"] == "completed"
 
 
 def test_admin_deletes_ingested_band_grid_and_ingest_record() -> None:
@@ -280,8 +326,10 @@ def test_admin_deletes_ingested_band_grid_and_ingest_record() -> None:
 
     response = client.delete("/v1/datasets/dataset-a/bands/band-a1-b01/grids/geohash")
 
-    assert response.status_code == 200
-    assert response.json()["deleted_ingest_records"] == 1
+    assert response.status_code == 202
+    task = _wait_for_task(repository, response.json()["task_id"])
+    assert task["status"] == "completed"
+    assert task["result"]["deleted_ingest_records"] == 1
     assert details["grid"] == []
     assert details["tiles"] == []
     assert details["indexes"] == []
@@ -333,6 +381,43 @@ def test_archive_preserves_scenes_and_source_objects() -> None:
     assert len(repository.metadata_audit) == audit_count
 
 
+def test_admin_deletes_dataset_and_its_managed_records() -> None:
+    client, repository, _ = _fixture()
+    details = repository.details["dataset-a"]
+    details["load_batches"] = [{"load_batch_id": "load-1", "status": "succeeded"}]
+    details["tiles"][0]["tile_uri"] = "s3://cube/partition/dataset-a/versions/out-a/tile.tif"
+    details["indexes"][0]["value_ref_uri"] = "s3://cube/partition/dataset-a/versions/out-a/index.json"
+    details["tiles"].append({"output_id": "tile-source", "tile_uri": "s3://cube/source/keep.tif"})
+
+    response = client.delete("/v1/datasets/dataset-a")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] is True
+    assert body["deleted_scenes"] == 2
+    assert body["deleted_load_batches"] == 1
+    assert body["object_cleanup"]["status"] == "pending"
+    assert body["object_cleanup"]["durable"] is False
+    assert body["object_cleanup"]["object_uris"] == [
+        "s3://cube/partition/dataset-a/versions/out-a/index.json",
+        "s3://cube/partition/dataset-a/versions/out-a/tile.tif",
+    ]
+    assert client.get("/v1/datasets/dataset-a").status_code == 404
+    assert client.get("/v1/datasets/dataset-b").status_code == 200
+    assert "dataset-a" not in repository.details
+
+
+def test_dataset_delete_waits_for_active_workflows() -> None:
+    client, repository, _ = _fixture()
+    repository.details["dataset-a"]["outputs"][0]["status"] = "running"
+
+    response = client.delete("/v1/datasets/dataset-a")
+
+    assert response.status_code == 409
+    assert "运行中的" in response.json()["detail"]["message"]
+    assert "dataset-a" in repository.datasets
+
+
 def test_dataset_mutations_require_admin() -> None:
     client, repository, hooks = _fixture()
     headers = {"x-test-role": "user"}
@@ -361,6 +446,7 @@ def test_dataset_mutations_require_admin() -> None:
             json={"reason": "unauthorized"},
             headers=headers,
         ),
+        client.delete("/v1/datasets/dataset-a", headers=headers),
     )
 
     assert [response.status_code for response in requests] == [403] * len(requests)

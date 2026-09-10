@@ -1798,6 +1798,14 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 "UPDATE partition_output_versions SET status = 'failed', error_code = %s, error_message = %s, failed_at = now() WHERE dataset_id = %s AND output_version = %s AND status = 'staging'",
                 (error_code, error_message, dataset_id, output_version),
             )
+            self._execute(
+                connection,
+                """UPDATE partition_datasets SET partition_status = 'failed',
+                       partition_completed_at = NULL, updated_at = now()
+                   WHERE dataset_id = %s AND current_output_version IS DISTINCT FROM %s
+                     AND partition_status IN ('pending','queued','running','cancelled')""",
+                (dataset_id, output_version),
+            )
             if hasattr(connection, "commit"):
                 connection.commit()
         return None

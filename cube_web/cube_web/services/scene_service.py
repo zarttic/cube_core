@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from datetime import date
 from math import isfinite
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -12,6 +14,9 @@ from cube_web.services.http_errors import HTTPException
 from cube_web.services.partition_contracts import DatasetInput, StrictPartitionRequest
 from cube_web.services.partition_defaults import default_grid_level_for_resolution, resolution_metadata_from_assets
 from cube_web.services.scene_contracts import CarbonFootprintPreviewRequest, CarbonGridPreviewRequest, DatasetReloadBatchRequest, PartitionDraftCreateRequest, ScenePartitionRunRequest, reload_selection_band_unit_ids
+from cube_web.services.partition_workflow import _safe_dataset_error
+
+logger = logging.getLogger(__name__)
 
 
 class SceneRepository(Protocol):
@@ -70,6 +75,8 @@ class SceneRepository(Protocol):
         keyword: str | None = None,
         data_type: str | None = None,
         status: str | None = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
         page: int = 1,
         page_size: int = 20,
         limit: int | None = None,
@@ -188,6 +195,9 @@ class SceneDomainService:
             "page_size": page_size,
             "dataset_options": [],
         }
+
+    def archive_load_batch(self, load_batch_id: str) -> dict[str, Any] | None:
+        return self.repository.archive_load_batch(load_batch_id)
 
     def import_load_schema(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.repository.upsert_load_schema(payload)
@@ -374,7 +384,11 @@ class SceneDomainService:
                 task = self.workflow.submit_strict(next(iter(data_types)), strict_request)
             self.repository.bind_partition_task(request.partition_run_id, task.task_id)
         except Exception as exc:
-            self.repository.fail_partition_run(request.partition_run_id, str(exc))
+            safe_error = _safe_dataset_error(exc)
+            try:
+                self.repository.fail_partition_run(request.partition_run_id, safe_error)
+            except Exception:
+                logger.exception("Failed to persist partition run failure %s", request.partition_run_id)
             raise
         try:
             current = self.workflow.get_task(task.task_id).to_dict()
@@ -402,6 +416,8 @@ class SceneDomainService:
         keyword: str | None = None,
         data_type: str | None = None,
         status: str | None = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
         page: int = 1,
         page_size: int = 20,
         limit: int | None = None,
@@ -409,10 +425,14 @@ class SceneDomainService:
         if limit is not None:
             page = 1
             page_size = limit
+        if created_from and created_to and created_from > created_to:
+            raise HTTPException(status_code=422, detail="创建时间范围无效：开始日期不能晚于结束日期")
         result = self.repository.list_partition_quality_batches(
             keyword=keyword,
             data_type=data_type,
             status=status,
+            created_from=created_from,
+            created_to=created_to,
             page=page,
             page_size=page_size,
         )
@@ -470,6 +490,16 @@ class SceneDomainService:
             band_unit_ids=tuple(sorted({band for bands in retry_band_unit_ids.values() for band in bands})) or None,
         )
         return task.to_dict()
+
+    def cancel_partition_run(self, partition_run_id: str) -> dict[str, Any]:
+        """Force-stop the task bound to a partition run."""
+        task_id = self.repository.get_partition_run_task_id(partition_run_id)
+        if not task_id:
+            raise HTTPException(status_code=409, detail="partition batch has no cancellable task")
+        force_cancel = getattr(self.workflow, "force_cancel_task", None)
+        task = (force_cancel or self.workflow.cancel_task)(task_id)
+        task_value = task.to_dict() if hasattr(task, "to_dict") else dict(task)
+        return {"partition_run_id": partition_run_id, **task_value}
 
     def create_partition_draft(self, payload: PartitionDraftCreateRequest, actor: Any) -> dict[str, Any]:
         draft_id = f"partition-draft-{uuid4().hex[:12]}"
@@ -628,6 +658,7 @@ def build_partition_execution_request(
         grid_type=first.grid_type,
         requested_grid_level=first.requested_grid_level,
         partition_method=first.partition_method,
+        worker_container_limit=request.worker_container_limit,
         cover_mode=first.cover_mode or "intersect",
         time_granularity=first.time_granularity or "day",
         max_cells_per_asset=0,

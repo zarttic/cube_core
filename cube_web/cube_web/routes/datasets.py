@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from minio import Minio
@@ -83,8 +84,12 @@ class RoleRestrictionsPayload(StrictPayload):
     hidden_roles: list[str] = Field(default_factory=list, max_length=len(HIDEABLE_DATASET_ROLES))
 
 
-def create_datasets_router(service: DatasetManagementService | None = None) -> APIRouter:
+def create_datasets_router(service: DatasetManagementService | None = None, task_store: Any | None = None) -> APIRouter:
     service = service or _production_service()
+    if task_store is None:
+        from cube_web.routes.partition import partition_service
+
+        task_store = partition_service.task_store
     router = APIRouter(prefix="/datasets", tags=["datasets"])
 
     @router.get("")
@@ -165,10 +170,12 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
         actor = require_admin(current_actor(request))
         return _call(lambda: service.retry_failed_band_ingest(dataset_id, band_unit_id, actor=actor.username))
 
-    @router.delete("/{dataset_id}/bands/{band_unit_id}/grids/{grid_type}")
+    @router.delete("/{dataset_id}/bands/{band_unit_id}/grids/{grid_type}", status_code=202)
     def delete_band_grid(dataset_id: str, band_unit_id: str, grid_type: GridType, request: Request) -> dict:
         actor = require_admin(current_actor(request))
-        return _call(lambda: service.delete_band_grid(dataset_id, band_unit_id, grid_type, actor=actor.username))
+        return _call(lambda: service.queue_band_grid_deletion(
+            dataset_id, band_unit_id, grid_type, actor=actor.username, task_store=task_store
+        ))
 
     @router.post("/{dataset_id}/ingest", status_code=202)
     def request_ingest(dataset_id: str, request: Request) -> dict:
@@ -189,6 +196,11 @@ def create_datasets_router(service: DatasetManagementService | None = None) -> A
     def archive(dataset_id: str, payload: ArchiveRequest, request: Request) -> dict:
         actor = require_admin(current_actor(request))
         return _call(lambda: service.archive(dataset_id, reason=payload.reason, actor=actor.username))
+
+    @router.delete("/{dataset_id}")
+    def delete_dataset(dataset_id: str, request: Request) -> dict:
+        actor = require_admin(current_actor(request))
+        return _call(lambda: service.delete_dataset(dataset_id, actor=actor.username))
 
     for detail in sorted(DETAILS):
         router.add_api_route(

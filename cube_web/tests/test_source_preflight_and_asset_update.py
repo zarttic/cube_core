@@ -281,6 +281,105 @@ def test_opengauss_asset_update_scopes_authoritative_sql_to_dataset() -> None:
     assert scene_update_params[-2:] == ("dataset-a", "a1")
 
 
+def test_opengauss_delete_band_grid_preserves_sibling_quality_status() -> None:
+    class Cursor:
+        def __init__(self) -> None:
+            self.statements: list[tuple[str, tuple[Any, ...]]] = []
+            self.status_rows = [
+                {
+                    "dataset_id": "dataset-a",
+                    "band_unit_id": "band-a1-b01",
+                    "grid_type": "geohash",
+                    "output_version": "output-v1",
+                    "partition_status": "completed",
+                    "quality_status": "pass",
+                    "ingest_status": "completed",
+                },
+                {
+                    "dataset_id": "dataset-a",
+                    "band_unit_id": "band-a1-b02",
+                    "grid_type": "geohash",
+                    "output_version": "output-v1",
+                    "partition_status": "completed",
+                    "quality_status": "pass",
+                    "ingest_status": "completed",
+                },
+            ]
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql: str, params=()):
+            self.statements.append((sql, tuple(params)))
+            self.rowcount = 0
+            normalized = " ".join(sql.split())
+            if "UPDATE partition_data_unit_grid_status SET quality_status='pending'" in normalized:
+                dataset_id, output_versions = params
+                for row in self.status_rows:
+                    if row["dataset_id"] == dataset_id and row["output_version"] in output_versions:
+                        row["quality_status"] = "pending"
+            elif "DELETE FROM partition_data_unit_grid_status" in normalized:
+                dataset_id, band_unit_id, grid_type = params
+                retained = [
+                    row for row in self.status_rows
+                    if not (
+                        row["dataset_id"] == dataset_id
+                        and row["band_unit_id"] == band_unit_id
+                        and row["grid_type"] == grid_type
+                    )
+                ]
+                self.rowcount = len(self.status_rows) - len(retained)
+                self.status_rows = retained
+
+        def fetchone(self):
+            sql = self.statements[-1][0]
+            if "FROM scene_bands sb" in sql:
+                return {"source_asset_id": "a1", "band_code": "B01", "scene_id": "scene-a1"}
+            if "SELECT EXISTS" in sql and "partition_publications" in sql:
+                return {"referenced": False}
+            if "current_output_version" in sql:
+                return None
+            return None
+
+        def fetchall(self):
+            sql = self.statements[-1][0]
+            if "FROM partition_data_unit_grid_status" in sql:
+                dataset_id, band_unit_id, grid_type = self.statements[-1][1]
+                return [
+                    row.copy() for row in self.status_rows
+                    if row["dataset_id"] == dataset_id
+                    and row["band_unit_id"] == band_unit_id
+                    and row["grid_type"] == grid_type
+                ]
+            return []
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self, **_kwargs):
+            return cursor
+
+    repository = OpenGaussDatasetManagementRepository(None, connection_factory=lambda: Connection())
+    result = repository.delete_band_grid("dataset-a", "band-a1-b01", "geohash", actor="admin")
+
+    scene_band_lookup = cursor.statements[0][0]
+    assert "sb.asset_id AS source_asset_id" in scene_band_lookup
+    assert "sb.source_asset_id" not in scene_band_lookup
+    assert result["deleted_statuses"] == 1
+    assert [row["band_unit_id"] for row in cursor.status_rows] == ["band-a1-b02"]
+    assert cursor.status_rows[0]["quality_status"] == "pass"
+
+
 class _ObjectCleanupRepository(InMemoryDatasetManagementRepository):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
