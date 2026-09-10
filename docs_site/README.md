@@ -16,4 +16,4 @@ python3.11 -m http.server 50041 --directory docs_site
 
 ## 内容基准
 
-文档内容以当前仓库的 `README.md`、`cube_web/docs/`、`docs/LOADER_SCHEMA_HANDOFF.md` 和实际前端代码为准。生产格网只描述 `geohash`、`mgrs`、`isea4h`；运行时基础设施使用 OpenGauss、Ray 和 MinIO。
+文档内容以当前仓库的 `README.md`、`cube_web/docs/`、`archive/docs/LOADER_SCHEMA_HANDOFF.md`（历史交付契约，仅作追溯） 和实际前端代码为准。生产格网只描述 `geohash`、`mgrs`、`isea4h`；运行时基础设施使用 OpenGauss、Ray 和 MinIO。

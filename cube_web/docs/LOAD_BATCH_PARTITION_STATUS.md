@@ -397,4 +397,4 @@ ORDER BY d.dataset_id, s.scene_id, sb.band_unit_id, g.grid_type, g.grid_level;
 - 载入批次查询和状态关联：[scene_repository.py](../cube_web/services/scene_repository.py)
 - 领域表和状态枚举：[scene_domain_schema.py](../cube_web/services/scene_domain_schema.py)
 - API 回归测试：[test_scene_api.py](../tests/test_scene_api.py)
-- 载入批次与剖分批次关系：[MULTI_GRID_PARTITION_DESIGN.md](../../docs/MULTI_GRID_PARTITION_DESIGN.md)
+- 载入批次与剖分批次关系：[MULTI_GRID_PARTITION_DESIGN.md（已归档）](../../archive/docs/MULTI_GRID_PARTITION_DESIGN.md)

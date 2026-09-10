@@ -39,7 +39,7 @@ Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址�
   碳卫星任务当前为一个 Worker task。
 
 Worker Pod 必须在启动时声明一个逻辑槽位；模板
-`docs/kuberay-migration/templates/raycluster.yaml` 已配置：
+`archive/docs/kuberay-migration/templates/raycluster.yaml`（迁移包，已归档） 已配置：
 
 ```yaml
 rayStartParams:

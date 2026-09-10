@@ -7,7 +7,7 @@
 ## 当前文档
 
 - [WORKFLOW.md](WORKFLOW.md)：当前剖分、manifest、入库、质检、AOI 读取和运行参数说明。
-- [CELL_GEOM_MIGRATION.md](CELL_GEOM_MIGRATION.md)：`rs_cube_cell_fact.cell_geom` 迁移和边界验证。
+- [CELL_GEOM_MIGRATION.md（已归档）](../../archive/docs/cube_split/CELL_GEOM_MIGRATION.md)：`rs_cube_cell_fact.cell_geom` 迁移和边界验证。
 
 ## 运行版本
 

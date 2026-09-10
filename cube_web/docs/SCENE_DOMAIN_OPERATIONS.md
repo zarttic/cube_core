@@ -95,7 +95,7 @@ cd cube_web/frontend && npm run test:unit && npm run build
 The complete real-source gate is implemented by
 `cube_web/scripts/run_real_partition_acceptance.py`. The `rs_cube_cell_fact`
 geometry migration and validation are documented in
-[`../../cube_split/docs/CELL_GEOM_MIGRATION.md`](../../cube_split/docs/CELL_GEOM_MIGRATION.md).
+[`../../archive/docs/cube_split/CELL_GEOM_MIGRATION.md`](../../archive/docs/cube_split/CELL_GEOM_MIGRATION.md).
 
 The runner consumes prepared, reviewed MinIO source objects and covers all four
 product types, Geohash/MGRS/ISEA4H, multi-Dataset and multi-Scene runs, task
