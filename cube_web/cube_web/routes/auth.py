@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from cube_web.services import auth_service, runtime_config
 from cube_web.services.access_control import is_admin_role
+from cube_web.services.api_errors import detail_code, detail_message, error_response, request_id_from_header
 
 PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
 
@@ -111,6 +112,7 @@ def _safe_target_path(target: str) -> str:
 
 
 async def require_auth_for_api(request: Request, call_next):
+    request_id_from_header(request)
     settings = auth_service.auth_settings()
     if request.url.path in PUBLIC_V1_PATHS:
         request.state.actor = Actor(username="system:public-import", role="service")
@@ -123,7 +125,27 @@ async def require_auth_for_api(request: Request, call_next):
                 role=str(payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"),
             )
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            if exc.status_code >= 500:
+                code = {502: "bad_gateway", 503: "service_unavailable"}.get(exc.status_code, "internal_error")
+                message = {
+                    502: "上游服务暂时不可用，请稍后重试",
+                    503: "服务暂时不可用，请稍后重试",
+                }.get(exc.status_code, "服务器内部错误，请稍后重试")
+                return error_response(
+                    request,
+                    status_code=exc.status_code,
+                    code=code,
+                    message=message,
+                    headers=exc.headers,
+                )
+            return error_response(
+                request,
+                status_code=exc.status_code,
+                code=detail_code(exc.status_code, exc.detail),
+                message=detail_message(exc.detail, "认证失败"),
+                detail=exc.detail,
+                headers=exc.headers,
+            )
     else:
         request.state.actor = Actor(username="local-development", role="admin")
     return await call_next(request)
