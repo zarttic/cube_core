@@ -57,13 +57,11 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job 
   --ray-address "$RAY_ADDRESS"
 ```
 
-运行光学入库端到端检查：
+光学入库端到端检查脚本已归档，见
+[archive/scripts/cube_split/run_ray_ingest_e2e.sh](../archive/scripts/cube_split/run_ray_ingest_e2e.sh)；
+它需要外部 Ray、MinIO 与 OpenGauss，当前不随代码维护。
 
-```bash
-scripts/run_ray_ingest_e2e.sh
-```
-
-脚本从 `CUBE_WEB_POSTGRES_DSN`/`POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`/`RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
+Ray 剖分与入库作业从 `CUBE_WEB_POSTGRES_DSN`/`POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`/`RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
 `MINIO_SECRET_KEY` 和 `MINIO_BUCKET` 读取 OpenGauss、Ray 和 MinIO 配置。
 分布式后端缺少必需配置时会显式失败。
 

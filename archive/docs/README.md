@@ -32,6 +32,7 @@
 | `auth-integration-guide.md` | `docs/` | 认证集成方案（2026-08-11） |
 | `测试大纲执行结果_20260824.md` | `docs/` | 测试大纲执行结果（2026-08-24） |
 | `分析就绪数据剖分管理系统测试大纲.docx` | `docs/` | 测试大纲原稿 |
+| `environment_versions.txt` | 仓库根 | 2026-07-13 开发者环境版本快照（文件自述非生产契约） |
 
 ## KubeRay 迁移包（`kuberay-migration/`）
 
