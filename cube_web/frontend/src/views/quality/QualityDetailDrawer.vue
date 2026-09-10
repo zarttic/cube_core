@@ -5,7 +5,12 @@ import { Download, Refresh } from '@element-plus/icons-vue';
 import AppTable from '@/components/AppTable.vue';
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
-import { qualityErrorLabel, qualityRecoveryLabel, qualityRuleLabel } from '@/utils/qualityLabels';
+import {
+  qualityErrorLabel,
+  qualityExecutionErrorLabel,
+  qualityRecoveryLabel,
+  qualityRuleLabel,
+} from '@/utils/qualityLabels';
 
 const props = defineProps({
   testId: { type: String, default: '' },
@@ -38,6 +43,22 @@ function bandLabel(row) {
   return row.band_name ? `${row.band_code || '未命名波段'} · ${row.band_name}` : row.band_code;
 }
 
+function numericMetric(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatMetric(value, suffix = '') {
+  const number = numericMetric(value);
+  return number === null ? '-' : `${number.toFixed(3)}${suffix}`;
+}
+
+function formatCount(value) {
+  const number = numericMetric(value);
+  return number === null ? '-' : number.toLocaleString('zh-CN');
+}
+
 const locationTree = computed(() => {
   if (!props.errors.length) return [];
   const dataset = {
@@ -66,7 +87,7 @@ const locationTree = computed(() => {
     band.children.push({
       key: `error:${row.quality_error_id}`,
       kind: 'error',
-      label: `${qualityErrorLabel(row.error_code)}：${row.message}`,
+      label: `${qualityErrorLabel(row.error_code)}：${qualityExecutionErrorLabel(row.message)}`,
       row,
     });
   }
@@ -85,15 +106,21 @@ function rerun() {
     <div class="drawer-close-row"><el-button data-testid="quality-detail-close" link type="primary" @click="emit('close')">关闭</el-button></div>
     <template v-if="detail">
       <el-descriptions :column="1" border class="run-overview">
+        <el-descriptions-item label="数据集名称">{{ detail.dataset_title || detail.dataset_code || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="数据集编码">{{ detail.dataset_code || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="数据集 ID">{{ detail.dataset_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="质量运行 ID">{{ detail.quality_run_id }}</el-descriptions-item>
         <el-descriptions-item label="输出版本">{{ detail.output_version }}</el-descriptions-item>
         <el-descriptions-item label="运行序列">{{ detail.quality_sequence }}</el-descriptions-item>
         <el-descriptions-item label="规则集版本">{{ detail.rule_set_version }}</el-descriptions-item>
         <el-descriptions-item label="当前质量">{{ detail.is_current ? '是（当前质量）' : '否（历史质量）' }}</el-descriptions-item>
         <el-descriptions-item label="状态"><StatusTag domain="quality" :value="detail.status" size="small" /></el-descriptions-item>
+        <el-descriptions-item label="检查格网数">{{ formatCount(detail.metrics?.checked_grid_count) }}</el-descriptions-item>
+        <el-descriptions-item label="质检耗时">{{ formatMetric(detail.metrics?.quality_elapsed_sec, ' 秒') }}</el-descriptions-item>
+        <el-descriptions-item label="格网吞吐">{{ formatMetric(detail.metrics?.grid_throughput_per_sec, ' 格网/秒') }}</el-descriptions-item>
       </el-descriptions>
       <div class="drawer-actions">
-        <el-button :icon="Refresh" :loading="rerunning" @click="rerun">重新质检</el-button>
+        <el-button :icon="Refresh" :loading="rerunning" @click="rerun">立即重试</el-button>
         <el-button data-testid="quality-export-all" :icon="Download" :loading="exporting" @click="emit('export', { format: 'csv', filtered: false })">导出全部 CSV</el-button>
         <el-button :icon="Download" :loading="exporting" @click="emit('export', { format: 'json', filtered: false })">导出全部 JSON</el-button>
       </div>
@@ -102,9 +129,16 @@ function rerun() {
       <el-tabs :model-value="activeTab" @tab-change="emit('tab-change', $event)">
         <el-tab-pane name="errors"><template #label><span data-testid="quality-detail-tab-errors">问题定位</span></template>
           <section class="location-overview">
-            <div><span>数据集</span><strong>{{ detail.dataset_code || detail.dataset_id }}</strong></div>
+            <div><span>数据集</span><strong>{{ detail.dataset_title || detail.dataset_code || detail.dataset_id }}</strong></div>
             <div><span>本页问题</span><strong>{{ errorTotal }}</strong></div>
             <div><span>定位粒度</span><strong>景 / 波段</strong></div>
+          </section>
+          <section v-if="detail.execution_error || results.some((item) => item.execution_error) || errors.length" class="quality-execution-log" data-testid="quality-execution-log">
+            <strong>失败日志</strong>
+            <small>当前 quality_run_id：{{ detail.quality_run_id }}</small>
+            <p v-if="detail.execution_error">{{ qualityExecutionErrorLabel(detail.execution_error) }}</p>
+            <p v-for="item in results.filter((result) => result.execution_error)" :key="`${item.rule_code}:${item.execution_error}`">{{ qualityRuleLabel(item.rule_code) }}：{{ qualityExecutionErrorLabel(item.execution_error) }}</p>
+            <p v-for="item in errors" :key="item.quality_error_id"><span>{{ qualityErrorLabel(item.error_code) }}</span>：{{ qualityExecutionErrorLabel(item.message) }}</p>
           </section>
           <el-empty v-if="!errors.length" description="当前筛选条件下没有问题记录" />
           <el-tree v-else class="quality-location-tree" :data="locationTree" :props="treeProps" node-key="key" default-expand-all :expand-on-click-node="false">
@@ -112,7 +146,7 @@ function rerun() {
               <div class="quality-tree-node" :class="`quality-tree-${data.kind}`">
                 <template v-if="data.kind === 'error'">
                   <span class="tree-error-code">{{ qualityErrorLabel(data.row.error_code) }}</span>
-                  <span class="tree-error-message">{{ data.row.message }}</span>
+                  <span class="tree-error-message">{{ qualityExecutionErrorLabel(data.row.message) }}</span>
                 </template>
                 <template v-else>
                   <strong>{{ data.label }}</strong>
@@ -141,7 +175,7 @@ function rerun() {
             <el-table-column label="规则" min-width="180"><template #default="{ row }"><span :title="row.rule_code">{{ qualityRuleLabel(row.rule_code) }}</span></template></el-table-column>
             <el-table-column label="错误码" min-width="180"><template #default="{ row }"><span :title="row.error_code">{{ qualityErrorLabel(row.error_code) }}</span></template></el-table-column>
             <el-table-column prop="field" label="字段" min-width="120" />
-            <el-table-column prop="message" label="说明" min-width="230" show-overflow-tooltip />
+            <el-table-column label="说明" min-width="230" show-overflow-tooltip><template #default="{ row }">{{ qualityExecutionErrorLabel(row.message) }}</template></el-table-column>
             <el-table-column label="问题来源 / 建议处理" min-width="250"><template #default="{ row }">{{ qualityRecoveryLabel(row.rule_code, row.error_code) }}</template></el-table-column>
           </AppTable>
         </el-tab-pane>
@@ -170,6 +204,11 @@ function rerun() {
 .location-overview > div { border: 1px solid #d7dde5; padding: 8px 10px; background: #f8fafc; }
 .location-overview span, .location-overview strong { display: block; }
 .location-overview span { color: #667085; font-size: 12px; margin-bottom: 3px; }
+.quality-execution-log { display: grid; gap: 4px; margin: 0 0 14px; border-left: 3px solid #c24d45; background: #fff7f6; padding: 8px 10px; color: #7f2d28; }
+.quality-execution-log > strong { color: #9b2c2c; }
+.quality-execution-log > small { color: #667085; overflow-wrap: anywhere; }
+.quality-execution-log p { margin: 0; overflow-wrap: anywhere; }
+.quality-execution-log p span { font-weight: 600; }
 .quality-location-tree { border: 1px solid #d7dde5; padding: 8px; margin-bottom: 14px; max-height: 360px; overflow: auto; }
 .quality-tree-node { display: flex; align-items: baseline; gap: 8px; min-width: 0; line-height: 1.65; }
 .quality-tree-node small { color: #667085; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -13,6 +13,7 @@ import { formatShanghaiRange, formatShanghaiTime } from '@/utils/time';
 const props = defineProps({
   testId: { type: String, default: '' }, visible: Boolean, datasetId: { type: String, default: '' },
   detail: { type: Object, default: () => ({}) }, loading: Boolean, actionLoading: Boolean,
+  pendingGridDeletes: { type: Object, default: () => ({}) },
   hiddenRoles: { type: Array, default: () => [] }, roleRestrictionsLoading: Boolean,
   writeEnabled: { type: Boolean, default: true },
   activeTab: { type: String, default: 'overview' }, tabPages: { type: Object, default: () => ({}) },
@@ -20,7 +21,7 @@ const props = defineProps({
 const emit = defineEmits([
   'close', 'tab-change', 'tab-page-change', 'tab-page-size-change', 'update-metadata',
   'reassign-scene', 'retry-band-ingest', 'queue-partition',
-  'update-role-restrictions', 'delete-band-grid',
+  'update-role-restrictions', 'delete-band-grid', 'delete-dataset',
 ]);
 
 const tabs = [
@@ -38,8 +39,20 @@ function latestGridStatus(band, gridType) {
   return (band?.grid_statuses || []).filter((item) => item.grid_type === gridType)
     .sort((left, right) => Number(right.grid_level) - Number(left.grid_level))[0] || null;
 }
+function gridDeleteKey(band, gridType) {
+  return `${props.datasetId}::${band?.band_unit_id || ''}::${gridType}`;
+}
+function gridDeletePending(band, gridType) {
+  return Boolean(props.pendingGridDeletes[gridDeleteKey(band, gridType)]);
+}
+function effectiveGridStatus(band, gridType) {
+  const status = latestGridStatus(band, gridType);
+  if (!gridDeletePending(band, gridType)) return status;
+  return { ...(status || {}), deletion_status: 'running' };
+}
 function gridStatusLabel(status) {
   if (!status) return '未剖分';
+  if (status.deletion_status === 'running') return '删除中';
   if (status.ingest_status === 'completed') return '已入库';
   if (status.quality_status === 'pass' || status.quality_status === 'warn') return '质检通过';
   if (status.quality_status === 'fail' || status.quality_status === 'error') return '质检未通过';
@@ -48,6 +61,7 @@ function gridStatusLabel(status) {
   return status.partition_status === 'running' ? '剖分中' : '未剖分';
 }
 function gridStatusClass(status) {
+  if (status?.deletion_status === 'running') return 'is-progress';
   if (status?.ingest_status === 'completed') return 'is-ingested';
   if (!status || ['pending', 'queued', 'cancelled'].includes(status.partition_status)) return 'is-empty';
   if (status.partition_status === 'failed' || ['fail', 'error'].includes(status.quality_status)) return 'is-error';
@@ -55,12 +69,13 @@ function gridStatusClass(status) {
 }
 function canDeleteGrid(status) {
   return Boolean(status)
+    && status.deletion_status !== 'running'
     && !['running', 'queued'].includes(status.partition_status)
     && status.quality_status !== 'running'
     && !['running', 'queued'].includes(status.ingest_status);
 }
 async function confirmDeleteGrid(band, gridType) {
-  const status = latestGridStatus(band, gridType);
+  const status = effectiveGridStatus(band, gridType);
   if (!band?.band_unit_id || !canDeleteGrid(status)) return;
   try {
     await ElMessageBox.confirm(
@@ -102,6 +117,7 @@ function levelOptions(gridType) {
   return definition ? Array.from({ length: definition.maxLevel - definition.minLevel + 1 }, (_, index) => definition.minLevel + index) : [];
 }
 function gridCompleted(band, gridType = repartitionGridType.value) {
+  if (gridDeletePending(band, gridType)) return true;
   return (band?.grid_statuses || []).some(
     (status) => status.grid_type === gridType && ['completed', 'running', 'queued'].includes(status.partition_status)
   );
@@ -292,6 +308,20 @@ function saveMetadata() {
   editing.value = false;
 }
 
+async function confirmDeleteDataset() {
+  const datasetName = props.detail?.overview?.dataset_title || props.detail?.overview?.dataset_code || props.datasetId;
+  try {
+    await ElMessageBox.confirm(
+      `确认删除数据集“${datasetName}”？该操作会同时删除其剖分成果、质检/入库记录及对应载入批次，且不可恢复。`,
+      '删除数据集',
+      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  emit('delete-dataset');
+}
+
 function saveRoleRestrictions() {
   emit('update-role-restrictions', accessRoles.filter((role) => !visibleRoleSelection.value.includes(role)));
 }
@@ -334,7 +364,10 @@ function sceneCollapsed(sceneId) {
         <template #label><span :data-testid="`dataset-detail-tab-${key}`">{{ label }}</span></template>
       <template v-if="key === 'overview'">
           <template v-if="detail?.overview">
-            <div v-if="writeEnabled" class="section-actions"><el-button link type="primary" @click="editing = !editing">{{ editing ? '取消编辑' : '编辑元数据' }}</el-button></div>
+            <div v-if="writeEnabled" class="section-actions">
+              <el-button link type="primary" :disabled="actionLoading" @click="editing = !editing">{{ editing ? '取消编辑' : '编辑元数据' }}</el-button>
+              <el-button data-testid="delete-dataset" link type="danger" :loading="actionLoading" @click="confirmDeleteDataset">删除数据集</el-button>
+            </div>
             <el-form v-if="editing" label-width="92px" class="metadata-form">
               <el-form-item label="名称"><el-input v-model="metadataForm.dataset_title" /></el-form-item>
               <el-form-item label="描述"><el-input v-model="metadataForm.description" type="textarea" :rows="3" /></el-form-item>
@@ -390,7 +423,7 @@ function sceneCollapsed(sceneId) {
               </header>
               <div v-if="!sceneCollapsed(scene.scene_id) && scene.bands?.length" class="managed-band-list">
                 <div v-for="band in scene.bands" :key="band.band_unit_id || `${band.asset_id}-${band.band_code}`" class="managed-band-row" :data-testid="band.band_unit_id ? `managed-band-${band.band_unit_id}` : undefined">
-                  <div class="managed-band-identity"><el-checkbox v-if="writeEnabled" :model-value="selectedPartitionBandIds.includes(band.band_unit_id)" :disabled="!band.band_unit_id || gridCompleted(band)" @click.stop @change="(value) => togglePartitionBands([band], value)" /><strong>{{ bandDisplayLabel(band) }}</strong><span>{{ band.band_unit_id || '-' }}</span><div class="band-grid-tags"><div v-for="grid in gridTypes" :key="grid.value" class="band-grid-status" :class="[`grid-${grid.value}`, gridStatusClass(latestGridStatus(band, grid.value))]"><span>{{ grid.label }} · {{ gridStatusLabel(latestGridStatus(band, grid.value)) }}</span><el-button v-if="writeEnabled && latestGridStatus(band, grid.value)" :data-testid="`delete-grid-${band.band_unit_id}-${grid.value}`" link type="danger" size="small" :disabled="!canDeleteGrid(latestGridStatus(band, grid.value))" @click.stop="confirmDeleteGrid(band, grid.value)">删除</el-button></div></div></div>
+                  <div class="managed-band-identity"><el-checkbox v-if="writeEnabled" :model-value="selectedPartitionBandIds.includes(band.band_unit_id)" :disabled="!band.band_unit_id || gridCompleted(band)" @click.stop @change="(value) => togglePartitionBands([band], value)" /><strong>{{ bandDisplayLabel(band) }}</strong><span>{{ band.band_unit_id || '-' }}</span><div class="band-grid-tags"><div v-for="grid in gridTypes" :key="grid.value" class="band-grid-status" :class="[`grid-${grid.value}`, gridStatusClass(effectiveGridStatus(band, grid.value))]"><span>{{ grid.label }} · {{ gridStatusLabel(effectiveGridStatus(band, grid.value)) }}</span><el-button v-if="writeEnabled && effectiveGridStatus(band, grid.value)" :data-testid="`delete-grid-${band.band_unit_id}-${grid.value}`" link type="danger" size="small" :disabled="!canDeleteGrid(effectiveGridStatus(band, grid.value))" @click.stop="confirmDeleteGrid(band, grid.value)">删除</el-button></div></div></div>
                   <span>{{ dataUnitTypeLabel(detail?.overview?.data_type) }}</span>
                   <span>{{ band.band_type || '-' }}</span>
                   <span>{{ band.asset_id || '-' }}</span>

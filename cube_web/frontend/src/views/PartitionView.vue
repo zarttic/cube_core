@@ -4,12 +4,14 @@ import { ElMessage } from 'element-plus';
 import { RefreshLeft } from '@element-plus/icons-vue';
 
 import { requestGet, requestJson } from '@/api/client';
+import { createRequestScope } from '@/api/requestScope';
 import { authRequired } from '@/config';
 import router from '@/router';
 import { usePartitionStore } from '@/stores/partition';
 import { takePartitionSelection } from '@/stores/partitionTransfer';
 import { useSubUserStore } from '@/stores/subUser';
 import { derivedPartitionMethod, gridDefinition, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
+import { qualityExecutionErrorLabel } from '@/utils/qualityLabels';
 import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
 import BatchAssetsPanel from '@/views/partition/BatchAssetsPanel.vue';
@@ -38,13 +40,18 @@ const carbonFootprintLoading = ref(false);
 const mapPreviewVisible = ref(true);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
+const mapSourceGeometriesByModule = ref({});
+const mapGridLegendsByModule = ref({});
 const carbonFootprintsByModule = ref({});
 let gridPreviewGeneration = 0;
 let carbonFootprintGeneration = 0;
+const gridPreviewScope = createRequestScope();
+const carbonFootprintScope = createRequestScope();
 const gridPreviewColors = Object.freeze({ geohash: '#2f73d9', mgrs: '#16836f', isea4h: '#d97706' });
 const moduleForms = ref(Object.fromEntries(productModules.map(({ value }) => [value, {
   gridType: value === 'carbon' ? 'isea4h' : 'geohash',
   requestedGridLevel: value === 'carbon' ? 6 : 4,
+  workerContainerLimit: 0,
 }])));
 
 const activeProduct = computed(() => productModules.find((item) => item.value === activeModule.value) || null);
@@ -58,6 +65,12 @@ const gridConfigLocked = computed(() => activeDatasets.value.some((dataset) => (
 )));
 const gridLevelLocked = computed(() => activeDatasets.value.length > 0
   && activeDatasets.value.some((dataset) => dataset.grid_level_unlocked !== true));
+
+function partitionErrorLabel(error, fallback) {
+  const message = String(error?.message || '').trim();
+  if (!message) return fallback;
+  return qualityExecutionErrorLabel(error).replace(/^质检执行异常：/, '任务执行异常：');
+}
 
 function fallbackGridLevel(gridType) {
   if (gridType === 'mgrs') return 1;
@@ -77,9 +90,21 @@ const formModel = computed({
   get: () => ({ ...store.form, ...moduleForms.value[activeModule.value] }),
   set: (value) => {
     if (activeProduct.value) {
-      if (gridConfigLocked.value) return;
-      const gridTypeChanged = value.gridType !== moduleForms.value[activeModule.value].gridType;
-      if (!gridTypeChanged && gridLevelLocked.value) return;
+      const currentSettings = moduleForms.value[activeModule.value];
+      const requestedWorkerContainerLimit = Number(value.workerContainerLimit);
+      const workerContainerLimit = Number.isInteger(requestedWorkerContainerLimit)
+        && requestedWorkerContainerLimit >= 0
+        ? requestedWorkerContainerLimit
+        : currentSettings.workerContainerLimit;
+      if (gridConfigLocked.value) {
+        moduleForms.value[activeModule.value] = { ...currentSettings, workerContainerLimit };
+        return;
+      }
+      const gridTypeChanged = value.gridType !== currentSettings.gridType;
+      if (!gridTypeChanged && gridLevelLocked.value) {
+        moduleForms.value[activeModule.value] = { ...currentSettings, workerContainerLimit };
+        return;
+      }
       const definition = gridDefinition(value.gridType);
       const requestedLevel = Number(value.requestedGridLevel);
       const requestedGridLevel = Number.isInteger(requestedLevel)
@@ -92,20 +117,21 @@ const formModel = computed({
         requestedGridLevel: gridTypeChanged && activeDatasets.value.length
           ? recommendedGridLevel(activeDatasets.value[0], value.gridType)
           : requestedGridLevel,
+        workerContainerLimit,
       };
       moduleForms.value[activeModule.value] = settings;
       store.setDatasets(activeModule.value, activeDatasets.value.map((dataset) => ({
-          ...dataset,
-          grid_level_unlocked: gridTypeChanged ? false : dataset.grid_level_unlocked,
-          partition: withFixedPartitionOptions({
-            ...dataset.partition,
-            grid_type: settings.gridType,
-            requested_grid_level: gridTypeChanged
-              ? recommendedGridLevel(dataset, settings.gridType)
-              : settings.requestedGridLevel,
-            partition_method: derivedPartitionMethod(settings.gridType),
-          }),
-        })));
+        ...dataset,
+        grid_level_unlocked: gridTypeChanged ? false : dataset.grid_level_unlocked,
+        partition: withFixedPartitionOptions({
+          ...dataset.partition,
+          grid_type: settings.gridType,
+          requested_grid_level: gridTypeChanged
+            ? recommendedGridLevel(dataset, settings.gridType)
+            : settings.requestedGridLevel,
+          partition_method: derivedPartitionMethod(settings.gridType),
+        }),
+      })));
     }
   },
 });
@@ -158,19 +184,62 @@ function bboxGeometry(bbox) {
   };
 }
 
-const selectedGeometries = computed(() => activeDatasets.value.flatMap((dataset, datasetIndex) => (
-  (dataset.assets || []).map((asset, assetIndex) => {
-    const geometry = bboxGeometry(asset.bbox);
-    if (!geometry) return null;
-    return {
-      geometry,
-      label: dataset.dataset_title || dataset.dataset_code || dataset.dataset_id,
-      color: ['#2f73d9', '#16836f', '#d97706', '#7c3aed'][(datasetIndex + assetIndex) % 4],
-      fillOpacity: 0.18,
-      weight: 2,
-    };
-  }).filter(Boolean)
-)));
+function buildSelectedGeometries(datasets) {
+  return datasets.flatMap((dataset) => (
+    (dataset.assets || []).map((asset) => {
+      const geometry = bboxGeometry(asset.bbox);
+      if (!geometry) return null;
+      return {
+        geometry,
+        label: dataset.dataset_title || dataset.dataset_code || dataset.dataset_id,
+        color: '#e53935',
+        fillOpacity: 0.18,
+        weight: 2,
+      };
+    }).filter(Boolean)
+  ));
+}
+
+function buildGridLegends(datasets) {
+  const legends = new Map();
+  datasets.forEach((dataset) => {
+    const partition = dataset.partition;
+    if (!partition?.grid_type) return;
+    const key = `${partition.grid_type}:${partition.requested_grid_level}`;
+    if (!legends.has(key)) legends.set(key, {
+      key,
+      color: gridPreviewColors[partition.grid_type] || '#7c3aed',
+      label: `${gridDefinition(partition.grid_type)?.label || partition.grid_type} · ${nativeLevelLabel(partition.grid_type, partition.requested_grid_level)}`,
+    });
+  });
+  return [...legends.values()];
+}
+
+function rememberMapSelection(moduleName, datasets) {
+  if (!datasets.length) {
+    const sourceGeometries = { ...mapSourceGeometriesByModule.value };
+    const gridLegends = { ...mapGridLegendsByModule.value };
+    delete sourceGeometries[moduleName];
+    delete gridLegends[moduleName];
+    mapSourceGeometriesByModule.value = sourceGeometries;
+    mapGridLegendsByModule.value = gridLegends;
+    return;
+  }
+  mapSourceGeometriesByModule.value = {
+    ...mapSourceGeometriesByModule.value,
+    [moduleName]: buildSelectedGeometries(datasets),
+  };
+  mapGridLegendsByModule.value = {
+    ...mapGridLegendsByModule.value,
+    [moduleName]: buildGridLegends(datasets),
+  };
+}
+
+const selectedGeometries = computed(() => (
+  activeDatasets.value.length
+    ? buildSelectedGeometries(activeDatasets.value)
+    : mapSourceGeometriesByModule.value[activeModule.value] || []
+));
 const activeGridGeometries = computed(() => gridGeometriesByModule.value[activeModule.value] || []);
 const gridGeometries = computed(() => Object.values(gridGeometriesByModule.value).flat());
 const activeCarbonFootprints = computed(() => carbonFootprintsByModule.value[activeModule.value] || []);
@@ -185,34 +254,24 @@ const carbonFootprintGeometries = computed(() => activeCarbonFootprints.value.fl
     weight: 1.25,
   }];
 }));
-const sourcePreviewGeometries = computed(() => (
-  activeModule.value === 'carbon' && carbonFootprintGeometries.value.length
-    ? carbonFootprintGeometries.value
-    : selectedGeometries.value
-));
-// Carbon source scenes are organized as observation footprints. A bbox is only
-// used until the raw source footprints have been loaded.
+const sourcePreviewGeometries = computed(() => [
+  ...selectedGeometries.value,
+  ...(activeModule.value === 'carbon' ? carbonFootprintGeometries.value : []),
+]);
+// Carbon source scenes are organized as observation footprints; both the
+// selected asset bounds and loaded footprints remain visible on the map.
 const mapGeometries = computed(() => (
   !mapPreviewVisible.value
     ? []
-    : activeGridGeometries.value.length
-    ? [...activeGridGeometries.value, ...(activeModule.value === 'carbon' ? carbonFootprintGeometries.value : [])]
-    : sourcePreviewGeometries.value
+    // Keep the source footprint visible, but draw the selected grid last so
+    // overlapping scene footprints cannot visually hide the grid boundaries.
+    : [...sourcePreviewGeometries.value, ...activeGridGeometries.value]
 ));
-const activeGridLegends = computed(() => {
-  const legends = new Map();
-  activeDatasets.value.forEach((dataset) => {
-    const partition = dataset.partition;
-    if (!partition?.grid_type) return;
-    const key = `${partition.grid_type}:${partition.requested_grid_level}`;
-    if (!legends.has(key)) legends.set(key, {
-      key,
-      color: gridPreviewColors[partition.grid_type] || '#7c3aed',
-      label: `${gridDefinition(partition.grid_type)?.label || partition.grid_type} · ${nativeLevelLabel(partition.grid_type, partition.requested_grid_level)}`,
-    });
-  });
-  return [...legends.values()];
-});
+const activeGridLegends = computed(() => (
+  activeDatasets.value.length
+    ? buildGridLegends(activeDatasets.value)
+    : mapGridLegendsByModule.value[activeModule.value] || []
+));
 const activeBandUnitCount = computed(() => activeDatasets.value.reduce((total, dataset) => (
   total + (Array.isArray(dataset.band_unit_ids) ? dataset.band_unit_ids.length : (dataset.scenes || []).length)
 ), 0));
@@ -235,14 +294,12 @@ function selectModule(moduleName) {
   activeModule.value = moduleName;
   datasetDrawerVisible.value = false;
   if (moduleChanged) {
-    gridPreviewGeneration += 1;
-    carbonFootprintGeneration += 1;
-    gridPreviewLoading.value = false;
-    carbonFootprintLoading.value = false;
-    mapPreviewVisible.value = false;
-    gridGeometriesByModule.value = {};
-    gridPreviewMetaByModule.value = {};
-    carbonFootprintsByModule.value = {};
+    cancelPreviewRequests();
+    // Each product page owns its preview state. Switching pages must not
+    // discard a previously loaded grid or its source-frame snapshot.
+    mapPreviewVisible.value = Boolean(
+      activeGridGeometries.value.length || selectedGeometries.value.length,
+    );
   }
 }
 
@@ -252,14 +309,17 @@ async function loadCarbonFootprints() {
     ElMessage.warning('请先选择碳卫星数据集和景。');
     return;
   }
+  const request = carbonFootprintScope.begin();
   const generation = ++carbonFootprintGeneration;
   carbonFootprintLoading.value = true;
   try {
     const response = await requestJson('/v1/partition/carbon/footprints', {
       source_batch_ids: selectedSourceBatchIds.value,
       scene_ids: sceneIds,
-    });
-    if (generation !== carbonFootprintGeneration || activeModule.value !== 'carbon') return;
+    }, { signal: request.signal });
+    if (generation !== carbonFootprintGeneration
+      || !carbonFootprintScope.isCurrent(request.token)
+      || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
     mapPreviewVisible.value = true;
     const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
@@ -270,16 +330,30 @@ async function loadCarbonFootprints() {
       ElMessage.success(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}。`);
     }
   } catch (error) {
-    if (generation === carbonFootprintGeneration) ElMessage.error(error.message || '加载碳卫星足迹失败。');
+    if (generation === carbonFootprintGeneration
+      && carbonFootprintScope.isCurrent(request.token)
+      && error?.name !== 'AbortError') ElMessage.error(partitionErrorLabel(error, '加载碳卫星足迹失败。'));
   } finally {
-    if (generation === carbonFootprintGeneration) carbonFootprintLoading.value = false;
+    if (generation === carbonFootprintGeneration && carbonFootprintScope.isCurrent(request.token)) {
+      carbonFootprintLoading.value = false;
+    }
   }
 }
 
 function resetCarbonFootprints() {
+  carbonFootprintScope.cancel();
   carbonFootprintGeneration += 1;
   carbonFootprintLoading.value = false;
   carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: [] };
+}
+
+function cancelPreviewRequests() {
+  gridPreviewScope.cancel();
+  carbonFootprintScope.cancel();
+  gridPreviewGeneration += 1;
+  carbonFootprintGeneration += 1;
+  gridPreviewLoading.value = false;
+  carbonFootprintLoading.value = false;
 }
 
 function selectReloadBatch(reloadBatch) {
@@ -292,10 +366,12 @@ function selectReloadBatch(reloadBatch) {
   moduleForms.value[activeModule.value] = {
     gridType: partition.grid_type,
     requestedGridLevel: Number(partition.requested_grid_level),
+    workerContainerLimit: moduleForms.value[activeModule.value].workerContainerLimit,
   };
+  rememberMapSelection(activeModule.value, activeDatasets.value);
   datasetDrawerVisible.value = false;
   mapPreviewVisible.value = true;
-  gridPreviewGeneration += 1;
+  cancelPreviewRequests();
   setModuleGridPreview(activeModule.value, []);
   if (activeModule.value === 'carbon') resetCarbonFootprints();
   refreshGridPreviewForSelection();
@@ -319,29 +395,32 @@ async function submit() {
   }
   const moduleName = activeModule.value;
   const contextVersion = store.contextVersionFor(moduleName);
+  rememberMapSelection(moduleName, activeDatasets.value);
+  // Keep the rendered layers, but invalidate any request started for the
+  // pre-submit selection so a late response cannot overwrite the snapshot.
+  cancelPreviewRequests();
   try {
     Object.assign(store.form, moduleForms.value[moduleName]);
-    await store.submit(moduleName);
+    const response = await store.submit(moduleName);
     store.clearDatasets(moduleName, contextVersion);
     datasetDrawerVisible.value = false;
-    gridPreviewGeneration += 1;
-    setModuleGridPreview(moduleName, []);
-    if (moduleName === 'carbon') resetCarbonFootprints();
-    ElMessage.success('剖分任务已提交。');
+    const partitionRunId = response?.partition_run_id || response?.run_id || '';
+    ElMessage.success(partitionRunId ? `剖分任务已提交，剖分批次：${partitionRunId}` : '剖分任务已提交。');
   } catch (error) {
-    ElMessage.error(error.message || '提交剖分失败。');
+    ElMessage.error(partitionErrorLabel(error, '提交剖分失败。'));
   }
 }
 
 function reset() {
   const currentType = activeModule.value;
   store.clearDatasets(currentType);
-  gridPreviewGeneration += 1;
+  rememberMapSelection(currentType, []);
+  cancelPreviewRequests();
   setModuleGridPreview(currentType, []);
   if (currentType === 'carbon') resetCarbonFootprints();
 }
 
-async function loadGridPreview(partition, bbox) {
+async function loadGridPreview(partition, bbox, signal, previewCrs = null) {
   const response = await requestJson('/v1/grid/cover', {
     grid_type: partition.grid_type,
     requested_grid_level: Number(partition.requested_grid_level),
@@ -350,8 +429,18 @@ async function loadGridPreview(partition, bbox) {
     geometry: null,
     bbox,
     crs: 'EPSG:4326',
-  });
-  return (response.cells || []).map((cell) => ({ ...cell, preview_grid_type: partition.grid_type }));
+    preview_mode: partition.grid_type === 'mgrs' ? 'continuous' : 'native',
+    preview_crs: previewCrs,
+  }, { signal });
+  const cells = Array.isArray(response.preview_cells) && response.preview_cells.length
+    ? response.preview_cells
+    : (response.cells || []);
+  return {
+    cells: cells.map((cell) => ({ ...cell, preview_grid_type: partition.grid_type })),
+    actualCount: Array.isArray(response.cells)
+      ? response.cells.length
+      : Number(response.statistics?.cell_count || 0),
+  };
 }
 
 function renderGridCells(cells) {
@@ -385,19 +474,22 @@ async function loadCarbonGridPreview() {
     grid_type: formModel.value.gridType,
     requested_grid_level: Number(formModel.value.requestedGridLevel),
   };
+  carbonFootprintScope.cancel();
   const generation = ++gridPreviewGeneration;
   carbonFootprintGeneration += 1;
+  const request = gridPreviewScope.begin();
   gridPreviewLoading.value = true;
   carbonFootprintLoading.value = true;
-  setModuleGridPreview('carbon', []);
   try {
     const response = await requestJson('/v1/partition/carbon/grid-preview', {
       source_batch_ids: selectedSourceBatchIds.value,
       scene_ids: sceneIds,
       grid_type: partition.grid_type,
       requested_grid_level: Number(partition.requested_grid_level),
-    });
-    if (generation !== gridPreviewGeneration || activeModule.value !== 'carbon') return;
+    }, { signal: request.signal });
+    if (generation !== gridPreviewGeneration
+      || !gridPreviewScope.isCurrent(request.token)
+      || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
     mapPreviewVisible.value = true;
     const rendered = renderGridCells((response.cells || []).map((cell) => ({
@@ -416,9 +508,11 @@ async function loadCarbonGridPreview() {
       ElMessage.success(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}。`);
     }
   } catch (error) {
-    if (generation === gridPreviewGeneration) ElMessage.error(error.message || '加载碳卫星格网预览失败。');
+    if (generation === gridPreviewGeneration
+      && gridPreviewScope.isCurrent(request.token)
+      && error?.name !== 'AbortError') ElMessage.error(partitionErrorLabel(error, '加载碳卫星格网预览失败。'));
   } finally {
-    if (generation === gridPreviewGeneration) {
+    if (generation === gridPreviewGeneration && gridPreviewScope.isCurrent(request.token)) {
       gridPreviewLoading.value = false;
       carbonFootprintLoading.value = false;
     }
@@ -439,6 +533,7 @@ async function loadMap() {
     return;
   }
 
+  const request = gridPreviewScope.begin();
   const generation = ++gridPreviewGeneration;
   const moduleName = activeModule.value;
   const requests = new Map();
@@ -450,39 +545,53 @@ async function loadMap() {
     (dataset.assets || []).forEach((asset) => {
       const bbox = normalizeBbox(asset.bbox);
       if (!bbox) return;
-      const key = [partition.grid_type, partition.requested_grid_level, bbox.join(',')].join(':');
-      if (!requests.has(key)) requests.set(key, { partition, bbox });
+      const previewCrs = partition.grid_type === 'mgrs'
+        ? (asset.crs || dataset.crs || null)
+        : null;
+      const key = [partition.grid_type, partition.requested_grid_level, bbox.join(','), previewCrs || ''].join(':');
+      if (!requests.has(key)) requests.set(key, { partition, bbox, previewCrs });
     });
   });
 
   gridPreviewLoading.value = true;
   mapPreviewVisible.value = true;
-  setModuleGridPreview(moduleName, []);
   try {
     const previewRequests = [...requests.values()].slice(0, 30);
-    const settled = await Promise.allSettled(previewRequests.map(({ partition, bbox }) => loadGridPreview(partition, bbox)));
-    if (generation !== gridPreviewGeneration) return;
+    const settled = await Promise.allSettled(previewRequests.map(({ partition, bbox, previewCrs }) => (
+      loadGridPreview(partition, bbox, request.signal, previewCrs)
+    )));
+    if (generation !== gridPreviewGeneration || !gridPreviewScope.isCurrent(request.token)) return;
     const successful = settled.filter((item) => item.status === 'fulfilled').map((item) => item.value);
     const failures = settled.filter((item) => item.status === 'rejected');
     if (!successful.length && failures.length) throw failures[0].reason;
-    const rendered = renderGridCells(successful.flat());
+    const rendered = renderGridCells(successful.flatMap((item) => item.cells));
+    const actualCount = successful.reduce((total, item) => total + item.actualCount, 0);
+    const total = actualCount || rendered.total;
     const geometries = rendered.geometries;
     const limited = requests.size > previewRequests.length;
-    setModuleGridPreview(moduleName, geometries, { limited, total: rendered.total });
+    setModuleGridPreview(moduleName, geometries, {
+      limited,
+      total,
+      displayTotal: rendered.total,
+    });
     if (failures.length) {
-      ElMessage.warning(`已加载 ${geometries.length} 个格网单元，${failures.length} 个范围加载失败。`);
+      ElMessage.warning(`已加载 ${total} 个格网单元，${failures.length} 个范围加载失败。`);
     } else {
-      ElMessage.success('已加载 ' + geometries.length + ' 个格网单元' + (limited ? `（总计 ${rendered.total} 个）` : '') + '。');
+      const displaySuffix = rendered.total < total ? `（连续预览显示 ${rendered.total} 个方格）` : '';
+      ElMessage.success('已加载 ' + total + ' 个格网单元' + (limited ? `（总计 ${total} 个）` : '') + displaySuffix + '。');
     }
   } catch (error) {
-    if (generation !== gridPreviewGeneration) return;
-    ElMessage.error(error.message || '加载格网预览失败。');
+    if (generation !== gridPreviewGeneration || !gridPreviewScope.isCurrent(request.token)) return;
+    ElMessage.error(partitionErrorLabel(error, '加载格网预览失败。'));
   } finally {
-    if (generation === gridPreviewGeneration) gridPreviewLoading.value = false;
+    if (generation === gridPreviewGeneration && gridPreviewScope.isCurrent(request.token)) {
+      gridPreviewLoading.value = false;
+    }
   }
 }
 
 function resetGridPreview() {
+  gridPreviewScope.cancel();
   gridPreviewGeneration += 1;
   gridPreviewLoading.value = false;
   setModuleGridPreview(activeModule.value, []);
@@ -495,6 +604,7 @@ function refreshGridPreviewForSelection() {
 
 function updateDatasets(datasets) {
   store.setDatasets(activeModule.value, datasets);
+  rememberMapSelection(activeModule.value, datasets);
   mapPreviewVisible.value = true;
   const partitions = datasets
     .filter((dataset) => dataset.data_type === activeModule.value && dataset.partition)
@@ -506,9 +616,10 @@ function updateDatasets(datasets) {
     moduleForms.value[activeModule.value] = {
       gridType: partitions[0].grid_type,
       requestedGridLevel: Number(partitions[0].requested_grid_level),
+      workerContainerLimit: moduleForms.value[activeModule.value].workerContainerLimit,
     };
   }
-  gridPreviewGeneration += 1;
+  cancelPreviewRequests();
   setModuleGridPreview(activeModule.value, []);
   if (activeModule.value === 'carbon') resetCarbonFootprints();
   refreshGridPreviewForSelection();
@@ -525,6 +636,7 @@ onMounted(() => {
     moduleForms.value[activeModule.value] = {
       gridType: queued.partition.grid_type,
       requestedGridLevel: Number(queued.partition.requested_grid_level),
+      workerContainerLimit: moduleForms.value[activeModule.value].workerContainerLimit,
     };
   }
   store.loadBatches();

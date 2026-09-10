@@ -10,6 +10,7 @@ const detailTabs = [
   'ingest-records', 'quality', 'publications', 'provenance',
 ];
 const paginatedTabs = detailTabs.filter((tab) => tab !== 'overview');
+const GRID_DELETE_POLL_MS = 1000;
 
 function emptyDetail() {
   return Object.fromEntries(detailTabs.map((tab) => [tab, null]));
@@ -35,6 +36,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const actionLoading = ref(false);
   const hiddenRoles = ref([]);
   const roleRestrictionsLoading = ref(false);
+  const pendingGridDeletes = reactive({});
   const selectedDatasetId = ref('');
   const detailVisible = ref(false);
   const detailLoading = ref(false);
@@ -46,6 +48,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const roleRestrictionsScope = createRequestScope();
   const tabScopes = Object.fromEntries(paginatedTabs.map((tab) => [tab, createRequestScope()]));
   let detailGeneration = 0;
+  const deletePollTimers = new Map();
 
   const selectedDataset = computed(() => detail.value.overview);
 
@@ -168,7 +171,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
     await loadDetailTab(tab);
   }
 
-  async function runAction(path, payload = {}, method = 'POST', refreshTab = '') {
+  async function runAction(path, payload = {}, method = 'POST', refreshTab = '', options = {}) {
     if (!selectedDatasetId.value) return;
     actionLoading.value = true;
     error.value = '';
@@ -178,12 +181,14 @@ export const useDatasetsStore = defineStore('datasets', () => {
         : method === 'DELETE'
           ? await requestJson(path, payload, { method: 'DELETE' })
         : await requestPost(path, payload);
-      await openDetail(selectedDatasetId.value);
-      if (refreshTab) {
-        activeTab.value = refreshTab;
-        await loadDetailTab(refreshTab);
+      if (options.refresh !== false) {
+        await openDetail(selectedDatasetId.value);
+        if (refreshTab) {
+          activeTab.value = refreshTab;
+          await loadDetailTab(refreshTab);
+        }
+        await loadList();
       }
-      await loadList();
       return response;
     } catch (requestError) {
       error.value = requestError.message || '数据集操作失败';
@@ -231,11 +236,73 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/bands/${encodeURIComponent(bandUnitId)}/ingest-retry`, {}, 'POST', 'ingest-records');
   }
 
-  function deleteBandGrid(bandUnitId, gridType) {
-    return runAction(
+  function gridDeleteKey(datasetId, bandUnitId, gridType) {
+    return `${datasetId}::${bandUnitId}::${gridType}`;
+  }
+
+  async function refreshAfterGridDelete(datasetId) {
+    if (selectedDatasetId.value !== datasetId) return;
+    await openDetail(datasetId);
+    if (selectedDatasetId.value !== datasetId) return;
+    activeTab.value = 'scenes';
+    await loadDetailTab('scenes');
+    await loadList();
+  }
+
+  async function pollGridDelete(datasetId, key, taskId) {
+    if (pendingGridDeletes[key]?.taskId !== taskId) return;
+    deletePollTimers.delete(key);
+    try {
+      const task = await requestGet(`/v1/partition/tasks/${encodeURIComponent(taskId)}`);
+      if (pendingGridDeletes[key]?.taskId !== taskId) return;
+      if (task.status === 'completed') {
+        delete pendingGridDeletes[key];
+        try {
+          await refreshAfterGridDelete(datasetId);
+        } catch (requestError) {
+          if (selectedDatasetId.value === datasetId) {
+            error.value = `波段格网已删除，但页面刷新失败：${requestError.message || '请稍后刷新'}`;
+          }
+        }
+        return;
+      }
+      if (['failed', 'cancelled'].includes(task.status)) {
+        delete pendingGridDeletes[key];
+        if (selectedDatasetId.value === datasetId) error.value = task.error || '波段格网删除失败';
+        return;
+      }
+    } catch (requestError) {
+      if (pendingGridDeletes[key]?.taskId !== taskId) return;
+      delete pendingGridDeletes[key];
+      if (selectedDatasetId.value === datasetId) error.value = requestError.message || '波段格网删除任务查询失败';
+      return;
+    }
+    if (pendingGridDeletes[key]?.taskId === taskId) {
+      deletePollTimers.set(key, setTimeout(() => {
+        pollGridDelete(datasetId, key, taskId);
+      }, GRID_DELETE_POLL_MS));
+    }
+  }
+
+  async function deleteBandGrid(bandUnitId, gridType) {
+    const datasetId = selectedDatasetId.value;
+    const response = await runAction(
       `/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/bands/${encodeURIComponent(bandUnitId)}/grids/${encodeURIComponent(gridType)}`,
-      {}, 'DELETE', 'scenes',
+      {}, 'DELETE', 'scenes', { refresh: false },
     );
+    if (response?.task_id && !['completed', 'failed', 'cancelled'].includes(response.status)) {
+      const key = gridDeleteKey(datasetId, bandUnitId, gridType);
+      pendingGridDeletes[key] = { taskId: response.task_id, status: response.status };
+      void pollGridDelete(datasetId, key, response.task_id);
+    }
+    try {
+      await refreshAfterGridDelete(datasetId);
+    } catch (requestError) {
+      if (selectedDatasetId.value === datasetId) {
+        error.value = `删除任务已提交，但页面刷新失败：${requestError.message || '请稍后刷新'}`;
+      }
+    }
+    return response;
   }
 
   function publish(targets = []) {
@@ -246,6 +313,26 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publications/${encodeURIComponent(publicationId)}/withdraw`, {}, 'POST', 'publications');
   }
 
+  async function deleteDataset() {
+    const datasetId = selectedDatasetId.value;
+    if (!datasetId) return;
+    actionLoading.value = true;
+    error.value = '';
+    try {
+      const response = await requestJson(`/v1/datasets/${encodeURIComponent(datasetId)}`, {}, { method: 'DELETE' });
+      // Reset all detail identity and tab state before loading the list again;
+      // otherwise a reopened drawer can display the deleted dataset briefly.
+      resetDetail();
+      await loadList();
+      return response;
+    } catch (requestError) {
+      error.value = requestError.message || '数据集删除失败';
+      throw requestError;
+    } finally {
+      actionLoading.value = false;
+    }
+  }
+
   function closeDetail() {
     resetDetail();
     detailLoading.value = false;
@@ -253,13 +340,16 @@ export const useDatasetsStore = defineStore('datasets', () => {
 
   function dispose() {
     listScope.dispose();
+    deletePollTimers.forEach((timer) => clearTimeout(timer));
+    deletePollTimers.clear();
+    Object.keys(pendingGridDeletes).forEach((key) => delete pendingGridDeletes[key]);
     resetDetail();
   }
 
   return {
-    filters, pageState, records, summary, loading, error, actionLoading, hiddenRoles, roleRestrictionsLoading, selectedDatasetId, selectedDataset,
+    filters, pageState, records, summary, loading, error, actionLoading, hiddenRoles, roleRestrictionsLoading, pendingGridDeletes, selectedDatasetId, selectedDataset,
     detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
     setActiveTab, setTabPage, setTabPageSize, updateMetadata, updateRoleRestrictions, reassignScene, requestIngest,
-    retryBandIngest, deleteBandGrid, publish, withdraw, closeDetail, dispose,
+    retryBandIngest, deleteBandGrid, publish, withdraw, deleteDataset, closeDetail, dispose,
   };
 });

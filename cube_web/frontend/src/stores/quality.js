@@ -4,11 +4,14 @@ import { defineStore } from 'pinia';
 import { download, request, requestGet, requestPost } from '@/api/client';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
-import { filterActiveQualityRules } from '@/utils/qualityLabels';
+import { filterActiveQualityRules, qualityExecutionErrorLabel } from '@/utils/qualityLabels';
 
 function emptyDetail() {
   return null;
 }
+
+const activeQualityStatuses = new Set(['pending', 'running']);
+const maxQualityPollDurationMs = 15 * 60 * 1000;
 
 export const useQualityStore = defineStore('quality', () => {
   const filters = reactive({
@@ -53,6 +56,56 @@ export const useQualityStore = defineStore('quality', () => {
   const resultsScope = createRequestScope();
   const errorsScope = createRequestScope();
   let detailGeneration = 0;
+  let qualityPollTimer = null;
+  let qualityPollGeneration = 0;
+  const maxQualityPollFailures = 5;
+
+  function stopQualityPoll() {
+    qualityPollGeneration += 1;
+    if (qualityPollTimer !== null) {
+      clearTimeout(qualityPollTimer);
+      qualityPollTimer = null;
+    }
+  }
+
+  function scheduleQualityPoll(qualityRunId) {
+    stopQualityPoll();
+    const pollGeneration = qualityPollGeneration;
+    const generation = detailGeneration;
+    let consecutiveFailures = 0;
+    const pollingStartedAt = Date.now();
+    const poll = async () => {
+      if (pollGeneration !== qualityPollGeneration || generation !== detailGeneration || selectedQualityRunId.value !== qualityRunId) return;
+      if (Date.now() - pollingStartedAt >= maxQualityPollDurationMs) {
+        qualityPollTimer = null;
+        error.value = '质检任务长时间未完成，请刷新页面或到任务列表确认状态';
+        return;
+      }
+      try {
+        const response = await requestGet(`/v1/quality/records/${encodeURIComponent(qualityRunId)}`);
+        if (pollGeneration !== qualityPollGeneration || generation !== detailGeneration || selectedQualityRunId.value !== qualityRunId) return;
+        detail.value = response;
+        error.value = '';
+        consecutiveFailures = 0;
+        if (activeQualityStatuses.has(response.status)) {
+          qualityPollTimer = setTimeout(poll, 1000);
+        } else {
+          qualityPollTimer = null;
+        }
+      } catch (requestError) {
+        if (pollGeneration !== qualityPollGeneration || generation !== detailGeneration || selectedQualityRunId.value !== qualityRunId) return;
+        error.value = qualityExecutionErrorLabel(requestError) || '质检任务状态刷新失败';
+        if (requestError?.retryable !== false && ![401, 403, 404].includes(requestError?.status)) {
+          consecutiveFailures += 1;
+          if (consecutiveFailures < maxQualityPollFailures) qualityPollTimer = setTimeout(poll, 1000);
+          else qualityPollTimer = null;
+        } else {
+          qualityPollTimer = null;
+        }
+      }
+    };
+    qualityPollTimer = setTimeout(poll, 1000);
+  }
 
   function listParameters() {
     return {
@@ -98,7 +151,7 @@ export const useQualityStore = defineStore('quality', () => {
       }
     } catch (requestError) {
       if (request.signal.aborted || !listScope.isCurrent(request.token)) return;
-      error.value = requestError.message || '质检记录加载失败';
+      error.value = qualityExecutionErrorLabel(requestError) || '质检记录加载失败';
       throw requestError;
     } finally {
       if (listScope.isCurrent(request.token)) loading.value = false;
@@ -138,6 +191,7 @@ export const useQualityStore = defineStore('quality', () => {
   }
 
   function resetDetail(nextQualityRunId = '') {
+    stopQualityPoll();
     detailScope.cancel();
     resultsScope.cancel();
     errorsScope.cancel();
@@ -168,9 +222,10 @@ export const useQualityStore = defineStore('quality', () => {
       const response = await requestGet(`/v1/quality/records/${encodeURIComponent(qualityRunId)}`, { signal: request.signal });
       if (selectedQualityRunId.value !== qualityRunId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
       detail.value = response;
+      if (activeQualityStatuses.has(response.status)) scheduleQualityPoll(qualityRunId);
     } catch (requestError) {
       if (request.signal.aborted || selectedQualityRunId.value !== qualityRunId || generation !== detailGeneration || !detailScope.isCurrent(request.token)) return;
-      error.value = requestError.message || '质检详情加载失败';
+      error.value = qualityExecutionErrorLabel(requestError) || '质检详情加载失败';
       throw requestError;
     } finally {
       if (selectedQualityRunId.value === qualityRunId && generation === detailGeneration && detailScope.isCurrent(request.token)) {
@@ -193,7 +248,7 @@ export const useQualityStore = defineStore('quality', () => {
       Object.assign(resultsPage, { page: page.page, pageSize: page.pageSize, total: page.total });
     } catch (requestError) {
       if (request.signal.aborted || selectedQualityRunId.value !== qualityRunId || generation !== detailGeneration || !resultsScope.isCurrent(request.token)) return;
-      error.value = requestError.message || '质检规则结果加载失败';
+      error.value = qualityExecutionErrorLabel(requestError) || '质检规则结果加载失败';
       throw requestError;
     }
   }
@@ -216,7 +271,7 @@ export const useQualityStore = defineStore('quality', () => {
       errorTotal.value = page.total;
     } catch (requestError) {
       if (request.signal.aborted || selectedQualityRunId.value !== qualityRunId || generation !== detailGeneration || !errorsScope.isCurrent(request.token)) return;
-      error.value = requestError.message || '质检错误明细加载失败';
+      error.value = qualityExecutionErrorLabel(requestError) || '质检错误明细加载失败';
       throw requestError;
     }
   }
@@ -255,12 +310,16 @@ export const useQualityStore = defineStore('quality', () => {
     }
   }
 
-  async function exportRunErrors(row, format = 'csv') {
+  async function exportRunErrors(row) {
+    return exportQualityWorkbook(row);
+  }
+
+  async function exportQualityWorkbook(row) {
     if (!row?.quality_run_id) return null;
     exporting.value = true;
     try {
-      const result = await download(`/v1/quality/records/${encodeURIComponent(row.quality_run_id)}/errors/export?${pageQuery({ format })}`);
-      saveDownload(result, `${row.dataset_code || 'dataset'}-quality-errors.${format}`);
+      const result = await download(`/v1/quality/records/${encodeURIComponent(row.quality_run_id)}/export?format=xlsx`);
+      saveDownload(result, `${row.dataset_code || 'dataset'}-quality.xlsx`);
       return result;
     } finally {
       exporting.value = false;
@@ -271,7 +330,14 @@ export const useQualityStore = defineStore('quality', () => {
     if (!datasetId || !outputVersion) return null;
     rerunning.value = true;
     try {
-      return await requestPost('/v1/quality/runs', { dataset_id: datasetId, output_version: outputVersion });
+      const response = await requestPost('/v1/quality/runs', { dataset_id: datasetId, output_version: outputVersion });
+      if (response?.quality_run_id) {
+        resetDetail(response.quality_run_id);
+        detail.value = response;
+        detailLoading.value = false;
+        if (activeQualityStatuses.has(response.status)) scheduleQualityPoll(response.quality_run_id);
+      }
+      return response;
     } finally {
       rerunning.value = false;
     }
@@ -320,6 +386,7 @@ export const useQualityStore = defineStore('quality', () => {
     setActiveTab,
     exportErrors,
     exportRunErrors,
+    exportQualityWorkbook,
     loadRuleCatalog,
     rerun,
     closeDetail,

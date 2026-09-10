@@ -1,5 +1,5 @@
 <script setup>
-defineProps({
+const props = defineProps({
   modelValue: { type: Object, required: true },
   loading: Boolean,
   submitDisabled: Boolean,
@@ -8,7 +8,14 @@ defineProps({
   selectedDatasetCount: { type: Number, default: 0 },
   sourceBatchIds: { type: Array, default: () => [] },
 });
-defineEmits(['reset', 'submit', 'open-datasets']);
+const emit = defineEmits(['update:modelValue', 'reset', 'submit', 'open-datasets']);
+
+function updateWorkerContainerLimit(value) {
+  emit('update:modelValue', {
+    ...props.modelValue,
+    workerContainerLimit: value == null ? 0 : value,
+  });
+}
 </script>
 
 <template>
@@ -41,6 +48,26 @@ defineEmits(['reset', 'submit', 'open-datasets']);
         <span v-else>选择待剖分数据单元后自动关联</span>
       </div>
     </div>
+    <div class="form-group worker-container-form-group">
+      <label for="partition-worker-container-limit">最多的容器数量</label>
+      <el-tooltip
+        data-testid="worker-container-limit-tooltip"
+        content="限制本次任务最多使用的容器数量；0 表示按系统默认值运行。"
+        placement="top"
+        :show-after="200"
+      >
+        <el-input-number
+          id="partition-worker-container-limit"
+          data-testid="worker-container-limit"
+          :model-value="Number(modelValue.workerContainerLimit ?? 0)"
+          :min="0"
+          :step="1"
+          :precision="0"
+          controls-position="right"
+          @update:model-value="updateWorkerContainerLimit"
+        />
+      </el-tooltip>
+    </div>
     <div class="form-group action-buttons">
       <el-button @click="$emit('reset')">重置</el-button>
       <el-button type="primary" :loading="loading" :disabled="submitDisabled" @click="$emit('submit')">提交剖分</el-button>
@@ -56,6 +83,8 @@ defineEmits(['reset', 'submit', 'open-datasets']);
 .source-batch-tags :deep(.source-batch-tag) { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
 .source-batch-tags :deep(.source-batch-tag .el-tag__content) { display: block; flex: 1 1 auto; max-width: 100%; min-width: 0; overflow: hidden; }
 .source-batch-id { display: block; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-container-form-group :deep(.el-tooltip) { display: block; width: 100%; }
+.worker-container-form-group :deep(.el-input-number) { width: 100%; }
 .action-buttons { flex-wrap: nowrap; }
 .action-buttons :deep(.el-button) { flex: 1 1 50%; min-width: 0; }
 </style>

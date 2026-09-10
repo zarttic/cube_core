@@ -9,6 +9,7 @@ vi.mock('@/api/client', () => ({
   requestPost: vi.fn(),
 }));
 
+import { requestGet, requestJson } from '@/api/client';
 import { useDatasetsStore } from '@/stores/datasets';
 import DatasetDetailDrawer from '@/views/datasets/DatasetDetailDrawer.vue';
 
@@ -48,6 +49,21 @@ describe('datasets store', () => {
     expect(requestGet.mock.calls.at(-1)[0]).toContain('/v1/datasets?');
     expect(requestGet.mock.calls.at(-1)[0]).not.toContain('batch_id');
     expect(requestGet.mock.calls.at(-1)[0]).not.toContain('datasetIds');
+  });
+
+  it('deletes the selected dataset and resets detail identity before refreshing the list', async () => {
+    setActivePinia(createPinia());
+    const store = useDatasetsStore();
+    store.selectedDatasetId = 'dataset-a';
+    store.detailVisible = true;
+    requestJson.mockResolvedValue({ dataset_id: 'dataset-a', deleted: true });
+    requestGet.mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 });
+
+    await store.deleteDataset();
+
+    expect(requestJson).toHaveBeenCalledWith('/v1/datasets/dataset-a', {}, { method: 'DELETE' });
+    expect(store.selectedDatasetId).toBe('');
+    expect(store.detailVisible).toBe(false);
   });
 });
 
@@ -152,6 +168,9 @@ describe('DatasetDetailDrawer', () => {
     expect(gridTags.find((tag) => tag.text().includes('平面格网')).classes()).toContain('is-ingested');
     expect(wrapper.get('[data-testid="delete-grid-band-1-mgrs"]').text()).toBe('删除');
     expect(wrapper.find('.band-workflow').exists()).toBe(false);
+
+    await wrapper.setProps({ pendingGridDeletes: { 'dataset-1::band-1::mgrs': { taskId: 'task-delete-1' } } });
+    expect(wrapper.findAll('.band-grid-status').find((tag) => tag.text().includes('平面格网')).text()).toContain('删除中');
   });
 
   it('renders scene, ingest and provenance alongside the existing detail tabs', () => {
@@ -245,5 +264,33 @@ describe('DatasetDetailDrawer', () => {
       },
     });
     expect(wrapper.text()).not.toContain('手动入库');
+  });
+
+  it('exposes dataset-level cascade deletion from the overview', () => {
+    const wrapper = mount(DatasetDetailDrawer, {
+      props: {
+        visible: true,
+        datasetId: 'dataset-a',
+        detail: { overview: { dataset_id: 'dataset-a', dataset_title: '数据集 A' } },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          AppTable: { template: '<div><slot /></div>' },
+          'el-tabs': { template: '<div><slot /></div>' },
+          'el-tab-pane': { template: '<section><slot name="label" /><slot /></section>' },
+          'el-table-column': { template: '<div />' },
+          StatusTag: { template: '<span />' },
+          'el-tooltip': { template: '<span><slot /></span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-descriptions': { template: '<div><slot /></div>' },
+          'el-descriptions-item': { template: '<div><slot /></div>' },
+          'el-empty': { template: '<div />' },
+        },
+      },
+    });
+    wrappers.push(wrapper);
+
+    expect(wrapper.get('[data-testid="delete-dataset"]').text()).toContain('删除数据集');
   });
 });

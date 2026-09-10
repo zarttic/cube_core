@@ -9,6 +9,7 @@ import { derivedPartitionMethod, gridDefinition, withFixedPartitionOptions } fro
 const initialForm = () => ({
   gridType: 'geohash',
   requestedGridLevel: 4,
+  workerContainerLimit: 0,
 });
 const productDataTypes = Object.freeze(['optical', 'carbon', 'radar', 'product']);
 const initialDatasetContexts = () => Object.fromEntries(productDataTypes.map((dataType) => [dataType, []]));
@@ -45,6 +46,14 @@ function validatePartition(partition) {
   if (!Number.isInteger(maxCells) || maxCells < 0) {
     throw invalidRequest('每数据单元最大格网单元数必须是非负整数。');
   }
+}
+
+function normalizeWorkerContainerLimit(value) {
+  const normalized = Number(value ?? 0);
+  if (!Number.isInteger(normalized) || normalized < 0) {
+    throw invalidRequest('容器数量必须是大于等于 0 的整数，0 表示按系统默认值运行。');
+  }
+  return normalized;
 }
 
 function normalizeSceneBatchIds(scene) {
@@ -171,6 +180,7 @@ export const usePartitionStore = defineStore('partition', () => {
     )).filter(Boolean))];
     if (!sourceBatchIds.length) throw invalidRequest('所选数据单元缺少来源载入批次。');
     if (sourceBatchIds.includes(runId)) throw invalidRequest('剖分执行 ID 不能复用载入批次 ID。');
+    const workerContainerLimit = normalizeWorkerContainerLimit(form.workerContainerLimit);
     const selectionSource = selectedDatasets.every((dataset) => dataset.selection_source === 'dataset')
       ? 'dataset'
       : 'load_batch';
@@ -178,6 +188,7 @@ export const usePartitionStore = defineStore('partition', () => {
       partition_run_id: runId,
       source_batch_ids: sourceBatchIds,
       selection_source: selectionSource,
+      worker_container_limit: workerContainerLimit,
       datasets,
     };
   }
@@ -228,7 +239,7 @@ export const usePartitionStore = defineStore('partition', () => {
     error.value = '';
     loading.submit = true;
     try {
-      const response = await requestPost('/v1/partition/runs', body, { signal: request.signal });
+      const response = await requestPost('/v1/partition/runs', body, { signal: request.signal, timeoutMs: 120000 });
       if (submitScope.isCurrent(request.token)) {
         result.value = response;
         await Promise.all([loadBatches(), loadTasks(1, taskPage.pageSize)]);

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { combineAbortSignals, download, request } from '@/api/client';
+import { combineAbortSignals, download, formatApiErrorMessage, request } from '@/api/client';
 
 describe('api client', () => {
   it('uses the supplied method and merges cancellation signals', async () => {
@@ -30,6 +30,21 @@ describe('api client', () => {
 
     expect(result.filename).toBe('quality.csv');
     expect(result.blob.type).toBe('text/csv');
+    fetchMock.mockRestore();
+  });
+
+  it('formats FastAPI validation details as readable Chinese text', async () => {
+    expect(formatApiErrorMessage([
+      { loc: ['body', 'worker_container_limit'], msg: 'Value error, 容器数量必须是大于等于 0 的整数' },
+      { loc: ['body', 'grid_type'], msg: 'Field required' },
+    ])).toBe('容器数量必须是大于等于 0 的整数；格网类型：字段不能为空');
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      detail: [{ loc: ['body', 'worker_container_limit'], msg: 'Value error, 容器数量必须是大于等于 0 的整数' }],
+    }), { status: 422, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(request('/v1/partition/runs', { method: 'POST', body: {} }))
+      .rejects.toThrow('容器数量必须是大于等于 0 的整数');
     fetchMock.mockRestore();
   });
 });

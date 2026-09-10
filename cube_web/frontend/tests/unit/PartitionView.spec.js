@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ElMessage } from 'element-plus';
 
 import PartitionView from '@/views/PartitionView.vue';
 import { usePartitionStore } from '@/stores/partition';
@@ -133,7 +134,18 @@ describe('PartitionView map workspace', () => {
     wrapper.unmount();
   });
 
-  it('uses grid cells alone after a grid preview is loaded', () => {
+  it('draws grid cells after overlapping selected data bounds', () => {
+    const store = usePartitionStore();
+    store.setDatasets('optical', [{
+      dataset_id: 'dataset-a',
+      data_type: 'optical',
+      assets: [
+        { source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] },
+        { source_asset_id: 'asset-b', bbox: [100.2, 20.2, 100.8, 20.8] },
+      ],
+      scenes: [{ scene_id: 'scene-a' }],
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    }]);
     const wrapper = mount(PartitionView, {
       global: {
         stubs: {
@@ -146,7 +158,12 @@ describe('PartitionView map workspace', () => {
     });
     expect(wrapper.vm.mapGeometries).toEqual(wrapper.vm.selectedGeometries);
     wrapper.vm.gridGeometriesByModule = { optical: [{ geometry: { type: 'Polygon', coordinates: [] } }] };
-    expect(wrapper.vm.mapGeometries).toEqual(wrapper.vm.gridGeometries);
+    expect(wrapper.vm.mapGeometries).toHaveLength(3);
+    expect(wrapper.vm.selectedGeometries.map((item) => item.color)).toEqual(['#e53935', '#e53935']);
+    expect(wrapper.vm.mapGeometries).toEqual([
+      ...wrapper.vm.selectedGeometries,
+      ...wrapper.vm.gridGeometries,
+    ]);
     wrapper.unmount();
   });
 
@@ -189,8 +206,8 @@ describe('PartitionView map workspace', () => {
       grid_type: 'geohash',
       requested_grid_level: 4,
       bbox: [100, 20, 101, 21],
-    }));
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
     await wrapper.get('[data-testid="reset-grid"]').trigger('click');
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
 
@@ -229,8 +246,55 @@ describe('PartitionView map workspace', () => {
       grid_type: 'mgrs',
       requested_grid_level: 2,
       bbox: [100, 20, 101, 21],
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+  });
+
+  it('uses the web facade continuous geometry for MGRS preview only', async () => {
+    requestJson.mockResolvedValue({
+      cells: [
+        { space_code: '47RRG', grid_level: 0, geometry: null, bbox: [101.9, 24, 102, 24.4] },
+        { space_code: '48RSM', grid_level: 0, geometry: null, bbox: [102, 24, 102.1, 24.4] },
+      ],
+      preview_cells: [{
+        space_code: 'preview-48-0-2400000',
+        grid_level: 0,
+        geometry: {
+          type: 'Polygon',
+          coordinates: [[[101.9, 24], [102.1, 24], [102.1, 24.4], [101.9, 24.4], [101.9, 24]]],
+        },
+      }],
+      statistics: { cell_count: 2 },
+    });
+    const store = usePartitionStore();
+    store.setDatasets('product', [{
+      dataset_id: 'product-mgrs',
+      data_type: 'product',
+      scenes: [{ scene_id: 'scene-product' }],
+      assets: [{ source_asset_id: 'asset-product', bbox: [100, 20, 104, 27], crs: 'EPSG:32648' }],
+      partition: { grid_type: 'mgrs', requested_grid_level: 0, partition_method: 'logical' },
+    }]);
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true,
+          BatchAssetsPanel: true, QualityView: true, DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="partition-module-product"]').trigger('click');
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    const coverCall = requestJson.mock.calls.find(([path]) => path === '/v1/grid/cover');
+    expect(coverCall[1]).toEqual(expect.objectContaining({
+      preview_mode: 'continuous', preview_crs: 'EPSG:32648',
     }));
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    expect(wrapper.vm.activeGridGeometries).toHaveLength(1);
+    expect(wrapper.vm.activeGridGeometries[0].label).toBe('preview-48-0-2400000');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
 
   it('loads selected carbon source footprints onto the map', async () => {
@@ -261,8 +325,8 @@ describe('PartitionView map workspace', () => {
 
     expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/footprints', expect.objectContaining({
       source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'],
-    }));
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
 
   it('loads carbon footprint coverage cells when loading the map', async () => {
@@ -294,7 +358,7 @@ describe('PartitionView map workspace', () => {
     expect(requestJson).toHaveBeenCalledWith('/v1/partition/carbon/grid-preview', expect.objectContaining({
       source_batch_ids: ['load-carbon'], scene_ids: ['scene-carbon'],
       grid_type: 'isea4h', requested_grid_level: 6,
-    }));
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
 
@@ -399,10 +463,10 @@ describe('PartitionView map workspace', () => {
     expect(wrapper.text()).toContain('经纬度格网 · 层级 6');
     expect(wrapper.text()).toContain('平面格网 · 层级 2');
     expect(wrapper.text()).toContain('六边形格网 · 层级 6');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('3');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('6');
   });
 
-  it('clears every preview layer while switching between product pages', async () => {
+  it('preserves each product preview while switching between product pages', async () => {
     requestJson.mockImplementation(async (_path, payload) => ({
       cells: [{
         space_code: `${payload.grid_type}-${payload.requested_grid_level}`,
@@ -451,11 +515,11 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="load-map"]').trigger('click');
     await flushPromises();
 
-    expect(wrapper.vm.gridGeometries.map((item) => item.color)).toEqual(['#d97706']);
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('1');
+    expect(wrapper.vm.activeGridGeometries.map((item) => item.color)).toEqual(['#d97706']);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
     await wrapper.get('[data-testid="partition-module-optical"]').trigger('click');
-    expect(wrapper.vm.gridGeometries).toEqual([]);
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+    expect(wrapper.vm.activeGridGeometries.map((item) => item.color)).toEqual(['#2f73d9']);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
   });
 
   it('renders every cell returned for a large recommended-level preview', async () => {
@@ -493,7 +557,7 @@ describe('PartitionView map workspace', () => {
 
     expect(wrapper.vm.gridGeometries).toHaveLength(5001);
     expect(wrapper.text()).not.toContain('已加载 5001 个格网单元');
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('5001');
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('5002');
   });
 
   it('exposes product, quality and ingest pages as peer modules', async () => {
@@ -664,13 +728,55 @@ describe('PartitionView map workspace', () => {
     });
 
     wrapper.vm.datasetDrawerVisible = true;
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+    const mapBeforeSubmit = wrapper.vm.mapGeometries;
+    const gridBeforeSubmit = wrapper.vm.gridGeometries;
     await wrapper.get('[data-testid="submit"]').trigger('click');
     await flushPromises();
 
     expect(store.datasetsFor('optical')).toEqual([]);
     expect(store.datasetsFor('carbon')).toEqual([expect.objectContaining({ dataset_id: 'dataset-carbon' })]);
     expect(wrapper.vm.datasetDrawerVisible).toBe(false);
-    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+    expect(wrapper.vm.gridGeometries).toEqual(gridBeforeSubmit);
+    expect(wrapper.vm.mapGeometries).toEqual(mapBeforeSubmit);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+  });
+
+  it('shows the returned partition run id after submission', async () => {
+    const store = usePartitionStore();
+    const successMessage = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined);
+    vi.spyOn(store, 'submit').mockResolvedValue({
+      partition_run_id: 'partition-run-real-batch',
+      task_id: 'partition-task-real',
+      status: 'queued',
+    });
+    store.setDatasets('optical', [{
+      dataset_id: 'dataset-optical',
+      data_type: 'optical',
+      scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
+      assets: [],
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    }]);
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          ...layoutStubs,
+          GlobeMap: GlobeMapStub,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.vm.submit();
+
+    expect(successMessage).toHaveBeenCalledWith('剖分任务已提交，剖分批次：partition-run-real-batch');
+    successMessage.mockRestore();
   });
 
   it('preserves product selections changed while submission is in flight', async () => {
@@ -739,8 +845,76 @@ describe('PartitionView map workspace', () => {
     await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
     resolvePreview({ cells: [{ space_code: 'old-grid', grid_level: 6, bbox: [100, 20, 101, 21] }] });
     await flushPromises();
-    expect(wrapper.vm.gridGeometries).toEqual([]);
+    expect(wrapper.vm.gridGeometries).toHaveLength(1);
+    expect(wrapper.vm.activeGridGeometries).toEqual([]);
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('0');
+    await wrapper.get('[data-testid="partition-module-optical"]').trigger('click');
+    expect(wrapper.vm.activeGridGeometries).toHaveLength(1);
+    expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('2');
+  });
+
+  it('invalidates an in-flight map preview while retaining rendered layers on submit', async () => {
+    let previewSignal;
+    let resolvePreview;
+    requestJson.mockImplementation((path, _payload, options = {}) => {
+      if (path === '/v1/grid/cover') {
+        previewSignal = options.signal;
+        return new Promise((resolve) => {
+          resolvePreview = resolve;
+        });
+      }
+      return Promise.resolve({ cells: [] });
+    });
+    const store = usePartitionStore();
+    const submit = vi.spyOn(store, 'submit').mockImplementation(() => {
+      expect(previewSignal.aborted).toBe(false);
+      return Promise.resolve({ task_id: 'optical-task', status: 'queued' });
+    });
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          ...layoutStubs,
+          GlobeMap: GlobeMapStub,
+          GridParameters: { template: '<button data-testid="submit" @click="$emit(\'submit\')">submit</button>' },
+          BatchAssetsPanel: true,
+          ExecutionResultPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DatasetsView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    wrapper.vm.updateDatasets([{
+      dataset_id: 'dataset-a',
+      data_type: 'optical',
+      scenes: [{ scene_id: 'scene-a', source_batch_ids: ['load-a'] }],
+      assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    }]);
+    const existingGrid = {
+      geometry: { type: 'Polygon', coordinates: [] },
+      label: '已显示格网', color: '#2f73d9', fillColor: '#2f73d9', fillOpacity: 0.07, weight: 1.5,
+    };
+    wrapper.vm.gridGeometriesByModule = { optical: [existingGrid] };
+    expect(previewSignal).toBeInstanceOf(AbortSignal);
+    expect(wrapper.vm.gridPreviewLoading).toBe(true);
+
+    await wrapper.get('[data-testid="submit"]').trigger('click');
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledWith('optical');
+    expect(previewSignal.aborted).toBe(true);
+    expect(wrapper.vm.gridPreviewLoading).toBe(false);
+    expect(wrapper.vm.gridGeometries).toEqual([existingGrid]);
+
+    resolvePreview({
+      cells: [{ space_code: 'stale-grid', grid_level: 4, bbox: [100, 20, 101, 21] }],
+    });
+    await flushPromises();
+    expect(wrapper.vm.gridGeometries).toEqual([existingGrid]);
+    expect(wrapper.vm.gridPreviewLoading).toBe(false);
   });
 
   it('allows multiple loader batches in the same product submission', async () => {

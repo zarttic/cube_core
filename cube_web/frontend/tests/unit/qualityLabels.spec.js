@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   filterActiveQualityRules,
   qualityErrorLabel,
+  qualityExecutionErrorLabel,
   qualityRecoveryLabel,
   qualityRuleLabel,
   RETIRED_QUALITY_RULE_CODES,
@@ -45,5 +46,21 @@ describe('quality recovery labels', () => {
       'asset_readability',
       'carbon_schema',
     ]);
+  });
+
+  it('translates detailed quality execution failures while keeping the root cause', () => {
+    const message = qualityExecutionErrorLabel(
+      'quality rule execution failed (RuntimeError: quality rule failed: asset_readability; caused by OSError: source object does not exist or cannot be opened)',
+    );
+    expect(message).toContain('质检规则执行失败');
+    expect(message).toContain('数据单元可读性');
+    expect(message).toContain('源数据不存在或无法打开');
+    expect(message).toContain('根因');
+    expect(message).not.toContain('s3://');
+  });
+
+  it('keeps existing Chinese messages and handles empty errors', () => {
+    expect(qualityExecutionErrorLabel('源数据不存在，请稍后重试')).toBe('源数据不存在，请稍后重试');
+    expect(qualityExecutionErrorLabel('')).toBe('');
   });
 });

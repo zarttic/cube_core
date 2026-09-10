@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { onMounted, onUnmounted, reactive, ref } from 'vue';
 import { List, Refresh } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
@@ -8,6 +8,7 @@ import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useQualityStore } from '@/stores/quality';
+import { qualityExecutionErrorLabel } from '@/utils/qualityLabels';
 import { formatShanghaiTime } from '@/utils/time';
 import PartitionQualityDrawer from '@/views/quality/PartitionQualityDrawer.vue';
 
@@ -15,7 +16,7 @@ const props = defineProps({ embedded: Boolean });
 const store = useQualityStore();
 
 const batches = ref([]);
-const filters = reactive({ keyword: '', dataType: '', status: '' });
+const filters = reactive({ keyword: '', dataType: '', status: '', createdAtRange: [] });
 const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
 const loading = ref(false);
 const error = ref('');
@@ -35,9 +36,113 @@ const dataTypeLabels = {
   carbon: '碳卫星',
 };
 let batchRequestGeneration = 0;
+let detailRequestGeneration = 0;
+let qualityPollTimer = null;
+let qualityPollGeneration = 0;
+
+const activeQualityStatuses = new Set(['pending', 'running']);
+const activePartitionStatuses = new Set(['pending', 'queued', 'running', 'retrying', 'cancel_requested']);
+const MAX_QUALITY_POLL_FAILURES = 5;
+const MAX_QUALITY_POLL_DURATION_MS = 15 * 60 * 1000;
 
 function dataTypeLabel(value) {
   return dataTypeLabels[value] || value || '-';
+}
+
+function qualityRunsInBatch(batch) {
+  return (batch?.datasets || []).flatMap((dataset) => (dataset.quality_runs || []).map((run) => ({
+    ...run,
+    dataset_id: run.dataset_id || dataset.dataset_id,
+    dataset_code: run.dataset_code || dataset.dataset_code,
+    dataset_title: run.dataset_title || dataset.dataset_title,
+  })));
+}
+
+function hasQualityRuns(batch, qualityRunIds) {
+  const available = new Set(qualityRunsInBatch(batch).map((run) => String(run.quality_run_id)));
+  return qualityRunIds.every((qualityRunId) => available.has(String(qualityRunId)));
+}
+
+function syncBatchFromDetail(batch) {
+  const partitionRunId = String(batch?.partition_run_id || '');
+  if (!partitionRunId) return;
+  const summary = batch.summary || {};
+  const summaryFields = [
+    'band_count', 'partitioned_count', 'partition_failed_count',
+    'quality_pass_count', 'quality_failed_count', 'ingested_count', 'ingest_failed_count',
+  ];
+  batches.value = batches.value.map((item) => {
+    if (String(item.partition_run_id) !== partitionRunId) return item;
+    const next = { ...item };
+    if (batch.status) next.status = batch.status;
+    for (const field of summaryFields) {
+      if (Object.prototype.hasOwnProperty.call(summary, field)) next[field] = summary[field];
+    }
+    return next;
+  });
+}
+
+function clearQualityPoll() {
+  qualityPollGeneration += 1;
+  if (qualityPollTimer !== null) {
+    clearTimeout(qualityPollTimer);
+    qualityPollTimer = null;
+  }
+}
+
+function scheduleQualityPoll(partitionRunId, expectedQualityRunIds = []) {
+  clearQualityPoll();
+  const pollGeneration = qualityPollGeneration;
+  const detailGeneration = detailRequestGeneration;
+  const expectedIds = [...new Set(expectedQualityRunIds.map((qualityRunId) => String(qualityRunId)))];
+  let consecutiveFailures = 0;
+  const pollingStartedAt = Date.now();
+
+  const nextPollDelay = () => Math.min(5000, 1000 * (2 ** Math.min(consecutiveFailures, 2)));
+
+  const poll = async () => {
+    if (pollGeneration !== qualityPollGeneration || detailGeneration !== detailRequestGeneration || selectedId.value !== partitionRunId) return;
+    if (Date.now() - pollingStartedAt >= MAX_QUALITY_POLL_DURATION_MS) {
+      qualityPollTimer = null;
+      error.value = '批次质检长时间未完成，请刷新页面或到任务列表确认状态';
+      return;
+    }
+    try {
+      const response = await requestGet(`/v1/partition/runs/${encodeURIComponent(partitionRunId)}/quality`);
+      if (pollGeneration !== qualityPollGeneration || detailGeneration !== detailRequestGeneration || selectedId.value !== partitionRunId) return;
+      consecutiveFailures = 0;
+      error.value = '';
+      syncBatchFromDetail(response);
+      if (expectedIds.length && !hasQualityRuns(response, expectedIds)) {
+        qualityPollTimer = setTimeout(poll, nextPollDelay());
+        return;
+      }
+      detail.value = response;
+      const runs = qualityRunsInBatch(response);
+      const trackedIds = expectedIds.length ? expectedIds : runs.map((run) => String(run.quality_run_id));
+      if (activePartitionStatuses.has(response.status) || trackedIds.some((qualityRunId) => {
+        const run = runs.find((item) => String(item.quality_run_id) === qualityRunId);
+        return run && activeQualityStatuses.has(run.status);
+      })) {
+        qualityPollTimer = setTimeout(poll, 1000);
+      } else {
+        qualityPollTimer = null;
+      }
+    } catch (requestError) {
+      if (pollGeneration !== qualityPollGeneration || detailGeneration !== detailRequestGeneration || selectedId.value !== partitionRunId) return;
+      error.value = qualityExecutionErrorLabel(requestError) || '质检任务状态刷新失败';
+      consecutiveFailures += 1;
+      const permanent = requestError?.retryable === false || [401, 403, 404].includes(requestError?.status);
+      if (!permanent && consecutiveFailures < MAX_QUALITY_POLL_FAILURES) {
+        qualityPollTimer = setTimeout(poll, nextPollDelay());
+      } else {
+        qualityPollTimer = null;
+        error.value = `${error.value}；请刷新页面或重新打开批次详情`;
+      }
+    }
+  };
+
+  qualityPollTimer = setTimeout(poll, 1000);
 }
 
 function openRuleDetail(rule) {
@@ -55,7 +160,7 @@ async function setRuleEnabled(rule, enabled) {
     await store.updateRuleSetting(rule.code, enabled);
     ElMessage.success('质检规则设置已保存');
   } catch (requestError) {
-    ElMessage.error(requestError.message || '质检规则设置保存失败');
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检规则设置保存失败');
   }
 }
 
@@ -64,7 +169,7 @@ async function openRuleCatalog() {
   try {
     await store.loadRuleCatalog({ force: true });
   } catch (requestError) {
-    ElMessage.error(requestError.message || '质检规则加载失败');
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检规则加载失败');
   }
 }
 
@@ -78,6 +183,8 @@ async function loadBatches({ resetPage = false } = {}) {
       keyword: filters.keyword.trim(),
       data_type: filters.dataType,
       status: filters.status,
+      created_from: filters.createdAtRange?.[0],
+      created_to: filters.createdAtRange?.[1],
       page: pageState.page,
       page_size: pageState.pageSize,
     });
@@ -91,7 +198,7 @@ async function loadBatches({ resetPage = false } = {}) {
       await loadBatches();
     }
   } catch (requestError) {
-    if (generation === batchRequestGeneration) error.value = requestError.message || '剖分批次质检记录加载失败';
+    if (generation === batchRequestGeneration) error.value = qualityExecutionErrorLabel(requestError) || '剖分批次质检记录加载失败';
   } finally {
     if (generation === batchRequestGeneration) loading.value = false;
   }
@@ -112,29 +219,53 @@ function setPageSize(pageSize) {
 }
 
 async function openBatch(row) {
-  selectedId.value = row.partition_run_id;
+  return openBatchForRun(row.partition_run_id);
+}
+
+async function openBatchForRun(partitionRunId, { expectedQualityRunIds = [] } = {}) {
+  const generation = ++detailRequestGeneration;
+  clearQualityPoll();
+  selectedId.value = partitionRunId;
   detailVisible.value = true;
   detail.value = null;
   detailLoading.value = true;
   try {
-    detail.value = await requestGet(`/v1/partition/runs/${encodeURIComponent(selectedId.value)}/quality`);
+    const response = await requestGet(`/v1/partition/runs/${encodeURIComponent(selectedId.value)}/quality`);
+    if (generation !== detailRequestGeneration || selectedId.value !== partitionRunId) return;
+    syncBatchFromDetail(response);
+    if (expectedQualityRunIds.length && !hasQualityRuns(response, expectedQualityRunIds)) {
+      detail.value = null;
+      scheduleQualityPoll(partitionRunId, expectedQualityRunIds);
+      return;
+    }
+    detail.value = response;
+    const qualityRunIds = expectedQualityRunIds.length
+      ? expectedQualityRunIds
+      : qualityRunsInBatch(response)
+        .filter((run) => activeQualityStatuses.has(run.status))
+        .map((run) => run.quality_run_id);
+    if (activePartitionStatuses.has(response.status) || qualityRunIds.length) scheduleQualityPoll(partitionRunId, qualityRunIds);
   } catch (requestError) {
-    error.value = requestError.message || '剖分批次详情加载失败';
+    if (generation === detailRequestGeneration && selectedId.value === partitionRunId) error.value = qualityExecutionErrorLabel(requestError) || '剖分批次详情加载失败';
   } finally {
-    detailLoading.value = false;
+    if (generation === detailRequestGeneration && selectedId.value === partitionRunId) detailLoading.value = false;
   }
 }
 
-async function requestQuality() {
-  if (!selectedId.value) return;
+async function retryQualityRun(run) {
+  if (!run?.dataset_id || !run?.output_version || !selectedId.value) return;
   submitting.value = true;
   try {
-    const response = await requestPost(`/v1/partition/runs/${encodeURIComponent(selectedId.value)}/quality`, {});
-    ElMessage.success(`已提交 ${response.quality_runs?.length || 0} 个数据集质量任务`);
-    await openBatch({ partition_run_id: selectedId.value });
+    const response = await requestPost('/v1/quality/runs', {
+      dataset_id: run.dataset_id,
+      output_version: run.output_version,
+    });
+    if (!response?.quality_run_id) throw new Error('质检重试未返回新的 quality_run_id');
+    ElMessage.success(`已提交质检重试（${response.quality_run_id}）`);
+    await openBatchForRun(selectedId.value, { expectedQualityRunIds: [response.quality_run_id] });
     await loadBatches();
   } catch (requestError) {
-    ElMessage.error(requestError.message || '批次质检提交失败');
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检立即重试提交失败');
   } finally {
     submitting.value = false;
   }
@@ -145,11 +276,26 @@ async function retryFailedPartition() {
   submitting.value = true;
   try {
     await requestPost(`/v1/partition/runs/${encodeURIComponent(selectedId.value)}/retry-failed`, {});
-    ElMessage.success('已在原剖分批次中提交失败数据重试');
+    ElMessage.success('已在原剖分批次中提交失败/终止数据重剖');
     await openBatch({ partition_run_id: selectedId.value });
     await loadBatches();
   } catch (requestError) {
-    ElMessage.error(requestError.message || '失败剖分重试提交失败');
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '剖分重试提交失败');
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function cancelPartition() {
+  if (!selectedId.value) return;
+  submitting.value = true;
+  try {
+    await requestPost(`/v1/partition/runs/${encodeURIComponent(selectedId.value)}/cancel`, {});
+    ElMessage.success('剖分任务已强制终止');
+    await openBatchForRun(selectedId.value);
+    await loadBatches();
+  } catch (requestError) {
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '剖分任务终止失败');
   } finally {
     submitting.value = false;
   }
@@ -157,20 +303,26 @@ async function retryFailedPartition() {
 
 async function exportQualityErrors(qualityRun) {
   try {
-    await store.exportRunErrors(qualityRun, 'csv');
-    ElMessage.success('质检错误明细已下载');
+    await store.exportQualityWorkbook(qualityRun);
+    ElMessage.success('质检结果已下载');
   } catch (requestError) {
-    ElMessage.error(requestError.message || '质检错误明细下载失败');
+    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检结果下载失败');
   }
 }
 
 function closeDetail() {
+  detailRequestGeneration += 1;
+  clearQualityPoll();
   detailVisible.value = false;
   selectedId.value = '';
   detail.value = null;
 }
 
 onMounted(() => { loadBatches(); });
+onUnmounted(() => {
+  detailRequestGeneration += 1;
+  clearQualityPoll();
+});
 </script>
 
 <template>
@@ -202,21 +354,38 @@ onMounted(() => { loadBatches(); });
         </el-select>
       </el-form-item>
       <el-form-item>
+        <el-date-picker
+          v-model="filters.createdAtRange"
+          type="daterange"
+          format="YYYY年M月D日"
+          value-format="YYYY-MM-DD"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          clearable
+          style="width: 270px"
+        />
+      </el-form-item>
+      <el-form-item>
         <el-button type="primary" native-type="submit">查询</el-button>
       </el-form-item>
     </el-form>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-    <AppTable :data="batches" :loading="loading" row-key="partition_run_id" :page="pageState.page" :page-size="pageState.pageSize" :total="pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="openBatch">
-      <el-table-column label="剖分批次" min-width="240"><template #default="{ row }"><div class="batch-cell"><strong>{{ row.partition_run_id }}</strong><span :title="(row.source_load_batch_ids || []).join('、')">来源 {{ (row.source_load_batch_names || row.source_load_batch_ids || []).join('、') || '-' }}</span></div></template></el-table-column>
-      <el-table-column label="数据范围" min-width="150"><template #default="{ row }">{{ row.dataset_count }} 个数据集 · {{ row.scene_count }} 景 · {{ row.band_count }} 波段</template></el-table-column>
-      <el-table-column label="剖分" width="105"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
-      <el-table-column label="质检" min-width="130"><template #default="{ row }"><span class="pass-count">{{ row.quality_pass_count }} 通过</span><span v-if="row.quality_failed_count" class="failed-count"> · {{ row.quality_failed_count }} 失败</span></template></el-table-column>
-      <el-table-column label="入库" width="105"><template #default="{ row }">{{ row.ingested_count }}/{{ row.band_count }}</template></el-table-column>
-      <el-table-column label="批次状态" width="115"><template #default="{ row }"><StatusTag domain="partition" :value="row.status" size="small" /></template></el-table-column>
-      <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
-      <el-table-column label="操作" width="80" fixed="right"><template #default="{ row }"><el-button link type="primary" @click.stop="openBatch(row)">查看</el-button></template></el-table-column>
-    </AppTable>
-    <PartitionQualityDrawer :visible="detailVisible" :detail="detail" :loading="detailLoading" :submitting="submitting" :exporting="store.exporting" @close="closeDetail" @request-quality="requestQuality" @retry-failed-partition="retryFailedPartition" @export-quality-errors="exportQualityErrors" />
+    <div class="quality-batch-table">
+      <AppTable :data="batches" :loading="loading" row-key="partition_run_id" :page="pageState.page" :page-size="pageState.pageSize" :total="pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="openBatch">
+        <el-table-column label="序号" width="72" align="center"><template #default="{ $index }">{{ (pageState.page - 1) * pageState.pageSize + $index + 1 }}</template></el-table-column>
+        <el-table-column label="剖分批次" min-width="180"><template #default="{ row }"><div class="batch-cell"><strong>{{ row.partition_run_id }}</strong></div></template></el-table-column>
+        <el-table-column label="数据集" min-width="180"><template #default="{ row }"><div v-if="row.datasets?.length" class="dataset-list"><div v-for="dataset in row.datasets" :key="dataset.dataset_id" class="dataset-cell"><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong></div></div><span v-else>{{ row.dataset_count || 0 }} 个数据集</span></template></el-table-column>
+        <el-table-column label="数据范围" min-width="150"><template #default="{ row }">{{ row.dataset_count }} 个数据集 · {{ row.scene_count }} 景 · {{ row.band_count }} 波段</template></el-table-column>
+        <el-table-column label="剖分" min-width="120"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
+        <el-table-column label="质检" min-width="130"><template #default="{ row }"><span class="pass-count">{{ row.quality_pass_count }} 通过</span><span v-if="row.quality_failed_count" class="failed-count"> · {{ row.quality_failed_count }} 失败</span></template></el-table-column>
+        <el-table-column label="入库" min-width="110"><template #default="{ row }">{{ row.ingested_count }}/{{ row.band_count }}</template></el-table-column>
+        <el-table-column label="批次状态" min-width="130"><template #default="{ row }"><StatusTag domain="partition" :value="row.status" size="small" /></template></el-table-column>
+        <el-table-column label="创建时间" min-width="165"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
+        <el-table-column label="操作" width="105" fixed="right"><template #default="{ row }"><el-button :data-testid="`quality-task-detail-${row.partition_run_id}`" link type="primary" @click.stop="openBatch(row)">任务详情</el-button></template></el-table-column>
+      </AppTable>
+    </div>
+    <PartitionQualityDrawer :visible="detailVisible" :detail="detail" :loading="detailLoading" :submitting="submitting" :exporting="store.exporting" @close="closeDetail" @cancel-partition="cancelPartition" @retry-failed-partition="retryFailedPartition" @retry-quality-run="retryQualityRun" @export-quality-errors="exportQualityErrors" />
 
     <el-drawer v-model="ruleDrawerVisible" title="质检规则" size="min(900px, 94vw)" destroy-on-close>
       <div class="rule-version">规则集版本 <strong>{{ store.ruleCatalog?.rule_set_version || '-' }}</strong></div>
@@ -307,10 +476,17 @@ onMounted(() => { loadBatches(); });
 .filter-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 0 10px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 8px; }
 .filter-bar :deep(.el-input) { width: min(330px, 44vw); }
+.quality-batch-table :deep(.el-table .cell) { padding-right: 14px; padding-left: 14px; }
+.quality-batch-table :deep(.el-table th .cell), .quality-batch-table :deep(.el-table td .cell) { text-align: center; }
+.quality-batch-table { width: 100%; }
+.quality-batch-table :deep(.el-table) { width: 100%; }
 .batch-cell { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
-.batch-cell strong, .batch-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-cell strong { color: #263247; }
-.batch-cell span { color: #748095; font-size: 12px; }
+.dataset-list { display: grid; gap: 4px; min-width: 0; }
+.dataset-cell { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.dataset-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dataset-cell strong { color: #263247; }
 .pass-count { color: #277a52; }
 .failed-count { color: #a53b32; }
 .rule-version { margin-bottom: 14px; color: #667085; font-size: 13px; }

@@ -4,6 +4,7 @@ import { computed } from 'vue';
 import { authRequired } from '@/config';
 import { navItems } from '@/data/navigation';
 import { useSubUserStore } from '@/stores/subUser';
+import nodcLogo from '@/assets/nodc-logo.png';
 
 const userStore = useSubUserStore();
 const navigationAccess = computed(() => ({
@@ -21,17 +22,11 @@ async function handleLogout() {
     <header class="portal-header">
       <div class="portal-header-inner">
         <div class="portal-brand">
-          <div class="portal-logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M2 12h20" />
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10" />
-            </svg>
-          </div>
-          <div class="portal-brand-text">
-            <div class="portal-brand-title">分析就绪数据剖分管理系统</div>
-            <div class="portal-brand-subtitle">Analysis-Ready Data Partitioning Management System</div>
-          </div>
+          <img
+            class="portal-brand-image"
+            :src="nodcLogo"
+            alt="国家对地观测科学数据中心 National Earth Observation Science Data Center"
+          />
         </div>
         <nav class="portal-nav" aria-label="主导航">
           <template v-for="item in navItems(navigationAccess)" :key="item.label">

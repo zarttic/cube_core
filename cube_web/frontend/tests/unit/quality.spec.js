@@ -42,7 +42,7 @@ describe('quality store', () => {
     expect(download.mock.calls[1][0]).not.toMatch(/(?:\?|&)page=|(?:\?|&)page_size=/);
   });
 
-  it('loads the rule catalog once, drops retired rules, and exports a record without page filters', async () => {
+  it('loads the rule catalog once, drops retired rules, and exports a record as a workbook', async () => {
     setActivePinia(createPinia());
     const store = useQualityStore();
     const pending = store.loadRuleCatalog();
@@ -62,7 +62,27 @@ describe('quality store', () => {
 
     const { download, requestGet } = await import('@/api/client');
     expect(requestGet.mock.calls.filter(([url]) => url === '/v1/quality/rules')).toHaveLength(1);
-    expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-a/errors/export?format=csv');
+    expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-a/export?format=xlsx');
+  });
+
+  it('exports successful rule results in the same workbook as failures', async () => {
+    setActivePinia(createPinia());
+    const store = useQualityStore();
+
+    await store.exportRunErrors({ quality_run_id: 'quality-run-pass', dataset_code: 'DS-PASS', status: 'pass' }, 'csv');
+
+    const { download } = await import('@/api/client');
+    expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-pass/export?format=xlsx');
+  });
+
+  it('exports successful and failed quality content as one workbook', async () => {
+    setActivePinia(createPinia());
+    const store = useQualityStore();
+
+    await store.exportQualityWorkbook({ quality_run_id: 'quality-run-combined', dataset_code: 'DS-COMBINED', status: 'fail' });
+
+    const { download } = await import('@/api/client');
+    expect(download).toHaveBeenLastCalledWith('/v1/quality/records/quality-run-combined/export?format=xlsx');
   });
 
   it('persists one optional rule toggle and refreshes the catalog', async () => {

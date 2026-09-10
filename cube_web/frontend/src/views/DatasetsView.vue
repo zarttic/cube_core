@@ -71,8 +71,6 @@ onUnmounted(() => store.dispose());
     <div class="summary-strip" aria-label="数据集统计">
       <div><strong>{{ store.summary.dataset_count || store.pageState.total }}</strong><span>数据集</span></div>
       <div><strong>{{ store.summary.scene_count || 0 }}</strong><span>景总数</span></div>
-      <div><strong>{{ store.summary.ready_scene_count || 0 }}</strong><span>可用景</span></div>
-      <div><strong>{{ store.summary.failed_scene_count || 0 }}</strong><span>异常景</span></div>
     </div>
     <AppTable
       :data="store.records"
@@ -103,6 +101,7 @@ onUnmounted(() => store.dispose());
       :detail="store.detail"
       :loading="store.detailLoading"
       :action-loading="store.actionLoading"
+      :pending-grid-deletes="store.pendingGridDeletes"
       :hidden-roles="store.hiddenRoles"
       :role-restrictions-loading="store.roleRestrictionsLoading"
       :active-tab="store.activeTab"
@@ -116,6 +115,7 @@ onUnmounted(() => store.dispose());
       @reassign-scene="({ scene_id, target_dataset_id, reason }) => store.reassignScene(scene_id, target_dataset_id, reason).catch(() => {})"
       @retry-band-ingest="(bandUnitId) => store.retryBandIngest(bandUnitId).catch(() => {})"
       @delete-band-grid="({ band_unit_id, grid_type }) => store.deleteBandGrid(band_unit_id, grid_type).catch(() => {})"
+      @delete-dataset="store.deleteDataset().catch(() => {})"
       @queue-partition="queuePartition"
       @withdraw="(publicationId) => store.withdraw(publicationId).catch(() => {})"
     />
@@ -131,7 +131,7 @@ onUnmounted(() => store.dispose());
 .filter-bar { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 12px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 12px; }
 .filter-action { align-self: end; }
-.summary-strip { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); border: 1px solid #dfe4ec; border-radius: 6px; margin-bottom: 18px; background: #fff; overflow: hidden; }
+.summary-strip { display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); border: 1px solid #dfe4ec; border-radius: 6px; margin-bottom: 18px; background: #fff; overflow: hidden; }
 .summary-strip div { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px; border-right: 1px solid var(--el-border-color-lighter); }
 .summary-strip div:last-child { border-right: 0; }
 .summary-strip strong { font-size: 22px; color: #1769aa; }
@@ -140,5 +140,5 @@ onUnmounted(() => store.dispose());
 .dataset-cell strong { overflow: hidden; color: #263247; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .dataset-cell span { overflow: hidden; color: #8993a4; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 880px) { .filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .datasets-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .view-header { align-items: stretch; flex-direction: column; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } }
+@media (max-width: 560px) { .datasets-view { padding: 16px; } .filter-bar { grid-template-columns: 1fr; } .view-header { align-items: stretch; flex-direction: column; } }
 </style>

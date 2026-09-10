@@ -32,6 +32,7 @@ describe('AppLayout navigation', () => {
       '全球离散格网模型与编码',
       '系统配置',
     ]);
+    expect(wrapper.find('.portal-brand-image').attributes('alt')).toContain('国家对地观测科学数据中心');
     expect(wrapper.findAll('.portal-nav a').find((item) => item.text() === '分析就绪数据剖分').attributes('href')).toBe('/partition');
   });
 });

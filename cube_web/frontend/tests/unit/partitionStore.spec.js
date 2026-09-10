@@ -72,6 +72,25 @@ describe('partition store scene request', () => {
     expect(body.datasets[0]).not.toHaveProperty('assets');
   });
 
+  it('submits the task-level Worker container limit separately from dataset grid settings', () => {
+    const store = usePartitionStore();
+    store.setDatasets('optical', [dataset('dataset-a', [scene('scene-a', ['load-a'])])]);
+    store.form.workerContainerLimit = 3;
+
+    expect(store.buildRequest('partition-run-workers', 'optical')).toMatchObject({
+      worker_container_limit: 3,
+    });
+  });
+
+  it('rejects a negative Worker container limit before submission', () => {
+    const store = usePartitionStore();
+    store.setDatasets('optical', [dataset('dataset-a', [scene('scene-a', ['load-a'])])]);
+    store.form.workerContainerLimit = -1;
+
+    expect(() => store.buildRequest('partition-run-invalid-workers', 'optical'))
+      .toThrow(/容器数量必须是大于等于 0 的整数/);
+  });
+
   it('keeps execution identity separate from a load batch identity', () => {
     const store = usePartitionStore();
     store.setDatasets('optical', [dataset('dataset-a', [scene('scene-a', ['load-a'])])]);

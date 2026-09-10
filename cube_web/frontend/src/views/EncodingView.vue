@@ -8,6 +8,7 @@ import { formatShanghaiTime } from '@/utils/time';
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
 const activeModule = ref('division');
+const activeOperation = ref('topology');
 const loading = ref(false);
 
 const division = ref({
@@ -54,21 +55,29 @@ const encodingParts = ref({
 
 const resultRows = ref([]);
 const topologyRows = ref([]);
+const conversionContextRows = ref([]);
 const conversionRows = ref([]);
 const markers = ref([{ position: [39.9042, 116.4074], label: '北京样例点' }]);
 const drawnCircle = ref(null);
 const gridGeometries = ref([]);
+const topologyGeometries = ref([]);
+const conversionGeometries = ref([]);
 
 const resultTitle = computed(() => {
   if (activeModule.value === 'division') return '生成结果';
-  if (activeModule.value === 'encoding') return '编码结果';
+  if (activeModule.value === 'encoding') return encoding.value.operation === 'decode' ? '解码结果' : '编码结果';
   return '元操作结果';
 });
 
 const emptyText = computed(() => {
-  if (activeModule.value === 'division') return '设置参数并执行演示以查看结果';
-  if (activeModule.value === 'encoding') return '设置参数并执行编码/解码操作';
-  return '请在左侧分别执行拓扑运算或坐标转换';
+  if (activeModule.value === 'division') return '设置参数并查看结果';
+  if (activeModule.value === 'encoding') return `设置参数并执行${encoding.value.operation === 'decode' ? '解码' : '编码'}操作`;
+  return activeOperation.value === 'topology' ? '选择点位并执行拓扑运算' : '选择点位并执行坐标转换';
+});
+
+const primaryActionLabel = computed(() => {
+  if (activeModule.value === 'division') return '查看结果';
+  return encoding.value.operation === 'decode' ? '执行解码' : '执行编码';
 });
 
 const gridTypeLabels = {
@@ -189,6 +198,13 @@ function extractGeometryBounds(geometry) {
 
 function setRows(rows) {
   resultRows.value = rows.filter((row) => row.value !== undefined && row.value !== null && row.value !== '');
+}
+
+function selectOperation(operation) {
+  activeOperation.value = operation;
+  gridGeometries.value = operation === 'topology'
+    ? topologyGeometries.value
+    : conversionGeometries.value;
 }
 
 function updateDivisionMarker(label) {
@@ -388,6 +404,10 @@ watch(() => division.value.gridType, (gridType) => {
 watch(() => encoding.value.gridType, (gridType) => {
   encoding.value.level = clampGridLevel(encoding.value.level, gridType);
 });
+watch(() => encoding.value.operation, () => {
+  resultRows.value = [];
+  encodingParts.value = { level: '-', space: '-', time: '-', full: '-' };
+});
 watch(() => topology.value.gridType, (gridType) => {
   topology.value.level = clampGridLevel(topology.value.level, gridType);
   topology.value.targetLevel = clampGridLevel(topology.value.targetLevel, gridType);
@@ -445,6 +465,7 @@ function setOperationRows(target, rows) {
 async function runTopologyOperation() {
   loading.value = true;
   topologyRows.value = [];
+  topologyGeometries.value = [];
   gridGeometries.value = [];
   try {
     const { gridPrefix, topologyPrefix } = apiPrefixes();
@@ -506,7 +527,8 @@ async function runTopologyOperation() {
       : gridGeometryStyle(config.gridType, 'result');
     const baseGeometryItems = await geometryItemsFromAddresses(topologyPrefix, baseAddresses, gridGeometryStyle(config.gridType, 'base'));
     const resultGeometryItems = await geometryItemsFromAddresses(topologyPrefix, Array.from(resultAddresses.values()), resultStyle);
-    gridGeometries.value = [...resultGeometryItems, ...baseGeometryItems];
+    topologyGeometries.value = [...resultGeometryItems, ...baseGeometryItems];
+    if (activeOperation.value === 'topology') gridGeometries.value = topologyGeometries.value;
     ElMessage.success('拓扑运算完成');
   } catch (error) {
     ElMessage.error(error.message);
@@ -517,29 +539,34 @@ async function runTopologyOperation() {
 
 async function runCoordinateConversion() {
   loading.value = true;
+  conversionContextRows.value = [];
   conversionRows.value = [];
+  conversionGeometries.value = [];
   gridGeometries.value = [];
   try {
     const { gridPrefix, topologyPrefix } = apiPrefixes();
     const config = topology.value;
     const selection = await resolveTopologySelection(gridPrefix);
     const baseAddress = selection.baseAddresses[0];
-    const rows = [
+    const contextRows = [
       { label: '格网类型', value: formatGridType(config.gridType) },
       { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
       { label: '基准编码', value: baseAddress.space_code, code: true },
     ];
+    const rows = [];
     await appendConversionRows(rows, {
       gridPrefix,
       topologyPrefix,
       representativeCode: baseAddress,
       selectionPoint: selection.selectionPoint,
     });
+    setOperationRows(conversionContextRows, contextRows);
     setOperationRows(conversionRows, rows);
     const renderCodes = conversion.value.convertDir === 'code2coord'
       ? [baseAddress]
       : [await requestJson(`${gridPrefix}/locate`, { grid_type: config.gridType, requested_grid_level: conversion.value.targetLevel, point: selection.selectionPoint })];
-    gridGeometries.value = await geometryItemsFromAddresses(topologyPrefix, renderCodes.map((item) => item.cell || item), gridGeometryStyle(config.gridType, 'conversion'));
+    conversionGeometries.value = await geometryItemsFromAddresses(topologyPrefix, renderCodes.map((item) => item.cell || item), gridGeometryStyle(config.gridType, 'conversion'));
+    if (activeOperation.value === 'conversion') gridGeometries.value = conversionGeometries.value;
     ElMessage.success('坐标转换完成');
   } catch (error) {
     ElMessage.error(error.message);
@@ -610,7 +637,7 @@ async function runDemo() {
                 <template v-if="activeModule === 'encoding'">
                   <h3>编码设置</h3>
                   <div class="form-group">
-                    <label>操作类型</label>
+                    <label>编解码选项</label>
                     <div class="radio-group">
                       <label class="radio-label"><input v-model="encoding.operation" type="radio" value="encode"><span class="radio-custom"></span><span>编码 (坐标→编码)</span></label>
                       <label class="radio-label"><input v-model="encoding.operation" type="radio" value="decode"><span class="radio-custom"></span><span>解码 (编码→坐标)</span></label>
@@ -687,7 +714,28 @@ async function runDemo() {
                     </div>
                   </section>
 
-                  <div class="operation-columns">
+                  <div class="operation-tabs" role="tablist" aria-label="元操作类型">
+                    <button
+                      type="button"
+                      role="tab"
+                      class="operation-tab"
+                      :class="{ active: activeOperation === 'topology' }"
+                      :aria-selected="activeOperation === 'topology'"
+                      data-testid="operation-tab-topology"
+                      @click="selectOperation('topology')"
+                    >拓扑运算</button>
+                    <button
+                      type="button"
+                      role="tab"
+                      class="operation-tab"
+                      :class="{ active: activeOperation === 'conversion' }"
+                      :aria-selected="activeOperation === 'conversion'"
+                      data-testid="operation-tab-conversion"
+                      @click="selectOperation('conversion')"
+                    >坐标转换</button>
+                  </div>
+
+                  <div v-if="activeOperation === 'topology'" class="operation-panel" role="tabpanel" aria-label="拓扑运算">
                     <section class="operation-section">
                       <h3>拓扑运算</h3>
                       <div class="form-group">
@@ -711,7 +759,9 @@ async function runDemo() {
                         <button class="btn btn-primary" type="button" :disabled="loading" @click="runTopologyOperation">执行拓扑运算</button>
                       </div>
                     </section>
+                  </div>
 
+                  <div v-else class="operation-panel" role="tabpanel" aria-label="坐标转换">
                     <section class="operation-section">
                       <h3>坐标转换</h3>
                       <div class="form-group">
@@ -726,7 +776,7 @@ async function runDemo() {
                         <input v-model.number="conversion.targetLevel" type="number" class="form-input" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)">
                       </div>
                       <div class="form-group action-buttons compact">
-                        <button class="btn btn-secondary" type="button" @click="conversionRows = []">清空转换结果</button>
+                        <button class="btn btn-secondary" type="button" @click="conversionContextRows = []; conversionRows = []">清空转换结果</button>
                         <button class="btn btn-primary" type="button" :disabled="loading" @click="runCoordinateConversion">执行坐标转换</button>
                       </div>
                     </section>
@@ -736,7 +786,7 @@ async function runDemo() {
                 <div v-if="activeModule !== 'operations'" class="form-group action-buttons">
                   <button class="btn btn-secondary" type="button" @click="resultRows = []">重置</button>
                   <button class="btn btn-primary" type="button" :disabled="loading" @click="runDemo">
-                    {{ activeModule === 'encoding' ? '执行编码' : '执行演示' }}
+                    {{ primaryActionLabel }}
                   </button>
                 </div>
               </div>
@@ -777,7 +827,7 @@ async function runDemo() {
                 <h3>{{ resultTitle }}</h3>
                 <div class="results-content">
                   <template v-if="activeModule === 'operations'">
-                    <div class="result-section">
+                    <div v-if="activeOperation === 'topology'" class="result-section" data-testid="topology-result">
                       <h4 class="result-section-title">拓扑运算</h4>
                       <template v-if="topologyRows.length">
                         <div v-for="row in topologyRows" :key="`topology-${row.label}`" class="result-item">
@@ -789,8 +839,14 @@ async function runDemo() {
                         <p>选择点位并执行拓扑运算</p>
                       </div>
                     </div>
-                    <div class="result-section">
+                    <div v-else class="result-section" data-testid="conversion-result">
                       <h4 class="result-section-title">坐标转换</h4>
+                      <div v-if="conversionContextRows.length" class="operation-context" data-testid="conversion-context">
+                        <div v-for="row in conversionContextRows" :key="`conversion-context-${row.label}`" class="operation-context-item">
+                          <div class="result-label">{{ row.label }}</div>
+                          <div class="result-value" :class="{ code: row.code }">{{ row.value }}</div>
+                        </div>
+                      </div>
                       <template v-if="conversionRows.length">
                         <div v-for="row in conversionRows" :key="`conversion-${row.label}`" class="result-item">
                           <div class="result-label">{{ row.label }}</div>
@@ -822,6 +878,62 @@ async function runDemo() {
 </template>
 
 <style scoped>
+.operation-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.operation-tab {
+  padding: 9px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--gray);
+  cursor: pointer;
+  font: inherit;
+}
+
+.operation-tab:hover,
+.operation-tab.active {
+  color: var(--primary-dark);
+}
+
+.operation-tab.active {
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+.operation-panel .operation-section {
+  margin-bottom: 0;
+}
+
+.operation-context {
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.operation-context-item {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 0;
+}
+
+.operation-context-item .result-label {
+  margin-bottom: 0;
+}
+
+.operation-context-item .result-value.code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 @media (min-width: 1201px) {
   .encoding-workspace {
     grid-template-columns: 280px minmax(0, 1fr) 300px;

@@ -7,7 +7,7 @@ const wrappers = [];
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
 
 describe('GridParameters', () => {
-  it('shows production grids, derived method and server-owned load batch IDs', () => {
+  it('shows production grids, derived method and server-owned load batch IDs', async () => {
     const wrapper = mount(GridParameters, {
       props: {
         modelValue: { gridType: 'mgrs', requestedGridLevel: 2, coverMode: 'intersect', timeGranularity: 'day', maxCellsPerAsset: 0 },
@@ -22,7 +22,11 @@ describe('GridParameters', () => {
           'el-select': { props: ['disabled'], template: '<select :disabled="disabled"><slot /></select>' },
           'el-option': { props: ['label'], template: '<span>{{ label }}</span>' },
           'el-input': { props: ['modelValue', 'readonly'], template: '<input :value="modelValue" :readonly="readonly" />' },
-          'el-input-number': { template: '<input type="number" />' },
+          'el-input-number': {
+            name: 'ElInputNumber',
+            emits: ['update:modelValue'],
+            template: '<input type="number" />',
+          },
           'el-button': { template: '<button><slot /></button>' },
           'el-tag': { template: '<span><slot /></span>' },
           'el-tooltip': { props: ['content'], template: '<span class="tooltip-stub" :data-content="content"><slot /></span>' },
@@ -44,7 +48,7 @@ describe('GridParameters', () => {
     expect(wrapper.get('[data-testid="selected-load-batches"]').text()).toContain('2 个批次');
     expect(wrapper.get('[data-testid="selected-load-batches"]').text()).toContain('REFLECT_20260717143357_8E3F');
     expect(wrapper.get('[data-testid="selected-load-batches"]').text()).toContain('mock-two-optical-datasets-20260717-01');
-    expect(wrapper.findAll('.tooltip-stub').map((item) => item.attributes('data-content'))).toEqual([
+    expect(wrapper.findAll('.source-batch-tags .tooltip-stub').map((item) => item.attributes('data-content'))).toEqual([
       'REFLECT_20260717143357_8E3F',
       'mock-two-optical-datasets-20260717-01',
     ]);
@@ -52,6 +56,14 @@ describe('GridParameters', () => {
     expect(wrapper.text()).not.toContain('覆盖方式');
     expect(wrapper.text()).not.toContain('时间粒度');
     expect(wrapper.text()).not.toContain('每数据单元最大格网单元数');
+    expect(wrapper.get('.worker-container-form-group label').text()).toBe('最多的容器数量');
+    expect(wrapper.get('[data-testid="worker-container-limit-tooltip"]').attributes('data-content')).toBe(
+      '限制本次任务最多使用的容器数量；0 表示按系统默认值运行。',
+    );
+    expect(wrapper.text()).not.toContain('0 表示按系统默认值运行');
+
+    await wrapper.findComponent({ name: 'ElInputNumber' }).vm.$emit('update:modelValue', 3);
+    expect(wrapper.emitted('update:modelValue')[0][0]).toMatchObject({ workerContainerLimit: 3 });
   });
 
 });

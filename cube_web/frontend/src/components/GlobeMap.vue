@@ -539,7 +539,12 @@ async function setMapMode(mode) {
 
   if (!viewer || useFallback.value) return;
   if (mode === '2d') {
-    replaceBaseLayer(createNaturalEarthLayer());
+    const layer = await createPreviewBaseLayer();
+    if (requestGeneration !== imageryGeneration || mapMode.value !== '2d' || !viewer || viewer.isDestroyed()) {
+      destroyUnusedLayer(layer);
+      return;
+    }
+    replaceBaseLayer(layer);
     viewer.scene.morphTo2D(0);
   } else {
     const layer = await createPreviewBaseLayer();
