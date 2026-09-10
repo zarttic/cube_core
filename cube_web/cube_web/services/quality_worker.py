@@ -26,6 +26,7 @@ from cube_web.services.quality_repository import (
     complete_quality_run_if_current,
     finish_quality_result,
     require_open_gauss_domain_store,
+    set_quality_lease_on_transaction,
     start_quality_run,
     write_quality_error_batch,
 )
@@ -55,10 +56,27 @@ def _resolve_quality_max_workers() -> int:
 
 
 def _safe_execution_error(exc: Exception, prefix: str) -> str:
-    exception_type = type(exc).__name__
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", exception_type) is None:
-        exception_type = "Exception"
-    return f"{prefix} ({exception_type})"
+    """Return an actionable error without persisting credentials or object URIs."""
+    details: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        exception_type = type(current).__name__
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", exception_type) is None:
+            exception_type = "Exception"
+        message = " ".join(str(current).split())
+        message = re.sub(
+            r"(?i)\b(?:password|passwd|secret|token|access[_-]?key)\s*[:=]\s*[^\s,;]+",
+            "[credential redacted]",
+            message,
+        )
+        message = re.sub(r"(?i)s3://[^\s\"'<>]+", "[object URI redacted]", message)
+        message = re.sub(r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|redis)://[^\s\"'<>]+", "[connection URI redacted]", message)
+        message = message[:1000]
+        details.append(f"{exception_type}: {message}" if message else exception_type)
+        current = current.__cause__ or current.__context__
+    return f"{prefix} ({'; caused by '.join(details)})"
 
 
 def claim_quality_runs(tx, *, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[QualityLease]:
@@ -135,11 +153,14 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                 event.get("dataset_id"),
                 event.get("output_version"),
             )
-            base_store.retry_outbox(
-                event["event_id"],
-                _safe_execution_error(exc, "quality outbox dispatch failed"),
-                available_at=(now + timedelta(seconds=30)).isoformat(),
-            )
+            try:
+                base_store.retry_outbox(
+                    event["event_id"],
+                    _safe_execution_error(exc, "quality outbox dispatch failed"),
+                    available_at=(now + timedelta(seconds=30)).isoformat(),
+                )
+            except Exception:
+                logger.exception("quality outbox retry failed for event_id=%s", event.get("event_id"))
     return allocated
 
 
@@ -172,16 +193,74 @@ def _write_findings(tx, *, lease: QualityLease, rule_code: str, findings: tuple[
         write_quality_error_batch(tx, quality_run_id=lease.quality_run_id, errors=errors[offset : offset + ERROR_BATCH_SIZE])
 
 
+def _finalize_failed_quality_run(
+    store: Any,
+    *,
+    lease: QualityLease,
+    results: list[QualityResult],
+    exc: Exception,
+) -> None:
+    """Finalize a failed run in a fresh transaction.
+
+    A database error aborts the transaction used by the rule runner.  Calling
+    ``complete_quality_run_if_current`` on that same connection only raises
+    ``current transaction is aborted`` and leaves the run in ``running``.  A
+    new connection/transaction is the recovery boundary.
+    """
+    try:
+        with store.transaction() as tx:
+            # The execution transaction is rolled back on failure. Recreate any
+            # rule-level terminal rows before closing the run so the quality
+            # detail page still shows which rule failed.
+            set_quality_lease_on_transaction(tx, lease)
+            for result in results:
+                finish_quality_result(tx, result=result)
+            complete_quality_run_if_current(
+                tx,
+                quality_run_id=lease.quality_run_id,
+                terminal_status="error",
+                error_count=sum(r.error_count for r in results),
+                warning_count=sum(r.warning_count for r in results),
+                results_complete=False,
+                execution_error=_safe_execution_error(exc, "quality run execution failed"),
+                completed_at=datetime.now(UTC),
+            )
+    except (StaleQualityLease, QualityCompletionConflict):
+        logger.debug("quality run was finalized elsewhere: %s", lease.quality_run_id)
+    except Exception:
+        logger.exception("Unable to finalize failed quality run %s", lease.quality_run_id)
+        # Do not report a successful worker iteration when the durable
+        # terminal transition failed. The lease can then be reconciled/retried.
+        raise
+
+
 def execute_quality_run(lease: QualityLease) -> None:
     store = require_open_gauss_domain_store()
-    with store.transaction() as tx:
-        run = start_quality_run(tx, lease=lease, started_at=datetime.now(UTC))
-        with tx.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT data_type, product_type FROM partition_datasets WHERE dataset_id = %s", (run.dataset_id,))
-            dataset = cur.fetchone()
-        results: list[QualityResult] = []
-        quality_completed = False
-        try:
+    results: list[QualityResult] = []
+
+    # Commit the running transition separately. This makes the error path able
+    # to finalize even when the execution transaction is later aborted.
+    try:
+        with store.transaction() as tx:
+            run = start_quality_run(tx, lease=lease, started_at=datetime.now(UTC))
+    except (StaleQualityLease, QualityCompletionConflict):
+        raise
+    except Exception as exc:
+        _finalize_failed_quality_run(store, lease=lease, results=results, exc=exc)
+        return
+
+    try:
+        with store.transaction() as tx:
+            # The lease marker lives on the transaction, so it must be
+            # re-established here: this transaction is separate from the one
+            # that ran start_quality_run and may be handed a different pooled
+            # connection. Without it every rule write fails the lease fence.
+            set_quality_lease_on_transaction(tx, lease)
+            with tx.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT data_type, product_type FROM partition_datasets WHERE dataset_id = %s", (run.dataset_id,))
+                dataset = cur.fetchone()
+            if dataset is None:
+                raise RuntimeError(f"quality dataset disappeared: {run.dataset_id}")
             registry = default_rule_registry()
             object_reader = quality_object_reader()
             for snapshot in run.rule_snapshot:
@@ -207,7 +286,7 @@ def execute_quality_run(lease: QualityLease) -> None:
                     warnings = len(findings) if not snapshot.mandatory else 0
                     status = "fail" if errors else "warn" if warnings else "pass"
                     execution_error = None
-                except Exception as exc:
+                except Exception as rule_error:
                     results.append(
                         finish_quality_result(
                             tx,
@@ -219,13 +298,13 @@ def execute_quality_run(lease: QualityLease) -> None:
                                 error_count=0,
                                 warning_count=0,
                                 metrics={},
-                                execution_error=_safe_execution_error(exc, "quality rule execution failed"),
+                                execution_error=_safe_execution_error(rule_error, "quality rule execution failed"),
                                 started_at=started,
                                 completed_at=datetime.now(UTC),
                             ),
                         )
                     )
-                    raise RuntimeError(f"quality rule failed: {snapshot.code}") from exc
+                    raise RuntimeError(f"quality rule failed: {snapshot.code}") from rule_error
                 result = QualityResult(
                     quality_run_id=lease.quality_run_id,
                     rule_code=snapshot.code,
@@ -272,20 +351,10 @@ def execute_quality_run(lease: QualityLease) -> None:
                     output_version=run.output_version,
                     quality_status=terminal_status,
                 )
-            quality_completed = True
-        except Exception as exc:
-            if quality_completed:
-                raise
-            complete_quality_run_if_current(
-                tx,
-                quality_run_id=lease.quality_run_id,
-                terminal_status="error",
-                error_count=sum(r.error_count for r in results),
-                warning_count=sum(r.warning_count for r in results),
-                results_complete=False,
-                execution_error=_safe_execution_error(exc, "quality run execution failed"),
-                completed_at=datetime.now(UTC),
-            )
+    except (StaleQualityLease, QualityCompletionConflict):
+        raise
+    except Exception as exc:
+        _finalize_failed_quality_run(store, lease=lease, results=results, exc=exc)
 
 
 class QualityRuntime:
@@ -365,6 +434,11 @@ class QualityRuntime:
             execute_quality_run(lease)
         except (StaleQualityLease, QualityCompletionConflict):
             logger.debug("quality lease was completed or replaced before execution: %s", lease.quality_run_id)
+        except Exception:
+            # One bad run must not abort the remainder of a claimed batch.  The
+            # run-level handler normally persists an error status; this log is
+            # the fallback signal when even that terminal transition failed.
+            logger.exception("quality run worker failed for %s", lease.quality_run_id)
 
     def _ingest_loop(self) -> None:
         while not self._stop.is_set():

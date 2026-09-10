@@ -11,7 +11,9 @@ def test_only_normalized_quality_routes_exist() -> None:
     assert paths == {
         "/quality/records",
         "/quality/records/{quality_run_id}",
+        "/quality/records/{quality_run_id}/export",
         "/quality/records/{quality_run_id}/results",
+        "/quality/records/{quality_run_id}/results/export",
         "/quality/records/{quality_run_id}/errors",
         "/quality/records/{quality_run_id}/errors/export",
         "/quality/rules",
@@ -66,3 +68,49 @@ def test_rule_settings_require_admin_and_toggle_one_optional_rule(monkeypatch) -
     rules = {item["code"]: item for item in response.json()["items"]}
     assert rules["index_schema"]["enabled"] is True
     assert rules["carbon_schema"]["enabled"] is True
+
+
+def test_results_export_route_streams_rule_results(monkeypatch) -> None:
+    monkeypatch.setattr(
+        quality_routes,
+        "stream_quality_results",
+        lambda quality_run_id, export_format: (
+            iter((b"rule_code,status\nindex_schema,pass\n",)),
+            1,
+            "dataset_results.csv",
+            "text/csv; charset=utf-8",
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_quality_router(), prefix="/v1")
+    client = TestClient(app)
+
+    response = client.get("/v1/quality/records/00000000-0000-0000-0000-000000000001/results/export?format=csv")
+
+    assert response.status_code == 200
+    assert response.headers["x-export-count"] == "1"
+    assert response.headers["content-disposition"] == 'attachment; filename="dataset_results.csv"'
+    assert response.text == "rule_code,status\nindex_schema,pass\n"
+
+
+def test_quality_export_route_streams_xlsx_workbook(monkeypatch) -> None:
+    monkeypatch.setattr(
+        quality_routes,
+        "stream_quality_workbook",
+        lambda quality_run_id: (
+            iter((b"xlsx-payload",)),
+            2,
+            "dataset_quality.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_quality_router(), prefix="/v1")
+    client = TestClient(app)
+
+    response = client.get("/v1/quality/records/00000000-0000-0000-0000-000000000001/export?format=xlsx")
+
+    assert response.status_code == 200
+    assert response.headers["x-export-count"] == "2"
+    assert response.headers["content-disposition"] == 'attachment; filename="dataset_quality.xlsx"'
+    assert response.content == b"xlsx-payload"

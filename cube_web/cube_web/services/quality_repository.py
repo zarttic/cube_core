@@ -20,6 +20,7 @@ from cube_web.services.quality_contracts import (
     QualityStatus,
     RuleSnapshot,
     SortOrder,
+    quality_run_metrics,
 )
 
 PartitionDomainTransaction: TypeAlias = psycopg.Connection[Any]
@@ -175,7 +176,9 @@ def _quality_run(row: dict[str, Any], *, is_current: bool) -> QualityRun:
         quality_run_id=row["quality_run_id"],
         dataset_id=row["dataset_id"],
         dataset_code=row["dataset_code"],
+        dataset_title=row.get("dataset_title") or row["dataset_code"],
         batch_id=row["batch_id"],
+        batch_name=row.get("batch_name") or row["batch_id"],
         data_type=row["data_type"],
         product_type=row.get("product_type"),
         partition_status=row["partition_status"],
@@ -197,11 +200,21 @@ def _quality_run(row: dict[str, Any], *, is_current: bool) -> QualityRun:
         completed_at=row.get("completed_at"),
         created_at=row["created_at"],
         is_current=is_current,
+        metrics=quality_run_metrics(
+            checked_grid_count=row.get("checked_grid_count", row.get("grid_cell_count", 0)),
+            started_at=row.get("started_at"),
+            completed_at=row.get("completed_at"),
+        ),
     )
 
 
 def _quality_run_with_dataset(row: dict[str, Any], dataset: dict[str, Any], *, is_current: bool) -> QualityRun:
-    return _quality_run({**row, **{key: dataset[key] for key in ("dataset_code", "batch_id", "data_type", "product_type", "partition_status")}}, is_current=is_current)
+    dataset_fields = {
+        key: dataset[key]
+        for key in ("dataset_code", "dataset_title", "batch_id", "batch_name", "data_type", "product_type", "partition_status")
+        if key in dataset
+    }
+    return _quality_run({**row, **dataset_fields}, is_current=is_current)
 
 
 def _quality_result(row: dict[str, Any]) -> QualityResult:
@@ -417,17 +430,29 @@ def complete_quality_run_if_current(
     if error_count < 0 or warning_count < 0:
         raise ValueError("quality counts must be non-negative")
     run = lock_quality_run(tx, quality_run_id)
-    if run["status"] != "running":
-        raise QualityCompletionConflict("quality run must be running")
+    if run["status"] not in {"pending", "running"}:
+        raise QualityCompletionConflict("quality run must be pending or running")
     lease = quality_lease_from_transaction(tx, quality_run_id)
     if lease is None:
-        raise StaleQualityLease(str(quality_run_id))
+        with tx.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT claimed_by, attempt_count, status FROM partition_quality_runs WHERE quality_run_id = %s",
+                (quality_run_id,),
+            )
+            lease_row = cur.fetchone()
+        if lease_row is None or not lease_row.get("claimed_by") or lease_row.get("status") not in {"pending", "running"}:
+            raise StaleQualityLease(str(quality_run_id))
+        lease = QualityLease(
+            quality_run_id,
+            str(lease_row["claimed_by"]),
+            int(lease_row["attempt_count"]),
+        )
 
     with tx.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "UPDATE partition_quality_runs SET status = %s, error_count = %s, warning_count = %s, "
             "result_complete = %s, last_error = %s, completed_at = %s, updated_at = %s, claimed_at = NULL, claimed_by = NULL "
-            "WHERE quality_run_id = %s AND claimed_by = %s AND attempt_count = %s AND status = 'running' RETURNING dataset_id",
+            "WHERE quality_run_id = %s AND claimed_by = %s AND attempt_count = %s AND status IN ('pending', 'running') RETURNING dataset_id",
             (
                 terminal_status,
                 error_count,
@@ -689,13 +714,64 @@ def count_quality_results(tx: PartitionDomainTransaction, *, quality_run_id: UUI
     return int(row["total"])
 
 
+def iter_quality_results(
+    tx: PartitionDomainTransaction,
+    *,
+    quality_run_id: UUID,
+    fetch_size: int = ERROR_BATCH_SIZE,
+) -> Iterator[QualityResult]:
+    if fetch_size < 1 or fetch_size > ERROR_BATCH_SIZE:
+        raise ValueError(f"fetch_size must be between 1 and {ERROR_BATCH_SIZE}")
+    cursor_name = f"quality_result_export_{quality_run_id.hex}"
+    with tx.cursor(name=cursor_name, row_factory=dict_row) as cur:
+        cur.itersize = fetch_size
+        cur.execute(
+            "SELECT * FROM partition_quality_results WHERE quality_run_id = %s ORDER BY rule_code",
+            (quality_run_id,),
+        )
+        for row in cur:
+            yield _quality_result(row)
+
+
+def list_quality_scene_bands(tx: PartitionDomainTransaction, *, dataset_id: str, output_version: str) -> list[dict[str, Any]]:
+    """Return scene/band units included in the quality run's output version."""
+    with tx.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT DISTINCT g.scene_id, s.scene_key AS scene_name, sb.asset_id AS source_asset_id, "
+            "sb.band_unit_id, sb.band_code, sb.band_name, sb.display_order "
+            "FROM partition_data_unit_grid_status g "
+            "JOIN scenes s ON s.scene_id = g.scene_id AND s.dataset_id = g.dataset_id "
+            "JOIN scene_bands sb ON sb.scene_id = g.scene_id AND sb.band_unit_id = g.band_unit_id "
+            "WHERE g.dataset_id = %s AND g.output_version = %s AND g.partition_status = 'completed' "
+            "ORDER BY g.scene_id, sb.asset_id, sb.display_order, sb.band_code",
+            (dataset_id, output_version),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        if rows:
+            return rows
+        cur.execute(
+            "SELECT DISTINCT s.scene_id, s.scene_key AS scene_name, a.source_asset_id, "
+            "b.band_code, b.band_name, b.display_order "
+            "FROM partition_dataset_assets a "
+            "JOIN partition_dataset_bands b ON b.dataset_id = a.dataset_id "
+            "AND b.source_asset_id = a.source_asset_id "
+            "LEFT JOIN scene_assets sa ON sa.asset_id = a.source_asset_id AND sa.asset_role = 'data' "
+            "LEFT JOIN scenes s ON s.scene_id = sa.scene_id AND s.dataset_id = %s "
+            "WHERE a.dataset_id = %s "
+            "ORDER BY s.scene_id NULLS LAST, a.source_asset_id, b.display_order, b.band_code",
+            (dataset_id, dataset_id),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
 def get_quality_run(tx: PartitionDomainTransaction, *, quality_run_id: UUID) -> QualityRun:
     with tx.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT q.*, d.dataset_code, d.batch_id, d.data_type, d.product_type, d.partition_status, "
-            "o.grid_type, o.requested_grid_level AS grid_level, "
+            "SELECT q.*, d.dataset_code, d.dataset_title, d.batch_id, pb.batch_name, d.data_type, d.product_type, d.partition_status, "
+            "o.grid_type, o.requested_grid_level AS grid_level, o.grid_cell_count AS checked_grid_count, "
             "q.quality_run_id = d.current_quality_run_id AS is_current "
             "FROM partition_quality_runs q JOIN partition_datasets d ON d.dataset_id = q.dataset_id "
+            "LEFT JOIN partition_batches pb ON pb.batch_id = d.batch_id "
             "LEFT JOIN partition_output_versions o ON o.dataset_id=q.dataset_id AND o.output_version=q.output_version "
             "WHERE q.quality_run_id = %s",
             (quality_run_id,),
@@ -753,10 +829,11 @@ def list_quality_runs(
     direction = "DESC" if sort_order == "desc" else "ASC"
     with tx.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT q.*, d.dataset_code, d.batch_id, d.data_type, d.product_type, d.partition_status, "
-            "o.grid_type, o.requested_grid_level AS grid_level, "
+            "SELECT q.*, d.dataset_code, d.dataset_title, d.batch_id, pb.batch_name, d.data_type, d.product_type, d.partition_status, "
+            "o.grid_type, o.requested_grid_level AS grid_level, o.grid_cell_count AS checked_grid_count, "
             "q.quality_run_id = d.current_quality_run_id AS is_current "
             "FROM partition_quality_runs q JOIN partition_datasets d ON d.dataset_id = q.dataset_id "
+            "LEFT JOIN partition_batches pb ON pb.batch_id = d.batch_id "
             "LEFT JOIN partition_output_versions o ON o.dataset_id=q.dataset_id AND o.output_version=q.output_version "
             f"WHERE {' AND '.join(clauses)} ORDER BY {_RUN_SORT_COLUMNS[sort_by]} {direction}, q.quality_run_id {direction} LIMIT %s OFFSET %s",
             (*params, limit, offset),

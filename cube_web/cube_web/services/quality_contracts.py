@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
@@ -10,7 +10,7 @@ QualityStatus = Literal["pending", "running", "pass", "warn", "fail", "error", "
 TerminalQualityStatus = Literal["pass", "warn", "fail", "error", "cancelled"]
 TriggerKind = Literal["automatic", "manual"]
 SortOrder = Literal["asc", "desc"]
-ExportFormat = Literal["csv", "json"]
+ExportFormat = Literal["csv", "json", "xlsx"]
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 500
@@ -37,7 +37,9 @@ class QualityRun(FrozenModel):
     quality_run_id: UUID
     dataset_id: str
     dataset_code: str
+    dataset_title: str | None = None
     batch_id: str
+    batch_name: str | None = None
     data_type: str
     product_type: str | None
     partition_status: str
@@ -59,6 +61,7 @@ class QualityRun(FrozenModel):
     completed_at: datetime | None
     created_at: datetime
     is_current: bool
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class QualityResult(FrozenModel):
@@ -151,3 +154,31 @@ def validate_sort(sort_by: str, sort_order: str, allowed: set[str]) -> tuple[str
     if sort_order not in {"asc", "desc"}:
         raise ValueError("sort_order must be asc or desc")
     return sort_by, sort_order  # type: ignore[return-value]
+
+
+def quality_run_metrics(
+    *,
+    checked_grid_count: Any = 0,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return the run-level grid throughput shown by quality task details."""
+    try:
+        grid_count = max(0, int(checked_grid_count or 0))
+    except (TypeError, ValueError):
+        grid_count = 0
+    elapsed_sec: float | None = None
+    if started_at is not None and completed_at is not None:
+        started = started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=UTC)
+        completed = completed_at if completed_at.tzinfo is not None else completed_at.replace(tzinfo=UTC)
+        duration = (completed - started).total_seconds()
+        if duration >= 0:
+            elapsed_sec = round(duration, 6)
+    throughput = None
+    if grid_count > 0 and elapsed_sec is not None and elapsed_sec > 0:
+        throughput = round(grid_count / elapsed_sec, 6)
+    return {
+        "checked_grid_count": grid_count,
+        "quality_elapsed_sec": elapsed_sec,
+        "grid_throughput_per_sec": throughput,
+    }

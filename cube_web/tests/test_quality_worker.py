@@ -5,17 +5,30 @@ from uuid import uuid4
 from cube_web.services.config_store import default_config
 from cube_web.services.quality_rules import QualityFinding
 from cube_web.services.quality_worker import QualityRuntime, _errors_from_findings, _safe_execution_error, execute_quality_run
-from cube_web.services.quality_repository import QualityLease, StaleQualityLease
+from cube_web.services.quality_repository import QualityLease, StaleQualityLease, quality_lease_from_transaction
 
 
-def test_safe_execution_error_does_not_persist_exception_message() -> None:
+def test_safe_execution_error_keeps_actionable_reason_without_credentials_or_object_uris() -> None:
     error = OSError("s3://access:secret@minio/private.tif")
 
     persisted = _safe_execution_error(error, "quality rule execution failed")
 
-    assert persisted == "quality rule execution failed (OSError)"
+    assert persisted == "quality rule execution failed (OSError: [object URI redacted])"
     assert "secret" not in persisted
     assert "s3://" not in persisted
+
+
+def test_safe_execution_error_includes_the_underlying_cause() -> None:
+    try:
+        try:
+            raise OSError("source object could not be opened")
+        except OSError as cause:
+            raise RuntimeError("quality rule failed: asset_readability") from cause
+    except RuntimeError as error:
+        persisted = _safe_execution_error(error, "quality run execution failed")
+
+    assert "quality rule failed: asset_readability" in persisted
+    assert "caused by OSError: source object could not be opened" in persisted
 
 
 def test_auto_ingest_after_quality_is_disabled_by_default() -> None:
@@ -158,6 +171,36 @@ def test_stale_quality_completion_does_not_enqueue_auto_ingest(monkeypatch) -> N
     execute_quality_run(lease)
 
 
+def test_execution_transaction_reestablishes_the_quality_lease(monkeypatch) -> None:
+    """Execution must carry its own lease marker instead of relying on the
+    pooled connection that committed the running transition."""
+    tx = _QualityTransaction()
+    lease = QualityLease(uuid4(), "quality-worker", 1)
+    snapshot = SimpleNamespace(code="rule", implementation_version="v1", mandatory=True)
+    run = SimpleNamespace(dataset_id="dataset-a", output_version="output-v1", rule_snapshot=(snapshot,))
+    rule = SimpleNamespace(implementation_version="v1", evaluate=lambda _context: ())
+    markers = []
+
+    def record_lease(tx_arg, *, result):
+        markers.append(quality_lease_from_transaction(tx_arg, result.quality_run_id))
+        return result
+
+    monkeypatch.setattr("cube_web.services.quality_worker.require_open_gauss_domain_store", lambda: _QualityStore(tx))
+    monkeypatch.setattr("cube_web.services.quality_worker.start_quality_run", lambda *_args, **_kwargs: run)
+    monkeypatch.setattr("cube_web.services.quality_worker.default_rule_registry", lambda: SimpleNamespace(get=lambda _code: rule))
+    monkeypatch.setattr("cube_web.services.quality_worker.quality_object_reader", lambda: object())
+    monkeypatch.setattr("cube_web.services.quality_worker._write_findings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("cube_web.services.quality_worker.finish_quality_result", record_lease)
+    monkeypatch.setattr("cube_web.services.quality_worker.assert_quality_result_totals", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("cube_web.services.quality_worker.reduce_quality_status", lambda *_args: "pass")
+    monkeypatch.setattr("cube_web.services.quality_worker.complete_quality_run_if_current", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("cube_web.services.quality_worker.auto_ingest_after_quality_enabled", lambda: False)
+
+    execute_quality_run(lease)
+
+    assert markers == [lease]
+
+
 def test_runtime_continues_after_a_stale_lease(monkeypatch) -> None:
     runtime = QualityRuntime()
     first = QualityLease(uuid4(), "quality-worker", 1)
@@ -168,6 +211,24 @@ def test_runtime_continues_after_a_stale_lease(monkeypatch) -> None:
         seen.append(lease.quality_run_id)
         if lease == first:
             raise StaleQualityLease(str(lease.quality_run_id))
+
+    monkeypatch.setattr("cube_web.services.quality_worker.execute_quality_run", execute)
+
+    runtime._execute_claimed_runs([first, second])
+
+    assert seen == [first.quality_run_id, second.quality_run_id]
+
+
+def test_runtime_continues_after_an_unexpected_run_error(monkeypatch) -> None:
+    runtime = QualityRuntime()
+    first = QualityLease(uuid4(), "quality-worker", 1)
+    second = QualityLease(uuid4(), "quality-worker", 1)
+    seen = []
+
+    def execute(lease):
+        seen.append(lease.quality_run_id)
+        if lease == first:
+            raise RuntimeError("unexpected rule worker failure")
 
     monkeypatch.setattr("cube_web.services.quality_worker.execute_quality_run", execute)
 

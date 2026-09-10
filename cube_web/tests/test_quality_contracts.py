@@ -11,6 +11,7 @@ from cube_web.services.quality_contracts import (
     QualityErrorFilter,
     RuleSnapshot,
     page_offset,
+    quality_run_metrics,
     validate_sort,
 )
 
@@ -69,3 +70,23 @@ def test_page_is_immutable_and_publication_forbids_published() -> None:
             withdrawn_at=None,
             withdrawal_reason=None,
         )
+
+
+def test_quality_run_metrics_reports_checked_grids_and_throughput() -> None:
+    metrics = quality_run_metrics(
+        checked_grid_count=120,
+        started_at=datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 8, 25, 10, 2, tzinfo=timezone.utc),
+    )
+
+    assert metrics == {
+        "checked_grid_count": 120,
+        "quality_elapsed_sec": 120.0,
+        "grid_throughput_per_sec": 1.0,
+    }
+    assert quality_run_metrics(checked_grid_count=0, started_at=None, completed_at=None)["grid_throughput_per_sec"] is None
+    assert quality_run_metrics(
+        checked_grid_count=0,
+        started_at=datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 8, 25, 10, 1, tzinfo=timezone.utc),
+    )["grid_throughput_per_sec"] is None

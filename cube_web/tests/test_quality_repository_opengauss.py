@@ -455,10 +455,81 @@ def test_rule_exception_terminalizes_run_as_incomplete_error(open_gauss_tx, seed
             ).fetchone()
         assert terminal["status"] == "error"
         assert terminal["result_complete"] is False
-        assert terminal["last_error"] == "quality run execution failed (RuntimeError)"
+        assert terminal["last_error"].startswith("quality run execution failed (RuntimeError: quality rule failed:")
         assert "secret" not in terminal["last_error"]
         assert "s3://" not in terminal["last_error"]
-        assert result == {"status": "error", "execution_error": "quality rule execution failed (RuntimeError)"}
+        assert result["status"] == "error"
+        assert result["execution_error"].startswith("quality rule execution failed (RuntimeError:")
+    finally:
+        set_partition_domain_store(previous_store)
+
+
+def test_rule_exception_terminalizes_when_every_transaction_uses_a_fresh_connection(
+    open_gauss_tx, seeded_outputs: dict[str, str], monkeypatch
+) -> None:
+    """Regression: execution must carry its own lease marker.
+
+    ``execute_quality_run`` commits the running transition in a separate
+    transaction. It used to rely on the pooled connection still holding the
+    lease marker, so a store that opens a fresh connection per transaction
+    failed the fence and left the run stuck in ``running``.
+    """
+    dsn = os.getenv("CUBE_WEB_POSTGRES_DSN", "").strip()
+
+    def broken_rule(_):
+        raise RuntimeError("rule input contains secret=s3://private-object")
+
+    snapshot = RuleSnapshot(
+        code="broken_rule",
+        name="Broken rule",
+        applicability={"data_types": ["optical"]},
+        mandatory=True,
+        parameters={},
+        implementation_version="1.0.0",
+    )
+    registry = RuleRegistry(
+        [
+            RegisteredRule(
+                code=snapshot.code,
+                name=snapshot.name,
+                applicability=snapshot.applicability,
+                mandatory=snapshot.mandatory,
+                parameters=snapshot.parameters,
+                implementation_version=snapshot.implementation_version,
+                evaluator=broken_rule,
+            )
+        ]
+    )
+    previous_store = get_partition_domain_store()
+    set_partition_domain_store(
+        OpenGaussPartitionDomainStore(connection_factory=lambda: psycopg.connect(dsn, row_factory=dict_row))
+    )
+    monkeypatch.setattr("cube_web.services.quality_worker.default_rule_registry", lambda: registry)
+    try:
+        with open_gauss_tx() as connection:
+            run = allocate_quality_run(
+                connection,
+                dataset_id=seeded_outputs["dataset_id"],
+                output_version=seeded_outputs["current_version"],
+                expected_current_output_version=seeded_outputs["current_version"],
+                quality_run_id=uuid4(),
+                trigger_event_id=None,
+                trigger="manual",
+                requested_by="quality-real",
+                rule_set_version="2026.07.14-v1",
+                rule_snapshot=(snapshot,),
+            )
+            lease = next(
+                item for item in claim_quality_runs(connection, worker_id="fresh-conn-worker") if item.quality_run_id == run.quality_run_id
+            )
+        execute_quality_run(lease)
+        with open_gauss_tx() as connection:
+            terminal = connection.execute(
+                "SELECT status, result_complete FROM partition_quality_runs WHERE quality_run_id = %s",
+                (run.quality_run_id,),
+            ).fetchone()
+        assert terminal["status"] == "error"
+        assert terminal["result_complete"] is False
     finally:
         set_partition_domain_store(previous_store)
 
