@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import pytest
-from shapely.geometry import shape
+from shapely.geometry import box, shape
+from shapely.ops import unary_union
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.mgrs.address import parent_space_code
@@ -184,6 +185,20 @@ def test_valid_latitude_band_boundary_candidate_is_collected() -> None:
     _add_valid_candidate("32TPU00", 1, candidates)
 
     assert candidates == {"32TPU00"}
+
+
+def test_cover_fills_an_utm_latitude_band_transition() -> None:
+    """A cover crossing 24°N must include both MGRS band aliases."""
+    engine = MGRSEngine()
+    geometry = box(100.64, 23.28, 104.83, 27.06).__geo_interface__
+
+    cells = engine.cover_geometry(geometry, 0, "intersect")
+    codes = {cell.space_code for cell in cells}
+    covered = unary_union([shape(cell.geometry) for cell in cells])
+
+    assert "48QTM" in codes
+    assert "48RTM" in codes
+    assert box(100.64, 23.28, 104.83, 27.06).difference(covered).area < 1e-9
 
 
 def test_children_target_level_must_be_greater() -> None:

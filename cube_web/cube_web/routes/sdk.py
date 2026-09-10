@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from cube_split.read.carbon_query import query_carbon_observations
 from fastapi import APIRouter, HTTPException
 from grid_core.sdk import (
@@ -25,8 +27,25 @@ from grid_core.sdk import (
     STCodeParseRequest,
     STCodeParseResponse,
 )
+from grid_core.app.utils.geometry import bbox_to_polygon
+from grid_core.sdk import GridCell
+from pydantic import Field
 
 from cube_web.schemas import SpatiotemporalQueryRequest
+from cube_web.services.grid_preview import build_continuous_mgrs_preview
+
+
+class WebCoverRequest(CoverRequest):
+    """Grid cover request with an explicit, display-only preview hint."""
+
+    preview_mode: Literal["native", "continuous"] = "native"
+    preview_crs: str | None = None
+
+
+class WebCoverResponse(CoverResponse):
+    """The web facade may return a separate display-only cell collection."""
+
+    preview_cells: list[GridCell] = Field(default_factory=list)
 
 
 def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
@@ -37,8 +56,8 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
         cell = sdk.locate(grid_type=req.grid_type, requested_grid_level=req.requested_grid_level, point=req.point)
         return LocateResponse(cell=cell)
 
-    @router.post("/grid/cover", response_model=CoverResponse)
-    def cover(req: CoverRequest) -> CoverResponse:
+    @router.post("/grid/cover", response_model=WebCoverResponse)
+    def cover(req: WebCoverRequest) -> WebCoverResponse:
         cells = sdk.cover(
             grid_type=req.grid_type,
             requested_grid_level=req.requested_grid_level,
@@ -48,12 +67,25 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
             bbox=req.bbox,
             crs=req.crs,
         )
-        return CoverResponse(
+        preview_cells: list[GridCell] = []
+        if req.preview_mode == "continuous" and req.grid_type.value == "mgrs":
+            target_geometry = req.geometry
+            if target_geometry is None and req.bbox is not None:
+                target_geometry = bbox_to_polygon(req.bbox).__geo_interface__
+            if target_geometry is not None:
+                preview_cells = build_continuous_mgrs_preview(
+                    cells,
+                    requested_grid_level=req.requested_grid_level,
+                    target_geometry=target_geometry,
+                    preview_crs=req.preview_crs,
+                )
+        return WebCoverResponse(
             grid_type=req.grid_type.value,
             requested_grid_level=req.requested_grid_level,
             cover_mode=req.cover_mode.value,
             cells=cells,
-            statistics={"cell_count": len(cells)},
+            preview_cells=preview_cells,
+            statistics={"cell_count": len(cells), "preview_cell_count": len(preview_cells)},
         )
 
     @router.post("/topology/neighbors", response_model=NeighborsResponse)

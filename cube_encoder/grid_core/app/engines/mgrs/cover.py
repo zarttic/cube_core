@@ -24,6 +24,7 @@ from grid_core.app.models.grid_address import GridAddress
 from grid_core.app.utils.geometry import to_shapely, wrapped_geometry_variants
 
 _converter = mgrs_lib.MGRS()
+_UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 
 
 def cover_geometry(
@@ -165,6 +166,14 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
         except ValidationError:
             return []
 
+        # MGRS latitude-band letters are part of the cell identity. At an
+        # 8-degree band boundary, the same 100 km UTM square can have a
+        # valid code in both adjacent bands (for example 48QTM/48RTM).
+        # UTMToMGRS chooses only one of those aliases, so add the adjacent
+        # band candidates explicitly or a cover crossing the boundary gets
+        # a visible gap.
+        _add_adjacent_band_aliases(code, precision, candidates)
+
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 if dx == 0 and dy == 0:
@@ -222,6 +231,27 @@ def _neighbor_codes(code: str, precision: int, domain: GridDomain) -> list[str]:
                     pass
 
     return list(candidates)
+
+
+def _add_adjacent_band_aliases(code: str, precision: int, out: set[str]) -> None:
+    """Add valid aliases for the UTM square at an adjacent latitude band."""
+    canonical = code.replace(" ", "").upper()
+    zone_digits = 2 if len(canonical) > 1 and canonical[1].isdigit() else 1
+    band_position = zone_digits
+    try:
+        band_index = _UTM_BANDS.index(canonical[band_position])
+    except (IndexError, ValueError):
+        return
+
+    for adjacent_index in (band_index - 1, band_index + 1):
+        if not 0 <= adjacent_index < len(_UTM_BANDS):
+            continue
+        alias = (
+            canonical[:band_position]
+            + _UTM_BANDS[adjacent_index]
+            + canonical[band_position + 1:]
+        )
+        _add_valid_neighbor(alias, precision, out)
 
 
 def _add_valid_neighbor(code: str, precision: int, out: set[str]) -> None:
