@@ -25,10 +25,8 @@
 | `INGEST_WORKFLOW.md` | `docs/` | 剖分批次入库流程旧稿（2026-07-24） |
 | `LOADER_SCHEMA_HANDOFF.md` | `docs/` | 载入子系统交付契约（2026-08-09） |
 | `MULTI_GRID_PARTITION_DESIGN.md` | `docs/` | 多格网剖分流程设计稿（2026-07-24） |
-| `OPEN_ISSUES.md` | `docs/` | 待处理问题清单（2026-07-19） |
 | `PRODUCTION_TEST_ACCEPTANCE.md` | `docs/` | 生产测试与验收基线（2026-08-16） |
 | `QUALITY_RETRY_FAILURE_REPORT.md` | `docs/` | 质检与重试失败场景报告（2026-07-21） |
-| `quality_retry_failure_matrix.json` | `docs/` | 上述报告的失败矩阵数据 |
 | `auth-integration-guide.md` | `docs/` | 认证集成方案（2026-08-11） |
 | `测试大纲执行结果_20260824.md` | `docs/` | 测试大纲执行结果（2026-08-24） |
 | `分析就绪数据剖分管理系统测试大纲.docx` | `docs/` | 测试大纲原稿 |

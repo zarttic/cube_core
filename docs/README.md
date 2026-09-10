@@ -14,6 +14,7 @@
 | [ACCEPTANCE_AND_TESTING.md](ACCEPTANCE_AND_TESTING.md) | 测试与验收：命令、pytest 标记、需要外部服务的门禁 |
 | [当前OpenGauss关系型数据库表说明.md](当前OpenGauss关系型数据库表说明.md) | OpenGauss 表结构、存储与对象组织 |
 | [操作员权限接入说明.md](操作员权限接入说明.md) | 操作员权限接入与账号角色 |
+| [OPEN_ISSUES.md](OPEN_ISSUES.md) | 待处理问题清单；质检失败 catalog 的 open_issues 证据来源（被 `test_quality_retry_failure_catalog.py` 校验） |
 
 ## 包级文档
 
