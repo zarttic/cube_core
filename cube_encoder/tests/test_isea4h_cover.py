@@ -4,7 +4,6 @@ from shapely.geometry import MultiPolygon, Polygon, box, shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
-from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines import isea4h_engine
 from grid_core.app.engines.isea4h.addressing import cell_count
 from grid_core.app.engines.isea4h.geometry import cell_boundary_polygon, cell_center

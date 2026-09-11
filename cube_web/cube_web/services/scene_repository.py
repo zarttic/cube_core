@@ -8,6 +8,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from cube_split.partition_timing import finish_partition_timing, partition_timing_from_workers
+
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
 from cube_web.services.quality_contracts import quality_run_metrics

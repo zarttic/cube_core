@@ -19,7 +19,6 @@ from cube_web.services.partition_workflow import (
     _filter_retry_datasets,
     _merge_scene_rows,
 )
-from cube_web.services.ray_job_submitter import RayJobPartitionSubmitter
 
 
 def _request() -> StrictPartitionRequest:

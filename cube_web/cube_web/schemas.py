@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from cube_split.partition.carbon_products import normalize_carbon_product_type
 from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cube_split.partition.carbon_products import normalize_carbon_product_type
 from cube_web.services.partition_contracts import StrictPartitionRequest as StrictPartitionRequest
 
 

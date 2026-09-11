@@ -10,10 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from netCDF4 import Dataset
-
 from grid_core.app.models.grid_address import GridAddress
 from grid_core.sdk import CubeEncoderSDK
+from netCDF4 import Dataset
 
 from cube_split.jobs.cancellation import cancel_ray_refs
 from cube_split.partition import CarbonSatellitePartitionService, OpticalPartitionService, RadarPartitionService, get_partition_service
@@ -22,19 +21,19 @@ from cube_split.partition.carbon import (
     CarbonObservationSourceSliceGroup,
     CarbonPartitionConfig,
     CarbonSatelliteObservation,
+    _dataset_time_iso,
     _load_observation_chunks,
     _load_oco2_lite_observation_slice,
-    _dataset_time_iso,
     _partition_chunk,
     _partition_chunks,
-    _resolve_partition_chunk_size,
     _partition_observation_chunk,
     _partition_source_slice_chunk,
     _plan_oco2_lite_source_slices,
     _ray_runtime_env_from_env,
+    _resolve_partition_chunk_size,
     _time_bucket,
-    load_oco2_lite_observations,
     load_observations_from_file,
+    load_oco2_lite_observations,
     partition_observation,
 )
 from cube_split.partition.carbon_products import get_carbon_product_adapter, supported_carbon_product_types

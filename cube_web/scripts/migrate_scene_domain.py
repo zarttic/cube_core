@@ -22,12 +22,12 @@ from cube_web.services.partition_job_store import PostgresPartitionJobStore  # n
 from cube_web.services.scene_domain_schema import (  # noqa: E402
     SCENE_DOMAIN_SCHEMA_VERSION,
     apply_scene_domain_schema,
-    backfill_scene_band_unit_ids,
-    split_legacy_ingest_band_units,
     backfill_partition_grid_status,
+    backfill_scene_band_unit_ids,
     backfill_scene_resolution_metadata,
     record_scene_domain_install,
     schema_statements,
+    split_legacy_ingest_band_units,
 )
 
 

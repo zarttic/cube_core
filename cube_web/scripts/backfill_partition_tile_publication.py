@@ -14,6 +14,7 @@ for package_path in (ROOT / "cube_encoder", ROOT / "cube_split", ROOT / "cube_we
         sys.path.insert(0, str(package_path))
 
 from cube_split import runtime_config  # noqa: E402
+
 from cube_web.services.partition_domain_schema import (  # noqa: E402
     apply_schema,
     backfill_partition_tile_publication_status,

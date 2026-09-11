@@ -3,6 +3,7 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
+from cube_web.schemas import SpatiotemporalQueryRequest
 from cube_web.services.partition_contracts import (
     OutputIdentity,
     StrictPartitionRequest,
@@ -14,7 +15,6 @@ from cube_web.services.partition_contracts import (
     resolve_dataset_partition,
     validate_partition_method,
 )
-from cube_web.schemas import SpatiotemporalQueryRequest
 
 
 def normalized_request() -> dict:

@@ -9,6 +9,7 @@ from typing import Any
 from cube_split import runtime_config
 from grid_core.app.core.enums import GridType
 from grid_core.app.models.request import validate_requested_grid_level
+
 from cube_web.services.partition_defaults import DEFAULT_ISEA4H_GRID_LEVEL
 
 CONFIG_SCOPE = "cube_web"

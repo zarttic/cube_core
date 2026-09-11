@@ -442,8 +442,8 @@ def quality_probe_manifest(manifest: dict[str, Any], expected_status: str) -> di
 
 def inject_quality_failure(dataset_id: str) -> None:
     """Corrupt one namespaced acceptance index to exercise a mandatory rule."""
-    from cube_split import runtime_config
     import psycopg
+    from cube_split import runtime_config
 
     with psycopg.connect(runtime_config.postgres_dsn()) as connection:
         with connection.cursor() as cursor:

@@ -12,6 +12,7 @@ import cube_split.ingest.ray_ingest_job as ray_ingest_job
 from cube_split.ingest.ray_ingest_job import (
     CubeFactRecord,
     RawAssetRecord,
+    _upsert_job_status_postgres,
     build_cube_fact_records,
     build_raw_asset_records,
     cell_geometry_geojson,
@@ -22,7 +23,6 @@ from cube_split.ingest.ray_ingest_job import (
     run_ingest,
     upload_assets_to_minio,
     upsert_cube_facts_postgres,
-    _upsert_job_status_postgres,
     upsert_raw_assets_postgres,
 )
 

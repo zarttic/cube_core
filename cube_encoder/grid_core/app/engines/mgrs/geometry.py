@@ -1,8 +1,8 @@
 """Clipped MGRS cell geometry: project square → densify → inverse-project → clip to domain."""
 from __future__ import annotations
 
-from functools import lru_cache
 import warnings
+from functools import lru_cache
 
 import mgrs as mgrs_lib
 from pyproj import Transformer

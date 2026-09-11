@@ -4,6 +4,7 @@ from typing import Literal
 
 from cube_split.read.carbon_query import query_carbon_observations
 from fastapi import APIRouter, HTTPException
+from grid_core.app.utils.geometry import bbox_to_polygon
 from grid_core.sdk import (
     BatchAddressRequest,
     BatchGeometryResponse,
@@ -14,6 +15,7 @@ from grid_core.sdk import (
     CoverResponse,
     CubeEncoderSDK,
     GeometryResponse,
+    GridCell,
     LocateRequest,
     LocateResponse,
     NeighborsRequest,
@@ -27,8 +29,6 @@ from grid_core.sdk import (
     STCodeParseRequest,
     STCodeParseResponse,
 )
-from grid_core.app.utils.geometry import bbox_to_polygon
-from grid_core.sdk import GridCell
 from pydantic import Field
 
 from cube_web.schemas import SpatiotemporalQueryRequest

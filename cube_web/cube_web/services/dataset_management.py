@@ -14,7 +14,8 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from cube_web.services.access_control import is_admin_role, viewer_role as canonical_viewer_role
+from cube_web.services.access_control import is_admin_role
+from cube_web.services.access_control import viewer_role as canonical_viewer_role
 from cube_web.services.db_pool import _PostgresPool
 
 

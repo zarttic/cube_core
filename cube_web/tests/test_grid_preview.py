@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from grid_core.sdk import CubeEncoderSDK
 from shapely.geometry import box, shape
 from shapely.ops import unary_union
 
-from grid_core.sdk import CubeEncoderSDK
 from cube_web.services.grid_preview import build_continuous_mgrs_preview
 
 

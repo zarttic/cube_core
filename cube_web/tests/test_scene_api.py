@@ -6,11 +6,11 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 import pytest
+from cube_split.partition.carbon import CarbonSatelliteObservation
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from cube_split.partition.carbon import CarbonSatelliteObservation
 from cube_web.routes.auth import Actor
 from cube_web.routes.partition import import_partition_schema_payload
 from cube_web.routes.scene_partition import create_scene_partition_router
@@ -23,8 +23,8 @@ from cube_web.services.scene_repository import (
     _partition_batch_timing,
     _partition_compute_timing,
     _partition_execution_timing,
-    _partition_write_timing,
     _partition_scene_idempotency_key,
+    _partition_write_timing,
 )
 from cube_web.services.scene_service import SceneDomainService, build_partition_execution_request
 

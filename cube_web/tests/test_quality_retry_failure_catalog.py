@@ -7,7 +7,6 @@ from pathlib import Path
 
 from cube_web.services.quality_rules import default_rule_registry
 
-
 ROOT = Path(__file__).resolve().parents[2]
 ARCHIVED_PROJECT_DOCS = ROOT / "archive" / "docs" / "project"
 CATALOG_PATH = ARCHIVED_PROJECT_DOCS / "quality_retry_failure_matrix.json"
