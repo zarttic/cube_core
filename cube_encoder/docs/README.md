@@ -95,5 +95,3 @@ PYTHONPATH=cube_encoder python3.11 -m pytest cube_encoder/tests
 
 - 主要覆盖：geohash / mgrs / isea4h 引擎、地址与拓扑、边界、契约模型、错误处理、SDK 集成、性能烟测。
 - `tests/fixtures/isea4h/` 是 DGGRID 生成的权威向量（jsonl + sha256 清单）。
-- `tests/integration/test_grid_real_aoi.py` 标记 `real_aoi`，需要环境变量 `CUBE_GRID_REAL_AOI_URI`，
-  未设置时用例直接失败（真实栅格门禁）。

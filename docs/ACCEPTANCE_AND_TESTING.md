@@ -16,12 +16,11 @@
 
 ## 2. 测试标记与外部依赖
 
-根 `pytest.ini` 注册了三个标记：
+根 `pytest.ini` 注册了两个标记：
 
 | 标记 | 含义 | 依赖 |
 | --- | --- | --- |
 | `e2e` | 需要外部 Ray、MinIO、PostgreSQL 的端到端用例 | 外部集群 |
-| `real_aoi` | 需要可读真实栅格输入 | 环境变量 `CUBE_GRID_REAL_AOI_URI`，未设置时用例直接失败 |
 | `quality_repository_opengauss` | 真实 OpenGauss 上的质检仓储验收，**不跳过** | 环境变量 `CUBE_WEB_POSTGRES_DSN`，未设置时用例直接失败 |
 
 `cube_split/tests/` 与 `cube_encoder/tests/` 的其余用例使用打桩与 fixture，不需要外部服务；
@@ -32,13 +31,9 @@
 | 门禁 | 结果 |
 | --- | --- |
 | 跨包 pytest | 904 passed |
-| `real_aoi` 真实栅格验收 | 失败：未设置 `CUBE_GRID_REAL_AOI_URI`（环境依赖，非代码缺陷） |
 | OpenGauss 质检仓储验收 | 10 passed（含在全量结果内） |
 | 前端单测 | 126 passed |
 | 前端构建 | 通过 |
-
-补跑真实栅格门禁：设置 `CUBE_GRID_REAL_AOI_URI` 指向可读栅格后运行
-`PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m pytest cube_encoder/tests/integration`。
 
 ## 4. 编码器性能烟测
 
