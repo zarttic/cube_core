@@ -107,7 +107,7 @@ NetCDF/HDF5 `source_uri`，不转换为 COG。TanSat SIF 使用 `product_type=si
 - `band_code` 是稳定身份；`band_name` 仅用于展示。
 
 完整命名与展示规则见
-[BAND_PRESENTATION_CONTRACT.md](../cube_web/docs/BAND_PRESENTATION_CONTRACT.md)。
+[BAND_PRESENTATION_CONTRACT.md](../../cube_web/docs/BAND_PRESENTATION_CONTRACT.md)。
 
 ## 5. 剖分与对账
 

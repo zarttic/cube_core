@@ -89,7 +89,7 @@
 `CUBE_WEB_RAY_WORKER_RESOURCE`（默认 `cube_partition_worker`）、`CUBE_CARBON_RAY_PARALLELISM`、
 `CUBE_LOGICAL_*`、`AWS_*`（GDAL/rasterio S3）。
 
-完整变量表见 `../docs/OPERATIONS.md`。
+完整变量表见归档的项目级运行时配置文档 [`archive/docs/project/OPERATIONS.md`](../../archive/docs/project/OPERATIONS.md)。
 
 ## 8. 计时埋点
 

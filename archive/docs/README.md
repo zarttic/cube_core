@@ -1,6 +1,6 @@
 # 归档文档
 
-归档时间：2026-09-10
+最近整理时间：2026-09-11
 
 本目录只保留**历史追溯**用的文档：一次性验收/性能报告、事故报告、阶段性设计稿、
 交付交接单和已完成迁移的记录。这些内容不作为当前契约或运行依据，不随当前代码更新。
@@ -9,15 +9,28 @@
 
 - 仓库协作规则：[AGENTS.md](../../AGENTS.md)
 - 项目入口：[README.md](../../README.md)
-- 数据库与存储：[docs/当前OpenGauss关系型数据库表说明.md](../../docs/当前OpenGauss关系型数据库表说明.md)
-- 操作员权限：[docs/操作员权限接入说明.md](../../docs/操作员权限接入说明.md)
 - Web API 与运行：[cube_web/docs/README.md](../../cube_web/docs/README.md)
 - 剖分与入库工作流：[cube_split/docs/README.md](../../cube_split/docs/README.md)
 - 编码器架构与 SDK：[cube_encoder/docs/README.md](../../cube_encoder/docs/README.md)
 
 文件按来源目录分到子目录，原始路径用 Git 历史可查（`git log --follow <file>`）。
 
-## 项目级（`docs/`）
+## 本次归档：原根目录 `docs/`
+
+以下文件原位于仓库根目录 `docs/`，现统一保存在 `archive/docs/project/`。它们只用于历史追溯、测试证据和问题上下文，不作为当前契约或运行依据。
+
+| 文件 | 原路径 | 说明 |
+| --- | --- | --- |
+| [`project/README.md`](project/README.md) | `docs/README.md` | 原项目级文档索引 |
+| [`project/ARCHITECTURE.md`](project/ARCHITECTURE.md) | `docs/ARCHITECTURE.md` | 系统架构与数据流 |
+| [`project/OPERATIONS.md`](project/OPERATIONS.md) | `docs/OPERATIONS.md` | 部署运行与运行时配置 |
+| [`project/ACCEPTANCE_AND_TESTING.md`](project/ACCEPTANCE_AND_TESTING.md) | `docs/ACCEPTANCE_AND_TESTING.md` | 测试与验收门禁 |
+| [`project/OPEN_ISSUES.md`](project/OPEN_ISSUES.md) | `docs/OPEN_ISSUES.md` | 待处理问题历史记录 |
+| [`project/quality_retry_failure_matrix.json`](project/quality_retry_failure_matrix.json) | `docs/quality_retry_failure_matrix.json` | 质检失败场景机器可读基准 |
+| [`project/当前OpenGauss关系型数据库表说明.md`](project/当前OpenGauss关系型数据库表说明.md) | `docs/当前OpenGauss关系型数据库表说明.md` | OpenGauss 表结构与存储说明 |
+| [`project/操作员权限接入说明.md`](project/操作员权限接入说明.md) | `docs/操作员权限接入说明.md` | 操作员权限接入说明 |
+
+## 既有项目级归档
 
 | 文件 | 原路径 | 说明 |
 | --- | --- | --- |

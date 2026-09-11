@@ -4,7 +4,7 @@
 
 **适用范围**：剖分产物质检、质检运行重试、剖分任务重试、质检通过后的手动入库重试。
 
-机器可读的完整矩阵见 [`quality_retry_failure_matrix.json`](quality_retry_failure_matrix.json)。该 JSON 是规则、错误码、当前行为、问题、解决方案和测试证据的基准；本文负责解释业务语义。
+机器可读的完整矩阵见 [`quality_retry_failure_matrix.json`](project/quality_retry_failure_matrix.json)。该 JSON 是规则、错误码、当前行为、问题、解决方案和测试证据的基准；本文负责解释业务语义。
 
 ## 1. 质检终态
 

@@ -43,7 +43,7 @@ python3.11 -m grid_core.app.perf_smoke
 ```
 
 共 12 个用例，阈值可用 `PERF_MAX_*` 环境变量覆盖，`PERF_SMOKE_JSON_PATH` 可导出 JSON 结果。
-发布前必须执行（见 `cube_encoder/docs/SDK_RELEASE.md`）。
+发布前必须执行（见 `../../../cube_encoder/docs/SDK_RELEASE.md`）。
 
 ## 5. 验收约定
 

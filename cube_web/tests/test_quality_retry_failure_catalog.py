@@ -9,10 +9,11 @@ from cube_web.services.quality_rules import default_rule_registry
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CATALOG_PATH = ROOT / "docs" / "quality_retry_failure_matrix.json"
+ARCHIVED_PROJECT_DOCS = ROOT / "archive" / "docs" / "project"
+CATALOG_PATH = ARCHIVED_PROJECT_DOCS / "quality_retry_failure_matrix.json"
 RULES_PATH = ROOT / "cube_web" / "cube_web" / "services" / "quality_rules.py"
 LABELS_PATH = ROOT / "cube_web" / "frontend" / "src" / "utils" / "qualityLabels.js"
-OPEN_ISSUES_PATH = ROOT / "docs" / "OPEN_ISSUES.md"
+OPEN_ISSUES_PATH = ARCHIVED_PROJECT_DOCS / "OPEN_ISSUES.md"
 
 
 def _catalog() -> dict:

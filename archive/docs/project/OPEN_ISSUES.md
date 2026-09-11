@@ -1,6 +1,6 @@
 # 待处理问题
 
-质检和重试的完整场景矩阵与当前行为报告见 [`QUALITY_RETRY_FAILURE_REPORT.md`](QUALITY_RETRY_FAILURE_REPORT.md)，机器可读基准见 [`quality_retry_failure_matrix.json`](quality_retry_failure_matrix.json)。
+质检和重试的完整场景矩阵与当前行为报告见 [`QUALITY_RETRY_FAILURE_REPORT.md`](../QUALITY_RETRY_FAILURE_REPORT.md)，机器可读基准见 [`quality_retry_failure_matrix.json`](quality_retry_failure_matrix.json)。
 
 ## 部分数据重剖分会替换整个数据集当前输出
 

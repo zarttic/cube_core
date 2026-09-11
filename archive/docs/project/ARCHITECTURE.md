@@ -28,7 +28,7 @@ cube_encoder 格网编码 SDK（grid_core）      —— locate / cover / topolo
 | MinIO | 源数据、COG、瓦片与实体剖分产物的对象存储 | `CUBE_WEB_MINIO_ENDPOINT` / `ACCESS_KEY` / `SECRET_KEY` / `BUCKET`（默认 `cube`） |
 | Ray | 分布式剖分与入库执行 | `CUBE_WEB_RAY_ADDRESS`；Ray Jobs 模式下 `CUBE_WEB_RAY_JOB_ADDRESS` |
 
-集群拓扑与凭据规范见 [AGENTS.md](../AGENTS.md)。
+集群拓扑与凭据规范见 [AGENTS.md](../../../AGENTS.md)。
 
 ## 3. 核心数据流
 

@@ -42,16 +42,13 @@ Web、剖分作业和编码 SDK 共用这一契约。`s2`、`tile_matrix`、`pla
 
 ## 文档
 
+项目级历史文档已归档到 [`archive/docs/project/`](archive/docs/project/README.md)；当前契约和运行说明以协作规则及各包文档为准。
+
 | 位置 | 内容 |
 | --- | --- |
 | `AGENTS.md` | 仓库协作规则与基础设施信息 |
-| [docs/README.md](docs/README.md) | 项目级文档索引 |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构与数据流 |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 部署运行、运行时配置与运维动作 |
-| [docs/ACCEPTANCE_AND_TESTING.md](docs/ACCEPTANCE_AND_TESTING.md) | 测试与验收门禁 |
-| [docs/当前OpenGauss关系型数据库表说明.md](docs/当前OpenGauss关系型数据库表说明.md) | 数据库表与存储说明 |
-| [docs/操作员权限接入说明.md](docs/操作员权限接入说明.md) | 操作员权限接入 |
 | [cube_encoder/docs/README.md](cube_encoder/docs/README.md) | 编码器架构、SDK 与发布规范 |
 | [cube_split/docs/README.md](cube_split/docs/README.md) | 剖分、入库、质检作业 |
 | [cube_web/docs/README.md](cube_web/docs/README.md) | Web API、任务编排与前端 |
-| [archive/docs/README.md](archive/docs/README.md) | 历史文档归档，不作为当前依据 |
+| [archive/README.md](archive/README.md) | 历史文档、站点与脚本归档总索引 |
+| [archive/docs/README.md](archive/docs/README.md) | 归档文档详细索引 |
