@@ -493,14 +493,23 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
 
     def fail_output(self, dataset_id: str, output_version: str, *, error_code: str, error_message: str) -> None:
         self.ensure_schema()
-        output = self.outputs.get((dataset_id, output_version))
-        if output is None:
-            raise KeyError(output_version)
-        if output["status"] == "completed":
-            return
-        output.update({"status": "failed", "error_code": error_code, "error_message": error_message, "failed_at": _now()})
-        if self.datasets.get(dataset_id, {}).get("current_output_version") != output_version:
-            self.datasets.get(dataset_id, {}).update({"partition_status": "failed", "updated_at": _now()})
+        with self._lock:
+            output = self.outputs.get((dataset_id, output_version))
+            if output is None:
+                raise KeyError(output_version)
+            if output["status"] == "completed":
+                return
+            output.update({"status": "failed", "error_code": error_code, "error_message": error_message, "failed_at": _now()})
+            newer_output_exists = any(
+                candidate.get("dataset_id") == dataset_id
+                and candidate.get("output_version") != output_version
+                and candidate.get("created_at")
+                and output.get("created_at")
+                and candidate["created_at"] > output["created_at"]
+                for candidate in self.outputs.values()
+            )
+            if not newer_output_exists and self.datasets.get(dataset_id, {}).get("current_output_version") != output_version:
+                self.datasets.get(dataset_id, {}).update({"partition_status": "failed", "updated_at": _now()})
 
     def resolve_output_version(self, dataset_id: str, output_version: str | None = None) -> str:
         dataset = self.datasets.get(dataset_id)
@@ -1803,8 +1812,34 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 """UPDATE partition_datasets SET partition_status = 'failed',
                        partition_completed_at = NULL, updated_at = now()
                    WHERE dataset_id = %s AND current_output_version IS DISTINCT FROM %s
-                     AND partition_status IN ('pending','queued','running','cancelled')""",
-                (dataset_id, output_version),
+                     AND partition_status IN ('pending','queued','running','cancelled')
+                     AND EXISTS (
+                       SELECT 1
+                       FROM partition_output_versions failed_target
+                       WHERE failed_target.dataset_id = %s
+                         AND failed_target.output_version = %s
+                         AND failed_target.status = 'failed'
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM partition_output_versions newer
+                       JOIN partition_output_versions failed_output
+                         ON failed_output.dataset_id = %s
+                        AND failed_output.output_version = %s
+                       WHERE newer.dataset_id = %s
+                         AND newer.output_version <> %s
+                         AND newer.created_at > failed_output.created_at
+                     )""",
+                (
+                    dataset_id,
+                    output_version,
+                    dataset_id,
+                    output_version,
+                    dataset_id,
+                    output_version,
+                    dataset_id,
+                    output_version,
+                ),
             )
             if hasattr(connection, "commit"):
                 connection.commit()

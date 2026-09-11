@@ -331,6 +331,113 @@ def test_ray_reconcile_logs_status_errors(caplog) -> None:
     assert "ray-job-01" in caplog.text
 
 
+def test_reconcile_local_worker_loss_closes_staged_output() -> None:
+    store = InMemoryPartitionJobStore()
+    _seed_failed_retry_attempt(store, task_id="task-restart")
+    domain_store = FakeDomainStore()
+    request = _request()
+    domain_store.start_output(request, request.datasets[0], "task-restart")
+    store.attempts["task-restart"]["status"] = "running"
+    store.batches["batch-01"]["status"] = "running"
+    workflow = _workflow(domain_store, FakeRunner(), store)
+
+    workflow.reconcile_orphaned_tasks()
+
+    attempt = store.get_attempt("task-restart")
+    assert attempt is not None
+    assert attempt["status"] == "manual_required"
+    output_version = make_output_version("dataset-ok", "task-restart")
+    assert domain_store.outputs[("dataset-ok", output_version)]["status"] == "failed"
+
+
+def test_cancelled_runner_result_closes_staged_output_without_succeeding_attempt() -> None:
+    store = InMemoryPartitionJobStore()
+    _seed_failed_retry_attempt(store, task_id="task-cancelled-result")
+    domain_store = FakeDomainStore()
+    request = _request()
+    domain_store.start_output(request, request.datasets[0], "task-cancelled-result")
+    store.attempts["task-cancelled-result"]["status"] = "running"
+    store.batches["batch-01"]["status"] = "running"
+    workflow = _workflow(domain_store, FakeRunner(), store)
+
+    workflow.on_task_succeeded(
+        "task-cancelled-result",
+        {"batch_id": "batch-01", "status": "cancelled", "datasets": []},
+    )
+
+    attempt = store.get_attempt("task-cancelled-result")
+    assert attempt is not None
+    assert attempt["status"] == "cancelled"
+    output_version = make_output_version("dataset-ok", "task-cancelled-result")
+    assert domain_store.outputs[("dataset-ok", output_version)]["status"] == "failed"
+
+
+def test_reconcile_ray_failure_closes_staged_output(monkeypatch) -> None:
+    monkeypatch.setattr(workflow_module, "ray_job_executor_enabled", lambda: True)
+    store = InMemoryPartitionJobStore()
+    _seed_failed_retry_attempt(store, task_id="task-ray")
+    domain_store = FakeDomainStore()
+    request = _request()
+    domain_store.start_output(request, request.datasets[0], "task-ray")
+    store.attempts["task-ray"]["status"] = "running"
+    store.batches["batch-01"]["status"] = "running"
+    store.set_ray_job_id("task-ray", "ray-job-01")
+
+    class FailedSubmitter:
+        def status(self, _ray_job_id: str) -> str:
+            return "FAILED"
+
+    workflow = PartitionWorkflowService(
+        PartitionService(),
+        store=store,
+        domain_store=domain_store,
+        runner=FakeRunner(),
+        ray_job_submitter=FailedSubmitter(),
+    )
+
+    workflow.reconcile_orphaned_tasks()
+
+    attempt = store.get_attempt("task-ray")
+    assert attempt is not None
+    assert attempt["status"] == "failed"
+    assert attempt["error_type"] == "ray_job_failed"
+    output_version = make_output_version("dataset-ok", "task-ray")
+    assert domain_store.outputs[("dataset-ok", output_version)]["status"] == "failed"
+
+
+def test_retry_waits_for_transient_output_cleanup() -> None:
+    class FlakyDomainStore(FakeDomainStore):
+        failures_remaining = 2
+
+        def fail_output(self, dataset_id, output_version, *, error_code, error_message):
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                raise RuntimeError("temporary database outage")
+            return super().fail_output(
+                dataset_id,
+                output_version,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+    store = InMemoryPartitionJobStore()
+    _seed_failed_retry_attempt(store)
+    domain_store = FlakyDomainStore()
+    request = _request()
+    domain_store.start_output(request, request.datasets[0], "task-failed")
+    workflow = _workflow(domain_store, FakeRunner(), store)
+
+    with pytest.raises(HTTPException) as exc_info:
+        workflow.retry_task("task-failed")
+    assert exc_info.value.status_code == 503
+    output_version = make_output_version("dataset-ok", "task-failed")
+    assert domain_store.outputs[("dataset-ok", output_version)]["status"] == "staging"
+
+    retry = workflow.retry_task("task-failed")
+    assert retry.task_id != "task-failed"
+    assert domain_store.outputs[("dataset-ok", output_version)]["status"] == "failed"
+
+
 class _PersistentStoreAdapter:
     """Exercise the Ray Job path while retaining the in-memory store's behavior."""
 

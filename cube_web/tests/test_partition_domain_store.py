@@ -168,6 +168,50 @@ def test_different_grid_outputs_remain_independently_available() -> None:
     assert store.outputs[("dataset-a", second_version)]["status"] == "completed"
 
 
+def test_stale_failed_output_does_not_regress_newer_staging_output() -> None:
+    store = InMemoryPartitionDomainStore()
+    request = _request()
+    first_version = store.start_output(request, request.datasets[0], "first-task")
+    first_result = _result(first_version)
+    first_result.task_id = "first-task"
+    store.complete_output(first_result)
+
+    stale_version = store.start_output(request, request.datasets[0], "stale-task")
+    newer_version = store.start_output(request, request.datasets[0], "newer-task")
+
+    store.fail_output("dataset-a", stale_version, error_code="partition_execution_failed", error_message="stale failure")
+
+    assert store.outputs[("dataset-a", stale_version)]["status"] == "failed"
+    assert store.outputs[("dataset-a", newer_version)]["status"] == "staging"
+    assert store.get_dataset("dataset-a")["partition_status"] == "running"
+
+    store.fail_output("dataset-a", newer_version, error_code="partition_execution_failed", error_message="latest failure")
+    assert store.get_dataset("dataset-a")["partition_status"] == "failed"
+
+
+def test_stale_failed_output_does_not_regress_newer_completed_output() -> None:
+    store = InMemoryPartitionDomainStore()
+    request = _request()
+    old_version = store.start_output(request, request.datasets[0], "old-task")
+    old_result = _result(old_version)
+    old_result.task_id = "old-task"
+    store.complete_output(old_result)
+
+    stale_version = store.start_output(request, request.datasets[0], "stale-task")
+    newer_version = store.start_output(request, request.datasets[0], "newer-task")
+    newer_result = _result(newer_version)
+    newer_result.task_id = "newer-task"
+    for noun in ("tiles", "indexes", "grid_cells"):
+        getattr(newer_result, noun)[0]["output_id"] = f"{noun}-newer"
+    store.complete_output(newer_result)
+
+    store.fail_output("dataset-a", stale_version, error_code="partition_execution_failed", error_message="stale failure")
+
+    assert store.outputs[("dataset-a", newer_version)]["status"] == "completed"
+    assert store.get_dataset("dataset-a")["current_output_version"] == newer_version
+    assert store.get_dataset("dataset-a")["partition_status"] == "completed"
+
+
 def test_detail_failure_rolls_back_pointer_and_outbox() -> None:
     store = InMemoryPartitionDomainStore()
     request = _request()
@@ -283,6 +327,24 @@ def test_opengauss_mutation_uses_schema_guard_and_transaction_order() -> None:
     assert "status = 'staging'" in rebind[0]
     assert "partition_completed_at = NULL" in rebind[0]
     assert version
+
+
+def test_opengauss_fail_output_protects_newer_staging_output() -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+
+    store.fail_output("dataset-a", "version-a", error_code="partition_execution_failed", error_message="failed")
+
+    updates = [(sql, params) for sql, params in connection.statements if sql.lstrip().startswith("UPDATE partition_")]
+    assert len(updates) == 2
+    dataset_update_sql, dataset_update_params = updates[1]
+    assert "NOT EXISTS" in dataset_update_sql
+    assert dataset_update_params == (
+        "dataset-a", "version-a",
+        "dataset-a", "version-a",
+        "dataset-a", "version-a",
+        "dataset-a", "version-a",
+    )
 
 
 def test_opengauss_complete_accepts_strict_attempt_for_reused_dataset(monkeypatch) -> None:

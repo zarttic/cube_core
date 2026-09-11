@@ -57,6 +57,26 @@ def test_health_endpoint_reports_service_status() -> None:
     assert body["checks"]["partition_queue"] == {"status": "ok", "queued": 0, "max_workers": 4}
 
 
+def test_deep_health_masks_connection_error_details(monkeypatch) -> None:
+    from cube_web.services import db_pool, health_service
+
+    class FailingPool:
+        @classmethod
+        def for_dsn(cls, _dsn):
+            return cls()
+
+        def connection(self):
+            raise RuntimeError("postgresql://admin:secret@example.internal:5432/cube")
+
+    monkeypatch.setattr(health_service.runtime_config, "postgres_dsn", lambda: "postgresql://admin:secret@example.internal:5432/cube")
+    monkeypatch.setattr(db_pool, "_PostgresPool", FailingPool)
+
+    result = health_service._check_postgres()
+
+    assert result == {"status": "fail", "message": "OpenGauss health check failed", "error_type": "RuntimeError"}
+    assert "secret" not in str(result)
+
+
 def test_auth_config_has_no_runtime_mode_switch() -> None:
     response = client.get("/api/config")
 

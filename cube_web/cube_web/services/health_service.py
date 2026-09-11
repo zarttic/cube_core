@@ -118,7 +118,7 @@ def _check_postgres() -> dict[str, Any]:
                 cur.execute("SELECT 1")
                 cur.fetchone()
     except Exception as exc:
-        return _fail(str(exc), error_type=exc.__class__.__name__)
+        return _fail("OpenGauss health check failed", error_type=exc.__class__.__name__)
     return {
         "status": "ok",
         "latency_ms": _elapsed_ms(start),
@@ -142,7 +142,7 @@ def _check_ray() -> dict[str, Any]:
         resources = ray.cluster_resources()
         nodes = ray.nodes()
     except Exception as exc:
-        return _fail(str(exc), error_type=exc.__class__.__name__)
+        return _fail("Ray health check failed", error_type=exc.__class__.__name__)
     finally:
         if ray is not None and not already_initialized:
             try:
@@ -164,7 +164,7 @@ def _check_minio() -> dict[str, Any]:
         client, settings = _minio_client()
         buckets = client.list_buckets()
     except Exception as exc:
-        return _fail(str(exc), error_type=exc.__class__.__name__)
+        return _fail("MinIO health check failed", error_type=exc.__class__.__name__)
     return {
         "status": "ok",
         "latency_ms": _elapsed_ms(start),
@@ -180,7 +180,7 @@ def _check_minio_bucket() -> dict[str, Any]:
         client, settings = _minio_client()
         exists = client.bucket_exists(settings.bucket)
     except Exception as exc:
-        return _fail(str(exc), error_type=exc.__class__.__name__)
+        return _fail("MinIO bucket health check failed", error_type=exc.__class__.__name__)
     if not exists:
         return _fail(f"MinIO bucket does not exist: {settings.bucket}", bucket=settings.bucket)
     return {

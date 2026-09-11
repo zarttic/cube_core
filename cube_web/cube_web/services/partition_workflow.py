@@ -108,7 +108,7 @@ class PartitionWorkflowService:
         *,
         error_code: str,
         error_message: str,
-    ) -> None:
+    ) -> bool:
         try:
             domain_store.fail_output(
                 dataset_id,
@@ -116,15 +116,24 @@ class PartitionWorkflowService:
                 error_code=error_code,
                 error_message=error_message,
             )
+        except KeyError:
+            # The worker may have failed before start_output, or a previous
+            # reconciliation may already have closed this version. Both are
+            # terminal for this cleanup intent.
+            return True
         except Exception:
             # The execution error is the primary failure. A cleanup error is
             # logged separately and must not replace the actionable root cause.
+            # Returning False lets a later reconciliation retry the same
+            # deterministic output version.
             logger.exception(
                 "Failed to close partition output %s/%s after %s",
                 dataset_id,
                 output_version,
                 error_code,
             )
+            return False
+        return True
 
     @property
     def store(self) -> PartitionJobStore:
@@ -620,17 +629,28 @@ class PartitionWorkflowService:
 
     def reconcile_orphaned_tasks(self) -> int:
         resolved = 0
-        for status in ACTIVE_TASK_STATUSES:
+        terminal_statuses = {"failed", "cancelled", "manual_required"}
+        for status in (*ACTIVE_TASK_STATUSES, *terminal_statuses):
             for task in self.store.list_tasks(status=status, limit=10_000, offset=0):
                 task_id = str(task.get("task_id") or "").strip()
                 if not task_id:
                     continue
-                attempt = self.store.get_attempt(task_id)
-                if attempt is None:
-                    continue
-                refreshed = self._refresh_active_attempt(task_id, attempt)
-                if refreshed is not None and str(refreshed.get("status") or "") not in ACTIVE_TASK_STATUSES:
-                    resolved += 1
+                try:
+                    attempt = self.store.get_attempt(task_id)
+                    if attempt is None:
+                        continue
+                    was_active = status in ACTIVE_TASK_STATUSES
+                    if was_active:
+                        attempt = self._refresh_active_attempt(task_id, attempt) or attempt
+                    current_status = str(attempt.get("status") or "")
+                    if current_status in terminal_statuses:
+                        self._reconcile_attempt_outputs(task_id, attempt)
+                        if was_active:
+                            resolved += 1
+                except Exception:
+                    # One broken attempt must not stop recovery for every other
+                    # task. Startup/detail/retry reconciliation will retry it.
+                    logger.warning("Unable to reconcile partition task %s", task_id, exc_info=True)
         return resolved
 
     def get_task(self, task_id: str) -> PartitionTask:
@@ -638,6 +658,7 @@ class PartitionWorkflowService:
         if attempt is None:
             return self.partition_service.get_task(task_id)
         attempt = self._refresh_active_attempt(task_id, attempt) or attempt
+        self._reconcile_attempt_outputs(task_id, attempt)
         batch = self.store.get_batch(str(attempt.get("batch_id") or ""))
         return _task_from_attempt(attempt, batch or {})
 
@@ -658,6 +679,9 @@ class PartitionWorkflowService:
             retryable_statuses.add("completed")
         if task.status not in retryable_statuses:
             raise HTTPException(status_code=409, detail=f"Partition task is not retryable: {task.status}")
+        attempt = self.store.get_attempt(task_id) or attempt
+        if not self._reconcile_attempt_outputs(task_id, attempt):
+            raise HTTPException(status_code=503, detail="Partition output cleanup is still pending; please retry later")
         batch_id = str(attempt["batch_id"])
         batch = self.get_batch(batch_id)
         if str(batch.get("last_task_id") or "") != task_id:
@@ -766,6 +790,7 @@ class PartitionWorkflowService:
                 except Exception:
                     cancelled = None
                     logger.exception("Failed to persist cancellation for task %s", task_id)
+                self._reconcile_attempt_outputs(task_id, cancelled or attempt)
                 self._notify_task_event(task_id, "cancelled", None)
             response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
             if stop_error is not None and isinstance(response, dict):
@@ -780,6 +805,7 @@ class PartitionWorkflowService:
             if attempt is not None and exc.status_code == 404:
                 cancelled = self.store.mark_cancelled(task_id)
                 if cancelled is not None:
+                    self._reconcile_attempt_outputs(task_id, cancelled)
                     return cancelled
             if attempt is None or exc.status_code != 404:
                 raise
@@ -787,7 +813,9 @@ class PartitionWorkflowService:
             if task is None:
                 raise HTTPException(status_code=404, detail=f"Partition task not found: {task_id}")
             return task.to_dict()
-        return self.store.get_attempt(task_id) or attempt
+        response = self.store.get_attempt(task_id) or attempt
+        self._reconcile_attempt_outputs(task_id, response)
+        return response
 
     def force_cancel_task(self, task_id: str) -> dict[str, Any]:
         """Terminate a partition attempt and publish cancellation immediately.
@@ -811,7 +839,7 @@ class PartitionWorkflowService:
                 except Exception:
                     cancelled = None
                     logger.exception("Failed to persist forced cancellation for task %s", task_id)
-                self._fail_active_partition_outputs(task_id, attempt)
+                self._reconcile_attempt_outputs(task_id, cancelled or attempt)
                 self._notify_task_event(task_id, "cancelled", None)
             response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
             if stop_error is not None and isinstance(response, dict):
@@ -831,22 +859,31 @@ class PartitionWorkflowService:
             if exc.status_code != 404:
                 raise
         cancelled = self.store.mark_cancelled(task_id) or self.store.get_attempt(task_id) or attempt
-        self._fail_active_partition_outputs(task_id, attempt)
+        self._reconcile_attempt_outputs(task_id, cancelled)
         self._notify_task_event(task_id, "cancelled", None)
         return cancelled
 
-    def _fail_active_partition_outputs(self, task_id: str, attempt: dict[str, Any] | None) -> None:
-        """Close staging outputs when a managed task is force-stopped.
+    def _fail_active_partition_outputs(
+        self,
+        task_id: str,
+        attempt: dict[str, Any] | None,
+        *,
+        error_code: str = "partition_cancelled",
+        error_message: str = "Partition task cancelled",
+    ) -> bool:
+        """Close staging outputs for a terminal managed task.
 
         A Ray job can disappear before its worker reaches the normal
         ``PartitionCancelledError`` path.  Marking those output versions failed
-        makes the database immediately consistent with the cancelled task and
-        allows a subsequent retry or dataset deletion.
+        makes the database consistent with the task. The attempt payload keeps
+        the output identity durable, so a later reconciliation can retry this
+        operation after a transient database failure.
         """
-        domain_store = self.domain_store
+        domain_store = self.domain_store or get_partition_domain_store()
         payload = (attempt or {}).get("payload")
         if domain_store is None or not isinstance(payload, dict) or payload.get("strict_partition_request") is not True:
-            return
+            return True
+        all_closed = True
         for dataset in payload.get("datasets") or ():
             if not isinstance(dataset, dict) or not dataset.get("dataset_id"):
                 continue
@@ -854,25 +891,29 @@ class PartitionWorkflowService:
             selection_id = str(dataset.get("selection_id") or "")
             execution_task_id = f"{task_id}:{selection_id}" if selection_id else task_id
             output_version = make_output_version(dataset_id, execution_task_id)
-            try:
-                self._safe_fail_output(
-                    domain_store,
-                    dataset_id,
-                    output_version,
-                    error_code="partition_cancelled",
-                    error_message="Partition task cancelled",
-                )
-            except (KeyError, ValueError):
-                # No output may have been started yet, or the worker may have
-                # already closed it.  The cancellation itself remains valid.
-                continue
-            except Exception:
-                logger.warning(
-                    "failed to close cancelled partition output %s/%s",
-                    dataset_id,
-                    output_version,
-                    exc_info=True,
-                )
+            all_closed = self._safe_fail_output(
+                domain_store,
+                dataset_id,
+                output_version,
+                error_code=error_code,
+                error_message=error_message,
+            ) and all_closed
+        return all_closed
+
+    def _reconcile_attempt_outputs(self, task_id: str, attempt: dict[str, Any] | None) -> bool:
+        """Retry closing output versions after failure, cancellation, or loss."""
+        status = str((attempt or {}).get("status") or "")
+        if status == "cancelled":
+            return self._fail_active_partition_outputs(task_id, attempt)
+        if status in {"failed", "manual_required"}:
+            error_message = _text_or_none((attempt or {}).get("error_message")) or "Partition task failed"
+            return self._fail_active_partition_outputs(
+                task_id,
+                attempt,
+                error_code="partition_execution_failed",
+                error_message=error_message,
+            )
+        return True
 
     def on_task_started(self, task_id: str) -> None:
         attempt = self.store.get_attempt(task_id)
@@ -884,10 +925,17 @@ class PartitionWorkflowService:
         attempt = self.store.get_attempt(task_id)
         result_status = str(result.get("status") or "completed")
         if attempt is not None:
-            self.store.succeed_attempt(task_id, result)
             if result_status == "cancelled":
-                self.store.mark_cancelled(task_id)
+                cancelled = self.store.mark_cancelled(task_id)
+                # A cancelled runner result must not first be persisted as
+                # succeeded: that would make the cancellation transition
+                # impossible in stores whose terminal states are immutable.
+                self._reconcile_attempt_outputs(
+                    task_id,
+                    cancelled or self.store.get_attempt(task_id) or attempt,
+                )
             elif result_status in {"failed", "partial_failure"}:
+                self.store.succeed_attempt(task_id, result)
                 failure_message = _first_dataset_error([
                     item for item in result.get("datasets", ()) if isinstance(item, dict)
                 ]) or "One or more datasets failed during partition execution"
@@ -896,6 +944,9 @@ class PartitionWorkflowService:
                     failure_message,
                     error_type=classify_partition_error(failure_message),
                 )
+                self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id) or attempt)
+            else:
+                self.store.succeed_attempt(task_id, result)
         projected_status = "cancelled" if result_status == "cancelled" else ("failed" if result_status in {"failed", "partial_failure"} else result_status)
         self._notify_task_event(task_id, projected_status, result)
 
@@ -906,11 +957,13 @@ class PartitionWorkflowService:
             self._notify_task_event(task_id, "failed", {"error": error})
             return
         if "cancel" in error.lower():
-            self.store.mark_cancelled(task_id)
+            cancelled = self.store.mark_cancelled(task_id)
+            self._reconcile_attempt_outputs(task_id, cancelled or attempt)
             self._notify_task_event(task_id, "cancelled", {"error": error})
             return
         error_type = classify_partition_error(error)
         self.store.fail_attempt(task_id, error, manual_required=True, error_type=error_type)
+        self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id) or attempt)
         self._notify_task_event(task_id, "failed", {"error": error})
 
     def _active_task_for_batch(self, batch: dict[str, Any]) -> PartitionTask | None:
@@ -961,9 +1014,11 @@ class PartitionWorkflowService:
                 "Local partition worker is unavailable after restart; Ray execution requires manual recovery",
                 error_type="local_worker_lost",
             )
+            self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id) or attempt)
             return
         if current.status == "cancelled":
-            self.store.mark_cancelled(task_id)
+            cancelled = self.store.mark_cancelled(task_id)
+            self._reconcile_attempt_outputs(task_id, cancelled or attempt)
             return
         if current.status == "failed":
             self.store.fail_attempt(
@@ -972,6 +1027,7 @@ class PartitionWorkflowService:
                 manual_required=True,
                 error_type="local_task_failed",
             )
+            self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id) or attempt)
             return
         if current.status == "completed" and isinstance(current.result, dict):
             self.store.succeed_attempt(task_id, current.result)
@@ -988,6 +1044,7 @@ class PartitionWorkflowService:
                 "Ray partition job exited without finalizing its managed attempt",
                 error_type="ray_job_incomplete",
             )
+            self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id))
         elif status.endswith("FAILED"):
             self.store.fail_attempt(
                 task_id,
@@ -995,8 +1052,10 @@ class PartitionWorkflowService:
                 manual_required=True,
                 error_type="ray_job_failed",
             )
+            self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id))
         elif status.endswith("STOPPED"):
-            self.store.mark_cancelled(task_id)
+            cancelled = self.store.mark_cancelled(task_id)
+            self._reconcile_attempt_outputs(task_id, cancelled or self.store.get_attempt(task_id))
 
 
 
