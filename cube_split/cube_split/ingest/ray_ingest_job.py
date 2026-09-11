@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -17,7 +18,10 @@ from shapely.geometry import Polygon, shape
 
 from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import _local_file_identity, _object_identity, _read_identity_sidecar, _write_identity_sidecar
+from cube_split.logging_config import configure_logging
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_POSTGRES_BATCH_SIZE = 1000
 _MGRS_MAX_RELATIVE_AREA_ERROR = 1e-4
@@ -1101,6 +1105,7 @@ def run_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            logger.error("ingest.failed backend=sqlite job_id=%s error=%s", args.job_id, exc)
             raise
         finally:
             conn.close()
@@ -1162,14 +1167,17 @@ def run_ingest(args: argparse.Namespace) -> dict:
                 finished_at=finished_at,
             )
             conn.commit()
+            logger.error("ingest.failed backend=postgres job_id=%s error=%s", args.job_id, exc)
             raise
 
 
 def main() -> None:
+    configure_logging(service="cube-ray-ingest")
     args = parse_args()
     start = time.perf_counter()
     stats = run_ingest(args)
     stats["elapsed_sec"] = round(time.perf_counter() - start, 3)
+    logger.info("ingest.finished job_id=%s elapsed_sec=%s", args.job_id, stats["elapsed_sec"])
     print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 

@@ -9,6 +9,7 @@ import AppTable from '@/components/AppTable.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useQualityStore } from '@/stores/quality';
 import { qualityExecutionErrorLabel } from '@/utils/qualityLabels';
+import { notifyApiError } from '@/utils/errorHandler';
 import { formatShanghaiTime } from '@/utils/time';
 import PartitionQualityDrawer from '@/views/quality/PartitionQualityDrawer.vue';
 
@@ -130,6 +131,7 @@ function scheduleQualityPoll(partitionRunId, expectedQualityRunIds = []) {
       }
     } catch (requestError) {
       if (pollGeneration !== qualityPollGeneration || detailGeneration !== detailRequestGeneration || selectedId.value !== partitionRunId) return;
+      notifyApiError(requestError, { silent: true, scope: 'quality-batch-poll' });
       error.value = qualityExecutionErrorLabel(requestError) || '质检任务状态刷新失败';
       consecutiveFailures += 1;
       const permanent = requestError?.retryable === false || [401, 403, 404].includes(requestError?.status);
@@ -160,7 +162,7 @@ async function setRuleEnabled(rule, enabled) {
     await store.updateRuleSetting(rule.code, enabled);
     ElMessage.success('质检规则设置已保存');
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检规则设置保存失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '质检规则设置保存失败' });
   }
 }
 
@@ -169,7 +171,7 @@ async function openRuleCatalog() {
   try {
     await store.loadRuleCatalog({ force: true });
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检规则加载失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '质检规则加载失败' });
   }
 }
 
@@ -265,7 +267,7 @@ async function retryQualityRun(run) {
     await openBatchForRun(selectedId.value, { expectedQualityRunIds: [response.quality_run_id] });
     await loadBatches();
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检立即重试提交失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '质检立即重试提交失败' });
   } finally {
     submitting.value = false;
   }
@@ -280,7 +282,7 @@ async function retryFailedPartition() {
     await openBatch({ partition_run_id: selectedId.value });
     await loadBatches();
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '剖分重试提交失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '剖分重试提交失败' });
   } finally {
     submitting.value = false;
   }
@@ -295,7 +297,7 @@ async function cancelPartition() {
     await openBatchForRun(selectedId.value);
     await loadBatches();
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '剖分任务终止失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '剖分任务终止失败' });
   } finally {
     submitting.value = false;
   }
@@ -306,7 +308,7 @@ async function exportQualityErrors(qualityRun) {
     await store.exportQualityWorkbook(qualityRun);
     ElMessage.success('质检结果已下载');
   } catch (requestError) {
-    ElMessage.error(qualityExecutionErrorLabel(requestError) || '质检结果下载失败');
+    notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '质检结果下载失败' });
   }
 }
 

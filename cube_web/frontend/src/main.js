@@ -7,5 +7,11 @@ import 'element-plus/dist/index.css';
 import App from './App.vue';
 import router from './router';
 import './styles.css';
+import { installErrorReporter } from './api/errorReporter';
+import { installGlobalErrorHandlers } from './utils/errorHandler';
 
-createApp(App).use(createPinia()).use(router).use(ElementPlus, { locale: zhCn }).mount('#app');
+const app = createApp(App);
+app.use(createPinia()).use(router).use(ElementPlus, { locale: zhCn });
+installGlobalErrorHandlers(app);
+installErrorReporter();
+app.mount('#app');

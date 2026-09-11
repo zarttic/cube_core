@@ -12,6 +12,7 @@ import { takePartitionSelection } from '@/stores/partitionTransfer';
 import { useSubUserStore } from '@/stores/subUser';
 import { derivedPartitionMethod, gridDefinition, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 import { qualityExecutionErrorLabel } from '@/utils/qualityLabels';
+import { notifyApiError } from '@/utils/errorHandler';
 import DataManagementView from '@/views/DataManagementView.vue';
 import QualityView from '@/views/QualityView.vue';
 import BatchAssetsPanel from '@/views/partition/BatchAssetsPanel.vue';
@@ -332,7 +333,7 @@ async function loadCarbonFootprints() {
   } catch (error) {
     if (generation === carbonFootprintGeneration
       && carbonFootprintScope.isCurrent(request.token)
-      && error?.name !== 'AbortError') ElMessage.error(partitionErrorLabel(error, '加载碳卫星足迹失败。'));
+      && error?.name !== 'AbortError') notifyApiError(error, { scope: 'PartitionView', message: partitionErrorLabel(error, '加载碳卫星足迹失败。') });
   } finally {
     if (generation === carbonFootprintGeneration && carbonFootprintScope.isCurrent(request.token)) {
       carbonFootprintLoading.value = false;
@@ -407,7 +408,7 @@ async function submit() {
     const partitionRunId = response?.partition_run_id || response?.run_id || '';
     ElMessage.success(partitionRunId ? `剖分任务已提交，剖分批次：${partitionRunId}` : '剖分任务已提交。');
   } catch (error) {
-    ElMessage.error(partitionErrorLabel(error, '提交剖分失败。'));
+    notifyApiError(error, { scope: 'PartitionView', message: partitionErrorLabel(error, '提交剖分失败。') });
   }
 }
 
@@ -510,7 +511,7 @@ async function loadCarbonGridPreview() {
   } catch (error) {
     if (generation === gridPreviewGeneration
       && gridPreviewScope.isCurrent(request.token)
-      && error?.name !== 'AbortError') ElMessage.error(partitionErrorLabel(error, '加载碳卫星格网预览失败。'));
+      && error?.name !== 'AbortError') notifyApiError(error, { scope: 'PartitionView', message: partitionErrorLabel(error, '加载碳卫星格网预览失败。') });
   } finally {
     if (generation === gridPreviewGeneration && gridPreviewScope.isCurrent(request.token)) {
       gridPreviewLoading.value = false;
@@ -582,7 +583,7 @@ async function loadMap() {
     }
   } catch (error) {
     if (generation !== gridPreviewGeneration || !gridPreviewScope.isCurrent(request.token)) return;
-    ElMessage.error(partitionErrorLabel(error, '加载格网预览失败。'));
+    notifyApiError(error, { scope: 'PartitionView', message: partitionErrorLabel(error, '加载格网预览失败。') });
   } finally {
     if (generation === gridPreviewGeneration && gridPreviewScope.isCurrent(request.token)) {
       gridPreviewLoading.value = false;

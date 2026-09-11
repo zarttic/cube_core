@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import os
 import re
@@ -20,12 +21,15 @@ from grid_core.sdk import CubeEncoderSDK
 
 from cube_split import runtime_config
 from cube_split.jobs.cancellation import PartitionCancelledError, cancel_ray_refs
+from cube_split.logging_config import apply_ray_logging_defaults, ray_logging_level
 from cube_split.partition.base import PartitionResult
 from cube_split.partition.carbon_products import (
     get_carbon_product_adapter,
     normalize_carbon_product_type,
     supported_carbon_product_types,
 )
+
+logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 _AUTO_PARTITION_CHUNK_SIZE = 0
@@ -1323,11 +1327,11 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
         loaded = json.loads(raw)
         if not isinstance(loaded, dict):
             raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
-        return loaded
+        return apply_ray_logging_defaults(loaded)
 
     project_root = Path(__file__).resolve().parents[3]
     minio = runtime_config.minio_settings()
-    return {
+    runtime_env = {
         "working_dir": str(project_root),
         "excludes": [
             ".git/**",
@@ -1360,6 +1364,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             "PYTHONPATH": ".:./cube_encoder:./cube_split:./cube_web",
         },
     }
+    return apply_ray_logging_defaults(runtime_env)
 
 
 def _ray_actor_options_from_env() -> dict[str, Any]:
@@ -1374,7 +1379,7 @@ def _init_ray(ray: Any, ray_address: str) -> bool:
     init_kwargs = {
         "ignore_reinit_error": True,
         "include_dashboard": False,
-        "logging_level": "ERROR",
+        "logging_level": ray_logging_level(),
         "runtime_env": runtime_env,
     }
     if ray_address:
@@ -1386,6 +1391,7 @@ def _init_ray(ray: Any, ray_address: str) -> bool:
             ray.init(**init_kwargs)
     else:
         ray.init(**init_kwargs)
+    logger.info("ray.initialized address=%s", ray_address or "auto")
     return True
 
 

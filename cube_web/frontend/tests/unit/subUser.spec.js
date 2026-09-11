@@ -20,4 +20,16 @@ describe('sub-user permissions', () => {
     expect(store.can('system_config:view')).toBe(true);
     expect(store.isSuperAdmin.value).toBe(true);
   });
+
+  it('clears credentials once when the session expires', () => {
+    localStorage.setItem('access_token', 'token-1');
+    localStorage.setItem('user_info', '{"username":"alice"}');
+    const store = useSubUserStore();
+
+    expect(store.handleSessionExpired()).toBe(true);
+    expect(localStorage.getItem('access_token')).toBeNull();
+    expect(localStorage.getItem('user_info')).toBeNull();
+    expect(store.state.token).toBe('');
+    expect(store.handleSessionExpired()).toBe(false);
+  });
 });

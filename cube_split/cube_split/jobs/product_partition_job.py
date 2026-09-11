@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from inspect import signature
@@ -31,7 +32,10 @@ from cube_split.jobs.ray_partition_core import (
     build_manifest,
     create_unique_run_dir,
 )
+from cube_split.logging_config import configure_logging, ray_logging_level
 from cube_split.partition.product_products import parse_product_asset
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_product_task_rows(tasks: list[dict], partition_prefix_len: int) -> list[dict]:
@@ -131,16 +135,17 @@ def _partition_groups_ray(
                 address=ray_address,
                 ignore_reinit_error=True,
                 include_dashboard=False,
-                logging_level="ERROR",
+                logging_level=ray_logging_level(),
                 runtime_env=runtime_env,
             )
         except Exception:
             if ray_address != "auto":
                 raise
-            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=runtime_env)
     else:
-        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=runtime_env)
     ray_init_elapsed = time.perf_counter() - ray_init_start
+    logger.info("ray.initialized address=%s elapsed_ms=%s", ray_address or "auto", round(ray_init_elapsed * 1000, 1))
 
     @ray.remote
     class ProductTaskProcessor:
@@ -412,6 +417,7 @@ def run_product_partition(args: argparse.Namespace) -> dict:
 
 
 def main() -> None:
+    configure_logging(service="cube-product-partition")
     print(json.dumps(run_product_partition(parse_args()), ensure_ascii=False, indent=2))
 
 

@@ -583,7 +583,9 @@ class PartitionWorkflowService:
             try:
                 ray_job_id = submitter.submit(task_id)
                 self.store.set_ray_job_id(task_id, ray_job_id)
+                logger.info("ray_job.submitted task_id=%s ray_job_id=%s", task_id, ray_job_id)
             except Exception as exc:
+                logger.error("ray_job.submit_failed task_id=%s error=%s", task_id, _safe_dataset_error(exc))
                 self.on_task_failed(task_id, str(exc))
             attempt = self.store.get_attempt(task_id)
             return _task_from_attempt(attempt or {"task_id": task_id, "data_type": data_type}, self.get_batch(request.batch_id))
@@ -651,6 +653,7 @@ class PartitionWorkflowService:
                     # One broken attempt must not stop recovery for every other
                     # task. Startup/detail/retry reconciliation will retry it.
                     logger.warning("Unable to reconcile partition task %s", task_id, exc_info=True)
+        logger.info("partition.reconcile resolved=%s", resolved)
         return resolved
 
     def get_task(self, task_id: str) -> PartitionTask:
@@ -792,6 +795,8 @@ class PartitionWorkflowService:
                     logger.exception("Failed to persist cancellation for task %s", task_id)
                 self._reconcile_attempt_outputs(task_id, cancelled or attempt)
                 self._notify_task_event(task_id, "cancelled", None)
+                if stop_error is None:
+                    logger.info("ray_job.stopped task_id=%s ray_job_id=%s", task_id, ray_job_id)
             response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
             if stop_error is not None and isinstance(response, dict):
                 response = {**response, "warning": "Ray 终止请求未确认，任务已标记为取消并进入恢复流程"}
@@ -841,6 +846,8 @@ class PartitionWorkflowService:
                     logger.exception("Failed to persist forced cancellation for task %s", task_id)
                 self._reconcile_attempt_outputs(task_id, cancelled or attempt)
                 self._notify_task_event(task_id, "cancelled", None)
+                if stop_error is None:
+                    logger.info("ray_job.force_stopped task_id=%s ray_job_id=%s", task_id, ray_job_id)
             response = cancelled or attempt or {"task_id": task_id, "status": "cancelled"}
             if stop_error is not None and isinstance(response, dict):
                 response = {**response, "warning": "Ray 终止请求未确认，任务已标记为取消并进入恢复流程"}
@@ -1039,6 +1046,7 @@ class PartitionWorkflowService:
             logger.warning("Unable to reconcile Ray job status for task %s (job %s): %s", task_id, ray_job_id, exc)
             return
         if status.endswith("SUCCEEDED"):
+            logger.warning("ray_job.incomplete task_id=%s ray_job_id=%s", task_id, ray_job_id)
             self.store.mark_result_manual_required(
                 task_id,
                 "Ray partition job exited without finalizing its managed attempt",
@@ -1046,6 +1054,7 @@ class PartitionWorkflowService:
             )
             self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id))
         elif status.endswith("FAILED"):
+            logger.error("ray_job.failed task_id=%s ray_job_id=%s", task_id, ray_job_id)
             self.store.fail_attempt(
                 task_id,
                 "Ray partition job failed; inspect the Ray Job logs for the driver error",
@@ -1054,6 +1063,7 @@ class PartitionWorkflowService:
             )
             self._reconcile_attempt_outputs(task_id, self.store.get_attempt(task_id))
         elif status.endswith("STOPPED"):
+            logger.info("ray_job.reconciled_stopped task_id=%s ray_job_id=%s", task_id, ray_job_id)
             cancelled = self.store.mark_cancelled(task_id)
             self._reconcile_attempt_outputs(task_id, cancelled or self.store.get_attempt(task_id))
 

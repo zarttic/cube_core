@@ -7,6 +7,7 @@ import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { bandDisplayLabel, dataUnitTypeLabel, sceneBands, sceneMatchesBand } from '@/utils/bands';
 import { derivedPartitionMethod, gridDefinition, gridDefinitions, nativeLevelLabel, withFixedPartitionOptions } from '@/utils/grid';
 import { formatShanghaiTime } from '@/utils/time';
+import { notifyApiError } from '@/utils/errorHandler';
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
@@ -193,7 +194,10 @@ async function loadAvailable({ preserveSelection = false, preserveExpansion = fa
       availableBatchGroups.value = [];
     }
   } catch (caught) {
-    if (generation === batchRequestGeneration) error.value = caught.message || '载入批次失败。';
+    if (generation === batchRequestGeneration) {
+      notifyApiError(caught, { silent: true, scope: 'batch-assets' });
+      error.value = caught.message || '载入批次失败。';
+    }
   } finally {
     if (generation === batchRequestGeneration) loading.value = false;
   }
@@ -336,6 +340,7 @@ async function loadSelectedBatches(batchIds, { preserveExpansion = false } = {})
     updateBandSelection(selectedBandUnitIds.value);
   } catch (caught) {
     if (generation !== sceneRequestGeneration || caught?.name === 'AbortError') return;
+    notifyApiError(caught, { silent: true, scope: 'batch-assets' });
     error.value = caught.message || '载入批次数据单元失败。';
     selectedBatchIds.value = [...committedBatchState.batchIds];
     availableDatasets.value = committedBatchState.datasets;

@@ -8,6 +8,8 @@ const state = reactive({
   userInfo: readUserInfo(),
 });
 
+let sessionExpiredHandledAt = 0;
+
 function readUserInfo() {
   try {
     return JSON.parse(localStorage.getItem('user_info') || '{}');
@@ -118,6 +120,16 @@ export function useSubUserStore() {
     window.location.replace(safeTargetPath(window.location.pathname || '/'));
   }
 
+  function handleSessionExpired() {
+    const now = Date.now();
+    if (now - sessionExpiredHandledAt < 5000) return false;
+    sessionExpiredHandledAt = now;
+    persistToken('');
+    persistUserInfo({});
+    if (authRequired()) redirectToAuth();
+    return true;
+  }
+
   return {
     state,
     username,
@@ -135,5 +147,6 @@ export function useSubUserStore() {
     exchangeCode,
     redirectToAuth,
     logout,
+    handleSessionExpired,
   };
 }

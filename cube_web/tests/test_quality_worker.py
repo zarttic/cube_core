@@ -3,9 +3,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from cube_web.services.config_store import default_config
+from cube_web.services.quality_repository import QualityLease, StaleQualityLease, quality_lease_from_transaction
 from cube_web.services.quality_rules import QualityFinding
 from cube_web.services.quality_worker import QualityRuntime, _errors_from_findings, _safe_execution_error, execute_quality_run
-from cube_web.services.quality_repository import QualityLease, StaleQualityLease, quality_lease_from_transaction
 
 
 def test_safe_execution_error_keeps_actionable_reason_without_credentials_or_object_uris() -> None:
@@ -270,3 +270,21 @@ def test_runtime_executes_independent_leases_with_bounded_parallelism(monkeypatc
     assert not thread.is_alive()
     assert peak == 2
     assert set(seen) == {lease.quality_run_id for lease in leases}
+
+
+def test_claimed_run_logs_with_quality_run_context(monkeypatch, caplog) -> None:
+    import logging
+
+    from cube_split.logging_config import configure_logging
+
+    configure_logging(service="cube-web")
+    runtime = QualityRuntime(execution_workers=1)
+    lease = QualityLease(uuid4(), "quality-worker", 1)
+    monkeypatch.setattr("cube_web.services.quality_worker.execute_quality_run", lambda claimed: None)
+
+    with caplog.at_level(logging.INFO, logger="cube_web.services.quality_worker"):
+        runtime._execute_claimed_runs([lease])
+
+    record = next(record for record in caplog.records if record.getMessage() == "quality.run_started")
+    assert record.cube_context["quality_run_id"] == str(lease.quality_run_id)
+    assert record.cube_context["worker_id"] == "quality-worker"

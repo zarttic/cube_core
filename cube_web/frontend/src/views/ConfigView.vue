@@ -6,6 +6,7 @@ import { Refresh, RefreshLeft, Check, Connection, DataLine } from '@element-plus
 import { apiPrefixes, requestJson } from '@/api/client';
 import { fixedPartitionOptions, gridDefinition, gridDefinitions } from '@/utils/grid';
 import { formatShanghaiTime } from '@/utils/time';
+import { notifyApiError } from '@/utils/errorHandler';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -90,7 +91,7 @@ async function loadConfig() {
     const { configPrefix } = apiPrefixes();
     applyResponse(await requestJson(`${configPrefix}/get`, {}));
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'ConfigView' });
   } finally {
     loading.value = false;
   }
@@ -103,7 +104,7 @@ async function saveConfig() {
     applyResponse(await requestJson(`${configPrefix}/update`, { config: config.value }));
     ElMessage.success('配置已保存');
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'ConfigView' });
   } finally {
     saving.value = false;
   }
@@ -125,7 +126,7 @@ async function resetConfig() {
     applyResponse(await requestJson(`${configPrefix}/reset`, {}));
     ElMessage.success('已恢复默认配置');
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'ConfigView' });
   } finally {
     resetting.value = false;
   }

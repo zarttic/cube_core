@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import time
@@ -48,7 +49,10 @@ from cube_split.jobs.ray_partition_core import (
     create_unique_run_dir,
     resolve_asset_source_path,
 )
+from cube_split.logging_config import configure_logging, ray_logging_level
 from cube_split.tile_probe import TileProbeMetric, report_tile_metrics
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ENTITY_TASKS_PER_GROUP = 64
 DEFAULT_ENTITY_MINIO_UPLOAD_WORKERS = 16
@@ -670,16 +674,17 @@ def _write_entity_tile_chunks_ray(
                 address=ray_address,
                 ignore_reinit_error=True,
                 include_dashboard=False,
-                logging_level="ERROR",
+                logging_level=ray_logging_level(),
                 runtime_env=runtime_env,
             )
         except Exception:
             if ray_address != "auto":
                 raise
-            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+            ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=runtime_env)
     else:
-        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=runtime_env)
+        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=runtime_env)
     ray_init_elapsed = time.perf_counter() - ray_init_start
+    logger.info("ray.initialized address=%s elapsed_ms=%s", ray_address or "auto", round(ray_init_elapsed * 1000, 1))
 
     @ray.remote
     class EntityTileProcessor:
@@ -1581,6 +1586,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    configure_logging(service="cube-entity-partition")
     report = run_entity_partition(parse_args())
     print("=== Entity partition job completed ===")
     print(json.dumps(report, ensure_ascii=False, indent=2))

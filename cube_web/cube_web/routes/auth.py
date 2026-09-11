@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,13 +11,24 @@ from cube_web.services import auth_service, runtime_config
 from cube_web.services.access_control import is_admin_role
 from cube_web.services.api_errors import detail_code, detail_message, error_response, request_id_from_header
 
+logger = logging.getLogger(__name__)
+
 PUBLIC_V1_PATHS = {"/v1/partition/schemas/import"}
+# Reachable before login so browser errors are still reported; identity is optional there.
+OPTIONAL_AUTH_V1_PATHS = {"/v1/client-errors"}
 
 
 @dataclass(frozen=True)
 class Actor:
     username: str
     role: str
+
+
+def actor_from_payload(payload: dict[str, Any]) -> Actor:
+    return Actor(
+        username=str(payload.get("username") or payload.get("name") or payload.get("sub") or "authenticated-user"),
+        role=str(payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"),
+    )
 
 
 def current_actor(request: Request) -> Actor:
@@ -116,14 +128,18 @@ async def require_auth_for_api(request: Request, call_next):
     settings = auth_service.auth_settings()
     if request.url.path in PUBLIC_V1_PATHS:
         request.state.actor = Actor(username="system:public-import", role="service")
+    elif request.url.path in OPTIONAL_AUTH_V1_PATHS:
+        try:
+            token = auth_service.bearer_token(request.headers.get("Authorization"))
+            request.state.actor = actor_from_payload(auth_service.verify_access_token(token, settings))
+        except Exception:
+            # Client error reporting must work before login; identity is optional.
+            request.state.actor = Actor(username="anonymous", role="anonymous")
     elif settings.required and request.url.path.startswith("/v1/"):
         try:
             token = auth_service.bearer_token(request.headers.get("Authorization"))
             payload = auth_service.verify_access_token(token, settings)
-            request.state.actor = Actor(
-                username=str(payload.get("username") or payload.get("name") or payload.get("sub") or "authenticated-user"),
-                role=str(payload.get("role") or payload.get("role_name") or payload.get("scope") or "普通用户"),
-            )
+            request.state.actor = actor_from_payload(payload)
         except HTTPException as exc:
             if exc.status_code >= 500:
                 code = {502: "bad_gateway", 503: "service_unavailable"}.get(exc.status_code, "internal_error")
@@ -131,6 +147,12 @@ async def require_auth_for_api(request: Request, call_next):
                     502: "上游服务暂时不可用，请稍后重试",
                     503: "服务暂时不可用，请稍后重试",
                 }.get(exc.status_code, "服务器内部错误，请稍后重试")
+                logger.error(
+                    "auth.upstream_failed status=%s path=%s code=%s",
+                    exc.status_code,
+                    request.url.path,
+                    code,
+                )
                 return error_response(
                     request,
                     status_code=exc.status_code,
@@ -138,6 +160,12 @@ async def require_auth_for_api(request: Request, call_next):
                     message=message,
                     headers=exc.headers,
                 )
+            logger.warning(
+                "auth.denied status=%s path=%s code=%s",
+                exc.status_code,
+                request.url.path,
+                detail_code(exc.status_code, exc.detail),
+            )
             return error_response(
                 request,
                 status_code=exc.status_code,

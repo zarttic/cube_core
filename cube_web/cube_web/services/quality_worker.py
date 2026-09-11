@@ -5,11 +5,14 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from cube_split import runtime_config
+from cube_split.logging_config import logging_context
 from psycopg.rows import dict_row
 
-from cube_split import runtime_config
+from cube_web.services.config_store import auto_ingest_after_quality_enabled, get_enabled_optional_quality_rules
 from cube_web.services.ingest_worker import _resolve_ingest_max_workers, process_queued_ingest_scenes
 from cube_web.services.partition_domain_store import get_partition_domain_store
 from cube_web.services.quality_contracts import QualityResult
@@ -30,7 +33,6 @@ from cube_web.services.quality_repository import (
     start_quality_run,
     write_quality_error_batch,
 )
-from cube_web.services.config_store import auto_ingest_after_quality_enabled, get_enabled_optional_quality_rules
 from cube_web.services.quality_rules import (
     DEFAULT_RULE_SET_VERSION,
     QualityFinding,
@@ -161,6 +163,8 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                 )
             except Exception:
                 logger.exception("quality outbox retry failed for event_id=%s", event.get("event_id"))
+    if allocated:
+        logger.info("quality.events_dispatched count=%s worker_id=%s", allocated, worker_id)
     return allocated
 
 
@@ -225,6 +229,10 @@ def _finalize_failed_quality_run(
                 execution_error=_safe_execution_error(exc, "quality run execution failed"),
                 completed_at=datetime.now(UTC),
             )
+        logger.warning(
+            "quality.run_failed error=%s",
+            _safe_execution_error(exc, "quality run execution failed"),
+        )
     except (StaleQualityLease, QualityCompletionConflict):
         logger.debug("quality run was finalized elsewhere: %s", lease.quality_run_id)
     except Exception:
@@ -351,6 +359,7 @@ def execute_quality_run(lease: QualityLease) -> None:
                     output_version=run.output_version,
                     quality_status=terminal_status,
                 )
+            logger.info("quality.run_finished status=%s", terminal_status)
     except (StaleQualityLease, QualityCompletionConflict):
         raise
     except Exception as exc:
@@ -405,6 +414,8 @@ class QualityRuntime:
                 store = require_open_gauss_domain_store()
                 with store.transaction() as tx:
                     leases = claim_quality_runs(tx, worker_id=f"{self.worker_id}:execute", limit=10)
+                if leases:
+                    logger.info("quality.leases_claimed count=%s worker_id=%s", len(leases), f"{self.worker_id}:execute")
                 self._execute_claimed_runs(leases)
             except Exception:
                 logger.exception("quality worker iteration failed")
@@ -430,15 +441,17 @@ class QualityRuntime:
 
     @staticmethod
     def _execute_claimed_run(lease: QualityLease) -> None:
-        try:
-            execute_quality_run(lease)
-        except (StaleQualityLease, QualityCompletionConflict):
-            logger.debug("quality lease was completed or replaced before execution: %s", lease.quality_run_id)
-        except Exception:
-            # One bad run must not abort the remainder of a claimed batch.  The
-            # run-level handler normally persists an error status; this log is
-            # the fallback signal when even that terminal transition failed.
-            logger.exception("quality run worker failed for %s", lease.quality_run_id)
+        with logging_context(quality_run_id=str(lease.quality_run_id), worker_id=lease.claimed_by):
+            try:
+                logger.info("quality.run_started")
+                execute_quality_run(lease)
+            except (StaleQualityLease, QualityCompletionConflict):
+                logger.debug("quality lease was completed or replaced before execution: %s", lease.quality_run_id)
+            except Exception:
+                # One bad run must not abort the remainder of a claimed batch.  The
+                # run-level handler normally persists an error status; this log is
+                # the fallback signal when even that terminal transition failed.
+                logger.exception("quality run worker failed for %s", lease.quality_run_id)
 
     def _ingest_loop(self) -> None:
         while not self._stop.is_set():

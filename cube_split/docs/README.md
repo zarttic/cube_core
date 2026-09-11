@@ -52,10 +52,15 @@
 
 ## 4. Ray 使用方式
 
-- 连接：`ray.init(address=..., ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR", runtime_env=...)`。
+- 连接：`ray.init(address=..., ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=...)`；
+  Ray 自身日志级别由 `CUBE_LOG_RAY_LEVEL` 控制（默认 `ERROR`，可设 `WARNING`/`INFO` 放开）。
 - Runtime env：优先使用 `RAY_RUNTIME_ENV_JSON`，否则 `working_dir` 为仓库根、`env_vars` 注入
   `CUBE_PROJECT_ROOT` 与 `PYTHONPATH`，并排除 `.git/**`、`**/__pycache__/**`、`cube_split/data/**`、
   `cube_web/frontend/node_modules/**` 等。
+- 日志：`_ray_runtime_env_from_env()` 会 `setdefault` 注入 `CUBE_LOG_LEVEL`、`CUBE_LOG_FORMAT`、
+  `CUBE_LOG_RAY_LEVEL` 和 `worker_process_setup_hook="cube_split.logging_config.worker_setup"`；
+  运维通过 `RAY_RUNTIME_ENV_JSON` 显式给出的值优先。`CUBE_LOG_FILE` 不下发到 worker，
+  worker 日志经 stdout 由 Ray 采集。
 - `CUBE_WEB_RAY_JOB_DRIVER=1` 时不再套 runtime env（由 Ray Jobs 提供运行环境）。
 - **凭据不进 task 参数**：MinIO 凭据通过 `runtime_env.env_vars` 注入 worker 运行时环境。
 - Ray 模式下实体剖分强制由 worker 上传 MinIO，本地路径直接报错。

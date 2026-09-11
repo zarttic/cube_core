@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import time
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from threading import Lock
@@ -10,6 +10,7 @@ from typing import Callable
 from uuid import uuid4
 
 from cube_split import runtime_config
+from cube_split.logging_config import logging_context
 
 from cube_web.services.http_errors import HTTPException
 
@@ -88,6 +89,8 @@ class PartitionTaskStore:
         on_failed: TaskErrorHook | None,
         cancellation_check: Callable[[], bool] | None,
     ) -> PartitionTask:
+        with logging_context(task_id=task.task_id):
+            logger.info("partition.task_queued data_type=%s operation=%s", task.data_type, task.operation)
         self._executor.submit(self._run, task.task_id, runner, on_started, on_succeeded, on_failed, cancellation_check)
         return task
 
@@ -220,6 +223,8 @@ class PartitionTaskStore:
         except Exception:
             logger.exception("Unable to persist local terminal state for task %s", task_id)
         self._safe_on_failed(task_id, error, on_failed)
+        level = logging.INFO if status == "cancelled" else logging.ERROR
+        logger.log(level, "partition.task_finished status=%s error=%s", status, error)
 
     def _complete_task_if_not_cancelled(self, task_id: str, result: dict) -> bool:
         # Check-and-commit under a single lock so a concurrent cancel() cannot be overwritten.
@@ -243,6 +248,19 @@ class PartitionTaskStore:
         on_failed: TaskErrorHook | None,
         cancellation_check: Callable[[], bool] | None,
     ) -> None:
+        with logging_context(task_id=task_id):
+            self._run_task(task_id, runner, on_started, on_succeeded, on_failed, cancellation_check)
+
+    def _run_task(
+        self,
+        task_id: str,
+        runner: Callable[[], dict],
+        on_started: TaskHook | None,
+        on_succeeded: TaskResultHook | None,
+        on_failed: TaskErrorHook | None,
+        cancellation_check: Callable[[], bool] | None,
+    ) -> None:
+        started = time.perf_counter()
         try:
             task = self.get(task_id)
             if task is not None and (task.status == "cancelled" or (cancellation_check is not None and cancellation_check())):
@@ -260,6 +278,11 @@ class PartitionTaskStore:
             if cancellation_check is not None and cancellation_check():
                 self._cancel_task(task_id, on_failed)
                 return
+            logger.info(
+                "partition.task_started data_type=%s operation=%s",
+                task.data_type if task is not None else "-",
+                task.operation if task is not None else "-",
+            )
             if on_started is not None:
                 on_started(task_id)
             if cancellation_check is not None and cancellation_check():
@@ -299,6 +322,10 @@ class PartitionTaskStore:
                 # A completion hook persists a projection; it must not turn a
                 # completed computation into a second, conflicting local failure.
                 logger.exception("Partition task completion hook failed for task %s", task_id)
+        logger.info(
+            "partition.task_finished status=completed duration_ms=%s",
+            round((time.perf_counter() - started) * 1000, 1),
+        )
 
 
 class PartitionService:

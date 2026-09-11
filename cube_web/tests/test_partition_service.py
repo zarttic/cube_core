@@ -276,3 +276,24 @@ def test_explicit_max_workers_overrides_environment(monkeypatch) -> None:
     monkeypatch.setenv("CUBE_WEB_PARTITION_MAX_WORKERS", "9")
     store = PartitionTaskStore(max_workers=2)
     assert store.max_workers == 2
+
+
+def test_task_logs_bind_task_id_context(caplog) -> None:
+    import logging
+
+    from cube_split.logging_config import configure_logging
+
+    configure_logging(service="cube-web")
+    store = PartitionTaskStore(max_workers=1)
+    with caplog.at_level(logging.INFO, logger="cube_web.services.partition_service"):
+        task = store.submit(data_type="optical", operation="run", runner=lambda: {"ok": True})
+        _wait_for_terminal_status(store, task.task_id)
+
+    events = {
+        record.getMessage().split(" ", 1)[0]: record
+        for record in caplog.records
+        if record.name == "cube_web.services.partition_service"
+    }
+    for event in ("partition.task_queued", "partition.task_started", "partition.task_finished"):
+        assert event in events
+        assert events[event].cube_context["task_id"] == task.task_id

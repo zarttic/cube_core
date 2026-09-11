@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import deque
 from datetime import UTC, datetime
@@ -11,7 +12,10 @@ from typing import Any, Callable, Iterator
 
 from cube_split import runtime_config
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
+from cube_split.logging_config import ray_logging_level
 from cube_split.partition_timing import TimingRecorder
+
+logger = logging.getLogger(__name__)
 
 
 def _ray_init_runtime_env(runtime_env: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -251,9 +255,10 @@ def run_logical_chunk_jobs(
                 address=payloads[0]["ray_address"],
                 ignore_reinit_error=True,
                 include_dashboard=False,
-                logging_level=40,
+                logging_level=ray_logging_level(),
                 runtime_env=_ray_init_runtime_env(runtime_env),
             )
+            logger.info("ray.initialized address=%s chunks=%s", payloads[0]["ray_address"] or "auto", len(payloads))
     else:
         driver_timing.add_counter("ray_init_reused")
     plan_chunk = ray.remote(_plan_logical_chunk)

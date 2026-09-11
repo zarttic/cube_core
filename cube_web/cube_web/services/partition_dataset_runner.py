@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -13,9 +14,12 @@ from urllib.parse import urlparse
 
 from cube_split import runtime_config
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
+from cube_split.logging_config import ray_logging_level
 from cube_split.partition_timing import TimingRecorder
 
 from cube_web.services.partition_contracts import OutputIdentity, make_output_id
+
+logger = logging.getLogger(__name__)
 
 
 class SourceObjectMissingError(ValueError):
@@ -423,7 +427,7 @@ def _run_logical_dataset_on_ray(
         return {"chunk_id": chunk_id, "object_uri": f"s3://{settings.bucket}/{key}", "checksum": checksum, "byte_size": len(body), **{f"{name[:-1] if name.endswith('s') else name}_count": count for name, count in counts.items()}}
 
     if not ray.is_initialized():
-        ray.init(address=payload["ray_address"], ignore_reinit_error=True, include_dashboard=False, logging_level=40, runtime_env=_ray_init_runtime_env(runtime_env))
+        ray.init(address=payload["ray_address"], ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=_ray_init_runtime_env(runtime_env))
     shard_degrees = float(runtime_config.env_text("CUBE_LOGICAL_SHARD_DEGREES", "1"))
     if not 0 < shard_degrees <= 10:
         raise ValueError("CUBE_LOGICAL_SHARD_DEGREES must be within (0, 10]")
@@ -648,7 +652,7 @@ def _run_carbon_dataset_on_ray(
                 address=payload["ray_address"],
                 ignore_reinit_error=True,
                 include_dashboard=False,
-                logging_level=40,
+                logging_level=ray_logging_level(),
                 runtime_env=_ray_init_runtime_env(runtime_env),
             )
     else:
@@ -974,7 +978,7 @@ def _run_dataset_on_ray(
                     address=payload["ray_address"],
                     ignore_reinit_error=True,
                     include_dashboard=False,
-                    logging_level=40,
+                    logging_level=ray_logging_level(),
                     runtime_env=_ray_init_runtime_env(runtime_env),
                 )
         else:
@@ -1241,7 +1245,7 @@ def _run_entity_dataset_batch_on_ray(
                     address=payloads[0]["ray_address"],
                     ignore_reinit_error=True,
                     include_dashboard=False,
-                    logging_level=40,
+                    logging_level=ray_logging_level(),
                     runtime_env=_ray_init_runtime_env(runtime_env),
                 )
         else:
@@ -1502,6 +1506,11 @@ class NormalizedPartitionDatasetRunner:
             with preflight_timing.phase("minio.stat"):
                 self._verify_assets_exist([payload])
             preflight_records.append(preflight_timing.finish())
+        logger.info(
+            "partition.run_started datasets=%s grid_types=%s",
+            len(payloads),
+            ",".join(sorted({str(payload.get("grid_type") or "") for payload in payloads})) or "-",
+        )
         outcomes: list[dict[str, Any] | None] = [None] * len(payloads)
         logical_positions = [
             index for index, payload in enumerate(payloads)
@@ -1533,8 +1542,15 @@ class NormalizedPartitionDatasetRunner:
             try:
                 outcomes[index] = {"result": self._run_payload(payload, runtime_env, cancellation_check)}
             except Exception as exc:
+                logger.warning(
+                    "partition.dataset_failed dataset_id=%s error_type=%s",
+                    payload["dataset"].get("dataset_id"),
+                    type(exc).__name__,
+                )
                 outcomes[index] = {"error": str(exc)}
         completed_outcomes = [outcome for outcome in outcomes if outcome is not None]
+        error_count = sum(1 for outcome in outcomes if isinstance(outcome, dict) and outcome.get("error"))
+        logger.info("partition.run_finished datasets=%s errors=%s", len(payloads), error_count)
         for index, outcome in enumerate(outcomes):
             if outcome is None:
                 continue

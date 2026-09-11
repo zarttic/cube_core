@@ -4,6 +4,7 @@ import { defineStore } from 'pinia';
 import { requestGet, requestJson, requestPost } from '@/api/client';
 import { pageQuery, normalizePageResponse } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
+import { notifyApiError } from '@/utils/errorHandler';
 
 const detailTabs = [
   'overview', 'scenes', 'bands', 'outputs', 'grid', 'tiles', 'indexes',
@@ -260,6 +261,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
         try {
           await refreshAfterGridDelete(datasetId);
         } catch (requestError) {
+          notifyApiError(requestError, { silent: true, scope: 'grid-delete-refresh' });
           if (selectedDatasetId.value === datasetId) {
             error.value = `波段格网已删除，但页面刷新失败：${requestError.message || '请稍后刷新'}`;
           }
@@ -273,6 +275,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
       }
     } catch (requestError) {
       if (pendingGridDeletes[key]?.taskId !== taskId) return;
+      notifyApiError(requestError, { silent: true, scope: 'grid-delete-poll' });
       delete pendingGridDeletes[key];
       if (selectedDatasetId.value === datasetId) error.value = requestError.message || '波段格网删除任务查询失败';
       return;

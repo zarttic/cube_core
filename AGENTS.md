@@ -149,6 +149,17 @@ CUBE_WEB_MINIO_ACCESS_KEY=<access-key>
 CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 ```
 
+日志属于运行时配置，同样只通过环境变量或本地 `.cube_web.env` 控制，不写入
+`cube_web_configs`：
+
+- `CUBE_LOG_LEVEL`：根日志级别，默认 `INFO`。
+- `CUBE_LOG_FORMAT`：`text`（默认）或 `json`。
+- `CUBE_LOG_FILE`：设置后写入该文件并按大小轮转，默认 10MB × 3，可用
+  `CUBE_LOG_MAX_BYTES` / `CUBE_LOG_BACKUP_COUNT` 调整；不设置时只输出 stdout。
+  该值不会下发到 Ray worker（worker 只配置 stdout）。
+- `CUBE_LOG_RAY_LEVEL`：Ray 自身日志级别，默认 `ERROR`，可设 `WARNING`/`INFO` 放开。
+- `CUBE_LOG_ACCESS`：`0` 时关闭应用访问日志。
+
 ### 隔离 worktree 与真实门禁
 
 - 新里程碑 worktree 必须从协调账本中已通过的前置 `integration_hash` 创建。不要从

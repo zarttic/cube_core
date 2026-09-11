@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cube_split import runtime_config
 from cube_split.jobs.ray_partition_core import create_unique_run_dir
+from cube_split.logging_config import configure_logging
 from cube_split.partition.carbon import CarbonPartitionConfig, CarbonSatellitePartitionService
 from cube_split.partition.carbon_products import normalize_carbon_product_type
 
@@ -137,6 +138,7 @@ def run_carbon_partition(args: argparse.Namespace) -> dict:
 
 
 def main() -> None:
+    configure_logging(service="cube-carbon-partition")
     print(json.dumps(run_carbon_partition(parse_args()), ensure_ascii=False, indent=2))
 
 

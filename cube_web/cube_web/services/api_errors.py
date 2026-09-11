@@ -21,6 +21,15 @@ def ensure_request_id(request: Request) -> str:
 
 
 def request_id_from_header(request: Request) -> str:
+    """Return the request id, reusing a valid one already stored on the request.
+
+    The access-log middleware runs before the auth middleware and may have generated
+    the id already; staying idempotent keeps the response header correlated with the
+    log lines emitted by both middleware.
+    """
+    existing = str(getattr(request.state, "request_id", "") or "").strip()
+    if _REQUEST_ID_PATTERN.fullmatch(existing):
+        return existing
     incoming = str(request.headers.get(REQUEST_ID_HEADER) or "").strip()
     value = incoming if _REQUEST_ID_PATTERN.fullmatch(incoming) else uuid4().hex
     request.state.request_id = value

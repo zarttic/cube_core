@@ -48,3 +48,36 @@ describe('api client', () => {
     fetchMock.mockRestore();
   });
 });
+
+describe('api client auth signalling', () => {
+  it('emits an auth failure for 401 responses on protected paths', async () => {
+    const { onAuthFailure } = await import('@/api/authEvents');
+    const listener = vi.fn();
+    const unsubscribe = onAuthFailure(listener);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'unauthorized', message: '认证失败', request_id: 'req-401' },
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(request('/v1/partition/tasks')).rejects.toThrow('认证失败');
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls[0][0]).toMatchObject({ status: 401, isApiError: true, requestId: 'req-401' });
+    unsubscribe();
+    fetchMock.mockRestore();
+  });
+
+  it('can opt out of auth failure signalling', async () => {
+    const { onAuthFailure } = await import('@/api/authEvents');
+    const listener = vi.fn();
+    const unsubscribe = onAuthFailure(listener);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'unauthorized', message: '认证失败' },
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(request('/v1/partition/tasks', { authRedirect: false })).rejects.toThrow('认证失败');
+
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+    fetchMock.mockRestore();
+  });
+});

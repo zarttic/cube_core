@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus';
 
 import { apiPrefixes, requestJson } from '@/api/client';
 import { formatShanghaiTime } from '@/utils/time';
+import { notifyApiError } from '@/utils/errorHandler';
 
 const GlobeMap = defineAsyncComponent(() => import('@/components/GlobeMap.vue'));
 
@@ -531,7 +532,7 @@ async function runTopologyOperation() {
     if (activeOperation.value === 'topology') gridGeometries.value = topologyGeometries.value;
     ElMessage.success('拓扑运算完成');
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'EncodingView' });
   } finally {
     loading.value = false;
   }
@@ -569,7 +570,7 @@ async function runCoordinateConversion() {
     if (activeOperation.value === 'conversion') gridGeometries.value = conversionGeometries.value;
     ElMessage.success('坐标转换完成');
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'EncodingView' });
   } finally {
     loading.value = false;
   }
@@ -583,7 +584,7 @@ async function runDemo() {
     if (activeModule.value === 'encoding') await runGridEncoding();
     ElMessage.success('操作完成');
   } catch (error) {
-    ElMessage.error(error.message);
+    notifyApiError(error, { scope: 'EncodingView' });
   } finally {
     loading.value = false;
   }

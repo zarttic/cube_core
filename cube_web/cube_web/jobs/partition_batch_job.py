@@ -5,6 +5,7 @@ import argparse
 import logging
 
 from cube_split import runtime_config
+from cube_split.logging_config import configure_logging, logging_context
 from cube_split.partition_timing import TimingRecorder
 
 from cube_web.services.partition_contracts import StrictPartitionRequest
@@ -25,19 +26,16 @@ def _project_task_safely(scene_repository, task_id: str, status: str, result: di
         logger.exception("Failed to project partition task %s as %s", task_id, status)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task-id", required=True)
-    args = parser.parse_args()
-
+def _execute_task(task_id: str) -> None:
     driver_timing = TimingRecorder("ray_job_driver")
     with driver_timing.phase("driver.bootstrap"):
         store = get_partition_job_store()
-        attempt = store.get_attempt(args.task_id)
+        attempt = store.get_attempt(task_id)
         if attempt is None:
-            raise RuntimeError(f"Partition attempt not found: {args.task_id}")
+            raise RuntimeError(f"Partition attempt not found: {task_id}")
     with driver_timing.phase("task.start_attempt"):
-        if not store.start_attempt(args.task_id):
+        if not store.start_attempt(task_id):
+            logger.info("driver.skipped reason=attempt_not_startable")
             return
     scene_repository = None
     workflow = None
@@ -45,7 +43,7 @@ def main() -> None:
         scene_repository = OpenGaussSceneRepository(runtime_config.require_postgres_dsn())
         # Projection must not prevent the actual Ray Job from executing; terminal
         # attempt state remains the source of truth if this write is unavailable.
-        _project_task_safely(scene_repository, args.task_id, "running", None)
+        _project_task_safely(scene_repository, task_id, "running", None)
         payload = dict(attempt.get("payload") or {})
         payload.pop("strict_partition_request", None)
         payload.pop("dataset_partitions", None)
@@ -57,33 +55,45 @@ def main() -> None:
             runner=NormalizedPartitionDatasetRunner(),
         )
         with driver_timing.phase("workflow.run"):
-            result = workflow.run(task_id=args.task_id, request=request)
+            result = workflow.run(task_id=task_id, request=request)
     except Exception as exc:
         safe_error = _safe_dataset_error(exc)
+        logger.exception("driver.failed")
         if workflow is not None:
             try:
-                workflow.on_task_failed(args.task_id, safe_error)
+                workflow.on_task_failed(task_id, safe_error)
             except Exception:
-                logger.exception("Failed to persist partition task failure %s", args.task_id)
+                logger.exception("Failed to persist partition task failure %s", task_id)
         else:
             try:
-                store.fail_attempt(args.task_id, safe_error, manual_required=True, error_type="ray_job_driver_failed")
+                store.fail_attempt(task_id, safe_error, manual_required=True, error_type="ray_job_driver_failed")
             except Exception:
-                logger.exception("Failed to persist Ray driver failure %s", args.task_id)
+                logger.exception("Failed to persist Ray driver failure %s", task_id)
         if scene_repository is not None:
-            _project_task_safely(scene_repository, args.task_id, "failed", {"error": safe_error})
+            _project_task_safely(scene_repository, task_id, "failed", {"error": safe_error})
         raise
     result["timings"] = {
         **dict(result.get("timings") or {}),
         "job_driver": driver_timing.finish(),
     }
     try:
-        workflow.on_task_succeeded(args.task_id, result)
+        workflow.on_task_succeeded(task_id, result)
     except Exception:
-        logger.exception("Failed to persist partition task success %s", args.task_id)
-    _project_task_safely(scene_repository, args.task_id, str(result.get("status") or "completed"), result)
+        logger.exception("Failed to persist partition task success %s", task_id)
+    _project_task_safely(scene_repository, task_id, str(result.get("status") or "completed"), result)
+    logger.info("driver.finished status=%s", result.get("status"))
     if result.get("status") in {"failed", "partial_failure"}:
         raise RuntimeError(f"Partition attempt completed with status {result['status']}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task-id", required=True)
+    args = parser.parse_args()
+    configure_logging(service="cube-web-ray-driver")
+    with logging_context(task_id=args.task_id, component="ray-job-driver"):
+        logger.info("driver.started")
+        _execute_task(args.task_id)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by Ray Jobs.

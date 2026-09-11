@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from cube_split.logging_config import configure_logging
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -14,16 +15,18 @@ from grid_core.sdk import CubeEncoderSDK, GridCoreError, NotImplementedCapabilit
 
 from cube_web.routes import partition as partition_route
 from cube_web.routes.auth import create_auth_router, require_auth_for_api
+from cube_web.routes.client_errors import create_client_errors_router
 from cube_web.routes.config import create_config_router
 from cube_web.routes.partition import create_partition_router
 from cube_web.routes.quality import create_quality_router
 from cube_web.routes.sdk import create_sdk_router
 from cube_web.services import health_service
+from cube_web.services.access_log import access_log_middleware
 from cube_web.services.api_errors import (
     detail_code,
     detail_message,
-    error_response,
     ensure_request_id,
+    error_response,
     request_id_from_header,
 )
 from cube_web.services.dataset_management import (
@@ -44,6 +47,7 @@ from cube_web.services.quality_repository import (
     QualityTriggerConflict,
 )
 from cube_web.services.quality_worker import QualityRuntime
+from cube_web.services.ray_job_submitter import ray_job_executor_enabled
 
 ENCODER_SDK_CLASS = CubeEncoderSDK
 logger = logging.getLogger(__name__)
@@ -65,18 +69,27 @@ partition_workflow_service = partition_route.partition_workflow_service
 
 
 def create_app() -> FastAPI:
+    configure_logging(service="cube-web")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         quality_runtime = QualityRuntime()
+        reconciled = 0
         try:
-            partition_workflow_service.reconcile_orphaned_tasks()
+            reconciled = partition_workflow_service.reconcile_orphaned_tasks()
         except Exception as exc:
             logger.warning("Skipping partition task reconcile during startup: %s", exc)
+        logger.info(
+            "web.startup executor=%s reconciled=%s",
+            "ray_job" if ray_job_executor_enabled() else "local",
+            reconciled,
+        )
         try:
             quality_runtime.start()
             yield
         finally:
             quality_runtime.stop()
+            logger.info("web.shutdown")
 
     web_app = FastAPI(title="cube-web", lifespan=lifespan)
     sdk = CubeEncoderSDK()
@@ -85,6 +98,8 @@ def create_app() -> FastAPI:
 
     web_app.middleware("http")(request_id_middleware)
     web_app.middleware("http")(require_auth_for_api)
+    # Registered last so it wraps every other middleware and sees early 401/403 replies.
+    web_app.middleware("http")(access_log_middleware)
     web_app.add_exception_handler(GridCoreError, handle_grid_core_error)
     web_app.add_exception_handler(HTTPException, handle_http_exception)
     web_app.add_exception_handler(RequestValidationError, handle_validation_error)
@@ -127,6 +142,7 @@ def create_app() -> FastAPI:
     api_router.include_router(create_sdk_router(sdk))
     api_router.include_router(create_quality_router())
     api_router.include_router(create_config_router())
+    api_router.include_router(create_client_errors_router())
     api_router.include_router(create_partition_router(scene_service=scene_domain_service))
     for router in domain_routers:
         api_router.include_router(router)

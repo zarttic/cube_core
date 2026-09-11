@@ -5,6 +5,7 @@ import { download, request, requestGet, requestPost } from '@/api/client';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
 import { createRequestScope } from '@/api/requestScope';
 import { filterActiveQualityRules, qualityExecutionErrorLabel } from '@/utils/qualityLabels';
+import { notifyApiError } from '@/utils/errorHandler';
 
 function emptyDetail() {
   return null;
@@ -94,6 +95,7 @@ export const useQualityStore = defineStore('quality', () => {
         }
       } catch (requestError) {
         if (pollGeneration !== qualityPollGeneration || generation !== detailGeneration || selectedQualityRunId.value !== qualityRunId) return;
+        notifyApiError(requestError, { silent: true, scope: 'quality-poll' });
         error.value = qualityExecutionErrorLabel(requestError) || '质检任务状态刷新失败';
         if (requestError?.retryable !== false && ![401, 403, 404].includes(requestError?.status)) {
           consecutiveFailures += 1;

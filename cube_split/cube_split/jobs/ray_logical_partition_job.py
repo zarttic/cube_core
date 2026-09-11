@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,6 +18,9 @@ from cube_split.jobs.ray_partition_core import (
     build_manifest,
     create_unique_run_dir,
 )
+from cube_split.logging_config import apply_ray_logging_defaults, configure_logging, ray_logging_level
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,7 +182,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
         loaded = json.loads(raw)
         if not isinstance(loaded, dict):
             raise ValueError("RAY_RUNTIME_ENV_JSON must decode to an object")
-        return loaded
+        return apply_ray_logging_defaults(loaded)
 
     project_root = Path(__file__).resolve().parents[3]
     env_vars = {
@@ -189,7 +193,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
     if source_cache_dir:
         env_vars["CUBE_SOURCE_CACHE_DIR"] = source_cache_dir
 
-    return {
+    runtime_env = {
         "working_dir": str(project_root),
         "excludes": [
             ".git/**",
@@ -217,6 +221,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
         ],
         "env_vars": env_vars,
     }
+    return apply_ray_logging_defaults(runtime_env)
 
 
 def _ray_runtime_env_for_init(runtime_env: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -399,7 +404,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                         address=args.ray_address,
                         ignore_reinit_error=True,
                         include_dashboard=False,
-                        logging_level="ERROR",
+                        logging_level=ray_logging_level(),
                         runtime_env=runtime_env,
                     )
                 except Exception:
@@ -408,16 +413,18 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
                     ray.init(
                         ignore_reinit_error=True,
                         include_dashboard=False,
-                        logging_level="ERROR",
+                        logging_level=ray_logging_level(),
                         runtime_env=runtime_env,
                     )
             else:
                 ray.init(
                     ignore_reinit_error=True,
                     include_dashboard=False,
-                    logging_level="ERROR",
+                    logging_level=ray_logging_level(),
                     runtime_env=runtime_env,
                 )
+                logger.info("ray.initialized address=%s", args.ray_address or "auto")
+                logger.info("ray.initialized address=%s", args.ray_address or "auto")
             @ray.remote
             class AssetTaskProcessor:
                 def process_groups(
@@ -589,6 +596,7 @@ def run_logical_partition(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    configure_logging(service="cube-logical-partition")
     report = run_logical_partition(parse_args())
     print("=== Ray logical partition job completed ===")
     print(json.dumps(report, ensure_ascii=False, indent=2))

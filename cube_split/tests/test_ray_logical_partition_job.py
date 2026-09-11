@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 
+from cube_web.services.partition_contracts import OutputIdentity, make_output_id
+
 from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
+from cube_split.jobs.ray_logical_chunk_job import _time_bucket, logical_output_id, run_logical_chunk_jobs
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
@@ -18,8 +22,6 @@ from cube_split.jobs.ray_logical_partition_job import (
     parse_args,
 )
 from cube_split.jobs.ray_partition_core import _group_tasks_for_local_processing, _prepare_task_rows_for_partitioning
-from cube_split.jobs.ray_logical_chunk_job import _time_bucket, logical_output_id, run_logical_chunk_jobs
-from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 
 class _FakeObjectRef:
@@ -352,6 +354,30 @@ def test_ray_runtime_env_passes_source_cache_dir(monkeypatch):
     assert ".tmp/**" in runtime_env["excludes"]
     assert ".run/**" in runtime_env["excludes"]
     assert "cube_web/frontend/test-results/**" in runtime_env["excludes"]
+
+
+def test_ray_runtime_env_propagates_logging_settings(monkeypatch):
+    monkeypatch.setenv("CUBE_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("CUBE_LOG_RAY_LEVEL", "WARNING")
+
+    runtime_env = _ray_runtime_env_from_env()
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"]["CUBE_LOG_LEVEL"] == "DEBUG"
+    assert runtime_env["env_vars"]["CUBE_LOG_RAY_LEVEL"] == "WARNING"
+    assert runtime_env["worker_process_setup_hook"] == "cube_split.logging_config.worker_setup"
+
+
+def test_ray_runtime_env_json_keeps_operator_logging_values(monkeypatch):
+    monkeypatch.setenv("RAY_RUNTIME_ENV_JSON", json.dumps({"env_vars": {"CUBE_LOG_LEVEL": "WARNING"}}))
+    monkeypatch.setenv("CUBE_LOG_LEVEL", "INFO")
+
+    runtime_env = _ray_runtime_env_from_env()
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"]["CUBE_LOG_LEVEL"] == "WARNING"
+    assert runtime_env["env_vars"]["CUBE_LOG_FORMAT"] == "text"
+    assert runtime_env["worker_process_setup_hook"] == "cube_split.logging_config.worker_setup"
 
 
 def test_resolve_ray_chunk_size_auto_prefers_full_fanout_for_small_runs():

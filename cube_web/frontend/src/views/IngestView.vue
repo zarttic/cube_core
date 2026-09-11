@@ -8,6 +8,7 @@ import StatusTag from '@/components/StatusTag.vue';
 import { useIngestRunsStore } from '@/stores/ingestRuns';
 import { formatShanghaiTime } from '@/utils/time';
 import { bandDisplayLabel, dataUnitTypeLabel } from '@/utils/bands';
+import { notifyApiError } from '@/utils/errorHandler';
 import { gridDefinition, nativeLevelLabel } from '@/utils/grid';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 
@@ -145,7 +146,7 @@ async function submitManualIngest() {
     manualBandUnitIds.value = [];
     ElMessage.success('已提交手动入库');
   } catch (requestError) {
-    ElMessage.error(requestError.message || '手动入库提交失败');
+    notifyApiError(requestError, { scope: 'IngestView', message: requestError.message || '手动入库提交失败' });
   }
 }
 
@@ -155,7 +156,11 @@ async function openManualIngest(partitionRunId = '') {
   manualBandUnitIds.value = [];
   collapsedManualDatasets.value = new Set();
   collapsedManualScenes.value = new Set();
-  try { await store.loadManualCandidates(); } catch (requestError) { ElMessage.error(requestError.message || '可入库数据加载失败'); }
+  try {
+    await store.loadManualCandidates();
+  } catch (requestError) {
+    notifyApiError(requestError, { scope: 'IngestView', message: requestError.message || '可入库数据加载失败' });
+  }
 }
 </script>
 

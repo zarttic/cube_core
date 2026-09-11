@@ -1,3 +1,5 @@
+import { emitAuthFailure } from './authEvents';
+
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const REQUEST_TIMEOUT_MS = 30000;
 const API_FIELD_LABELS = {
@@ -65,12 +67,16 @@ async function parseResponse(response) {
         error.status = response.status;
         error.code = 'non_json_error';
         error.requestId = requestId;
+        error.isApiError = true;
+        error.isApiError = true;
         error.retryable = response.status >= 500 || response.status === 408 || response.status === 429;
         throw error;
       }
       const error = new Error('服务返回了非 JSON 响应');
       error.status = response.status;
       error.code = 'invalid_success_response';
+      error.isApiError = true;
+      error.isApiError = true;
       error.requestId = requestId;
       throw error;
     }
@@ -90,6 +96,7 @@ async function parseResponse(response) {
     error.requestId = apiError.request_id || requestId;
     error.retryable = response.status >= 500 || response.status === 408 || response.status === 429;
     error.detail = body?.detail;
+    error.isApiError = true;
     throw error;
   }
   return body;
@@ -123,7 +130,7 @@ export function combineAbortSignals(signals = []) {
   };
 }
 
-export async function request(path, { method = 'GET', body, headers = {}, signal, responseType = 'json', timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+export async function request(path, { method = 'GET', body, headers = {}, signal, responseType = 'json', timeoutMs = REQUEST_TIMEOUT_MS, authRedirect = true } = {}) {
   const timeout = timeoutSignal(timeoutMs);
   const combined = combineAbortSignals([signal, timeout.signal]);
   try {
@@ -139,6 +146,9 @@ export async function request(path, { method = 'GET', body, headers = {}, signal
     }
     return await parseResponse(response);
   } catch (caught) {
+    if (caught?.isApiError && caught.status === 401 && authRedirect && path.startsWith('/v1/')) {
+      emitAuthFailure(caught);
+    }
     if (caught?.name === 'AbortError' && timeout.signal.aborted && !signal?.aborted) {
       const error = new Error(`请求超时，请到任务列表确认任务状态后再重试（${method} ${path}）`);
       error.name = 'RequestTimeoutError';

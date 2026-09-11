@@ -1,6 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue';
+import { ElMessage } from 'element-plus';
 
+import { onAuthFailure } from '@/api/authEvents';
 import { authRequired, loadAuthRuntimeConfig } from '@/config';
 import AppLayout from '@/layouts/AppLayout.vue';
 import router, { resolveApplicationAuthReady, safeLocalTarget } from '@/router';
@@ -59,7 +61,14 @@ function retryLogin() {
   userStore.redirectToAuth('/');
 }
 
-onMounted(initializeApplicationAuth);
+onMounted(() => {
+  onAuthFailure(() => {
+    if (userStore.handleSessionExpired()) {
+      ElMessage.warning('登录已过期，请重新登录');
+    }
+  });
+  initializeApplicationAuth();
+});
 </script>
 
 <template>

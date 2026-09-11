@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from cube_split import runtime_config
+from cube_split.logging_config import ray_logging_level
 
 from cube_web.services.config_store import _masked_dsn
 
@@ -138,7 +139,7 @@ def _check_ray() -> dict[str, Any]:
 
         already_initialized = ray.is_initialized()
         if not already_initialized:
-            ray.init(address=address, ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
+            ray.init(address=address, ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level())
         resources = ray.cluster_resources()
         nodes = ray.nodes()
     except Exception as exc:

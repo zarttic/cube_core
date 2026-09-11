@@ -60,7 +60,12 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 - 响应头带 `X-Request-ID`；入站同名头（仅允许 `A-Za-z0-9._:-`，最长 128）会被复用，否则生成随机 ID。
 - **5xx 不回显内部细节**：只给固定中文文案与请求 ID；连接串、对象地址、异常堆栈一律不返回。
 - 4xx 透出领域错误或校验明细（`detail` 保留结构化校验列表，便于前端定位字段）。
-- 服务端会记录未处理异常的堆栈，日志中带请求 ID、方法与路径。
+- 服务端日志：`CUBE_LOG_LEVEL`（默认 `INFO`）控制级别，默认单行文本输出到 stdout；
+  `CUBE_LOG_FILE` 可开启文件轮转（默认 10MB × 3），`CUBE_LOG_FORMAT=json` 输出 JSON 行。
+- 访问日志记录 `method/path/status/duration_ms/actor/request_id`（跳过 `/health` 与 `/`，
+  `CUBE_LOG_ACCESS=0` 可关闭）；4xx 记 WARNING、5xx 记 ERROR，401/403 另记 `auth.denied`。
+- 未处理异常记录堆栈，日志带请求 ID、方法与路径；浏览器错误上报走
+  `POST /v1/client-errors`（无需登录，限流 30 次/分钟/IP，拒绝超过 32KB 的请求体）。
 
 常见稳定错误码：
 

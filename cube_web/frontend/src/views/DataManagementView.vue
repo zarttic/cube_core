@@ -1,10 +1,10 @@
 <script setup>
 import { ref } from 'vue';
-import { ElMessage } from 'element-plus';
 
 import router from '@/router';
 import { createDatasetReloadBatch } from '@/api/partitionDrafts';
 import { queuePartitionSelection } from '@/stores/partitionTransfer';
+import { notifyApiError } from '@/utils/errorHandler';
 import DatasetsView from '@/views/DatasetsView.vue';
 import IngestView from '@/views/IngestView.vue';
 
@@ -23,7 +23,7 @@ async function queuePartition(dataset) {
     queuePartitionSelection(reloadBatch);
     router.push({ name: 'partition', query: { module: dataset.data_type, load_batch_id: reloadBatch.load_batch_id } });
   } catch (error) {
-    ElMessage.error(error.message || '创建重新载入批次失败');
+    notifyApiError(error, { scope: 'DataManagementView', message: error.message || '创建重新载入批次失败' });
   }
 }
 </script>
