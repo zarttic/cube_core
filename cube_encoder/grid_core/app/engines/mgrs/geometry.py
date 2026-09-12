@@ -22,30 +22,67 @@ _EDGE_SEGMENTS = 8
 _UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 
 
+@lru_cache(maxsize=16384)
 def decode_utm(code: str) -> tuple[int, str, float, float]:
-    """Decode a UTM MGRS code, rejecting latitude-band-inconsistent results."""
+    """Decode a UTM MGRS code, rejecting latitude-band-inconsistent results.
+
+    The C extension reports a latitude-band mismatch as a ``RuntimeWarning`` from
+    ``Convert_MGRS_To_UTM``.  Promoting exactly that warning to an error keeps the
+    band check while avoiding the cost of recording and formatting the message,
+    and the result is cached because decoding is a pure function of the code
+    (cover loops revisit the same codes across sliding windows).
+    """
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", RuntimeWarning)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                message=r'Warning in "Convert_MGRS_To_UTM"',
+                category=RuntimeWarning,
+            )
             decoded = _converter.MGRSToUTM(code)
+    except RuntimeWarning as exc:  # latitude band mismatch reported by the C extension
+        raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}") from exc
     except Exception as exc:
         raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
-    if any("Convert_MGRS_To_UTM" in str(warning.message) for warning in caught):
-        raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}")
     return decoded
+
+
+def _utm_band_letter(code: str) -> str:
+    """Return the latitude-band letter of an MGRS code."""
+    canonical = code.replace(" ", "").upper()
+    zone_digits = 2 if len(canonical) > 1 and canonical[1].isdigit() else 1
+    band = canonical[zone_digits : zone_digits + 1]
+    if band not in _UTM_BANDS:
+        raise ValidationError(f"Cannot determine UTM latitude band from MGRS code: {code!r}")
+    return band
+
+
+@lru_cache(maxsize=64)
+def _band_polygon(band: str) -> Polygon:
+    """Return the standard MGRS latitude band box (full longitude span)."""
+    try:
+        band_index = _UTM_BANDS.index(band)
+    except ValueError as exc:
+        raise ValidationError(f"Cannot determine UTM latitude band: {band!r}") from exc
+    south = -80.0 + band_index * 8.0
+    north = 84.0 if band == "X" else south + 8.0
+    return box(-180.0, south, 180.0, north)
 
 
 def _utm_band_polygon(code: str) -> Polygon:
     """Return the standard MGRS Grid Zone Designator latitude band."""
-    canonical = code.replace(" ", "").upper()
-    zone_digits = 2 if len(canonical) > 1 and canonical[1].isdigit() else 1
-    try:
-        band_index = _UTM_BANDS.index(canonical[zone_digits])
-    except (IndexError, ValueError) as exc:
-        raise ValidationError(f"Cannot determine UTM latitude band from MGRS code: {code!r}") from exc
-    south = -80.0 + band_index * 8.0
-    north = 84.0 if canonical[zone_digits] == "X" else south + 8.0
-    return box(-180.0, south, 180.0, north)
+    return _band_polygon(_utm_band_letter(code))
+
+
+@lru_cache(maxsize=4096)
+def _valid_utm_domain(domain: GridDomain, band: str) -> Polygon | MultiPolygon:
+    """Return the cached UTM (zone/hemisphere) clipped to one latitude band.
+
+    The result depends only on the UTM domain and the latitude-band letter, so the
+    key space is bounded by 60 zones x 2 hemispheres x 20 bands and a long-running
+    cover never thrashes this cache.
+    """
+    return domain_polygon(domain).intersection(_band_polygon(band))
 
 
 def _densify_projected_edge(
@@ -160,7 +197,7 @@ def cell_geometry_clipped(
     if domain.kind == "utm":
         zone, hemisphere, easting, northing = decode_utm(code)
         raw = _utm_raw_geometry(zone, hemisphere, easting, northing, precision)
-        valid_domain = domain_polygon(domain).intersection(_utm_band_polygon(code))
+        valid_domain = _valid_utm_domain(domain, _utm_band_letter(code))
     else:
         raw = _ups_raw_geometry(code, precision)
         valid_domain = domain_polygon(domain)
