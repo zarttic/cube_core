@@ -125,7 +125,13 @@ def test_run_carbon_ingest_uses_postgres_backend(monkeypatch, tmp_path: Path):
     assert ("copy_row", "snd-postgres") in calls
     assert not any(call[0] == "executemany" for call in calls)
     assert not any("ON COMMIT DROP" in str(call[1]) for call in calls if call[0] == "execute")
-    assert any("CAST(target.satellite AS VARCHAR(128))" in str(call[1]) for call in calls if call[0] == "execute")
+    # The ON keys are typed TEXT on both sides (see ``columns`` above), so the MERGE
+    # must compare them directly.  Wrapping either side in CAST() hides the unique
+    # index from the planner: the plan degrades to a sequential scan of the whole
+    # fact table (cost 38030 for 227 MB) instead of an index-only scan (cost 8.28),
+    # which pinned every ingest to a cost independent of the batch size.
+    assert any("target.satellite = source.satellite" in str(call[1]) for call in calls if call[0] == "execute")
+    assert not any("CAST(target.satellite" in str(call[1]) for call in calls if call[0] == "execute")
     assert len(captured) == 1
     assert captured[0].task_name == "cube.partition.carbon.ingest"
     assert captured[0].method_name == "merge.rs_carbon_observation_fact"
