@@ -9,6 +9,7 @@ Base32 alphabet (lowercase):  0123456789bcdefghjkmnpqrstuvwxyz
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 from grid_core.app.core.exceptions import ValidationError
 from grid_core.app.engines.base import BaseGridEngine
@@ -123,8 +124,14 @@ def _encode(lon: float, lat: float, precision: int) -> str:
     return "".join(result)
 
 
+@lru_cache(maxsize=32768)
 def _decode_bbox(code: str) -> tuple[float, float, float, float]:
-    """Return (lon_min, lat_min, lon_max, lat_max) for a geohash."""
+    """Return (lon_min, lat_min, lon_max, lat_max) for a geohash.
+
+    Decoding is a pure function of the code and every geometry/cover helper needs
+    it, so the cache turns the repeated decode-shift-encode round trips of the
+    candidate walk into table lookups.
+    """
     _validate_space_code(code)
     lon_min, lon_max = -180.0, 180.0
     lat_min, lat_max = -90.0, 90.0
@@ -293,6 +300,26 @@ def _bbox_to_shapely(lon_min: float, lat_min: float, lon_max: float, lat_max: fl
     return shapely_box(lon_min, lat_min, lon_max, lat_max)
 
 
+def _bboxes_to_shapely(bboxes: list[tuple[float, float, float, float]]):
+    """Build every candidate box in one vectorised Shapely call.
+
+    Cover selects from thousands of candidates, so the per-cell Shapely
+    construction and intersection were the dominant cost; Shapely 2 broadcasts a
+    single AOI against the whole box array instead.
+    """
+    try:
+        import shapely
+    except ImportError:  # pragma: no cover
+        raise RuntimeError("shapely is required for cover operations")
+    # ``shapely.box`` (not ``shapely.geometry.box``) is the vectorised builder.
+    return shapely.box(
+        [bbox[0] for bbox in bboxes],
+        [bbox[1] for bbox in bboxes],
+        [bbox[2] for bbox in bboxes],
+        [bbox[3] for bbox in bboxes],
+    )
+
+
 def _geom_to_shapely(geometry: dict):
     """Convert a GeoJSON geometry dict to a Shapely geometry, normalising the
     antimeridian by splitting geometries that cross lon=180 / lon=-180."""
@@ -311,40 +338,83 @@ def _geom_to_shapely(geometry: dict):
     return geom.intersection(world)
 
 
+def _cell_index_to_code(i: int, j: int, lon_bits: int, lat_bits: int) -> str:
+    """Return the geohash whose bisection path matches cell indices (i, j).
+
+    Bits are interleaved most-significant-first starting with longitude, exactly
+    like :func:`_encode`, so the index arithmetic reproduces the bit sequence that
+    the floating-point bisection would have produced for any point in the cell.
+    """
+    chars: list[str] = []
+    char_bits = 0
+    bit_pos = 4
+    for pos in range(lon_bits + lat_bits):
+        if pos & 1:
+            value = (j >> (lat_bits - 1 - (pos >> 1))) & 1
+        else:
+            value = (i >> (lon_bits - 1 - (pos >> 1))) & 1
+        char_bits |= value << bit_pos
+        if bit_pos == 0:
+            chars.append(BASE32[char_bits])
+            char_bits = 0
+            bit_pos = 4
+        else:
+            bit_pos -= 1
+    return "".join(chars)
+
+
 def _cells_for_bbox(
     lon_min: float, lat_min: float, lon_max: float, lat_max: float, precision: int
 ) -> list[str]:
     """Enumerate all geohash codes at ``precision`` that intersect the given bbox."""
-    # Start from code at lower-left corner and fill in by expanding
+    codes, _ = _cells_and_boxes_for_bbox(lon_min, lat_min, lon_max, lat_max, precision)
+    return codes
 
-    seed = _encode(
-        max(-180.0, min(lon_min, 179.9999999)),
-        max(-90.0, lat_min),
-        precision,
-    )
-    # Expand right and up from seed to cover the bbox
-    result_codes: set[str] = set()
-    # Iterate row by row (scan upward from bottom row)
-    row_start = seed
-    while True:
-        row_code = row_start
-        while True:
-            result_codes.add(row_code)
-            rb = _decode_bbox(row_code)
-            if rb[2] >= lon_max:  # lon_max of cell >= bbox lon_max
-                break
-            nxt = _neighbor_in_direction(row_code, "right")
-            if nxt == row_code:  # stuck at antimeridian
-                break
-            row_code = nxt
-        rb_start = _decode_bbox(row_start)
-        if rb_start[3] >= lat_max:  # lat_max of row >= bbox lat_max
-            break
-        nxt_row = _neighbor_in_direction(row_start, "top")
-        if nxt_row == row_start:  # stuck at north pole
-            break
-        row_start = nxt_row
-    return list(result_codes)
+
+def _cells_and_boxes_for_bbox(
+    lon_min: float, lat_min: float, lon_max: float, lat_max: float, precision: int
+) -> tuple[list[str], list[tuple[float, float, float, float]]]:
+    """Enumerate candidate codes and their bboxes for the given bbox.
+
+    The cells form a rectangle in the (longitude index, latitude index) lattice, so
+    both the codes and the bboxes are computed arithmetically instead of walking the
+    lattice from the lower-left seed (one decode-shift-encode round trip per cell).
+    The cell edges are exactly representable dyadic values, so the arithmetic bboxes
+    are bit-identical to what the bisection decoder returns.
+    """
+    total_bits = precision * 5
+    lon_bits = (total_bits + 1) // 2
+    lat_bits = total_bits // 2
+    lon_cells = 1 << lon_bits
+    lat_cells = 1 << lat_bits
+    lon_step = 360.0 / lon_cells
+    lat_step = 180.0 / lat_cells
+
+    def index_range(low: float, high: float, origin: float, step: float, cells: int, limit: float) -> tuple[int, int]:
+        """Inclusive cell-index range for a coordinate span (cells are half-open)."""
+        start = min(cells - 1, int((max(origin, min(low, limit)) - origin) / step))
+        end = int((max(origin, min(high, limit)) - origin) / step)
+        if end >= cells:
+            end = cells - 1
+        elif origin + end * step >= high and end > start:
+            # ``high`` sits exactly on this cell's left edge, and the walk stopped
+            # at the previous cell because its right edge already reaches ``high``.
+            end -= 1
+        return start, max(start, end)
+
+    i0, i1 = index_range(lon_min, lon_max, -180.0, lon_step, lon_cells, 179.9999999)
+    j0, j1 = index_range(lat_min, lat_max, -90.0, lat_step, lat_cells, 90.0)
+
+    codes: list[str] = []
+    boxes: list[tuple[float, float, float, float]] = []
+    for j in range(j0, j1 + 1):
+        lat_lo = -90.0 + j * lat_step
+        lat_hi = lat_lo + lat_step
+        for i in range(i0, i1 + 1):
+            lon_lo = -180.0 + i * lon_step
+            codes.append(_cell_index_to_code(i, j, lon_bits, lat_bits))
+            boxes.append((lon_lo, lat_lo, lon_lo + lon_step, lat_hi))
+    return codes, boxes
 
 
 # ---------------------------------------------------------------------------
@@ -503,24 +573,29 @@ class GeohashEngine(BaseGridEngine):
         aoi_bounds = aoi.bounds  # (minx, miny, maxx, maxy)
 
         # Collect candidate codes at the requested level
-        seed_codes = _cells_for_bbox(
+        seed_codes, cell_bboxes = _cells_and_boxes_for_bbox(
             aoi_bounds[0], aoi_bounds[1], aoi_bounds[2], aoi_bounds[3],
             requested_grid_level,
         )
 
         selected: list[str] = []
-        for code in seed_codes:
-            cell_geom = _bbox_to_shapely(*_decode_bbox(code))
-            intersection = cell_geom.intersection(aoi)
+        if cover_mode not in ("intersect", "minimal", "contain"):
+            raise ValidationError(f"Unknown cover_mode: {cover_mode!r}")
+        if not seed_codes:
+            return []
+        try:
+            import shapely
+        except ImportError:  # pragma: no cover
+            raise RuntimeError("shapely is required for cover operations")
 
-            if cover_mode in ("intersect", "minimal"):
-                if not intersection.is_empty and intersection.area > 0.0:
-                    selected.append(code)
-            elif cover_mode == "contain":
-                if aoi.covers(cell_geom):
-                    selected.append(code)
-            else:
-                raise ValidationError(f"Unknown cover_mode: {cover_mode!r}")
+        cell_boxes = _bboxes_to_shapely(cell_bboxes)
+        if cover_mode == "contain":
+            hits = shapely.covers(aoi, cell_boxes)
+        else:
+            # ``intersect`` and ``minimal`` both require a positive-area overlap:
+            # a cell touching the AOI only along an edge or a vertex is excluded.
+            hits = shapely.area(shapely.intersection(cell_boxes, aoi)) > 0.0
+        selected = [code for code, hit in zip(seed_codes, hits) if hit]
 
         if cover_mode == "minimal" and compact:
             selected = self._compact(selected, aoi, requested_grid_level)
