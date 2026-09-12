@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from shapely import affinity
 from shapely.geometry import MultiPolygon, Polygon, box, shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
@@ -235,3 +236,77 @@ def test_high_resolution_polar_cover_stays_local() -> None:
     covered = engine.cover_geometry(aoi.__geo_interface__, 8, "intersect")
 
     assert {cell.space_code for cell in covered} == {"132", "133", "134", "388", "389", "390"}
+
+
+def _longitude_variants(geometry, offsets):
+    return tuple(
+        affinity.translate(geometry, xoff=360.0 * offset) for offset in offsets
+    )
+
+
+def _intersects_area_legacy_grid(cell, target) -> bool:
+    """The pre-optimisation 5x5 (cell variant, target variant) formulation."""
+    return any(
+        cell_variant.intersection(target_variant).area > 0.0
+        for cell_variant in _longitude_variants(cell, range(-2, 3))
+        for target_variant in _longitude_variants(target, range(-2, 3))
+    )
+
+
+def _intersects_area_relative_shifts(cell, target) -> bool:
+    """The current formulation: untranslated cell x nine relative target shifts."""
+    return any(
+        cell.intersection(target_variant).area > 0.0
+        for target_variant in _longitude_variants(
+            target, isea4h_engine._RELATIVE_LONGITUDE_SHIFTS
+        )
+    )
+
+
+def test_relative_longitude_shifts_match_the_legacy_variant_grid() -> None:
+    """Nine relative shifts must decide exactly like the 5x5 variant grid.
+
+    Guards ``area(cell*360a & target*360b) == area(cell & target*360(b-a))`` on the
+    cases that actually exercise it: dateline, polar, and vertex-only (zero area)
+    contact, where a plain ``intersects`` test would differ.
+    """
+    engine = ISEA4HEngine()
+    resolution = 6
+    codes = [
+        engine.locate_space_code(116.391, 39.907, resolution).space_code,
+        engine.locate_space_code(179.99, 0.0, resolution).space_code,
+        engine.locate_space_code(-179.99, 0.0, resolution).space_code,
+        engine.locate_space_code(179.9, 62.4, resolution).space_code,
+        engine.locate_space_code(0.0, 84.0, resolution).space_code,
+        engine.locate_space_code(0.0, -84.0, resolution).space_code,
+    ]
+    vertex_lon, vertex_lat = cell_boundary_polygon(int(codes[0]), resolution)[0]
+    targets = [
+        box(116.0, 39.5, 117.0, 40.5),
+        box(179.5, -0.5, 180.0, 0.5),
+        box(-180.0, -0.5, -179.5, 0.5),
+        box(170.0, -1.0, 190.0, 1.0),
+        box(-180.0, 83.5, 180.0, 84.5),
+        box(vertex_lon - 1e-9, vertex_lat - 1e-9, vertex_lon + 1e-9, vertex_lat + 1e-9),
+    ]
+    checked = 0
+    for code in codes:
+        cell = Polygon(normalize_ring_longitudes(cell_boundary_polygon(int(code), resolution)))
+        if not cell.is_valid:
+            cell = make_valid(cell)
+        for target in targets:
+            assert _intersects_area_relative_shifts(
+                cell, target
+            ) == _intersects_area_legacy_grid(cell, target)
+            checked += 1
+    assert checked == len(codes) * len(targets)
+
+
+def test_cover_matches_the_legacy_oracle_across_both_candidate_paths() -> None:
+    """Dateline (spatial index) and local (neighbour walk) covers agree with the oracle."""
+    engine = ISEA4HEngine()
+    resolution = 3
+
+    for aoi in (box(179.5, -1.0, 180.5, 1.0), box(116.0, 39.5, 117.0, 40.5)):
+        covered = engine.cover_geometry(aoi.__geo_interface__, resolution, "intersect")
+        assert {cell.space_code for cell in covered} == _exact_intersections(aoi, resolution)

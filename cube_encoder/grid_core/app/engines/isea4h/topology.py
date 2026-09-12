@@ -139,13 +139,14 @@ def cell_parent(seqnum: int, res: int) -> int:
     qx, qy = ccx / mag, ccy / mag
     pi, pj = _quantify(qx * pmag, qy * pmag)
     pq, pi, pj = q2dix_to_q2di(quad, pi, pj, pmag)
-    candidates = [q2di_to_seqnum(pq, pi, pj, pres)]
-    # plus that candidate's neighbourhood, since boundary children belong to
-    # an adjacent parent
-    for extra in cell_neighbors(candidates[0], pres):
-        candidates.append(extra)
+    primary = q2di_to_seqnum(pq, pi, pj, pres)
+    if seqnum in cell_children(primary, pres):
+        return primary
 
-    for cand in candidates:
+    # Boundary children belong to an adjacent parent, so fall back to the
+    # primary candidate's neighbourhood (only needed when the centre candidate
+    # does not own this cell).
+    for cand in cell_neighbors(primary, pres):
         if seqnum in cell_children(cand, pres):
             return cand
 

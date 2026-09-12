@@ -37,6 +37,15 @@ _WGS84_BOUNDS = box(-180.0, -90.0, 180.0, 90.0)
 _INDEXED_LEVEL_MAX_CELLS = 200_000
 _COVER_INDEX_CACHE: dict[int, tuple[object, list[object]]] = {}
 
+# Relative longitude shifts used by the cover intersection tests.  Because
+#   area(translate(cell, 360a) & translate(target, 360b))
+#     == area(cell & translate(target, 360 * (b - a)))
+# and ``b - a`` ranges over [-4, 4] for the previous 5x5 variant grid, testing the
+# untranslated cell against these nine relative shifts is equivalent -- with the
+# saving that ``d == 0`` first keeps the common same-turn case at a single
+# intersection call.
+_RELATIVE_LONGITUDE_SHIFTS = (0, -1, 1, -2, 2, -3, 3, -4, 4)
+
 
 def _validate_level(level: int) -> int:
     if not _LEVEL_MIN <= level <= _LEVEL_MAX:
@@ -297,14 +306,19 @@ class ISEA4HEngine(BaseGridEngine):
             return seeds
 
         def intersects_area(cell: object, search_variants: tuple[object, ...]) -> bool:
+            # ``search_variants`` already enumerates every relative longitude
+            # shift (see _RELATIVE_LONGITUDE_SHIFTS in intersecting_cells), so
+            # translating the cell as well would add 24 redundant evaluations.
             return any(
-                cell_variant.intersection(search_variant).area > 0.0
-                for cell_variant in longitude_variants(cell)
+                cell.intersection(search_variant).area > 0.0
                 for search_variant in search_variants
             )
 
         def intersecting_cells(search_target: object, level: int) -> Iterator[tuple[int, object]]:
-            search_variants = longitude_variants(search_target)
+            search_variants = tuple(
+                affinity.translate(search_target, xoff=360.0 * offset)
+                for offset in _RELATIVE_LONGITUDE_SHIFTS
+            )
             candidates = indexed_candidates(search_target, level)
             if candidates is not None:
                 for seqnum in sorted(candidates):
