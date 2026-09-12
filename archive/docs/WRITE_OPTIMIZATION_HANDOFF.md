@@ -225,11 +225,13 @@ manifest 结构：4 个 dataset / 7 个 scene，覆盖 `optical`、`radar`、`pr
 
 1. **`driver.bootstrap` 0.122–0.358s**，相对历史 `partition-bd81e80f4b60` 的 **102.8s** 已消除 —— 直接证明 `PostgresPartitionJobStore.ensure_schema` 的列/索引/schema 版本预检生效。
 2. 逻辑 mgrs 的写入瓶颈已从 staging 转移到 **`promote_logical_staging`：26,024 行 / 106.93s ≈ 243 rows/s**。分数据集：optical 2,568 行 18.908s、radar 19,536 行 66.262s、product 3,920 行 21.761s（三个数据集顺序执行，合计 106.9s；carbon 走碳专用路径，不经过 promote）。
-3. 该吞吐明显低于微基准 88.8k rows/s，差在**目标表规模与索引维护**，不是写入模式：
-   - `partition_indexes`：293,645 行 / 1,167 MB，3 个索引（`output_id` 主键、8 列复合唯一索引、`tile_output_id` 部分索引）；
-   - `partition_tiles`：293,645 行 / 1,144 MB，3 个索引（含 `(grid_type, grid_level, dataset_id)` 部分索引）；
-   - 微基准用的是全新临时表，没有这种规模、bloat 与 WAL 压力。
-   - 因此继续提速应走 DB 侧治理（`VACUUM`/`REINDEX`、按 `dataset_id`/`output_version` 分区、裁剪复合索引列），而不是再改 SQL 模式。
+3. 该吞吐明显低于微基准 88.8k rows/s，差在**目标表规模与索引维护**，不是写入模式（2026-09-12 实测）：
+   - `partition_indexes`：表 489 MB / **索引 678 MB**（8 列复合唯一索引 493 MB + 主键 182 MB + `tile_output_id` 局部索引 3 MB），291,920 行，`n_dead_tup=1`；
+   - `partition_tiles`：表 340 MB / **索引 804 MB**（复合唯一索引 529 MB + 主键 157 MB + searchable 局部索引 118 MB），293,338 行，`n_tup_upd=74,776`；
+   - 即每一行输出都要维护两个大宽 btree（索引体量已超过表体量），这才是 243 rows/s 的真正来源；
+   - 死元组几乎为 0（1 / 505），所以**不是 bloat**：`VACUUM`/`REINDEX` 收益有限，杠杆在索引列宽/数量与按 `dataset_id`/`output_version` 分区；
+   - 微基准用的是全新临时表（同构索引但零体量），因此 88.8k rows/s 不代表生产大表上也能到这个量级。
+   - 附：`partition_logical_staging_rows` 跑完后 `n_live_tup=0` 但仍有 46 MB 索引（TRUNCATE 不回收），也是后续可关注的写入开销。
 4. isea4h L6 每数据集只有 3–37 个 cell，实体瓦片由 worker 写回对象存储；这四个数据集在实体路径下的 DB 阶段只有 `start_output`（0.02–0.83s）与 `complete_output`（0.562–3.518s/数据集，合计 6.227s），没有 `promote_logical_staging`。逻辑路径的 `complete_output` 只有 1.6–2.0s。
 5. Ray Job Server 时长远大于 attempt（例如 mgrs 137.13s vs 133.26s、isea4h 174.74s vs 171.03s），差额是提交/排队/收尾开销，未计入 DB 写入统计。
 6. **本轮真实运行实际走到的优化路径**：
@@ -274,8 +276,8 @@ manifest 结构：4 个 dataset / 7 个 scene，覆盖 `optical`、`radar`、`pr
 
 1. 本轮验收里 product 数据集入库走的是 isea4h 实体输出 → `managed_output_ingest` 的 COPY + 单条 MERGE 路径（24 行 / 1.44–1.95s）。逐批 VALUES MERGE 只在 **product + logical（geohash/mgrs）** 组合生效，本轮没有真实场景量到它。
 2. 按 §五 微基准，VALUES MERGE ≈ 14.9k rows/s。本轮最大的逻辑产物是 mgrs 的 26k 行/run，即使全部走该路径，与 COPY 的差距也只有秒级；当前真正的主导成本是 `promote_logical_staging` 的 ~243 rows/s（§9.3）。
-3. 后续优化按收益排序：
-   - `partition_indexes` / `partition_tiles` 的 DB 治理（VACUUM/REINDEX、分区、裁剪复合索引）；
+3. 后续优化按收益排序（依据 §9.3 的表/索引实测）：
+   - 先降 `partition_indexes` / `partition_tiles` 的索引成本（收窄 8 列复合唯一索引、评估主键与 searchable 局部索引的必要性、按 `dataset_id`/`output_version` 分区）——实测死元组极少，`VACUUM`/`REINDEX` 不是杠杆；
    - 把 `product_ingest_job.upsert_product_assets_postgres` / `upsert_product_facts_postgres` 迁移到 `ray_ingest_job` 已有的 `_copy_rows_to_temp` + 单条 MERGE 模式（纯机械改动）；
    - 给验收脚本补一个 product + logical 的入库场景，用来量测上面的改动。
 
