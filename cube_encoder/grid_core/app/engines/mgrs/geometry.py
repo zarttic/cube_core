@@ -1,10 +1,13 @@
 """Clipped MGRS cell geometry: project square → densify → inverse-project → clip to domain."""
 from __future__ import annotations
 
+import ctypes
+import threading
 import warnings
 from functools import lru_cache
 
 import mgrs as mgrs_lib
+from mgrs import core as _mgrs_core
 from pyproj import Transformer
 from shapely.geometry import MultiPolygon, Polygon, box, mapping
 from shapely.ops import unary_union
@@ -17,6 +20,45 @@ from grid_core.app.utils.geometry import normalize_ring_longitudes
 
 _converter = mgrs_lib.MGRS()
 
+
+def _bit_mask(bits) -> int:
+    mask = 0
+    for bit in bits:
+        mask |= bit
+    return mask
+
+
+def _bind_raw_mgrs_decoder():
+    """Bind the MGRS->UTM C decoder so the status bitmask is visible to us.
+
+    ``mgrs`` installs an ``errcheck`` that reports the latitude-band warning through
+    ``warnings.warn``.  Reading that warning back requires manipulating the
+    process-global ``warnings`` filters, which is not thread safe: a concurrent
+    caller can restore an older filter list and the promotion to an error is lost,
+    silently accepting a band-inconsistent code.  Binding the same shared library a
+    second time without the hook lets ``decode_utm`` read the bitmask directly.
+    """
+    raw = ctypes.CDLL(_mgrs_core.rt._name)
+    decoder = raw.Convert_MGRS_To_UTM
+    decoder.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_long),
+        ctypes.POINTER(ctypes.c_char),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    decoder.restype = ctypes.c_long
+    return decoder, _bit_mask(_mgrs_core.errors), _bit_mask(_mgrs_core.warnings)
+
+
+try:  # pragma: no cover - exercised by every decode on supported platforms
+    _RAW_MGRS_TO_UTM, _MGRS_ERROR_BITS, _MGRS_WARNING_BITS = _bind_raw_mgrs_decoder()
+except Exception:  # noqa: BLE001 - library layout is third-party, so keep a fallback
+    _RAW_MGRS_TO_UTM, _MGRS_ERROR_BITS, _MGRS_WARNING_BITS = None, 0, 0
+
+# Only used by the fallback path, which has to serialise the warnings-filter window.
+_WARNINGS_LOCK = threading.Lock()
+
 # Number of densification segments per projected edge (controls inverse-projection accuracy)
 _EDGE_SEGMENTS = 8
 _UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
@@ -26,24 +68,41 @@ _UTM_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 def decode_utm(code: str) -> tuple[int, str, float, float]:
     """Decode a UTM MGRS code, rejecting latitude-band-inconsistent results.
 
-    The C extension reports a latitude-band mismatch as a ``RuntimeWarning`` from
-    ``Convert_MGRS_To_UTM``.  Promoting exactly that warning to an error keeps the
-    band check while avoiding the cost of recording and formatting the message,
-    and the result is cached because decoding is a pure function of the code
-    (cover loops revisit the same codes across sliding windows).
+    Decoding is a pure function of the code (cover sliding windows revisit the same
+    codes) and failures are not cached.  The status bitmask is read directly instead
+    of through a warning so the band check is thread safe.
     """
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "error",
-                message=r'Warning in "Convert_MGRS_To_UTM"',
-                category=RuntimeWarning,
-            )
+    if _RAW_MGRS_TO_UTM is not None:
+        zone = ctypes.c_long()
+        hemisphere = ctypes.c_char()
+        easting = ctypes.c_double()
+        northing = ctypes.c_double()
+        status = _RAW_MGRS_TO_UTM(
+            code.encode("utf-8"),
+            ctypes.byref(zone),
+            ctypes.byref(hemisphere),
+            ctypes.byref(easting),
+            ctypes.byref(northing),
+        )
+        # Same precedence as the library: hard errors first, then the latitude warning.
+        if status & _MGRS_ERROR_BITS:
+            raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}")
+        if status & _MGRS_WARNING_BITS:
+            raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}")
+        return (zone.value, hemisphere.value.decode("utf-8"), easting.value, northing.value)
+
+    with _WARNINGS_LOCK, warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message=r'Warning in "Convert_MGRS_To_UTM"',
+            category=RuntimeWarning,
+        )
+        try:
             decoded = _converter.MGRSToUTM(code)
-    except RuntimeWarning as exc:  # latitude band mismatch reported by the C extension
-        raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}") from exc
-    except Exception as exc:
-        raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
+        except RuntimeWarning as exc:  # latitude band mismatch reported by the C extension
+            raise ValidationError(f"UTM MGRS code has an invalid latitude band: {code!r}") from exc
+        except Exception as exc:
+            raise ValidationError(f"Cannot decode UTM MGRS code: {code!r}") from exc
     return decoded
 
 
