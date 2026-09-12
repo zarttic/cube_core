@@ -6,13 +6,13 @@
 
 | 事项 | 状态 |
 |---|---|
-| 代码优化（5 文件） | ✅ 已完成，单测通过，全量 pytest 待最终确认 |
-| 代码提交 | ⏳ 未提交（工作区 5 个文件 Modified） |
+| 代码优化（5 文件） | ✅ 已完成，跨包 pytest **947 passed**，已提交 `69bfb52` |
+| 代码提交 | ✅ `69bfb52 perf: switch partition/ingest writes from batch MERGE to COPY and set-based INSERT`（6 文件） |
 | OpenGauss 全局参数调优 | ✅ 已生效（主备两节点，7 项） |
 | DB 维护（TRUNCATE/VACUUM） | ✅ 已完成（staging 3.59GB→0，库 7.9→4.32GB） |
-| **真实剖分测试** | ❌ 未执行（下一步最关键） |
+| **真实剖分测试** | ⏳ 未执行（入口已定位：`POST /v1/partition/tasks/{task_id}/retry`，仅 failed/cancelled/manual_required 可直接重试；completed 需 band_unit_ids） |
 | **真实入库测试** | ❌ 未执行 |
-| Linear 事项 | ⏳ 建议新建（如 ZAR-9x「剖分/入库写入路径优化」）记录提交与测试结果 |
+| Linear 事项 | ✅ **ZAR-95**「剖分/入库写入路径优化：批量 MERGE 改 COPY/集合式写入」已建并 In Progress |
 
 ## 二、已完成的代码改动（未提交）
 
@@ -57,7 +57,7 @@
 
 ## 四、待办清单（按优先级）
 
-1. **提交代码**（用户要求先把直接修改 commit）：5 个文件 + 建议同时在 Linear 新建事项记录。
+1. ~~提交代码~~ ✅ 已提交 `69bfb52`；Linear 事项 ZAR-95 已建。
 2. **真实剖分测试**：
    - 触发方式候选：`PartitionWorkflowService.retry_task`（仅 failed/cancelled/manual_required 可直接重试；completed 需要 band_unit_ids）或对既有 succeeded 批次重新提交流程；确认入口后经 Ray Job（`CUBE_WEB_RAY_JOB_ADDRESS=http://10.3.100.183:30826`）提交，runtime_env 会上传本地工作目录 → 未提交改动会生效。
    - 采集指标：`partition_job_attempts.runner_result.timings` 里的 `opengauss.promote_logical_staging` / `opengauss.complete_output` / `opengauss.logical_stage` 与 `driver.bootstrap`，**与 baseline 对比（见下）**；`ray.wait` 属于 KubeRay 调度/预热，不计入入库时间。
