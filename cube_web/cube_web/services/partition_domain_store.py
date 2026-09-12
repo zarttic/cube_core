@@ -14,7 +14,7 @@ import hashlib
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal
@@ -51,6 +51,18 @@ _PUBLIC_TILE_COLUMNS = (
     "output_id, dataset_id, output_version, source_asset_id, band_code, grid_type, grid_level, grid_level_name, "
     "space_code, topology_code, time_bucket, tile_uri, tile_kind, bbox, width, height, byte_size, checksum, status, created_at"
 )
+
+
+def _timing_phase(timing: Any | None, name: str) -> AbstractContextManager[None]:
+    """Time one statement inside an existing recorder, or do nothing.
+
+    The workflow already times ``opengauss.promote_logical_staging`` as a whole; the
+    per-statement children answer which target table the time actually goes to, which
+    the aggregate cannot.  Passed explicitly so stores stay usable without a recorder.
+    """
+    if timing is None:
+        return nullcontext()
+    return timing.phase(name)
 
 
 def _now() -> str:
@@ -126,7 +138,7 @@ class PartitionDomainStore:
     def verify_output_chunks(self, result: "PartitionDatasetResult") -> None:
         raise NotImplementedError
 
-    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
+    def promote_logical_staging(self, result: "PartitionDatasetResult", timing: Any | None = None) -> None:
         raise NotImplementedError
 
     def fail_output(self, dataset_id: str, output_version: str, *, error_code: str, error_message: str) -> None:
@@ -312,7 +324,7 @@ class InMemoryPartitionDomainStore(PartitionDomainStore):
         if _field(result, "chunks", ()):
             raise RuntimeError("in-memory store cannot verify persisted chunks")
 
-    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
+    def promote_logical_staging(self, result: "PartitionDatasetResult", timing: Any | None = None) -> None:
         return None
 
     def _upsert_dataset(self, request: Any, dataset: Any, now: str) -> dict[str, Any]:
@@ -1105,7 +1117,7 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 (dataset_id, version, descriptor["chunk_id"]),
             )
 
-    def promote_logical_staging(self, result: "PartitionDatasetResult") -> None:
+    def promote_logical_staging(self, result: "PartitionDatasetResult", timing: Any | None = None) -> None:
         """Merge Ray-written logical staging rows with set-based OpenGauss SQL."""
         dataset_id = str(_field(result, "dataset_id"))
         version = str(_field(result, "output_version"))
@@ -1130,39 +1142,42 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             if actual != {kind: count for kind, count in expected.items() if count}:
                 raise RuntimeError("logical staging rows are incomplete")
             self._execute(connection, "BEGIN")
-            self._execute(connection,
-                "INSERT INTO partition_grid_cells (output_id,dataset_id,output_version,grid_type,grid_level,grid_level_name,space_code,topology_code,bbox,geometry,tile_count,index_count) "
-                "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.space_code,staged.topology_code,staged.bbox,staged.geometry,0,0 "
-                "FROM (SELECT payload->>'output_id' AS output_id,payload->>'grid_type' AS grid_type,(payload->>'grid_level')::int AS grid_level,"
-                "payload->>'grid_level' AS grid_level_name,payload->>'space_code' AS space_code,payload->>'topology_code' AS topology_code,"
-                "payload->'bbox' AS bbox,payload->'geometry' AS geometry,chunk_id,row_number "
-                "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
-                "WHERE NOT EXISTS (SELECT 1 FROM partition_grid_cells target WHERE target.output_id=staged.output_id) "
-                "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
-                (dataset_id, version, dataset_id, version, "grid_cells"))
-            self._execute(connection,
-                "INSERT INTO partition_tiles (output_id,dataset_id,output_version,source_asset_id,band_code,grid_type,grid_level,grid_level_name,space_code,topology_code,time_bucket,tile_uri,tile_kind,bbox,status) "
-                "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,staged.source_asset_id,staged.band_code,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.space_code,staged.topology_code,staged.time_bucket,staged.tile_uri,staged.tile_kind,staged.bbox,'ready' "
-                "FROM (SELECT payload->>'output_id' AS output_id,payload->>'source_asset_id' AS source_asset_id,payload->>'band_code' AS band_code,"
-                "payload->>'grid_type' AS grid_type,(payload->>'grid_level')::int AS grid_level,payload->>'grid_level' AS grid_level_name,"
-                "payload->>'space_code' AS space_code,payload->>'topology_code' AS topology_code,payload->>'time_bucket' AS time_bucket,"
-                "payload->>'tile_uri' AS tile_uri,payload->>'tile_kind' AS tile_kind,payload->'bbox' AS bbox,chunk_id,row_number "
-                "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
-                "WHERE NOT EXISTS (SELECT 1 FROM partition_tiles target WHERE target.output_id=staged.output_id) "
-                "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
-                (dataset_id, version, dataset_id, version, "tiles"))
-            self._execute(connection,
-                "INSERT INTO partition_indexes (output_id,dataset_id,output_version,tile_output_id,source_asset_id,band_code,acquisition_time,time_bucket,grid_type,grid_level,grid_level_name,topology_code,space_code,st_code,value_ref_uri,attributes) "
-                "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,NULL,staged.source_asset_id,staged.band_code,staged.acquisition_time,staged.time_bucket,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.topology_code,staged.space_code,staged.st_code,staged.value_ref_uri,staged.attributes "
-                "FROM (SELECT payload->>'output_id' AS output_id,payload->>'source_asset_id' AS source_asset_id,payload->>'band_code' AS band_code,"
-                "(payload->>'acquisition_time')::timestamptz AS acquisition_time,payload->>'time_bucket' AS time_bucket,payload->>'grid_type' AS grid_type,"
-                "(payload->>'grid_level')::int AS grid_level,payload->>'grid_level' AS grid_level_name,payload->>'topology_code' AS topology_code,"
-                "payload->>'space_code' AS space_code,payload->>'st_code' AS st_code,payload->>'value_ref_uri' AS value_ref_uri,"
-                "payload->'attributes' AS attributes,chunk_id,row_number "
-                "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
-                "WHERE NOT EXISTS (SELECT 1 FROM partition_indexes target WHERE target.output_id=staged.output_id) "
-                "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
-                (dataset_id, version, dataset_id, version, "indexes"))
+            with _timing_phase(timing, "opengauss.promote.grid_cells"):
+                self._execute(connection,
+                    "INSERT INTO partition_grid_cells (output_id,dataset_id,output_version,grid_type,grid_level,grid_level_name,space_code,topology_code,bbox,geometry,tile_count,index_count) "
+                    "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.space_code,staged.topology_code,staged.bbox,staged.geometry,0,0 "
+                    "FROM (SELECT payload->>'output_id' AS output_id,payload->>'grid_type' AS grid_type,(payload->>'grid_level')::int AS grid_level,"
+                    "payload->>'grid_level' AS grid_level_name,payload->>'space_code' AS space_code,payload->>'topology_code' AS topology_code,"
+                    "payload->'bbox' AS bbox,payload->'geometry' AS geometry,chunk_id,row_number "
+                    "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
+                    "WHERE NOT EXISTS (SELECT 1 FROM partition_grid_cells target WHERE target.output_id=staged.output_id) "
+                    "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
+                    (dataset_id, version, dataset_id, version, "grid_cells"))
+            with _timing_phase(timing, "opengauss.promote.tiles"):
+                self._execute(connection,
+                    "INSERT INTO partition_tiles (output_id,dataset_id,output_version,source_asset_id,band_code,grid_type,grid_level,grid_level_name,space_code,topology_code,time_bucket,tile_uri,tile_kind,bbox,status) "
+                    "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,staged.source_asset_id,staged.band_code,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.space_code,staged.topology_code,staged.time_bucket,staged.tile_uri,staged.tile_kind,staged.bbox,'ready' "
+                    "FROM (SELECT payload->>'output_id' AS output_id,payload->>'source_asset_id' AS source_asset_id,payload->>'band_code' AS band_code,"
+                    "payload->>'grid_type' AS grid_type,(payload->>'grid_level')::int AS grid_level,payload->>'grid_level' AS grid_level_name,"
+                    "payload->>'space_code' AS space_code,payload->>'topology_code' AS topology_code,payload->>'time_bucket' AS time_bucket,"
+                    "payload->>'tile_uri' AS tile_uri,payload->>'tile_kind' AS tile_kind,payload->'bbox' AS bbox,chunk_id,row_number "
+                    "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
+                    "WHERE NOT EXISTS (SELECT 1 FROM partition_tiles target WHERE target.output_id=staged.output_id) "
+                    "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
+                    (dataset_id, version, dataset_id, version, "tiles"))
+            with _timing_phase(timing, "opengauss.promote.indexes"):
+                self._execute(connection,
+                    "INSERT INTO partition_indexes (output_id,dataset_id,output_version,tile_output_id,source_asset_id,band_code,acquisition_time,time_bucket,grid_type,grid_level,grid_level_name,topology_code,space_code,st_code,value_ref_uri,attributes) "
+                    "SELECT DISTINCT ON (staged.output_id) staged.output_id,%s,%s,NULL,staged.source_asset_id,staged.band_code,staged.acquisition_time,staged.time_bucket,staged.grid_type,staged.grid_level,staged.grid_level_name,staged.topology_code,staged.space_code,staged.st_code,staged.value_ref_uri,staged.attributes "
+                    "FROM (SELECT payload->>'output_id' AS output_id,payload->>'source_asset_id' AS source_asset_id,payload->>'band_code' AS band_code,"
+                    "(payload->>'acquisition_time')::timestamptz AS acquisition_time,payload->>'time_bucket' AS time_bucket,payload->>'grid_type' AS grid_type,"
+                    "(payload->>'grid_level')::int AS grid_level,payload->>'grid_level' AS grid_level_name,payload->>'topology_code' AS topology_code,"
+                    "payload->>'space_code' AS space_code,payload->>'st_code' AS st_code,payload->>'value_ref_uri' AS value_ref_uri,"
+                    "payload->'attributes' AS attributes,chunk_id,row_number "
+                    "FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s AND kind=%s) staged "
+                    "WHERE NOT EXISTS (SELECT 1 FROM partition_indexes target WHERE target.output_id=staged.output_id) "
+                    "ORDER BY staged.output_id, staged.chunk_id, staged.row_number",
+                    (dataset_id, version, dataset_id, version, "indexes"))
             if hasattr(connection, "commit"):
                 connection.commit()
 

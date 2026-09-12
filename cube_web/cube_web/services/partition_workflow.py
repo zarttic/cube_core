@@ -217,7 +217,7 @@ class PartitionWorkflowService:
                     promote_chunks = getattr(selected_domain_store, "promote_logical_staging", None)
                     if callable(promote_chunks):
                         with workflow_timing.phase("opengauss.promote_logical_staging"):
-                            promote_chunks(result)
+                            promote_chunks(result, timing=workflow_timing)
                 with workflow_timing.phase("opengauss.complete_output"):
                     committed = selected_domain_store.complete_output(result)
                 if scene_outcomes is None or all(item["status"] == "completed" for item in scene_outcomes):
@@ -404,7 +404,7 @@ class PartitionWorkflowService:
                     promote_chunks = getattr(domain_store, "promote_logical_staging", None)
                     if callable(promote_chunks):
                         with item["workflow_timing"].phase("opengauss.promote_logical_staging"):
-                            promote_chunks(result)
+                            promote_chunks(result, timing=item["workflow_timing"])
                 with item["workflow_timing"].phase("opengauss.complete_output"):
                     committed = domain_store.complete_output(result)
                 if scene_outcomes is None or all(outcome["status"] == "completed" for outcome in scene_outcomes):
