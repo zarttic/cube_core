@@ -764,12 +764,57 @@ class InMemoryPartitionJobStore(PartitionJobStore):
 
 
 class PostgresPartitionJobStore(PartitionJobStore):
+    # Presence of these objects means the forward DDL already ran; probing them
+    # costs one SELECT instead of issuing DDL that can wait on table locks.
+    _SCHEMA_COLUMN_MARKERS = (
+        ("partition_batches", "ingest_status"),
+        ("partition_batches", "ingest_job_id"),
+        ("partition_batches", "ingest_error"),
+        ("partition_batches", "ingested_at"),
+        ("partition_job_attempts", "error_type"),
+        ("partition_job_attempts", "source_task_id"),
+        ("partition_job_attempts", "retry_strategy"),
+        ("partition_job_attempts", "failure_reason"),
+        ("partition_job_attempts", "ray_job_id"),
+    )
+    _SCHEMA_INDEX_MARKERS = (
+        "idx_partition_batches_status",
+        "idx_partition_batches_type_status",
+        "idx_partition_assets_batch_status",
+        "idx_partition_attempts_batch",
+    )
+
     def __init__(self, dsn: str) -> None:
         if not dsn:
             raise ValueError("PostgreSQL DSN is required")
         self.dsn = dsn
         self._schema_ensured = False
         self._schema_lock = Lock()
+
+    def _schema_ready(self, connection) -> bool:
+        from cube_web.services.partition_domain_schema import PARTITION_DOMAIN_SCHEMA_VERSION
+
+        column_predicate = " OR ".join(
+            f"(table_name = '{table}' AND column_name = '{column}')"
+            for table, column in self._SCHEMA_COLUMN_MARKERS
+        )
+        index_placeholders = ", ".join(["%s"] * len(self._SCHEMA_INDEX_MARKERS))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT "
+                f"(SELECT count(*) FROM information_schema.columns WHERE {column_predicate}) AS columns, "
+                f"(SELECT count(*) FROM pg_indexes WHERE indexname IN ({index_placeholders})) AS indexes, "
+                "(SELECT schema_version FROM partition_domain_schema_version WHERE singleton = TRUE) AS domain_version",
+                self._SCHEMA_INDEX_MARKERS,
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return False
+        return (
+            int(row[0]) == len(self._SCHEMA_COLUMN_MARKERS)
+            and int(row[1]) == len(self._SCHEMA_INDEX_MARKERS)
+            and str(row[2] or "") == PARTITION_DOMAIN_SCHEMA_VERSION
+        )
 
     def ensure_schema(self) -> None:
         if self._schema_ensured:
@@ -778,6 +823,16 @@ class PostgresPartitionJobStore(PartitionJobStore):
             if self._schema_ensured:
                 return
             with self._connect() as conn:
+                try:
+                    if self._schema_ready(conn):
+                        self._schema_ensured = True
+                        return
+                except Exception:
+                    # Missing tables/columns raise here; fall back to the full DDL.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 with conn.cursor() as cur:
                     cur.execute(
                         """

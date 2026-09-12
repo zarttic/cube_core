@@ -399,13 +399,13 @@ def test_opengauss_complete_persists_index_attributes_as_jsonb(monkeypatch) -> N
     def merge_insert(_connection, **kwargs):
         inserted.append(kwargs)
 
-    def merge_insert_many(_connection, **kwargs):
+    def copy_insert_many(_connection, **kwargs):
         for values in kwargs["rows"]:
             inserted.append({**kwargs, "values": values})
 
     monkeypatch.setattr(store, "_fetchall", fetchall)
     monkeypatch.setattr(store, "_merge_insert", merge_insert)
-    monkeypatch.setattr(store, "_merge_insert_many", merge_insert_many)
+    monkeypatch.setattr(store, "_copy_insert_many", copy_insert_many)
     result = _result("version-a")
     attributes = {"satellite": "OCO2", "observation_id": "obs-1", "xco2": 410.25}
     result.indexes[0]["attributes"] = attributes

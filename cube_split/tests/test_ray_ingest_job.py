@@ -449,10 +449,10 @@ def test_run_ingest_reports_probe_metrics_per_cube_fact(monkeypatch, tmp_path: P
     assert {metric.attributes["cube.target_table"] for metric in captured} == {"rs_cube_cell_fact"}
 
 
-def test_postgres_upserts_batch_merge_rows() -> None:
-    class FakeCursor:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, tuple]] = []
+def test_postgres_upserts_copy_rows_then_merge_once() -> None:
+    class FakeCopy:
+        def __init__(self, rows: list[tuple]) -> None:
+            self.rows = rows
 
         def __enter__(self):
             return self
@@ -460,8 +460,26 @@ def test_postgres_upserts_batch_merge_rows() -> None:
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, sql, params):
+        def write_row(self, row) -> None:
+            self.rows.append(tuple(row))
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple]] = []
+            self.copied_rows: list[tuple] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
             self.calls.append((sql, tuple(params)))
+
+        def copy(self, sql):
+            self.calls.append((sql, ()))
+            return FakeCopy(self.copied_rows)
 
     class FakeConn:
         def __init__(self) -> None:
@@ -503,15 +521,18 @@ def test_postgres_upserts_batch_merge_rows() -> None:
     upsert_raw_assets_postgres(raw_conn, raw_records, batch_size=2)
     upsert_cube_facts_postgres(cube_conn, cube_records, batch_size=2)
 
-    assert len(raw_conn.cursor_obj.calls) == 2
-    assert len(cube_conn.cursor_obj.calls) == 2
-    assert "VALUES" in raw_conn.cursor_obj.calls[0][0]
-    assert "VALUES" in cube_conn.cursor_obj.calls[0][0]
-    assert len(raw_conn.cursor_obj.calls[0][1]) == 16
-    assert len(raw_conn.cursor_obj.calls[1][1]) == 8
-    assert len(cube_conn.cursor_obj.calls[0][1]) == 34
-    assert len(cube_conn.cursor_obj.calls[1][1]) == 17
-    assert "ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)" in cube_conn.cursor_obj.calls[0][0]
+    raw_calls = raw_conn.cursor_obj.calls
+    cube_calls = cube_conn.cursor_obj.calls
+    assert sum("CREATE TEMP TABLE" in sql for sql, _params in raw_calls) == 1
+    assert sum(sql.startswith("COPY ") for sql, _params in raw_calls) == 1
+    assert sum("MERGE INTO rs_raw_scene_asset" in sql for sql, _params in raw_calls) == 1
+    assert sum("DROP TABLE IF EXISTS" in sql for sql, _params in raw_calls) == 1
+    assert len(raw_conn.cursor_obj.copied_rows) == len(raw_records)
+    assert sum("MERGE INTO rs_cube_cell_fact" in sql for sql, _params in cube_calls) == 1
+    assert len(cube_conn.cursor_obj.copied_rows) == len(cube_records)
+    cube_merge = next(sql for sql, _params in cube_calls if "MERGE INTO rs_cube_cell_fact" in sql)
+    assert "ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)" in cube_merge
+    assert "DISTINCT ON (grid_type, grid_level, space_code, time_bucket, band, cube_version)" in cube_merge
 
 
 def test_load_rows_rejects_empty_file(tmp_path: Path):

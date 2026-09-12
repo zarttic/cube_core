@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 from grid_core.sdk import CubeEncoderSDK, GridAddress
 from shapely.geometry import Polygon, shape
@@ -736,8 +737,15 @@ def upsert_raw_assets_postgres(conn: Any, rows: list[RawAssetRecord], batch_size
         for row in rows
     ]
     with conn.cursor() as cur:
-        for batch in _batches(values, batch_size):
-            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
+        temp = _copy_rows_to_temp(cur, columns=columns, casts=casts, rows=values, suffix="raw_assets")
+        try:
+            cur.execute(
+                sql_template.format(
+                    source_sql=_deduplicated_temp_source(temp, ("scene_id", "band", "version")),
+                )
+            )
+        finally:
+            _drop_temp_table(cur, temp)
 
 
 def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size: int = DEFAULT_POSTGRES_BATCH_SIZE) -> None:
@@ -837,8 +845,12 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         for row in rows
     ]
     with conn.cursor() as cur:
-        for batch in _batches(values, batch_size):
-            cur.execute(sql_template.format(source_sql=_postgres_values_source(columns, casts, len(batch))), _flatten(batch))
+        temp = _copy_rows_to_temp(cur, columns=columns, casts=casts, rows=values, suffix="cube_facts")
+        try:
+            keys = ("grid_type", "grid_level", "space_code", "time_bucket", "band", "cube_version")
+            cur.execute(sql_template.format(source_sql=_deduplicated_temp_source(temp, keys)))
+        finally:
+            _drop_temp_table(cur, temp)
 
 
 def _postgres_values_source(columns: tuple[str, ...], casts: tuple[str, ...], row_count: int) -> str:
@@ -857,6 +869,40 @@ def _batches(values: list[tuple[Any, ...]], batch_size: int) -> Iterable[list[tu
 
 def _flatten(values: list[tuple[Any, ...]]) -> tuple[Any, ...]:
     return tuple(item for row in values for item in row)
+
+
+def _copy_rows_to_temp(
+    cursor: Any,
+    *,
+    columns: tuple[str, ...],
+    casts: tuple[str, ...],
+    rows: list[tuple[Any, ...]],
+    suffix: str,
+) -> str:
+    """Load rows into a typed temp table so the MERGE reads server-side storage."""
+    temp = f"tmp_ingest_{suffix}_{uuid4().hex[:8]}"
+    cursor.execute(
+        f"CREATE TEMP TABLE {temp} ("
+        + ", ".join(f"{column} {cast}" for column, cast in zip(columns, casts))
+        + ")"
+    )
+    with cursor.copy("COPY " + temp + " (" + ", ".join(columns) + ") FROM STDIN") as copy:
+        for row in rows:
+            copy.write_row(row)
+    return temp
+
+
+def _deduplicated_temp_source(temp: str, key_columns: tuple[str, ...]) -> str:
+    """OpenGauss rejects duplicate source keys inside one MERGE; keep one row per key."""
+    keys = ", ".join(key_columns)
+    return f"SELECT DISTINCT ON ({keys}) * FROM {temp} ORDER BY {keys}"
+
+
+def _drop_temp_table(cursor: Any, temp: str) -> None:
+    try:
+        cursor.execute(f"DROP TABLE IF EXISTS {temp}")
+    except Exception:
+        pass
 
 
 def _postgres_batch_size(args: argparse.Namespace) -> int:
