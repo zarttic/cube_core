@@ -99,6 +99,11 @@ def _make_address(seqnum: int, res: int) -> GridAddress:
 def _continuous_ring(seqnum: int, res: int) -> list[list[float]]:
     """Return a local, antimeridian-continuous cell boundary."""
     corners = cell_boundary_polygon(seqnum, res)
+    longitudes = [point[0] for point in corners]
+    if max(longitudes) - min(longitudes) <= 180.0:
+        # The cell does not straddle the antimeridian: every rotation normalises to
+        # the same ring, so the six-candidate search is unnecessary here.
+        return normalize_ring_longitudes(corners)
     candidates: list[list[list[float]]] = []
     for start in range(len(corners)):
         ring = normalize_ring_longitudes(corners[start:] + corners[:start])
@@ -107,12 +112,6 @@ def _continuous_ring(seqnum: int, res: int) -> list[list[float]]:
     if not candidates:
         return normalize_ring_longitudes(corners)
     return min(candidates, key=lambda ring: max(point[0] for point in ring) - min(point[0] for point in ring))
-
-
-def _closed_ring(seqnum: int, res: int) -> list[list[float]]:
-    """Boundary corners with the first point repeated to close the ring."""
-    ring = _continuous_ring(seqnum, res)
-    return ring + [ring[0]]
 
 
 def _to_wgs84_shape(geometry: object):
@@ -125,8 +124,12 @@ def _to_wgs84_shape(geometry: object):
     return make_valid(unary_union([piece for piece in pieces if not piece.is_empty]))
 
 
+def _shape_from_ring(ring: list[list[float]]):
+    return _to_wgs84_shape(Polygon(ring + [ring[0]]))
+
+
 def _cell_shape(seqnum: int, res: int):
-    return _to_wgs84_shape(Polygon(_closed_ring(seqnum, res)))
+    return _shape_from_ring(_continuous_ring(seqnum, res))
 
 
 def _cell_geometry(seqnum: int, res: int) -> dict:
@@ -138,26 +141,31 @@ def _wrap_longitude(lon: float) -> float:
     return 180.0 if wrapped == -180.0 and lon > 0.0 else wrapped
 
 
-def _cell_bbox(seqnum: int, res: int) -> list[float]:
-    ring = _continuous_ring(seqnum, res)
+def _bbox_from_ring(ring: list[list[float]]) -> list[float]:
     min_lon = min(point[0] for point in ring)
     max_lon = max(point[0] for point in ring)
     min_lat = min(point[1] for point in ring)
     max_lat = max(point[1] for point in ring)
     if max_lon - min_lon <= 180.0 + 1e-6:
         return [_wrap_longitude(min_lon), min_lat, _wrap_longitude(max_lon), max_lat]
-    return list(_cell_shape(seqnum, res).bounds)
+    return list(_shape_from_ring(ring).bounds)
+
+
+def _cell_bbox(seqnum: int, res: int) -> list[float]:
+    return _bbox_from_ring(_continuous_ring(seqnum, res))
 
 
 def _make_cell(seqnum: int, res: int) -> GridCell:
     lon, lat = cell_center(seqnum, res)
-    geometry = _cell_shape(seqnum, res)
+    # One ring serves both the geometry and the bbox; they used to build their own.
+    ring = _continuous_ring(seqnum, res)
+    geometry = _shape_from_ring(ring)
     return GridCell(
         grid_type=_GRID_TYPE,
         grid_level=res,
         space_code=str(seqnum),
         center=[lon, lat],
-        bbox=_cell_bbox(seqnum, res),
+        bbox=_bbox_from_ring(ring),
         geometry=dict(mapping(geometry)),
         metadata={},
     )
