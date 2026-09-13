@@ -537,7 +537,19 @@ class OpenGaussIngestRepository:
         collections = []
         for collection in grouped.values():
             units = collection["units"]
+            datasets: list[dict[str, Any]] = []
+            seen_dataset_ids: set[str] = set()
+            for unit in units:
+                if unit["dataset_id"] in seen_dataset_ids:
+                    continue
+                seen_dataset_ids.add(unit["dataset_id"])
+                datasets.append({
+                    "dataset_id": unit["dataset_id"],
+                    "dataset_code": unit["dataset_code"],
+                    "dataset_title": unit["dataset_title"],
+                })
             collection.update(
+                datasets=datasets,
                 dataset_count=len({unit["dataset_id"] for unit in units}),
                 scene_count=len({unit["scene_id"] for unit in units}),
                 band_count=len(units),

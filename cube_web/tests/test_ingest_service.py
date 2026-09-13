@@ -154,9 +154,10 @@ def test_concurrent_scene_completion_reaches_completed_run() -> None:
 
 
 class _RecordingCursor:
-    def __init__(self, *, scene_status: str = "running", update_count: int = 1) -> None:
+    def __init__(self, *, scene_status: str = "running", update_count: int = 1, all_rows: list[dict] | None = None) -> None:
         self.scene_status = scene_status
         self.update_count = update_count
+        self.all_rows = all_rows
         self.statements: list[str] = []
         self.rowcount = 0
         self._one = None
@@ -181,6 +182,8 @@ class _RecordingCursor:
             self._one = (self.scene_status,)
         elif sql.startswith("SELECT status,error_message"):
             self._all = [("completed", None)]
+        elif "WITH filtered_units" in sql:
+            self._all = list(self.all_rows or [])
 
     def fetchone(self):
         return self._one
@@ -221,6 +224,31 @@ def _sql_repository(cursor: _RecordingCursor) -> OpenGaussIngestRepository:
     repository.pool = _RecordingPool(cursor)
     repository.get = lambda _run_id: "persisted-run"  # type: ignore[method-assign]
     return repository
+
+
+def test_pending_collection_payload_includes_dataset_identity() -> None:
+    unit = {
+        "scene_id": "scene-a", "scene_key": "LC08_120029_20240622", "dataset_id": "dataset-a", "dataset_code": "ARD-OPTICAL",
+        "dataset_title": "光学遥感样例", "data_type": "optical", "output_version": "output-v1", "band_unit_id": "band-a",
+        "band_code": "B04", "band_name": "红光", "band_type": "spectral", "unit": "reflectance", "display_order": 1,
+        "grid_type": "geohash", "grid_level": 4, "quality_status": "pass", "ingest_status": None,
+    }
+    rows = [
+        {**unit, "partition_run_id": "run-a", "partition_created_at": None},
+        {**unit, "partition_run_id": "run-a", "partition_created_at": None, "band_unit_id": "band-b", "band_code": "B08"},
+        {**unit, "partition_run_id": "run-a", "partition_created_at": None, "band_unit_id": "band-c", "scene_id": "scene-b", "scene_key": "LC08_120030_20240623", "dataset_id": "dataset-b", "dataset_code": "ARD-RADAR", "dataset_title": "雷达遥感样例"},
+    ]
+    cursor = _RecordingCursor(all_rows=rows)
+    collections = _sql_repository(cursor).list_collections(limit=20, offset=0)
+
+    assert len(collections) == 1
+    collection = collections[0]
+    assert collection["dataset_count"] == 2
+    assert collection["datasets"] == [
+        {"dataset_id": "dataset-a", "dataset_code": "ARD-OPTICAL", "dataset_title": "光学遥感样例"},
+        {"dataset_id": "dataset-b", "dataset_code": "ARD-RADAR", "dataset_title": "雷达遥感样例"},
+    ]
+    assert len(collection["units"]) == 3
 
 
 def test_pending_collection_filter_keeps_null_ingest_status_rows() -> None:

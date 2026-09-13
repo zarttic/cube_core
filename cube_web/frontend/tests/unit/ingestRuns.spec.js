@@ -179,9 +179,17 @@ describe('manual ingest selection', () => {
         { dataset_id: 'dataset-a', dataset_code: 'ARD-OPTICAL', dataset_title: '光学遥感样例', data_type: 'optical', scene_id: 'scene-internal', scene_key: 'LC08_120029_20240622', band_unit_id: 'band-internal-b', band_code: 'B08', band_name: '近红外', band_type: 'spectral', display_order: 2, grid_type: 'geohash', grid_level: 4, quality_status: 'warn', ingest_status: 'pending' },
       ],
     };
+    const multiCollection = {
+      partition_run_id: 'partition-run-b', dataset_count: 2, scene_count: 2, quality_pass_count: 4, ingested_count: 0,
+      datasets: [
+        { dataset_id: 'dataset-b', dataset_code: 'ARD-RADAR', dataset_title: '雷达遥感样例' },
+        { dataset_id: 'dataset-c', dataset_code: 'ARD-PRODUCT', dataset_title: '信息产品样例' },
+      ],
+      units: [],
+    };
     requestGet.mockImplementation((url) => Promise.resolve(url.startsWith('/v1/ingest-runs?')
       ? { items: [], total: 0, page: 1, page_size: 20 }
-      : { items: [collection] }));
+      : { items: [collection, multiCollection] }));
     const wrapper = mount(IngestView, {
       global: {
         stubs: {
@@ -207,6 +215,11 @@ describe('manual ingest selection', () => {
     });
 
     await vi.waitFor(() => expect(wrapper.findAll('button').some((button) => button.text() === '选择数据入库')).toBe(true));
+    const pendingRows = wrapper.findAll('.pending-ingest-row');
+    expect(pendingRows).toHaveLength(2);
+    expect(pendingRows[0].text()).toContain('光学遥感样例');
+    expect(pendingRows[0].text()).toContain('partition-run-a');
+    expect(pendingRows[1].text()).toContain('雷达遥感样例 等 2 个数据集');
     const candidateRequestCount = () => requestGet.mock.calls.filter(([url]) => url.startsWith('/v1/ingest-runs/collections?')).length;
     const initialCandidateRequests = candidateRequestCount();
     await wrapper.findAll('button').find((button) => button.text() === '刷新').trigger('click');

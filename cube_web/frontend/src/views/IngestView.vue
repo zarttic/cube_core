@@ -119,6 +119,17 @@ function gridConfigLabel(configs = []) {
   }).filter(Boolean).join('；') || '格网信息缺失';
 }
 
+function collectionDatasetLabel(collection) {
+  const datasets = collection?.datasets?.length
+    ? collection.datasets
+    : [...new Map((collection?.units || []).map((unit) => [unit.dataset_id, {
+      dataset_id: unit.dataset_id, dataset_code: unit.dataset_code, dataset_title: unit.dataset_title,
+    }])).values()];
+  const titles = [...new Set(datasets.map((dataset) => dataset.dataset_title || dataset.dataset_code || dataset.dataset_id).filter(Boolean))];
+  if (!titles.length) return '';
+  return titles.length > 1 ? `${titles[0]} 等 ${titles.length} 个数据集` : titles[0];
+}
+
 function collectionGridLabel(collection) {
   const configs = collection?.grid_configs?.length
     ? collection.grid_configs
@@ -178,7 +189,7 @@ async function openManualIngest(partitionRunId = '') {
       <div v-else-if="!store.manualCandidates.length" class="pending-state">暂无满足入库条件的剖分批次数据集合</div>
       <div v-else class="pending-ingest-list">
         <div v-for="collection in store.manualCandidates" :key="collection.partition_run_id" class="pending-ingest-row">
-          <div class="run-cell"><strong>{{ collection.partition_run_id }}</strong><span>{{ collectionGridLabel(collection) }} · {{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count - collection.ingested_count }} 个波段待入库</span></div>
+          <div class="run-cell"><strong :title="collectionDatasetLabel(collection) || collection.partition_run_id">{{ collectionDatasetLabel(collection) || collection.partition_run_id }}</strong><span>{{ collection.partition_run_id }} · {{ collectionGridLabel(collection) }} · {{ collection.dataset_count }} 个数据集 · {{ collection.scene_count }} 景 · {{ collection.quality_pass_count - collection.ingested_count }} 个波段待入库</span></div>
           <el-button type="primary" size="small" @click="openManualIngest(collection.partition_run_id)">选择数据入库</el-button>
         </div>
       </div>
