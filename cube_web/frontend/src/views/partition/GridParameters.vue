@@ -10,10 +10,23 @@ const props = defineProps({
 });
 const emit = defineEmits(['update:modelValue', 'reset', 'submit', 'open-datasets']);
 
+// 容器数量只允许非负整数。Element Plus 只在失焦后把越界值钳回 min，
+// 聚焦期间会把用户输入的负号原样显示出来，所以在捕获阶段直接拦掉这些按键。
+const blockedWorkerContainerKeys = new Set(['-', '+', 'e', 'E']);
+
+function blockInvalidWorkerContainerKeys(event) {
+  if (blockedWorkerContainerKeys.has(event.key)) event.preventDefault();
+}
+
+function normalizeWorkerContainerLimit(value) {
+  const limit = Number(value ?? 0);
+  return Number.isInteger(limit) && limit >= 0 ? limit : 0;
+}
+
 function updateWorkerContainerLimit(value) {
   emit('update:modelValue', {
     ...props.modelValue,
-    workerContainerLimit: value == null ? 0 : value,
+    workerContainerLimit: normalizeWorkerContainerLimit(value),
   });
 }
 </script>
@@ -56,16 +69,19 @@ function updateWorkerContainerLimit(value) {
         placement="top"
         :show-after="200"
       >
-        <el-input-number
-          id="partition-worker-container-limit"
-          data-testid="worker-container-limit"
-          :model-value="Number(modelValue.workerContainerLimit ?? 0)"
-          :min="0"
-          :step="1"
-          :precision="0"
-          controls-position="right"
-          @update:model-value="updateWorkerContainerLimit"
-        />
+        <span class="worker-container-input" @keydown.capture="blockInvalidWorkerContainerKeys">
+          <el-input-number
+            id="partition-worker-container-limit"
+            data-testid="worker-container-limit"
+            :model-value="Number(modelValue.workerContainerLimit ?? 0)"
+            :min="0"
+            :step="1"
+            :precision="0"
+            :value-on-clear="0"
+            controls-position="right"
+            @update:model-value="updateWorkerContainerLimit"
+          />
+        </span>
       </el-tooltip>
     </div>
     <div class="form-group action-buttons">
@@ -83,6 +99,7 @@ function updateWorkerContainerLimit(value) {
 .source-batch-tags :deep(.source-batch-tag) { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
 .source-batch-tags :deep(.source-batch-tag .el-tag__content) { display: block; flex: 1 1 auto; max-width: 100%; min-width: 0; overflow: hidden; }
 .source-batch-id { display: block; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-container-input { display: block; width: 100%; }
 .worker-container-form-group :deep(.el-tooltip) { display: block; width: 100%; }
 .worker-container-form-group :deep(.el-input-number) { width: 100%; }
 .action-buttons { flex-wrap: nowrap; }

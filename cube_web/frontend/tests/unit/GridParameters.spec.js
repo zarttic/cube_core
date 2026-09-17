@@ -67,3 +67,51 @@ describe('GridParameters', () => {
   });
 
 });
+
+describe('GridParameters container limit', () => {
+  const containerLimitStubs = {
+    'el-input-number': { name: 'ElInputNumber', emits: ['update:modelValue'], template: '<input type="number" />' },
+    'el-tooltip': { props: ['content'], template: '<span><slot /></span>' },
+    'el-button': { template: '<button><slot /></button>' },
+    'el-tag': { template: '<span><slot /></span>' },
+  };
+
+  function mountContainerLimit(workerContainerLimit) {
+    const wrapper = mount(GridParameters, {
+      props: {
+        modelValue: { workerContainerLimit },
+        selectedDatasetCount: 1,
+        selectedCount: 1,
+        sourceBatchIds: [],
+      },
+      global: { stubs: containerLimitStubs },
+    });
+    wrappers.push(wrapper);
+    return wrapper;
+  }
+
+  it('coerces negative, fractional and empty limits back to the default 0', async () => {
+    const wrapper = mountContainerLimit(0);
+    const input = wrapper.findComponent({ name: 'ElInputNumber' });
+    for (const value of [-5, -1, 2.5, null, undefined, 4]) {
+      await input.vm.$emit('update:modelValue', value);
+    }
+    expect(wrapper.emitted('update:modelValue').map(([payload]) => payload.workerContainerLimit))
+      .toEqual([0, 0, 0, 0, 0, 4]);
+  });
+
+  it('blocks minus and exponent keys so the field cannot display a negative number', () => {
+    const wrapper = mountContainerLimit(0);
+    const field = wrapper.get('input[type="number"]');
+    for (const key of ['-', '+', 'e', 'E']) {
+      const blocked = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      field.element.dispatchEvent(blocked);
+      expect(blocked.defaultPrevented).toBe(true);
+    }
+    for (const key of ['0', '7', 'Backspace', 'ArrowDown']) {
+      const allowed = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      field.element.dispatchEvent(allowed);
+      expect(allowed.defaultPrevented).toBe(false);
+    }
+  });
+});
