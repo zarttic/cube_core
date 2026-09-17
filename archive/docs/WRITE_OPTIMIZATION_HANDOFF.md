@@ -2,7 +2,7 @@
 
 > 状态更新：2026-09-12 傍晚（agent 续作完成）。目标（用户 goal）：实现推荐的写入优化，并**必须做真实剖分入库测试**（KubeRay 预热时间不算入库时间）。
 > 当前停在：代码优化已提交 `69bfb52`；**真实剖分 + 真实入库验收已执行并通过**（`status=passed`，前缀 `real-accept-0d411c506d50`，证据见 §九）。
-> 剩余：Linear ZAR-95 的 comment 未写入（本次会话没有 Linear MCP 工具，见 §九.8）；原待办 4（`product_ingest_job`）已给出带证据的决策（§九.7）。
+> 剩余：原待办 4（`product_ingest_job`）已给出带证据的决策（§九.7）。
 
 ## 一、当前状态总览
 
@@ -15,7 +15,6 @@
 | **真实剖分测试** | ✅ 已执行并通过：6 个 partition run（geohash/mgrs/isea4h + cancel/quality 探针）全部 completed；`driver.bootstrap` 0.122–0.358s（见 §九.3） |
 | **真实入库测试** | ✅ 已执行并通过：4 个真实数据集手动托管入库 completed，RS 表实际行数与 `rs_ingest_job.stats_json` 一致（见 §九.4） |
 | 验收脚本终态 | ✅ `cube_web/scripts/run_real_partition_acceptance.py` 返回 **`status=passed`** |
-| Linear 事项 | ⏳ **ZAR-95** 已建并 In Progress；comment 待写入（本会话无 Linear MCP 工具） |
 
 ## 二、已完成的代码改动（已提交 `69bfb52`）
 
@@ -60,11 +59,10 @@
 
 ## 四、待办清单（按优先级）
 
-1. ~~提交代码~~ ✅ 已提交 `69bfb52`；Linear 事项 ZAR-95 已建。
+1. ~~提交代码~~ ✅ 已提交 `69bfb52`。
 2. ~~真实剖分测试~~ ✅ 已执行（见 §九.2、§九.3）。入口是验收脚本本身：`POST /v1/partition/schemas/import` → `POST /v1/partition/runs`（3 个格网）+ cancel/quality 探针；全部经 Ray Job（`http://10.3.100.183:30826`）执行，`ray.wait` 与 Ray Job Server 排队时长单独记录、不计入 DB 写入耗时。
 3. ~~真实入库测试~~ ✅ 已执行（见 §九.4）。路径为 `cube_web/services/ingest_worker` → `cube_split.ingest.managed_output_ingest.ingest_managed_output` → `ray_ingest_job` 的「COPY 到类型化临时表 + 单条 MERGE」；记录了行数与耗时。
 4. **`product_ingest_job` 决策：本轮不改**（见 §九.7）。本轮 product 数据集走的是 isea4h 实体输出 → COPY 路径；逐批 VALUES MERGE 只在 product + logical 组合生效，需要专门场景才能量到收益，且按实测它不是当前瓶颈。
-5. Linear：`ZAR-95` comment（验收前缀、attempt / Ray Job ID、timings、行数、验证命令、`status=passed`）待有 MCP 的会话补记。
 
 ## 五、Baseline（对比用）
 
@@ -96,8 +94,6 @@
 git status --short
 git log --oneline -8
 ```
-
-继续使用 Linear 事项 **ZAR-95**，不要新建重复事项。每个独立 commit 都要在事项中记录 hash、变更范围和验证结果；真实门禁全部通过后再将事项设为结束。
 
 ### 7.2 启动本地 Web API
 
@@ -165,7 +161,7 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 \
 
 剖分完成后，查询 `partition_job_attempts.runner_result`，至少记录 `driver.bootstrap`、`opengauss.logical_stage`、`opengauss.promote_logical_staging`、`opengauss.complete_output`。入库完成后查询 `rs_ingest_job` 的 `started_at`、`finished_at`、`stats_json`，并核对 `ingest_runs`/`ingest_run_scenes` 完成计数。Ray Job 排队、`ray.wait` 和 worker 预热单独记录，不计入 OpenGauss 写入耗时。
 
-将脱敏结果补回本文档，并在 ZAR-95 添加 comment，包含任务/attempt ID、timings、入库行数、验证命令和结果。不要写入 token、MinIO 凭据、DSN、完整 `.cube_web.env` 或含 secret 的 Ray 日志。若真实门禁暴露了 `product_ingest_job` 仍使用逐批 VALUES MERGE，再根据实测决定是否另做该路径优化。
+将脱敏结果补回本文档，包含任务/attempt ID、timings、入库行数、验证命令和结果。不要写入 token、MinIO 凭据、DSN、完整 `.cube_web.env` 或含 secret 的 Ray 日志。若真实门禁暴露了 `product_ingest_job` 仍使用逐批 VALUES MERGE，再根据实测决定是否另做该路径优化。
 
 ## 八、排障与安全边界
 
@@ -281,9 +277,8 @@ manifest 结构：4 个 dataset / 7 个 scene，覆盖 `optical`、`radar`、`pr
    - 把 `product_ingest_job.upsert_product_assets_postgres` / `upsert_product_facts_postgres` 迁移到 `ray_ingest_job` 已有的 `_copy_rows_to_temp` + 单条 MERGE 模式（纯机械改动）；
    - 给验收脚本补一个 product + logical 的入库场景，用来量测上面的改动。
 
-### 9.8 Linear 与遗留数据
+### 9.8 遗留数据
 
-- 本次会话**没有 Linear MCP 工具**，无法写 ZAR-95 comment。待补内容：验收前缀、6 个 run 的 attempt / Ray Job ID、§9.3–§9.5 的 timings 与行数、验证命令、`status=passed` 结论。
 - 验收在数据库中留下 `real-accept-0d411c506d50%` 前缀记录（datasets 7 / scenes 10 / partition_runs 6 / ingest_runs 16 / tiles 与 indexes 各 26,671 / grid_cells 5,747 / quality_runs 21）；如需清理可用脚本内的 `cleanup_sql(prefix)`，本轮**未执行**以保留证据。
 - 另有一个更早的 smoke 前缀 `smoke-b2f5e0588245%`（geohash L1、仅 optical），同为可清理的测试数据。
 

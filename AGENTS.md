@@ -106,14 +106,8 @@ PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest tests
 近期历史使用简短祈使句 commit message，有时带 `feat:`、`docs:` 或 `feat(partition):`
 等前缀。保持 commit 聚焦且用户可理解，例如 `Update cube web SDK backend and UI`。
 
-所有开发工作必须在 Linear 中有对应事项。开始实现前，使用 Linear MCP 查找已有事项；
-没有准确事项时创建一个，再将状态设为“进行中”。每个独立 Git 提交完成后都要在事项中
-记录提交 hash、变更范围和已执行验证。实现、迁移和约定测试全部完成后，补充最终验证结果，
-再将事项设为“结束”。不得把无关变更写入历史归档事项，也不得因为本地没有 `linear` CLI
-而跳过此流程；Linear 通过 MCP 工具访问。
-
 GitHub 发布使用 `gh` CLI。每次 push 前运行完整跨包 pytest，并在 PR 或交接说明中包含结果。
-PR 应包含摘要、影响路径、验证结果、UI 截图和对应 Linear 事项。
+PR 应包含摘要、影响路径、验证结果和 UI 截图。
 
 如果沙箱内 `gh` 认证或 GitHub CLI 访问失败，先在沙箱外提权重试同一个 `gh` 命令，再判断认证无效。
 
@@ -218,6 +212,39 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 
 ---
 
+## 性能优化与真实库验证
+
+性能工作按“先定位、后优化、再证等价”三步走，禁止凭感觉改热点路径。
+
+### 测量纪律
+
+- **硬证据优先**：格元数、行数、脏页数、逐字节一致数、执行计划节点（如 `Index Only Scan`）与机器负载无关，可以作为结论；计时只在同一次测量内部用于排序。
+- 计时一律报**多轮最小值 + 中位**，并标注测量时的机器负载。A/B 对比必须**轮转执行顺序**（否则“总是最后测”的变体会虚高 20–30%，本项目已据此撤回过硬结论）。
+- 优化前先证伪瓶颈假设：已出现多次“看着像瓶颈、实测不是”（`_verify_minio_objects` 串行 stat 仅 0.21 s；快照 SQL 服务端仅 1.1 s，其余时间在客户端行传输与物化）。
+- 语义等价的改动优先于“需要新语义”的改动；等价性必须有可复现证据（代数恒等、由 ON 键唯一确定、逐字节/逐格元比对、格元数逐例一致）。
+
+### 真实库探针安全模板（必须遵守）
+
+- 只写 scratch schema，影子表**与生产表同名**（否则 `MERGE`/`UPDATE` 里的无限定表名会回落到 `public` 的真表），并在同一会话 `SET search_path = <scratch>, public`。
+- 执行前后必须断言：`SELECT oid FROM pg_class WHERE oid = '<表名>'::regclass` 等于影子表 OID（OpenGauss 没有 `to_regclass`）；写入前后核对生产表行数不变。
+- 探针禁止把 DSN / MinIO 凭据打印到终端或写入文档，只输出 `bool(os.environ.get(...))` 这类存在性判断。
+- 模板与归档证据：`/tmp/verify-grid/probe_guard.py`、`~/perf-probe-evidence-20260912/`。
+
+### 已落地优化的语义边界
+
+- `rs_cube_cell_fact` 的 MERGE **不再在 UPDATE 分支重写 `cell_geom`**（几何由 ON 键中的 `grid_type/grid_level/space_code` 唯一确定；实测 20k 行全 MATCHED 时 min −30.6%）。因此**同一 `cube_version` 重跑不再修复“非 NULL 但过期”的几何**；`cell_geom IS NULL` 的历史行由 `_backfill_missing_cell_geom` 兜底。几何修正的正规出口是：新的 `cube_version`、迁移脚本，或**手动入库**（见下）。
+- `_load_snapshot` 按 `(dataset_id, output_version)` **一次性取格元再回填**，不再逐行 JOIN TOAST 几何（实测 70,909 索引行 : 248 格元时 8.71 s → 5.30 s）；JOIN 仍保留作“索引行必须有格元”的过滤，格元缺失立即报错。
+- 改写入/快照路径前必读：`cube_split/cube_split/ingest/managed_output_ingest._verify_targets` 用 `run_id = job_id AND cube_version` 计数且要求 `cell_geom IS NOT NULL`，**任何“跳过写入”的优化都必须同步调整该口径**，否则 managed ingest 自检失败。
+- 手动入库（`POST /v1/datasets/{id}/ingest`、`request_manual_ingest_collection`）是显式、低频、有质量门禁与审计的操作，适合承担昂贵转换/修复：几何修复应按**不同格元**比较（`ST_Equals`），成本 ∝ 格元数而非行数。注意 `manual=True` 只放宽资格规则、**不落库到 ingest run**，且选单元 SQL 明确排除 `ingest_status='completed'`，因此“重新入库已完成的单元”需要补能力（产品语义决定）。
+
+### 已知结构性问题（未授权前不要动）
+
+- `rs_cube_cell_fact` 累计 **134 万次非 HOT 更新**（`n_tup_upd=1,340,000` vs `n_tup_ins=203,613`，`n_tup_hot_upd` 仅 0.16%），来源是重复 ingest：16 个版本对应 214 次作业，同一 `output_version` 最多重跑 60 次。降低它需要 `fillfactor`+HOT 或改 `_verify_targets` 口径。
+- 该表 heap 曾膨胀到 410 MB / 6 万活行；`VACUUM FULL` + `REINDEX` 属破坏性运维，需明确授权。
+- 性能记录与复现命令：`docs/PERFORMANCE_OPTIMIZATION_STEPS_20260913.md`（方法+收益+撤回项）、`docs/GRID_OPTIMIZATION_ROUND1_20260912.md`、`docs/PARTITION_WRITE_PERFORMANCE_HANDOFF.md`、`docs/PERFORMANCE_OPTIMIZATION_DIRECTIONS_20260912.md`。
+
+---
+
 ## 基础设施集群信息
 
 ### OpenGauss 数据库
@@ -296,28 +323,30 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   PY
   ```
 
-### Ray 分布式计算集群
+### Ray 分布式计算集群（KubeRay）
 
-4 节点 Ray 集群，Head 在 `poufennode04`。
+生产 Ray 走 **KubeRay**，集群 `cube-partition`（namespace `kuberay-system`），不是任何裸机集群。
 
-| 节点 | IP | 角色 | GCS 地址 |
-|------|----|------|----------|
-| poufennode04 | 10.3.100.182 | **Head Node** | `10.3.100.182:6379` |
-| poufennode01 | 10.3.100.179 | Worker Node | - |
-| poufennode02 | 10.3.100.180 | Worker Node | - |
-| poufennode03 | 10.3.100.181 | Worker Node | - |
+| 项 | 值 |
+|---|---|
+| RayCluster CR | `kuberay-system/cube-partition`（kuberay v1.3.0，operator 45d，累计重启 794 次） |
+| Head Pod | `cube-partition-head-x7wcs`（2 CPU/8Gi 申请，跑在 `poufennode03`=`10.3.100.181`，podIP `10.244.4.129`） |
+| **Head 的 Ray 参数** | `ray start --head --num-cpus=0 ...` → **head 不提供 CPU** |
+| Worker 组 | `partition-workers`：replicas 由 autoscaler 动态写入（实测 0→8），min=0 / **max=36** / 每 pod **1 CPU / 2Gi** / `idleTimeoutSeconds=1800`（2026-09-13 显式设置；此前未配置） |
+| **Jobs API（推荐接入方式）** | `http://10.3.100.183:30826`（dashboard 端口 8265 的 NodePort；`/api/jobs/` 已有 420+ 历史作业） |
+| GCS NodePort | `10.3.100.183:30637`（→ head 的 6379） |
+| 运行时镜像 | `10.3.100.183:30500/remote-sensing/cube-kuberay-runtime:20260728` |
+| worker 环境 | 已自带 `CUBE_WEB_MINIO_*` / `CUBE_WEB_POSTGRES_DSN` / `RAY_ADDRESS`，**不需要注入凭据** |
+| worker 可用库 | `rasterio`/`minio`/`psycopg`/`shapely`/`numpy`/`pyproj` 可导入；**`fiona` 缺失** |
 
-- **Dashboard**: `http://10.3.100.182:8265`
-- **GCS 地址**: `10.3.100.182:6379`
-- **Head Node IP**: `10.3.100.182`
-- **集群 ID**: `3a74cad5b9acda678ec4c7db6bf996772af733039bb153dc4810f131`
-- **连接方式**:
-  ```python
-  import ray
-  ray.init(address="10.3.100.182:6379")
-  # 或
-  ray.init(address="auto")  # 在集群节点上
+- **提交方式**（driver 在集群内起，autoscaler 才会扩容）：
+  ```bash
+  ray job submit --address http://10.3.100.183:30826 --working-dir <dir> --no-wait -- python <script.py>
   ```
+- **在集群内/作业内**用 `ray.init(address="auto")` 是正确的（`.cube_web.env` 的 `CUBE_WEB_RAY_ADDRESS=auto` 就属于这种用法）。
+- **不要**把 NodePort 地址写进 `CUBE_WEB_RAY_ADDRESS`：head 是 `--num-cpus=0`，**外部 `ray.init(address="<节点>:30637")` 在 0 worker 时必报 `No node info found matching attributes`**；即使 worker 已拉起，从集群外主机实测仍然连不上，所以外部 driver 不是支持的接入路径。
+- **跑测试前先预热**：submit 一个 `rasterio/minio/psycopg/shapely` 导入 + 建 `/tmp/cube_split_source_cache` 的小 job（实测 8 任务 125 s 成、拉起 8 worker），或确认已有 worker 在跑（`kubectl -n kuberay-system get pods`）。
+- 历史遗留：`.182:6379` 的裸机 Ray（4 台 poufennode，GCS 有 6 条 DEAD 记录）**已不再使用**，不要把作业指向它（2026-09-13 前 AGENTS.md 记录的裸机端点与集群 ID 已作废）。
 - **注意事项**:
   - 分布式剖分必须使用 `ray` 后端验证，不要只用本地 thread/process 结果代替。
 - 不要用固定节点资源规避数据路径问题；演示数据应同步到 MinIO，Ray worker 应在各节点本地缓存 `s3://` 源对象后并行处理。
@@ -326,7 +355,8 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   从 worker 运行时环境传入；任务参数只保留业务数据和不敏感的对象定位信息。
 - 普通光学逻辑剖分（`geohash`/`mgrs`）和实体剖分（`isea4h`）都不能让 driver
   先生成 `/tmp/.../cog/*.tif` 再交给 Ray worker 读取；不同节点无法访问该本地路径。
-- Worker 侧流程应为：从 MinIO 下载源 TIF 到 `/tmp/cube_split_source_cache`，在 worker 本地转 COG，将 COG/实体瓦片上传回 MinIO，再用 `s3://` 写入 index rows。
+- **源数据已经是 COG，剖分链路不再做 COG 转换**（2026-09-13 确认）：worker 侧只调 `cube_split/jobs/ray_partition_core.cache_source_cog` 把源 COG **原样**缓存到 `/tmp/cube_split_source_cache`（按 URI 的 sha256 分目录，带 stat 身份校验与 ENOSPC 回退），随后用 `s3://` 写 index rows。因此不要再按“下载 TIF → 转 COG → 上传”描述这条链路，也不要把 target-crs / 压缩参数当作剖分的必经步骤。
+- 入库侧（postgres 元数据）走 `asset_storage_backend=minio` → `upload_assets_to_minio`；仅 sqlite 本地开发才用 `materialize_cog_assets`。评估入库耗时时要看这一步是否在同 Bucket 内做了多余的整文件拷贝（可用服务端 copy 代替）。
 - 源对象下载缓存必须按 URI 的稳定哈希隔离并校验预期 SHA-256；解析 `s3://` 路径时先
   URL decode，避免中文对象键被二次编码。发生 `ENOSPC` 时只清理该 worker 的
   `/tmp/cube_split_source_cache` 后重试一次，绝不能递归清理通用 `/tmp` 或其他任务目录。
@@ -336,3 +366,15 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
     类型选择 `geohash`、`mgrs` 或 `isea4h`，剖分方式由格网类型派生，不允许用户混选。
     `max_cells_per_asset=0` 表示不设上限，smoke/调试任务应显式设置小的正数。
   - 小规模冒烟测试可用 ISEA4H `grid_level=1`、单景影像、`ray_parallelism=2`、`max_cells_per_asset=50`；完整 level 6 任务会占用更多集群 IO 与 CPU。
+- **当前性能目标（2026-09-13 起）**：单景全部波段，**从剖分到入库 < 10 s**。范围限定为两种**逻辑格网** `geohash` / `mgrs`；**六边形/实体剖分（`isea4h`）不在测试与优化范围内**。
+  - 计量口径：必须先预热 worker（否则仅 autoscaler 冷启动就 ~125 s，不计入剖分时间），报告分两段——**作业自身耗时**（剖分 / 质检 / 入库分段）与**含冷启动的端到端耗时**。
+  - 按已知成本结构，最可能顶穿 10 s 的是：worker 从 MinIO 拉取源 COG（单景多波段 = 多份几百 MB 对象）、入库的 `upload_assets_to_minio`、以及 `_load_snapshot` 的行物化；而不是 MERGE 本身。
+- **跑分布式剖分/落库前先做只读健康检查**：`kubectl -n kuberay-system get pods` 里要有 Running 的 `cube-partition-partition-workers-worker-*`（head 本身 `--num-cpus=0`，不提供算力）。
+- **历史遗留（已弃用）**：`10.3.100.182:6379` 的裸机 Ray 集群（4 台 poufennode，session 从 2026-07-26 起）仍有残留 DEAD 节点记录（`ray.nodes()` 10 条、存活 4 条、`cluster_resources().CPU` 报 48），误连它会遇到 `Failed to startup worker after retrying 5 times` / `Failed to connect to socket at /tmp/ray/session_*/sockets/raylet`。它不再用于生产与测试，也不要拿它的数字做性能基线。
+- **预热 worker（生产作业前）**：提交一个小 job 驱动 autoscaler 扩容（已设 `idleTimeoutSeconds=1800`）：
+  ```bash
+  ray job submit --address http://10.3.100.183:30826 --working-dir <dir> --no-wait -- python <warm.py>
+  ```
+  每个任务做：导入 `rasterio/minio/psycopg/shapely`、建 `/tmp/cube_split_source_cache`、回报节点名与环境变量存在性。实测 8 任务 125 s 完成、拉起 8 个 worker（低负载 8/8 全成）。
+- `.cube_web.env` 里的 `CUBE_WEB_RAY_ADDRESS=auto` 对“在集群内跑的 driver/作业”是正确的；**不要把 NodePort 或任何节点地址写进去**。
+- K8s 侧排查/重启用 `kubectl`（本机已装 v1.35.0）：`kubectl get rayclusters -A`、`kubectl get pods -A | grep -i ray`；运维说明见 `docs/rag/10-技术手册/T4-资源调度-技术手册.md` 与 `docs/rag/00-总览/02-部署拓扑与运行实例.md`。
