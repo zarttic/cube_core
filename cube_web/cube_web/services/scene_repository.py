@@ -345,7 +345,9 @@ class OpenGaussSceneRepository:
                                        'tile_id', quality_error.tile_id,
                                        'row_number', quality_error.row_number,
                                        'field', quality_error.field_name,
-                                       'context', quality_error.context
+                                       -- OpenGauss: json_build_object() aborts with "cache lookup failed for type"
+                                       -- when handed a jsonb value, so cast the jsonb column down to json.
+                                       'context', quality_error.context::json
                                    ) ORDER BY quality_error.created_at
                                )
                                FROM (
