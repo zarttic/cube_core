@@ -313,6 +313,9 @@ def test_dataset_ray_task_uses_configured_node_resource(monkeypatch) -> None:
     ray = FakeRay()
     monkeypatch.setitem(sys.modules, "ray", ray)
     monkeypatch.setenv("RAY_ACTOR_NODE_RESOURCE", "node:10.3.100.180")
+    # The developer's local .cube_web.env may pin entity work elsewhere; this
+    # test covers the global label only.
+    monkeypatch.setenv("CUBE_ENTITY_NODE_RESOURCE", "")
 
     result = _run_dataset_on_ray({"ray_address": "10.3.100.182:6379"}, None)
 
@@ -336,6 +339,88 @@ def test_entity_task_options_pin_the_large_worker_group(monkeypatch) -> None:
     }
     # Logical work keeps running on the default worker group.
     assert _ray_partition_task_options(1)["resources"] == {"cube_partition_worker": 1}
+
+    # The entity label replaces the global one instead of stacking onto it.
+    monkeypatch.setenv("RAY_ACTOR_NODE_RESOURCE", "node:10.3.100.180")
+    monkeypatch.setattr(
+        runner_module.runtime_config,
+        "env_text",
+        lambda name, default="": {
+            "CUBE_ENTITY_NODE_RESOURCE": "cube_partition_worker_large",
+            "RAY_ACTOR_NODE_RESOURCE": "node:10.3.100.180",
+        }.get(name, default),
+    )
+    assert runner_module._entity_task_options(1)["resources"] == {
+        "cube_partition_worker_large": 0.001,
+        "cube_partition_worker": 1,
+    }
+
+
+def test_streamed_entity_tile_matches_a_single_mask_read(tmp_path) -> None:
+    """Block-wise streaming must produce the same pixels as one mask.mask read.
+
+    The entity path falls back to streaming whenever a cell window exceeds the
+    block budget, so the two paths have to agree pixel for pixel.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.mask import geometry_window
+    from rasterio.mask import mask as mask_read
+    from rasterio.transform import from_bounds
+    from rasterio.windows import Window, intersection
+
+    source_path = tmp_path / "source.tif"
+    transform = from_bounds(0.0, 0.0, 1.2, 0.9, 120, 90)
+    pixels = (np.arange(120 * 90, dtype="uint16").reshape(90, 120) % 977)
+    with rasterio.open(source_path, "w", driver="GTiff", width=120, height=90, count=1, dtype="uint16",
+                       crs="EPSG:4326", transform=transform, nodata=0) as destination:
+        destination.write(pixels, 1)
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[0.1, 0.1], [0.7, 0.12], [0.62, 0.8], [0.08, 0.6], [0.1, 0.1]]],
+    }
+
+    with rasterio.open(source_path) as source:
+        expected, expected_transform = mask_read(source, [geometry], crop=True, indexes=[1])
+        dest_window = intersection(
+            geometry_window(source, [geometry]).round_offsets().round_lengths(),
+            Window(0, 0, source.width, source.height),
+        ).round_offsets().round_lengths()
+
+    # A generous budget still streams one block; a tiny budget splits the cell.
+    for block_pixels in (100_000, 37):
+        with rasterio.open(source_path) as source:
+            tile_path = runner_module._stream_entity_tile(
+                source=source,
+                geometry=geometry,
+                dest_window=dest_window,
+                source_band_index=1,
+                profile=source.profile,
+                path=tmp_path / f"tile-{block_pixels}.tif",
+                block_pixels=block_pixels,
+            )
+        with rasterio.open(tile_path) as tile:
+            assert (tile.width, tile.height) == (expected.shape[2], expected.shape[1])
+            assert np.allclose(tile.transform, expected_transform)
+            assert np.array_equal(tile.read(1), expected[0])
+        assert tile_path.exists()
+
+
+def test_entity_block_windows_cover_the_window_without_overlap() -> None:
+    from rasterio.windows import Window
+
+    window = Window(col_off=10, row_off=20, width=7, height=5)  # helpers return relative offsets
+    blocks = runner_module._entity_block_windows(window, 6)
+
+    assert sum(int(block.width) * int(block.height) for block in blocks) == 7 * 5
+    assert (int(blocks[0].col_off), int(blocks[0].row_off)) == (0, 0)
+    covered = set()
+    for block in blocks:
+        for row in range(int(block.row_off), int(block.row_off + block.height)):
+            for col in range(int(block.col_off), int(block.col_off + block.width)):
+                assert (row, col) not in covered
+                covered.add((row, col))
+    assert len(covered) == 7 * 5
 
 
 def test_ray_client_uses_node_local_credentials_without_runtime_env(monkeypatch) -> None:

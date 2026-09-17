@@ -116,6 +116,8 @@ class RayJobPartitionSubmitter:
             "CUBE_ENTITY_UPLOAD_WORKERS",
             "CUBE_ENTITY_MINIO_PARALLEL_UPLOADS",
             "CUBE_ENTITY_NODE_RESOURCE",
+            "CUBE_ENTITY_READ_BLOCK_PIXELS",
+            "CUBE_ENTITY_TILE_TMP_DIR",
             "CUBE_WEB_RAY_WORKER_RESOURCE",
         ):
             value = runtime_config.env_text(name)

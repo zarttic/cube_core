@@ -52,7 +52,12 @@ def _entity_node_resource() -> str | None:
 
 
 def _entity_task_options(worker_container_limit: int | None, *, include_num_cpus: bool = True) -> dict[str, Any]:
-    """Task options for entity work, pinned to the entity worker group when configured."""
+    """Task options for entity work, pinned to the entity worker group when configured.
+
+    ``CUBE_ENTITY_NODE_RESOURCE`` takes precedence over the global
+    ``RAY_ACTOR_NODE_RESOURCE``: requesting both labels would need a node that
+    carries them together, which no worker group does.
+    """
     from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
 
     return _ray_partition_task_options(
@@ -60,6 +65,108 @@ def _entity_task_options(worker_container_limit: int | None, *, include_num_cpus
         include_num_cpus=include_num_cpus,
         node_resource=_entity_node_resource(),
     )
+
+
+DEFAULT_ENTITY_READ_BLOCK_PIXELS = 4_000_000
+
+
+def _entity_read_block_pixels() -> int:
+    """Pixel budget for a single entity read block (default ≈ 8 MB per int16 band)."""
+    try:
+        value = int(runtime_config.env_text("CUBE_ENTITY_READ_BLOCK_PIXELS", str(DEFAULT_ENTITY_READ_BLOCK_PIXELS)))
+    except ValueError:
+        return DEFAULT_ENTITY_READ_BLOCK_PIXELS
+    return max(1, value)
+
+
+def _entity_tile_tmp_dir() -> Path:
+    """Where streamed entity tiles are staged before upload."""
+    configured = runtime_config.env_text("CUBE_ENTITY_TILE_TMP_DIR")
+    if configured:
+        return Path(configured)
+    cache_dir = runtime_config.env_text("CUBE_SOURCE_CACHE_DIR", "/tmp/cube_split_source_cache")
+    return Path(cache_dir or "/tmp/cube_split_source_cache") / "entity_tiles"
+
+
+def _entity_block_windows(window: Any, max_pixels: int) -> list[Any]:
+    """Split one window into blocks of at most ``max_pixels`` pixels.
+
+    The returned windows are relative to ``window`` (offsets start at 0): the
+    destination tile is written with them, while the source read has to add
+    ``window``'s own origin.
+    """
+    from rasterio.windows import Window
+
+    width, height = int(window.width), int(window.height)
+    if width <= 0 or height <= 0:
+        return []
+    cols_per_block = max(1, min(width, max_pixels))
+    rows_per_block = max(1, min(height, max(1, max_pixels // cols_per_block)))
+    blocks: list[Any] = []
+    for row_offset in range(0, height, rows_per_block):
+        rows = min(rows_per_block, height - row_offset)
+        for col_offset in range(0, width, cols_per_block):
+            cols = min(cols_per_block, width - col_offset)
+            blocks.append(Window(col_offset, row_offset, cols, rows))
+    return blocks
+
+
+def _stream_entity_tile(
+    *,
+    source: Any,
+    geometry: dict[str, Any],
+    dest_window: Any,
+    source_band_index: int,
+    profile: dict[str, Any],
+    path: Path,
+    block_pixels: int,
+) -> Path:
+    """Write one entity tile band through bounded read blocks.
+
+    A coarse cell window can cover a whole scene (500+ Mpx); reading it with a
+    single ``rasterio.mask.mask`` call is what pushed worker pods over their
+    memory limit. Read one block at a time, apply the cell mask per block and
+    write straight into a temporary GeoTIFF, so peak memory follows the block
+    budget instead of the cell size. This trades wall-clock for memory and
+    keeps full resolution.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.features import geometry_mask
+    from rasterio.windows import Window
+
+    dest_profile = profile.copy()
+    dest_profile.update(
+        driver="GTiff",
+        count=1,
+        width=int(dest_window.width),
+        height=int(dest_window.height),
+        transform=source.window_transform(dest_window),
+    )
+    fill = source.nodata if source.nodata is not None else 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with rasterio.open(path, "w", **dest_profile) as destination:
+            for block in _entity_block_windows(dest_window, block_pixels):
+                source_window = Window(
+                    dest_window.col_off + block.col_off,
+                    dest_window.row_off + block.row_off,
+                    block.width,
+                    block.height,
+                )
+                data = source.read(indexes=[source_band_index], window=source_window)
+                inside = geometry_mask(
+                    [geometry],
+                    out_shape=data.shape[1:],
+                    transform=source.window_transform(source_window),
+                    invert=True,
+                )
+                data = np.where(inside, data, np.asarray(fill, dtype=data.dtype))
+                destination.write(data, window=block)
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(f"entity tile streaming write failed for {path.name}: {exc}") from None
+    return path
 _ENTITY_COVER_CACHE: dict[tuple[str, int, str, tuple[float, ...]], list[dict[str, Any]]] = {}
 _ENTITY_COVER_CACHE_LOCK = Lock()
 _RAY_INIT_LOCK = Lock()
@@ -718,6 +825,7 @@ def _run_dataset_on_ray(
         from minio import Minio
         from rasterio.errors import WindowError
         from rasterio.io import MemoryFile
+        from rasterio.mask import geometry_window
         from rasterio.warp import transform_bounds, transform_geom
         from rasterio.windows import Window, from_bounds, intersection
 
@@ -760,6 +868,34 @@ def _run_dataset_on_ray(
                 metadata = {str(name).lower(): str(item) for name, item in (getattr(existing, "metadata", {}) or {}).items()}
                 existing_checksum = metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")
                 if getattr(existing, "size", None) != len(tile_bytes) or existing_checksum != checksum:
+                    raise ValueError(f"immutable entity tile collision for {object_key}")
+            return f"s3://{settings['bucket']}/{object_key}", stat_elapsed, upload_elapsed
+
+        def persist_entity_tile_path(item: tuple[Path, str, str]) -> tuple[str, float, float]:
+            """Stream one staged tile file to MinIO without loading it into memory."""
+            tile_path, checksum, object_key = item
+            stat_started = perf_counter()
+            try:
+                existing = client.stat_object(settings["bucket"], object_key)
+            except Exception as exc:
+                if getattr(exc, "code", None) not in {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}:
+                    raise
+                existing = None
+            stat_elapsed = perf_counter() - stat_started
+            byte_size = tile_path.stat().st_size
+            upload_elapsed = 0.0
+            if existing is None:
+                upload_started = perf_counter()
+                client.fput_object(
+                    settings["bucket"], object_key, str(tile_path), content_type="image/tiff",
+                    metadata={"checksum-sha256": checksum},
+                    num_parallel_uploads=minio_parallel_uploads,
+                )
+                upload_elapsed = perf_counter() - upload_started
+            else:
+                metadata = {str(name).lower(): str(value) for name, value in (getattr(existing, "metadata", {}) or {}).items()}
+                existing_checksum = metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")
+                if getattr(existing, "size", None) != byte_size or existing_checksum != checksum:
                     raise ValueError(f"immutable entity tile collision for {object_key}")
             return f"s3://{settings['bucket']}/{object_key}", stat_elapsed, upload_elapsed
         dataset = value["dataset"]
@@ -915,53 +1051,88 @@ def _run_dataset_on_ray(
                         geometry = cell_geometry
                         if source.crs and str(source.crs).upper() != "EPSG:4326":
                             geometry = transform_geom("EPSG:4326", source.crs, geometry)
-                        with timing.phase("entity.tile_mask"):
-                            data, tile_transform = rasterio.mask.mask(
-                                source,
-                                [geometry],
-                                crop=True,
-                                indexes=[source_band_index for _, source_band_index in asset_bands],
-                            )
-                        pending_tile_uploads: list[tuple[dict[str, Any], dict[str, Any], bytes, str, str, int, int]] = []
-                        for band_position, (band, _source_band_index_value, tile, index) in enumerate(band_records):
-                            band_data = data[band_position:band_position + 1]
-                            with timing.phase("entity.tile_write"):
-                                profile = source.profile.copy()
-                                profile.update(
-                                    driver="GTiff", count=1, width=band_data.shape[2], height=band_data.shape[1], transform=tile_transform
+                        with timing.phase("entity.tile_window"):
+                            dest_window = intersection(
+                                geometry_window(source, [geometry]).round_offsets().round_lengths(),
+                                Window(0, 0, source.width, source.height),
+                            ).round_offsets().round_lengths()
+                        block_pixels = _entity_read_block_pixels()
+                        stream_tile = int(dest_window.width) * int(dest_window.height) > block_pixels
+                        if stream_tile:
+                            timing.add_counter("entity_tile_stream_count")
+                        else:
+                            with timing.phase("entity.tile_mask"):
+                                data, tile_transform = rasterio.mask.mask(
+                                    source,
+                                    [geometry],
+                                    crop=True,
+                                    indexes=[source_band_index for _, source_band_index in asset_bands],
                                 )
-                                with MemoryFile() as memory:
-                                    with memory.open(**profile) as destination:
-                                        destination.write(band_data)
-                                    tile_bytes = memory.read()
-                            with timing.phase("entity.tile_checksum"):
-                                checksum = sha256(tile_bytes).hexdigest()
+                        pending_tile_uploads: list[tuple[dict[str, Any], dict[str, Any], bytes | Path, str, str, int, int]] = []
+                        for band_position, (band, source_band_index, tile, index) in enumerate(band_records):
                             object_key = f"partition/{dataset['dataset_id']}/versions/{value['output_version']}/tiles/{tile['output_id']}.tif"
+                            payload: bytes | Path
+                            if stream_tile:
+                                with timing.phase("entity.tile_stream"):
+                                    payload = _stream_entity_tile(
+                                        source=source,
+                                        geometry=geometry,
+                                        dest_window=dest_window,
+                                        source_band_index=source_band_index,
+                                        profile=source.profile,
+                                        path=_entity_tile_tmp_dir() / f"{tile['output_id']}.tif",
+                                        block_pixels=block_pixels,
+                                    )
+                                with timing.phase("entity.tile_checksum"):
+                                    checksum, _byte_size = _sha256_file(payload)
+                                width, height = int(dest_window.width), int(dest_window.height)
+                            else:
+                                band_data = data[band_position:band_position + 1]
+                                with timing.phase("entity.tile_write"):
+                                    profile = source.profile.copy()
+                                    profile.update(
+                                        driver="GTiff", count=1, width=band_data.shape[2], height=band_data.shape[1], transform=tile_transform
+                                    )
+                                    with MemoryFile() as memory:
+                                        with memory.open(**profile) as destination:
+                                            destination.write(band_data)
+                                        payload = memory.read()
+                                with timing.phase("entity.tile_checksum"):
+                                    checksum = sha256(payload).hexdigest()
+                                width, height = band_data.shape[2], band_data.shape[1]
                             pending_tile_uploads.append(
-                                (tile, index, tile_bytes, checksum, object_key, band_data.shape[2], band_data.shape[1])
+                                (tile, index, payload, checksum, object_key, width, height)
                             )
                         upload_workers = min(
                             max(1, int(value.get("entity_upload_workers") or 1)),
                             len(pending_tile_uploads),
                         )
                         upload_items = [
-                            (tile_bytes, checksum, object_key)
-                            for _tile, _index, tile_bytes, checksum, object_key, _width, _height in pending_tile_uploads
+                            (payload, checksum, object_key)
+                            for _tile, _index, payload, checksum, object_key, _width, _height in pending_tile_uploads
                         ]
+                        persist = persist_entity_tile_path if stream_tile else persist_entity_tile
                         if upload_workers == 1:
-                            persisted = [persist_entity_tile(item) for item in upload_items]
+                            persisted = [persist(item) for item in upload_items]
                         else:
                             with ThreadPoolExecutor(max_workers=upload_workers, thread_name_prefix="cube-entity-tile") as pool:
-                                futures = [pool.submit(persist_entity_tile, item) for item in upload_items]
+                                futures = [pool.submit(persist, item) for item in upload_items]
                                 persisted = [future.result() for future in futures]
                         for item, result in zip(pending_tile_uploads, persisted, strict=True):
-                            tile, index, tile_bytes, checksum, object_key, width, height = item
+                            tile, index, payload, checksum, object_key, width, height = item
                             tile_uri, stat_elapsed, upload_elapsed = result
                             timing.add_phase("minio.tile_stat", stat_elapsed)
                             if upload_elapsed:
                                 timing.add_phase("minio.tile_upload", upload_elapsed)
-                            tile.update({"tile_uri": tile_uri, "checksum": checksum, "byte_size": len(tile_bytes), "width": width, "height": height})
+                            byte_size = len(payload) if isinstance(payload, bytes) else int(Path(payload).stat().st_size)
+                            tile.update({"tile_uri": tile_uri, "checksum": checksum, "byte_size": byte_size, "width": width, "height": height})
                             index.update({"value_ref_uri": tile_uri, "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None})
+                        if stream_tile:
+                            for _tile, _index, payload, _checksum, _key, _width, _height in pending_tile_uploads:
+                                try:
+                                    Path(payload).unlink(missing_ok=True)
+                                except OSError:
+                                    logger.warning("unable to remove streamed entity tile %s", payload)
                     else:
                         for band, _source_band_index_value, tile, index in band_records:
                             tile["tile_uri"] = source_uri
