@@ -41,7 +41,7 @@ beforeEach(() => {
     if (path === '/v1/topology/geometry') {
       return { geometry: { type: 'Polygon', coordinates: [] } };
     }
-    if (path === '/v1/code/parse') {
+    if (path === '/v1/code/GNse') {
       return { grid_type: 'geohash', grid_level: 6, space_code: 'wx4g0b', time_code: '202603091530' };
     }
     if (path === '/v1/code/st') return { st_code: 'gh:6:wx4g0b:202603091530' };
@@ -74,7 +74,7 @@ describe('EncodingView', () => {
     await wrapper.get('button.btn-primary').trigger('click');
     await flushPromises();
 
-    expect(requestJson).toHaveBeenCalledWith('/v1/code/parse', { st_code: 'gh:6:wx4g0b:202603091530' });
+    expect(requestJson).toHaveBeenCalledWith('/v1/code/GNse', { st_code: 'gh:6:wx4g0b:202603091530' });
     expect(requestJson).not.toHaveBeenCalledWith('/v1/code/st', expect.anything());
     expect(wrapper.text()).toContain('解码');
   });

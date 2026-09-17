@@ -10,7 +10,7 @@ from cube_split.logging_config import configure_logging
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from grid_core.sdk import CubeEncoderSDK, GridCoreError, NotImplementedCapabilityError, ValidationError
 
 from cube_web.routes import partition as partition_route
@@ -125,6 +125,18 @@ def create_app() -> FastAPI:
     @web_app.get("/")
     async def root() -> dict[str, str]:
         return {"service": "cube-web", "status": "ok"}
+
+    def _grid_system_probe() -> PlainTextResponse:
+        """Bare 200 + fixed plain text, nothing else."""
+        return PlainTextResponse("格网系统正常")
+
+    @web_app.get("/GNent", response_class=PlainTextResponse)
+    async def grid_system_probe_get() -> PlainTextResponse:
+        return _grid_system_probe()
+
+    @web_app.post("/GNent", response_class=PlainTextResponse)
+    async def grid_system_probe_post() -> PlainTextResponse:
+        return _grid_system_probe()
 
     @web_app.get("/health")
     def health(

@@ -17,7 +17,7 @@ from cube_web.services.api_errors import request_id_from_header
 
 logger = logging.getLogger("cube_web.access")
 
-SKIP_PATHS = {"/", "/health"}
+SKIP_PATHS = {"/", "/health", "/GNent"}
 _CLIENT_ERROR_LEVEL = logging.WARNING
 _SERVER_ERROR_LEVEL = logging.ERROR
 

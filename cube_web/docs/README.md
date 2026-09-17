@@ -35,7 +35,8 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 ## 3. 认证与授权
 
 - `CUBE_WEB_AUTH_REQUIRED` 默认 **开启**（接受 `1/true/yes/on`）；仅受控本地测试可关闭。
-- 鉴权只作用于 `/v1/` 前缀；`/api/*`、`/health`、`/` 不校验。
+- 鉴权只作用于 `/v1/` 前缀；`/api/*`、`/health`、`/`、`/GNent` 不校验。
+- `GET`/`POST /GNent` 是外部探活入口：只返回 200 + 纯文本 `格网系统正常`，不带其它内容。
 - 公开入口：`POST /v1/partition/schemas/import`（载入系统交付入口）。
 - 其余 `/v1/*` 需要 Bearer Token；无凭证 401，非管理员角色 403。
 - 管理员判定为角色归一化后等于 `ADMIN`（含 `admin`、`administrator`、`管理员` 等别名）。
@@ -62,7 +63,7 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 - 4xx 透出领域错误或校验明细（`detail` 保留结构化校验列表，便于前端定位字段）。
 - 服务端日志：`CUBE_LOG_LEVEL`（默认 `INFO`）控制级别，默认单行文本输出到 stdout；
   `CUBE_LOG_FILE` 可开启文件轮转（默认 10MB × 3），`CUBE_LOG_FORMAT=json` 输出 JSON 行。
-- 访问日志记录 `method/path/status/duration_ms/actor/request_id`（跳过 `/health` 与 `/`，
+- 访问日志记录 `method/path/status/duration_ms/actor/request_id`（跳过 `/health`、`/GNent` 与 `/`，
   `CUBE_LOG_ACCESS=0` 可关闭）；4xx 记 WARNING、5xx 记 ERROR，401/403 另记 `auth.denied`。
 - 未处理异常记录堆栈，日志带请求 ID、方法与路径；浏览器错误上报走
   `POST /v1/client-errors`（无需登录，限流 30 次/分钟/IP，拒绝超过 32KB 的请求体）。
@@ -86,7 +87,7 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 
 `POST /v1/grid/locate`、`POST /v1/grid/cover`（可带 `preview_mode=continuous` 返回仅用于显示的
 `preview_cells`）、`POST /v1/topology/neighbors|geometry|geometries|parent|children`、
-`POST /v1/code/st|parse|st/batch`、`POST /v1/query/st`。
+`POST /v1/code/st|GNse|st/batch`、`POST /v1/query/st`（时空编码解析入口为 `/v1/code/GNse`，无 `/v1/code/parse` 别名）。
 
 MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `preview_cells` 中返回显示用方格，
 不改变剖分编码、源影像 CRS 或入库几何。

@@ -122,7 +122,7 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
         )
         return STCodeGenerateResponse(st_code=result.st_code)
 
-    @router.post("/code/parse", response_model=STCodeParseResponse)
+    @router.post("/code/GNse", response_model=STCodeParseResponse)
     def parse_st(req: STCodeParseRequest) -> STCodeParseResponse:
         result = sdk.parse_st_code(req.st_code)
         return STCodeParseResponse(

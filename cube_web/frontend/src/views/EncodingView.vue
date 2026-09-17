@@ -347,7 +347,7 @@ async function runGridEncoding() {
   const timestamp = config.timestamp ? new Date(config.timestamp).toISOString() : new Date().toISOString();
 
   if (config.operation === 'decode') {
-    const parsed = await requestJson(`${codePrefix}/parse`, { st_code: config.decodeInput.trim() });
+    const parsed = await requestJson(`${codePrefix}/GNse`, { st_code: config.decodeInput.trim() });
     await requestJson(`${topologyPrefix}/geometry`, {
       address: { grid_type: parsed.grid_type, grid_level: parsed.grid_level, space_code: parsed.space_code },
       boundary_type: 'polygon',

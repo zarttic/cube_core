@@ -48,6 +48,15 @@ def test_root_smoke_endpoint() -> None:
     assert response.json() == {"service": "cube-web", "status": "ok"}
 
 
+def test_grid_system_probe_returns_plain_text_only() -> None:
+    for method in ("GET", "POST"):
+        response = client.request(method, "/GNent")
+
+        assert response.status_code == 200
+        assert response.text == "格网系统正常"
+        assert response.headers["content-type"].startswith("text/plain")
+
+
 def test_health_endpoint_reports_service_status() -> None:
     response = client.get("/health")
 
