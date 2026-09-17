@@ -36,6 +36,8 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 50040,
     strictPort: true,
+    // Allow external / reverse-proxied Host headers (Vite blocks unknown domains by default).
+    allowedHosts: true,
     proxy: {
       '/v1': backendTarget,
       '/api': backendTarget,
@@ -46,6 +48,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 50040,
     strictPort: true,
+    allowedHosts: true,
   },
   test: {
     include: ['tests/unit/**/*.spec.js'],
