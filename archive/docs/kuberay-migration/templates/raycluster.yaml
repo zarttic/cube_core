@@ -43,14 +43,60 @@ spec:
             emptyDir:
               sizeLimit: 20Gi
   workerGroupSpecs:
+    # Both groups declare cube_partition_worker: 1 so that a task-level
+    # worker_container_limit counts every worker pod, whichever group serves it.
     - groupName: partition-workers
       replicas: 0
       minReplicas: 0
-      maxReplicas: <max-worker-replicas>
+      maxReplicas: <max-small-worker-replicas>
       # One logical slot represents one partition Worker Pod. The web task
       # limit requests this resource and the Ray autoscaler uses it to scale.
       rayStartParams:
+        num-cpus: "1"
         resources: '"{\"cube_partition_worker\": 1}"'
+      template:
+        spec:
+          serviceAccountName: <service-account>
+          imagePullSecrets:
+            - name: <image-pull-secret>
+          containers:
+            - name: ray-worker
+              image: <registry>/<project>/cube-ray:<immutable-tag-or-digest>
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - secretRef:
+                    name: <cube-runtime-secret>
+              env:
+                - name: CUBE_SOURCE_CACHE_DIR
+                  value: /data/cube_split_source_cache
+              # requests.cpu stays 1 (one task per pod); limits.cpu allows the
+              # single task to burst without changing the scheduling contract.
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "2Gi"
+                  ephemeral-storage: "5Gi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
+                  ephemeral-storage: "10Gi"
+              volumeMounts:
+                - name: source-cache
+                  mountPath: /data/cube_split_source_cache
+          volumes:
+            - name: source-cache
+              emptyDir:
+                sizeLimit: 10Gi
+    # Entity (isea4h) cells can cover a whole scene; 1.6 GB was measured for a
+    # full-resolution read, so this group carries more memory and the extra
+    # label that CUBE_ENTITY_NODE_RESOURCE pins entity tasks to.
+    - groupName: partition-workers-large
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: <max-large-worker-replicas>
+      rayStartParams:
+        num-cpus: "1"
+        resources: '"{\"cube_partition_worker\": 1, \"cube_partition_worker_large\": 1}"'
       template:
         spec:
           serviceAccountName: <service-account>
@@ -68,17 +114,17 @@ spec:
                   value: /data/cube_split_source_cache
               resources:
                 requests:
-                  cpu: "4"
-                  memory: "16Gi"
-                  ephemeral-storage: "50Gi"
+                  cpu: "1"
+                  memory: "4Gi"
+                  ephemeral-storage: "5Gi"
                 limits:
-                  cpu: "4"
-                  memory: "16Gi"
-                  ephemeral-storage: "50Gi"
+                  cpu: "2"
+                  memory: "4Gi"
+                  ephemeral-storage: "12Gi"
               volumeMounts:
                 - name: source-cache
                   mountPath: /data/cube_split_source_cache
           volumes:
             - name: source-cache
               emptyDir:
-                sizeLimit: 50Gi
+                sizeLimit: 10Gi

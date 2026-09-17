@@ -24,6 +24,12 @@ CUBE_WEB_RAY_ADDRESS=auto
 Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址和凭据
 同样只从运行时环境读取。凭据不可写入任务业务 payload、业务配置表或仓库。
 
+异构 worker 组存在时，实体剖分任务要钝到大内存组，需额外设置：
+
+```text
+CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large
+```
+
 ## 单任务容器数量限制
 
 前端“容器数量”对应请求字段 `worker_container_limit`，表示一次剖分任务最多
@@ -79,6 +85,37 @@ kubectl -n kuberay-system patch raycluster cube-partition --type=json \
 
 补丁对**新创建**的 Worker Pod 生效；改动后确认 `ray status` 出现
 `cube_partition_worker`，再用一个容器数量大于 0 的小规模真实任务端到端确认。
+
+### 异构 worker 组（大/小两组）
+
+实体剖分（`isea4h`）的单个格元可覆盖整景，按格元窗口全分辨率读取时峰值内存实测可达 **1.6 GB**
+（单景 34,025×15,457 px、1 波段 uint16），2026-09-17 曾因 2Gi Pod 上限被 Ray 内存监控杀掉 3 次；
+而逻辑剖分（`geohash`/`mgrs`）的 chunk 任务普遍很小。因此生产集群用两组 worker：
+
+| 组 | 容器 requests / limits | `num-cpus` | 声明资源 | `maxReplicas` | 用途 |
+| --- | --- | --- | --- | --- | --- |
+| `partition-workers` | 1 CPU / 2Gi（limits：2 CPU / 10Gi 临时盘） | 1 | `cube_partition_worker: 1` | 14 | `geohash`/`mgrs` 及其余任务 |
+| `partition-workers-large` | 1 CPU / 4Gi（limits：2 CPU / 12Gi 临时盘） | 1 | `cube_partition_worker: 1` + `cube_partition_worker_large: 1` | 5 | `isea4h` 实体剖分 |
+
+- 两组都用 `num-cpus: 1` 且各声明 1 个逻辑槽位，所以“一个 Worker Pod 同时只跑一个剖分任务”
+  的语义不变；`limits.cpu` 给到 2 只是让单任务在 cgroup 层能突发多核，不改变调度语义。
+- `isea4h` 任务通过 `CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large` 钝到 4Gi 组
+  （任务请求 `cube_partition_worker_large: 0.001`，只有该组声明了这个标签）。未设置该变量时
+  实体任务与逻辑任务一样落在默认组，行为向后兼容。
+- **每个组都必须声明 `cube_partition_worker: 1`**，否则 `worker_container_limit > 0` 的任务在该组上
+  是不可调度请求，会永久 pending（见上一节的失败模式）；两边都声明才能保证 `limit=N` 跨组合计生效。
+- 容量：可调度节点为 `poufennode02`/`poufennode03`（`poufennode01` 已 cordon、`poufennode04` 不在集群），
+  每节点可分配 16 CPU / 31.5Gi；扣除 head 的 2 CPU / 8.5Gi 后留给 worker 约 51Gi，因此
+  `maxReplicas` 取 14（小）+ 5（大）≈ 48Gi。照搬 36 会得到长期 Pending 的 Pod。
+
+只读校验：
+
+```bash
+kubectl -n kuberay-system get raycluster cube-partition \
+  -o jsonpath='{range .spec.workerGroupSpecs[*]}{.groupName}{" "}{.maxReplicas}{" "}{.rayStartParams.resources}{"\n"}{end}'
+kubectl -n kuberay-system exec <worker-pod> -- bash -lc 'RAY_ADDRESS=auto ray status' | grep cube_partition_worker
+# 任务级：实体（isea4h）任务的 required_resources 应同时含槽位与 large 标签
+```
 
 ## 集群与镜像要求
 
