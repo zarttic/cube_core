@@ -1,6 +1,7 @@
 /** Rules removed from the active registry; hide from catalogs and live run summaries. */
 export const RETIRED_QUALITY_RULE_CODES = new Set([
   'product_band_contract',
+  'radar_band_contract',
   'carbon_observation_duplicates',
   'carbon_footprints',
   'carbon_quality_flags',
@@ -9,9 +10,9 @@ export const RETIRED_QUALITY_RULE_CODES = new Set([
 const ruleLabels = {
   index_schema: '索引结构完整性', output_count_consistency: '输出数量一致性',
   output_reference_integrity: '输出引用完整性', grid_method_agreement: '格网与剖分方式一致性',
-  cell_bbox_validity: '格网边界有效性', time_bucket_consistency: '时间分桶一致性',
+  cell_bbox_validity: '格网边界有效性', time_bucket_consistency: '采集时间分桶一致性',
   asset_readability: '数据单元可读性', asset_crs: '数据单元坐标系', window_bounds: '像素窗口边界',
-  optical_band_contract: '光学波段规范', radar_band_contract: '雷达极化通道规范',
+  optical_band_contract: '光学波段规范',
   carbon_schema: '碳卫星数据结构',
   carbon_coordinates: '碳卫星坐标有效性', carbon_xco2_range: 'XCO2 数值范围',
   carbon_sif_range: 'SIF 数值范围',
@@ -21,8 +22,8 @@ const errorLabels = {
   missing_st_code: '缺少时空编码', missing_tile_reference: '缺少瓦片引用',
   missing_output_version: '缺少输出版本', tile_grid_mismatch: '瓦片格网信息不一致',
   tile_kind_mismatch: '瓦片类型不一致', detail_grid_mismatch: '明细格网信息不一致',
-  invalid_bbox: '格网边界无效', missing_time_bucket: '缺少时间分桶',
-  time_bucket_mismatch: '时间分桶不一致', invalid_carbon_source: '碳卫星源数据地址无效',
+  invalid_bbox: '格网边界无效', missing_time_bucket: '缺少采集时间分桶',
+  time_bucket_mismatch: '采集时间分桶不一致', invalid_carbon_source: '碳卫星源数据地址无效',
   invalid_cog_uri: 'COG 数据地址无效', invalid_checksum: '校验和格式无效',
   object_reader_unavailable: '数据读取服务不可用', source_object_unreadable: '源数据无法读取',
   missing_crs: '缺少坐标系', invalid_crs: '坐标系无效',
@@ -93,8 +94,8 @@ const executionTextReplacements = [
   [/quality target has no output version/gi, '质检目标没有输出版本'],
   [/tile grid does not match output version/gi, '瓦片格网与输出版本不一致'],
   [/grid cell bbox must be \[west, south, east, north\] in WGS84 bounds/gi, '格网单元边界必须是 WGS84 范围内的［西、南、东、北］'],
-  [/index has no time bucket/gi, '索引记录缺少时间分桶'],
-  [/time bucket does not match acquisition date/gi, '时间分桶与采集日期不一致'],
+  [/index has no time bucket/gi, '索引记录缺少采集时间分桶'],
+  [/time bucket does not match acquisition date/gi, '采集时间分桶与采集日期不一致'],
   [/source asset must use an s3 COG URI/gi, '源数据必须使用 s3 COG 地址'],
   [/source asset checksum must be a SHA-256 hex digest/gi, '源数据校验和必须是 SHA-256 十六进制摘要'],
   [/quality object reader is unavailable/gi, '数据读取服务不可用'],
@@ -148,7 +149,7 @@ export function qualityExecutionErrorLabel(value) {
 }
 
 const metadataRules = new Set([
-  'optical_band_contract', 'radar_band_contract',
+  'optical_band_contract',
 ]);
 const sourceRules = new Set([
   'asset_readability', 'asset_crs', 'carbon_schema', 'carbon_coordinates',

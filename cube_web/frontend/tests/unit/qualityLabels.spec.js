@@ -34,10 +34,13 @@ describe('quality recovery labels', () => {
     expect(RETIRED_QUALITY_RULE_CODES.has('product_band_contract')).toBe(true);
     expect(RETIRED_QUALITY_RULE_CODES.has('carbon_observation_duplicates')).toBe(true);
     expect(RETIRED_QUALITY_RULE_CODES.has('carbon_footprints')).toBe(true);
+    expect(RETIRED_QUALITY_RULE_CODES.has('radar_band_contract')).toBe(true);
     expect(qualityRuleLabel('carbon_footprints')).toContain('已停用');
+    expect(qualityRuleLabel('radar_band_contract')).toContain('已停用');
     const filtered = filterActiveQualityRules([
       { code: 'asset_readability', name: '数据单元可读性' },
       { rule_code: 'product_band_contract', status: 'pass' },
+      { rule_code: 'radar_band_contract', status: 'warn' },
       { rule_code: 'carbon_observation_duplicates', status: 'fail' },
       { rule_code: 'carbon_footprints', status: 'fail' },
       { rule_code: 'carbon_schema', status: 'pass' },
@@ -46,6 +49,14 @@ describe('quality recovery labels', () => {
       'asset_readability',
       'carbon_schema',
     ]);
+  });
+
+  it('names the acquisition-time bucket explicitly', () => {
+    expect(qualityRuleLabel('time_bucket_consistency')).toBe('采集时间分桶一致性');
+    expect(qualityErrorLabel('missing_time_bucket')).toBe('缺少采集时间分桶');
+    expect(qualityErrorLabel('time_bucket_mismatch')).toBe('采集时间分桶不一致');
+    expect(qualityExecutionErrorLabel('time bucket does not match acquisition date')).toBe('采集时间分桶与采集日期不一致');
+    expect(qualityExecutionErrorLabel('index has no time bucket')).toBe('索引记录缺少采集时间分桶');
   });
 
   it('translates detailed quality execution failures while keeping the root cause', () => {

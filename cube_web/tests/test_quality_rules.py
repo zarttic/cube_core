@@ -69,7 +69,6 @@ def test_snapshot_contains_every_interpretive_field() -> None:
     assert {"index_schema", "asset_readability", "asset_crs", "window_bounds", "grid_method_agreement"} <= {item.code for item in radar}
     assert "product_year_consistency" not in {item.code for item in product}
     assert "optical_band_contract" in {item.code for item in optical}
-    assert "radar_band_contract" in {item.code for item in radar}
     assert "product_band_contract" not in {item.code for item in product}
     assert not {"pixel_sample", "metadata_completeness", "declared_metadata_defects", "declared_metadata_warnings"} & {item.code for item in (*optical, *radar, *product, *carbon)}
     assert "asset_crs" not in {item.code for item in carbon}
@@ -89,7 +88,6 @@ def test_data_type_specific_rules_are_optional_and_can_be_disabled() -> None:
     optional_codes = {
         "asset_crs",
         "optical_band_contract",
-        "radar_band_contract",
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
@@ -300,23 +298,11 @@ def test_asset_crs_compares_declared_value_with_raster_metadata() -> None:
     assert [finding.error_code for finding in rule.evaluate(context)] == ["crs_metadata_mismatch"]
 
 
-def test_product_specific_band_contract_requires_normalized_band_type() -> None:
-    registry = default_rule_registry()
-    context = RuleContext(
-        dataset_id="radar-a",
-        output_version="v1",
-        data_type="radar",
-        product_type="sar",
-        repository=_RowsRepository(
-            ("source_asset_id", "band_code", "band_type"),
-            [("asset-a", "VV", "spectral"), ("asset-b", None, None)],
-        ),
-        object_reader=None,
-    )
+def test_radar_datasets_no_longer_carry_a_band_contract_rule() -> None:
+    """Radar band typing is not enforced: SAR-derived products use variable bands."""
 
-    rule = registry.get("radar_band_contract")
-    assert rule is not None
-    assert [finding.error_code for finding in rule.evaluate(context)] == ["invalid_band_type", "missing_band_metadata"]
+    assert default_rule_registry().get("radar_band_contract") is None
+    assert "radar_band_contract" not in default_enabled_optional_rules()
 
 
 def test_optical_band_contract_accepts_known_quality_variables_only() -> None:

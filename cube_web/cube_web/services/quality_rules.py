@@ -11,14 +11,13 @@ from pyproj import CRS
 
 from cube_web.services.quality_contracts import QualityResult, RuleSnapshot, TerminalQualityStatus
 
-DEFAULT_RULE_SET_VERSION = "2026.08.09-v9"
+DEFAULT_RULE_SET_VERSION = "2026.09.12-v10"
 
 # Optional rules can be toggled on/off via quality config. Mandatory rules always run.
 OPTIONAL_QUALITY_RULE_CODES = frozenset(
     {
         "asset_crs",
         "optical_band_contract",
-        "radar_band_contract",
         "carbon_schema",
         "carbon_coordinates",
         "carbon_xco2_range",
@@ -32,12 +31,11 @@ RULE_NAMES = {
     "output_reference_integrity": "输出引用完整性",
     "grid_method_agreement": "格网与剖分方式一致性",
     "cell_bbox_validity": "格网边界有效性",
-    "time_bucket_consistency": "时间分桶一致性",
+    "time_bucket_consistency": "采集时间分桶一致性",
     "asset_readability": "数据单元可读性",
     "asset_crs": "数据单元坐标系",
     "window_bounds": "像素窗口边界",
     "optical_band_contract": "光学波段规范",
-    "radar_band_contract": "雷达极化通道规范",
     "carbon_schema": "碳卫星数据结构",
     "carbon_coordinates": "碳卫星坐标有效性",
     "carbon_xco2_range": "XCO2 数值范围",
@@ -50,12 +48,11 @@ RULE_DESCRIPTIONS = {
     "output_reference_integrity": "检查索引引用的瓦片或输出对象是否真实存在。",
     "grid_method_agreement": "确认格网类型、层级和剖分方式与任务配置一致。",
     "cell_bbox_validity": "验证瓦片边界是否为合法的经纬度范围并且方向正确。",
-    "time_bucket_consistency": "检查数据时间分桶是否与数据单元采集时间一致。",
+    "time_bucket_consistency": "检查索引记录的采集时间分桶是否与数据单元采集时间一致。",
     "asset_readability": "尝试读取输出数据，确认文件可打开且内容可访问。",
     "asset_crs": "检查数据单元是否声明有效且可解析的坐标参考系。",
     "window_bounds": "验证像素窗口没有超出源影像的有效行列范围。",
     "optical_band_contract": "检查光学产品波段名称、数量和展示字段是否符合规范。",
-    "radar_band_contract": "检查雷达产品极化通道名称和数据结构是否符合规范。",
     "carbon_schema": "检查碳卫星文件是否包含规定的观测变量和维度结构。",
     "carbon_coordinates": "验证碳卫星观测经纬度是否存在且处于合法范围。",
     "carbon_xco2_range": "检查XCO2观测值是否落在物理合理范围内。",
@@ -498,10 +495,6 @@ def _optical_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
     )
 
 
-def _radar_band_contract(context: RuleContext) -> Iterable[QualityFinding]:
-    return _band_contract(context, "polarization")
-
-
 def _window_bounds(context: RuleContext) -> Iterable[QualityFinding]:
     for row in _rows(
         context,
@@ -655,7 +648,6 @@ def default_rule_registry() -> RuleRegistry:
         "asset_crs": _asset_crs,
         "window_bounds": _window_bounds,
         "optical_band_contract": _optical_band_contract,
-        "radar_band_contract": _radar_band_contract,
         "carbon_schema": _carbon_schema,
         "carbon_coordinates": _carbon_coordinates,
         "carbon_xco2_range": _carbon_xco2_range,
@@ -694,7 +686,6 @@ def default_rule_registry() -> RuleRegistry:
     )
     for code, data_type, band_type in (
         ("optical_band_contract", "optical", "spectral"),
-        ("radar_band_contract", "radar", "polarization"),
     ):
         parameters: dict[str, Any] = {"expected_band_type": band_type}
         implementation_version = "1.0.0"

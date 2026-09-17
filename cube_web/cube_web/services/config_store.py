@@ -56,7 +56,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled_optional_rules": [
             "asset_crs",
             "optical_band_contract",
-            "radar_band_contract",
             "carbon_schema",
             "carbon_coordinates",
             "carbon_xco2_range",
@@ -288,7 +287,7 @@ def normalized_config(config: dict[str, Any] | None) -> dict[str, Any]:
     quality["target_crs"] = _text_value(quality.get("target_crs"), "quality.target_crs")
     quality["history_limit"] = _int_value(quality.get("history_limit"), "history_limit", minimum=1, maximum=200)
     merged["quality"]["enabled_optional_rules"] = list(
-        _normalize_enabled_optional_quality_rules(merged["quality"].get("enabled_optional_rules"))
+        _normalize_enabled_optional_quality_rules(merged["quality"].get("enabled_optional_rules"), drop_retired=True)
     )
     return merged
 
@@ -345,13 +344,18 @@ def optical_quality_defaults() -> dict[str, Any]:
     return dict(optical) if isinstance(optical, dict) else dict(DEFAULT_CONFIG["quality"]["optical"])
 
 
-def _normalize_enabled_optional_quality_rules(codes: Any) -> tuple[str, ...]:
-    from cube_web.services.quality_rules import normalize_enabled_optional_rules
+def _normalize_enabled_optional_quality_rules(codes: Any, *, drop_retired: bool = False) -> tuple[str, ...]:
+    from cube_web.services.quality_rules import OPTIONAL_QUALITY_RULE_CODES, normalize_enabled_optional_rules
 
     if codes is None:
         return normalize_enabled_optional_rules(None)
     if not isinstance(codes, (list, tuple, set)):
         raise ValueError("quality.enabled_optional_rules must be a list of rule codes")
+    if drop_retired:
+        # Stored config may still name rules that were retired from the registry. Ignore those
+        # instead of failing every read and quality run that consumes the stored list; explicit
+        # API input is still validated strictly.
+        codes = [code for code in codes if str(code or "").strip() in OPTIONAL_QUALITY_RULE_CODES]
     return normalize_enabled_optional_rules(codes)
 
 
@@ -365,7 +369,7 @@ def get_enabled_optional_quality_rules() -> tuple[str, ...]:
         return tuple(sorted(default_enabled_optional_rules()))
     config = store.get_config_record()["config"]
     raw = (config.get("quality") or {}).get("enabled_optional_rules")
-    return _normalize_enabled_optional_quality_rules(raw)
+    return _normalize_enabled_optional_quality_rules(raw, drop_retired=True)
 
 
 def set_enabled_optional_quality_rules(codes: Iterable[str] | None) -> tuple[str, ...]:
