@@ -193,7 +193,7 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
     if source_cache_dir:
         env_vars["CUBE_SOURCE_CACHE_DIR"] = source_cache_dir
 
-    runtime_env = {
+    runtime_env: dict[str, Any] = {
         "working_dir": str(project_root),
         "excludes": [
             ".git/**",
@@ -208,6 +208,18 @@ def _ray_runtime_env_from_env() -> dict[str, Any] | None:
             ".venv/**",
             "**/__pycache__/**",
             "**/.pytest_cache/**",
+            "**/.ruff_cache/**",
+            "**/build/**",
+            "**/tests/**",
+            "**/scripts/**",
+            "**/*.md",
+            "**/*.pyc",
+            "**/*.pyi",
+            ".claude/**",
+            ".dggrid_src/**",
+            "docs/**",
+            "archive/**",
+            "*.jpg",
             "cube_split/*.gz",
             "cube_split/*.nc4",
             "cube_split/data/**",
