@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 import pytest
 
@@ -269,3 +270,44 @@ def test_open_gauss_mutations_lock_run_before_scene_and_replay_completed_start()
     assert _sql_repository(replay_cursor).start_scene("run-a", "scene-a") == "persisted-run"
     assert replay_cursor.statements[0].startswith("SELECT status FROM ingest_runs")
     assert not any(sql.startswith("UPDATE ingest_runs") for sql in replay_cursor.statements)
+
+
+def test_ingest_run_keyword_filter_matches_partition_batch_name() -> None:
+    where, params = OpenGaussIngestRepository._filters(keyword="黄土高原", dataset_id=None, status=None)
+
+    assert "i.partition_run_id ILIKE %s" in where
+    assert "d.dataset_title ILIKE %s" in where
+    assert "lb.batch_name ILIKE %s" in where
+    assert params == ["%黄土高原%"] * 6
+
+
+def test_open_gauss_ingest_run_detail_exposes_partition_batch_name() -> None:
+    class _RunCursor(_RecordingCursor):
+        def execute(self, sql, params=()):
+            super().execute(sql, params)
+            if sql.startswith("SELECT i.*,d.dataset_code"):
+                assert "load_batches" in sql
+                self._one = {
+                    "ingest_run_id": "ingest-run-auto-1",
+                    "partition_run_id": "partition-run-1",
+                    "dataset_id": "dataset-a",
+                    "dataset_code": "ARD-OPTICAL",
+                    "partition_batch_name": "2021年中国黄土高原GF-1 ARD地表反射率数据-01",
+                    "status": "completed",
+                    "requested_by": "operator",
+                    "error_message": None,
+                    "created_at": datetime(2026, 9, 17, tzinfo=UTC),
+                    "started_at": None,
+                    "completed_at": None,
+                    "attributes": {},
+                }
+            return
+
+    cursor = _RunCursor()
+    repository = object.__new__(OpenGaussIngestRepository)
+    repository.pool = _RecordingPool(cursor)
+
+    detail = repository.get("ingest-run-auto-1")
+
+    assert detail.partition_batch_name == "2021年中国黄土高原GF-1 ARD地表反射率数据-01"
+    assert detail.partition_run_id == "partition-run-1"

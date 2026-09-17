@@ -636,7 +636,12 @@ class OpenGaussIngestRepository:
     def get(self, ingest_run_id: str) -> IngestRun:
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT i.*,d.dataset_code FROM ingest_runs i JOIN datasets d ON d.dataset_id=i.dataset_id WHERE i.ingest_run_id=%s",
+                "SELECT i.*,d.dataset_code,lb.batch_name AS partition_batch_name "
+                "FROM ingest_runs i "
+                "JOIN datasets d ON d.dataset_id=i.dataset_id "
+                "LEFT JOIN partition_runs pr ON pr.partition_run_id=i.partition_run_id "
+                "LEFT JOIN load_batches lb ON lb.load_batch_id=NULLIF(pr.source_load_batch_ids->>0,'')"
+                " WHERE i.ingest_run_id=%s",
                 (ingest_run_id,),
             )
             run = cur.fetchone()
@@ -1006,9 +1011,15 @@ class OpenGaussIngestRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if keyword:
-            clauses.append("(i.ingest_run_id ILIKE %s OR i.dataset_id ILIKE %s OR d.dataset_code ILIKE %s)")
+            clauses.append(
+                "(i.ingest_run_id ILIKE %s OR i.partition_run_id ILIKE %s OR i.dataset_id ILIKE %s "
+                "OR d.dataset_code ILIKE %s OR d.dataset_title ILIKE %s "
+                "OR EXISTS (SELECT 1 FROM partition_runs pr JOIN load_batches lb "
+                "ON lb.load_batch_id=NULLIF(pr.source_load_batch_ids->>0,'')"
+                " WHERE pr.partition_run_id=i.partition_run_id AND lb.batch_name ILIKE %s))"
+            )
             term = f"%{keyword.strip()}%"
-            params.extend((term, term, term))
+            params.extend((term,) * 6)
         if dataset_id:
             clauses.append("i.dataset_id=%s")
             params.append(dataset_id)

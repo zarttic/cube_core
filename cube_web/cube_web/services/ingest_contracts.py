@@ -87,6 +87,10 @@ class IngestRun(FrozenModel):
     partition_run_id: str
     dataset_id: str
     dataset_code: str | None = None
+    # Human readable name of the source partition batch (`load_batches.batch_name`).
+    # The partition run id stays authoritative; this field only helps operators
+    # recognise the batch behind an ingest record.
+    partition_batch_name: str | None = None
     status: IngestRunStatus
     requested_by: str
     error_message: str | None

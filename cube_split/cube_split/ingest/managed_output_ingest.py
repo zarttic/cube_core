@@ -140,7 +140,7 @@ def _load_snapshot(
             raise RuntimeError("managed output has no Scene asset mapping")
         cur.execute(
             "SELECT i.*,a.cog_uri,a.source_uri,a.checksum AS source_checksum,a.time_start,a.attributes AS asset_attributes,b.band_name,sb.band_unit_id,"
-            "g.bbox AS cell_bbox,g.geometry AS cell_geometry,t.width,t.height,t.checksum AS tile_checksum,t.tile_uri "
+            "t.width,t.height,t.checksum AS tile_checksum,t.tile_uri "
             "FROM partition_indexes i "
             "JOIN partition_dataset_assets a ON a.dataset_id=i.dataset_id AND a.source_asset_id=i.source_asset_id "
             "LEFT JOIN partition_dataset_bands b ON b.dataset_id=i.dataset_id AND b.source_asset_id=i.source_asset_id AND b.band_code=i.band_code "
@@ -154,6 +154,23 @@ def _load_snapshot(
             (output_dataset_id, output_version, list(scene_ids), list(band_unit_ids), list(band_unit_ids)),
         )
         indexes = cur.fetchall()
+        # 网格几何是 TOAST 列, 而同一 output_version 的格元数远小于索引行数(实测 70,909 行 : 248 格元):
+        # 把它们逐行 JOIN 出来意味着上万次随机 TOAST 读(实测 6.62 s 里占 1.8 s), 一次性批量取回再回填
+        # 只要 0.01 s。这里保留 JOIN 作为“索引行必须有对应格元”的过滤语义, 只不再取它的列。
+        cur.execute(
+            "SELECT grid_type, grid_level, space_code, topology_code, bbox, geometry "
+            "FROM partition_grid_cells WHERE dataset_id=%s AND output_version=%s",
+            (output_dataset_id, output_version),
+        )
+        cells = {
+            (row["grid_type"], row["grid_level"], row["space_code"], row["topology_code"]): (row["bbox"], row["geometry"])
+            for row in cur.fetchall()
+        }
+        for row in indexes:
+            cell = cells.get((row["grid_type"], row["grid_level"], row["space_code"], row["topology_code"]))
+            if cell is None:
+                raise RuntimeError(f"managed output index has no grid cell: {row['space_code']}")
+            row["cell_bbox"], row["cell_geometry"] = cell
     if not indexes:
         raise RuntimeError("managed output has no indexes")
     return {"dataset": dict(dataset), "output": dict(output), "scene_assets": [dict(row) for row in scene_assets], "indexes": [dict(row) for row in indexes]}
@@ -191,6 +208,12 @@ def _ingest_raster(conn: Any, snapshot: dict[str, Any], version: str, job_id: st
     raw: dict[tuple[str, str], RawAssetRecord] = {}
     fact_candidates: dict[tuple[str, int, str, str, str], list[tuple[dict[str, Any], dict[str, Any], str]]] = {}
     entity_rows: list[dict[str, Any]] = []
+    # 几何与 bbox 只依赖格元 (grid_type, grid_level, space_code, topology_code)，而同一格元会出现在
+    # 多个波段上（单景 4 波段）。按格元缓存后，逐行/逐 fact 的 json.loads 与 GeoJSON 序列化只做一次
+    # （此前 _bbox 每 fact 重复 3 次、cell_geometry_geojson 每波段重复 1 次）。
+    cell_bounds: dict[tuple[str, int, str, str], tuple[float, float, float, float]] = {}
+    cell_geom_text: dict[tuple[str, int, str, str], str] = {}
+    missing = object()
     for row in snapshot["indexes"]:
         scene = asset_scenes.get(str(row["source_asset_id"]))
         if scene is None:
@@ -203,7 +226,11 @@ def _ingest_raster(conn: Any, snapshot: dict[str, Any], version: str, job_id: st
         source_uri = str(row.get("cog_uri") or row.get("source_uri") or "")
         band = str(row["band_code"])
         raw.setdefault((scene_id, band), RawAssetRecord(dataset["dataset_id"], sensor, scene_id, band, acq_text, source_uri, version, job_id))
-        bounds = _bbox(row)
+        cell_key = (str(row["grid_type"]), int(row["grid_level"]), str(row["space_code"]), str(row.get("topology_code") or ""))
+        bounds = cell_bounds.get(cell_key)
+        if bounds is None:
+            bounds = _bbox(row)
+            cell_bounds[cell_key] = bounds
         value_uri = str(row["value_ref_uri"])
         key = (str(row["grid_type"]), int(row["grid_level"]), str(row["space_code"]), str(row["time_bucket"]), band)
         fact_candidates.setdefault(key, []).append((row, scene, acq_text))
@@ -219,11 +246,18 @@ def _ingest_raster(conn: Any, snapshot: dict[str, Any], version: str, job_id: st
     facts: list[CubeFactRecord] = []
     for key, candidates in fact_candidates.items():
         winner_row, winner_scene, _ = max(candidates, key=lambda item: (item[2], str(item[1]["scene_id"])))
-        bounds = _bbox(winner_row)
-        geom_text = cell_geometry_geojson(
-            grid_type=key[0], grid_level=key[1], space_code=key[2],
-            topology_code=winner_row.get("topology_code"), geometry=_geometry(winner_row),
-        )
+        cell_key = (key[0], key[1], key[2], str(winner_row.get("topology_code") or ""))
+        bounds = cell_bounds.get(cell_key)
+        if bounds is None:
+            bounds = _bbox(winner_row)
+            cell_bounds[cell_key] = bounds
+        geom_text = cell_geom_text.get(cell_key)
+        if geom_text is None:
+            geom_text = cell_geometry_geojson(
+                grid_type=key[0], grid_level=key[1], space_code=key[2],
+                topology_code=winner_row.get("topology_code"), geometry=_geometry(winner_row),
+            )
+            cell_geom_text[cell_key] = geom_text
         candidate_scene_ids = sorted({str(item[1]["scene_id"]) for item in candidates})
         facts.append(CubeFactRecord(
             key[0], key[1], key[2], key[3], key[4], str(winner_row["st_code"]), *bounds, geom_text,

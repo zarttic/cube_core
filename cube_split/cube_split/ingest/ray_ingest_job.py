@@ -787,6 +787,11 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         "text",
         "text",
     )
+    # UPDATE 分支刻意不重写 cell_geom: 同一 (grid_type, grid_level, space_code) 的网格几何是确定的,
+    # 而这三列都在 ON 键里, 因此对 MATCHED 行重写几何只是重复解析 GeoJSON 并重过一遍 typmod 校验
+    # (20k 行全 MATCHED 实测 min -30%、中位 -12%; 脏页数不变, 省下的是 CPU 而非 IO)。
+    # 几何修正走新的 cube_version(NOT MATCHED 分支仍会解析 GeoJSON); 历史 NULL 几何由
+    # _backfill_missing_cell_geom 兜底。
     sql_template = """
         MERGE INTO rs_cube_cell_fact target
         USING ({source_sql}) source
@@ -804,7 +809,6 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
           cell_min_lat = source.cell_min_lat,
           cell_max_lon = source.cell_max_lon,
           cell_max_lat = source.cell_max_lat,
-          cell_geom = ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326),
           value_ref_uri = source.value_ref_uri,
           source_scene_count = source.source_scene_count,
           provenance_json = source.provenance_json,
@@ -849,6 +853,7 @@ def upsert_cube_facts_postgres(conn: Any, rows: list[CubeFactRecord], batch_size
         try:
             keys = ("grid_type", "grid_level", "space_code", "time_bucket", "band", "cube_version")
             cur.execute(sql_template.format(source_sql=_deduplicated_temp_source(temp, keys)))
+            _backfill_missing_cell_geom(cur, temp)
         finally:
             _drop_temp_table(cur, temp)
 
@@ -896,6 +901,29 @@ def _deduplicated_temp_source(temp: str, key_columns: tuple[str, ...]) -> str:
     """OpenGauss rejects duplicate source keys inside one MERGE; keep one row per key."""
     keys = ", ".join(key_columns)
     return f"SELECT DISTINCT ON ({keys}) * FROM {temp} ORDER BY {keys}"
+
+
+_CUBE_FACT_KEY_MATCH = " AND ".join(
+    f"target.{column} = source.{column}" for column in ("grid_type", "grid_level", "space_code", "time_bucket", "band", "cube_version")
+)
+
+
+def _backfill_missing_cell_geom(cursor: Any, temp: str) -> None:
+    """为 cell_geom 缺失的历史行补几何。
+
+    MERGE 的 UPDATE 分支刻意不重写 cell_geom(见 upsert_cube_facts_postgres 注释), 因此迁移或历史
+    遗留的 `cell_geom IS NULL` 行需要在这里兜住。先做一次廉价探测, 没有 NULL 行时整段零成本;
+    有 NULL 行时才按 ON 键从 temp 源表取几何回填。
+    """
+    cursor.execute("SELECT 1 FROM rs_cube_cell_fact WHERE cell_geom IS NULL LIMIT 1")
+    if cursor.fetchone() is None:
+        return
+    cursor.execute(
+        f"""UPDATE rs_cube_cell_fact target
+            SET cell_geom = ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)
+            FROM {temp} source
+            WHERE target.cell_geom IS NULL AND {_CUBE_FACT_KEY_MATCH}"""
+    )
 
 
 def _drop_temp_table(cursor: Any, temp: str) -> None:

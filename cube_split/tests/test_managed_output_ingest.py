@@ -273,3 +273,112 @@ def test_managed_target_verification_casts_opengauss_text_keys() -> None:
 
     assert "CAST(run_id AS VARCHAR(128))=%s::varchar(128)" in connection.cursor_value.sql
     assert "CAST(cube_version AS VARCHAR(128))=%s::varchar(128)" in connection.cursor_value.sql
+
+
+def test_load_snapshot_fetches_cell_geometry_once_per_cell() -> None:
+    """格元几何改为一次性批量取回(实测 70,909 行 : 248 格元, 8.71 s -> 5.30 s)。
+
+    锁定两点: 主查询不得再逐行 JOIN 取几何; snapshot 行必须仍带 cell_bbox/cell_geometry。
+    """
+    from cube_split.ingest.managed_output_ingest import _load_snapshot
+
+    index_rows = [
+        {"grid_type": "isea4h", "grid_level": 4, "space_code": "A1", "topology_code": None, "output_id": 1,
+         "dataset_id": "ds", "source_asset_id": "asset-1", "band_code": "B01", "time_bucket": "2026-01", "st_code": "st", "value_ref_uri": "s3://cube/v/1"},
+        {"grid_type": "isea4h", "grid_level": 4, "space_code": "A2", "topology_code": None, "output_id": 2,
+         "dataset_id": "ds", "source_asset_id": "asset-1", "band_code": "B01", "time_bucket": "2026-01", "st_code": "st", "value_ref_uri": "s3://cube/v/2"},
+    ]
+    cell_rows = [
+        {"grid_type": "isea4h", "grid_level": 4, "space_code": "A1", "topology_code": None, "bbox": "[1,2,3,4]", "geometry": '{"type":"Polygon","coordinates":[]}'},
+        {"grid_type": "isea4h", "grid_level": 4, "space_code": "A2", "topology_code": None, "bbox": [5.0, 6.0, 7.0, 8.0], "geometry": {"type": "Polygon", "coordinates": [[[5, 6]]]}},
+    ]
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            self.executed.append(" ".join(sql.split()))
+            return self
+
+        def fetchone(self):
+            sql = self.executed[-1]
+            if sql.startswith("SELECT * FROM datasets"):
+                return {"dataset_id": "ds", "data_type": "optical"}
+            if sql.startswith("SELECT * FROM partition_output_versions"):
+                return {"output_version": "v1", "partition_method": "entity"}
+            return None
+
+        def fetchall(self):
+            sql = self.executed[-1]
+            if "FROM partition_indexes" in sql:
+                return index_rows
+            if "FROM partition_grid_cells" in sql:
+                return cell_rows
+            return [{"scene_id": "S1", "asset_id": "asset-1"}]
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self, **_kwargs):
+            return self.cursor_obj
+
+    conn = FakeConn()
+    snapshot = _load_snapshot(conn, "ds", "ds", "v1", ("S1",))
+    main_sql = next(sql for sql in conn.cursor_obj.executed if "FROM partition_indexes" in sql)
+    assert "cell_bbox" not in main_sql and "cell_geometry" not in main_sql
+    assert "g.geometry" not in main_sql
+    assert "JOIN partition_grid_cells g" in main_sql  # JOIN 仍作为"索引行必须有格元"的过滤语义
+    assert any(sql.startswith("SELECT grid_type, grid_level, space_code, topology_code, bbox, geometry FROM partition_grid_cells") for sql in conn.cursor_obj.executed)
+    assert snapshot["indexes"][0]["cell_bbox"] == "[1,2,3,4]"
+    assert snapshot["indexes"][1]["cell_geometry"] == {"type": "Polygon", "coordinates": [[[5, 6]]]}
+
+
+def test_load_snapshot_rejects_index_without_grid_cell() -> None:
+    """批量取回后仍必须保证每个索引行都能配上格元, 缺失要立刻报错而不是默默产生坏几何。"""
+    import pytest
+    from cube_split.ingest.managed_output_ingest import _load_snapshot
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            self.executed.append(" ".join(sql.split()))
+            return self
+
+        def fetchone(self):
+            sql = self.executed[-1]
+            if sql.startswith("SELECT * FROM datasets"):
+                return {"dataset_id": "ds", "data_type": "optical"}
+            if sql.startswith("SELECT * FROM partition_output_versions"):
+                return {"output_version": "v1", "partition_method": "entity"}
+            return None
+
+        def fetchall(self):
+            sql = self.executed[-1]
+            if "FROM partition_indexes" in sql:
+                return [{"grid_type": "isea4h", "grid_level": 4, "space_code": "MISSING", "topology_code": None, "output_id": 1}]
+            if "FROM partition_grid_cells" in sql:
+                return []
+            return [{"scene_id": "S1", "asset_id": "asset-1"}]
+
+    class FakeConn:
+        def cursor(self, **_kwargs):
+            return FakeCursor()
+
+    with pytest.raises(RuntimeError, match="has no grid cell"):
+        _load_snapshot(FakeConn(), "ds", "ds", "v1", ("S1",))

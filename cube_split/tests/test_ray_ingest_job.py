@@ -477,6 +477,10 @@ def test_postgres_upserts_copy_rows_then_merge_once() -> None:
         def execute(self, sql, params=()):
             self.calls.append((sql, tuple(params)))
 
+        def fetchone(self):
+            # upsert_cube_facts_postgres 会探测是否存在缺失几何的历史行; 默认为没有。
+            return None
+
         def copy(self, sql):
             self.calls.append((sql, ()))
             return FakeCopy(self.copied_rows)
@@ -637,3 +641,108 @@ def test_materialize_cog_assets_copies_to_standard_layout(tmp_path: Path):
     assert target.read_bytes() == b"abc"
     assert "dataset=landsat8" in str(target)
     assert "scene_id=SCENE_A" in str(target)
+
+
+def _recording_conn(*, null_geometry: bool = False) -> "SimpleNamespace":
+    """记录 execute/COPY 调用的最小假连接, 用于断言 MERGE 的 SQL 形状。
+
+    null_geometry=True 时"缺失几何探测"返回命中, 驱动 _backfill_missing_cell_geom 回填分支。
+    """
+
+    class FakeCopy:
+        def __init__(self) -> None:
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def write_row(self, row) -> None:
+            self.rows.append(row)
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = []
+            self.copied_rows = []
+            self._results = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+            if "cell_geom IS NULL LIMIT 1" in sql:
+                self._results.append((1,) if null_geometry else None)
+            else:
+                self._results.append(None)
+            return self
+
+        def fetchone(self):
+            return self._results.pop() if self._results else None
+
+        def copy(self, _sql):
+            copy = FakeCopy()
+            self.copied_rows.extend(copy.rows)
+            return copy
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    return SimpleNamespace(conn=FakeConn())
+
+
+def _cube_fact_records():
+    geometry = {"type": "Polygon", "coordinates": [[[116.0, 39.0], [117.0, 39.0], [117.0, 40.0], [116.0, 39.0]]]}
+    return [
+        ray_ingest_job.CubeFactRecord(
+            "geohash", 6, "wx4g0b", "2026-01", "B01", "st-1", 116.0, 39.0, 117.0, 40.0,
+            json.dumps(geometry), "s3://cube/value/1.tif", 2, json.dumps({"winner_scene_id": "S1"}),
+            "latest_acquisition", "cube-v1", "run-1",
+        )
+    ]
+
+
+def test_cube_fact_merge_never_rewrites_key_determined_geometry() -> None:
+    """MATCHED 分支不得重写 cell_geom: 几何由 ON 键中的 grid_type/grid_level/space_code 唯一确定。
+
+    重写只会重复解析 GeoJSON 并重过 typmod 校验(实测 min -30%); 几何修正走新的 cube_version。
+    """
+    harness = _recording_conn()
+    ray_ingest_job.upsert_cube_facts_postgres(harness.conn, _cube_fact_records(), batch_size=10)
+
+    merge_sql = next(sql for sql, _ in harness.conn.cursor_obj.calls if "MERGE INTO rs_cube_cell_fact" in sql)
+    update_branch, insert_branch = merge_sql.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")
+    assert "cell_geom" not in update_branch
+    assert "ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)" in insert_branch
+    assert "ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)" in merge_sql
+
+
+def test_cube_fact_upsert_backfills_only_when_legacy_geometry_is_missing() -> None:
+    """没有 NULL 几何时不发 UPDATE; 有 NULL 几何时按 ON 键从 temp 源表回填。"""
+
+    # 情况一: 表里没有 NULL 几何 -> 只探测, 不回填
+    clean = _recording_conn(null_geometry=False)
+    ray_ingest_job.upsert_cube_facts_postgres(clean.conn, _cube_fact_records(), batch_size=10)
+    calls = [sql for sql, _ in clean.conn.cursor_obj.calls]
+    assert sum("cell_geom IS NULL LIMIT 1" in sql for sql in calls) == 1
+    assert not any(sql.lstrip().startswith("UPDATE rs_cube_cell_fact") for sql in calls)
+
+    # 情况二: 表里存在 NULL 几何 -> 回填, 且限定 target.cell_geom IS NULL + 六列 ON 键
+    dirty = _recording_conn(null_geometry=True)
+    ray_ingest_job.upsert_cube_facts_postgres(dirty.conn, _cube_fact_records(), batch_size=10)
+    backfill = next(
+        sql for sql, _ in dirty.conn.cursor_obj.calls if sql.lstrip().startswith("UPDATE rs_cube_cell_fact")
+    )
+    assert "ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)" in backfill
+    assert "target.cell_geom IS NULL" in backfill
+    for column in ("grid_type", "grid_level", "space_code", "time_bucket", "band", "cube_version"):
+        assert f"target.{column} = source.{column}" in backfill

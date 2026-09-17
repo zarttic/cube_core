@@ -52,6 +52,7 @@ def test_list_and_get_ingest_runs_match_frontend_contract() -> None:
     assert response.json()["total"] == 2
     assert response.json()["summary"]["scene_count"] == 2
     assert response.json()["items"][0]["ingest_run_id"] == queued_id
+    assert "partition_batch_name" in response.json()["items"][0]
     detail = client.get(f"/v1/ingest-runs/{failed_id}")
     assert detail.status_code == 200
     assert detail.json()["failed_scene_count"] == 1

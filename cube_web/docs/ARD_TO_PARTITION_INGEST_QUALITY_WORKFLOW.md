@@ -350,6 +350,8 @@ ARD 等上游系统通过 `POST /v1/partition/schemas/import` 交付规范化清
 
 “待入库集合”列表（`GET /v1/ingest-runs/collections`）的每条集合新增 `datasets: [{dataset_id, dataset_code, dataset_title}]` 字段，用于标识该剖分批次包含哪些数据集；该字段为增量字段，`dataset_count` 及其他字段语义不变。页面上该行主标题展示数据集标题（多个数据集显示为“标题 等 N 个数据集”），剖分运行 ID 移到次要行展示，便于操作员按数据集识别集合归属。
 
+入库记录列表与详情（`GET /v1/ingest-runs`、`GET /v1/ingest-runs/{id}`）的每条入库运行新增 `partition_batch_name` 字段，取该剖分批次来源载入批次的 `load_batches.batch_name`（按 `partition_runs.source_load_batch_ids` 的首个批次解析），不可解析时为 `null`；`partition_run_id` 仍是权威标识，该字段只用于人眼识别。页面上「入库记录」的“数据入库”列主标题展示 `partition_batch_name`（缺失时回落数据集编码，再回落数据集 ID），次要行保留数据集编码与入库运行 ID 以便按 ID 检索；“剖分运行”列改名为“剖分批次”，仍展示 `partition_run_id`。关键词检索同时匹配入库运行 ID、剖分运行 ID、数据集编码/标题和剖分批次名称。
+
 ### 8.5 这一步结束后，业务上得到什么结果
 
 到这里，一批数据已经不只是“跑过了”，而是“正式进入平台成果体系”。
