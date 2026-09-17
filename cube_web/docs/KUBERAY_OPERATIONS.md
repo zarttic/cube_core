@@ -52,6 +52,34 @@ Ray 会因待调度的逻辑资源请求触发 KubeRay 扩容，空闲超时后�
 `minReplicas`。该资源是 Ray 的逻辑调度资源，实际 Pod 的 CPU、内存仍由
 Kubernetes requests/limits 控制。
 
+### 运行实例校验与修复
+
+Worker 组一旦缺少 `resources` 声明，请求该逻辑资源的 task 会变成不可满足（infeasible）：
+Ray 不报错也不超时，task 永久 pending，`ray_job` 任务一直处于运行中。日志特征是
+`(raylet) There are tasks with infeasible resource requests ...` 和每 5 秒重复的
+`(autoscaler) No available node types can fulfill resource requests
+{'CPU': 1.0, 'cube_partition_worker': 1.0}*N`；此时扩容 worker 也不会让任务完成。
+2026-09-17 的运行实例即因此导致容器数量大于 0 的剖分任务全部被人工取消。
+
+只读校验（第二处的输出必须出现 `cube_partition_worker`）：
+
+```bash
+kubectl -n kuberay-system get raycluster cube-partition \
+  -o jsonpath='{.spec.workerGroupSpecs[0].rayStartParams}{"\n"}'
+kubectl -n kuberay-system exec <worker-pod> -- bash -lc 'RAY_ADDRESS=auto ray status' | grep cube_partition_worker
+```
+
+缺失时补回声明（`value` 必须是双重编码字符串，KubeRay 会把它渲染成
+`--resources="{\"cube_partition_worker\": 1}"`）：
+
+```bash
+kubectl -n kuberay-system patch raycluster cube-partition --type=json \
+  --patch '[{"op":"add","path":"/spec/workerGroupSpecs/0/rayStartParams/resources","value":"\"{\\\"cube_partition_worker\\\": 1}\""}]'
+```
+
+补丁对**新创建**的 Worker Pod 生效；改动后确认 `ray status` 出现
+`cube_partition_worker`，再用一个容器数量大于 0 的小规模真实任务端到端确认。
+
 ## 集群与镜像要求
 
 - Head 与 Worker 使用同一兼容 Ray 版本的运行镜像，镜像应包含
