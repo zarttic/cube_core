@@ -42,3 +42,6 @@ build/
 *.orig
 微信图片_*.jpg
 分析就绪数据剖分管理系统*.docx
+
+# Operation-manual screenshots stay on disk only (same policy as other screenshots).
+docs/rag/30-截图/
