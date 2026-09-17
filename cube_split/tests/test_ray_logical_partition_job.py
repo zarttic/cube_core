@@ -268,6 +268,18 @@ def test_partition_task_options_merges_worker_slot_with_node_resource(monkeypatc
     }
 
 
+def test_partition_task_options_can_pin_an_explicit_node_resource(monkeypatch):
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_partition_job.runtime_config.env_text",
+        lambda name, default="": {"CUBE_WEB_RAY_WORKER_RESOURCE": "cube_partition_worker"}.get(name, default),
+    )
+
+    assert _ray_partition_task_options(1, node_resource="cube_partition_worker_large") == {
+        "num_cpus": 1,
+        "resources": {"cube_partition_worker_large": 0.001, "cube_partition_worker": 1},
+    }
+
+
 def test_logical_chunk_identity_matches_partition_contract():
     identity = OutputIdentity(
         dataset_id="dataset-a", output_version="version-a", source_asset_id="asset-a", band_code="B01",

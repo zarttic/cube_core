@@ -321,6 +321,23 @@ def test_dataset_ray_task_uses_configured_node_resource(monkeypatch) -> None:
     assert ray.task.options_value == {"resources": {"node:10.3.100.180": 0.001}}
 
 
+def test_entity_task_options_pin_the_large_worker_group(monkeypatch) -> None:
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
+
+    monkeypatch.setattr(
+        runner_module.runtime_config,
+        "env_text",
+        lambda name, default="": {"CUBE_ENTITY_NODE_RESOURCE": "cube_partition_worker_large"}.get(name, default),
+    )
+
+    assert runner_module._entity_task_options(1) == {
+        "num_cpus": 1,
+        "resources": {"cube_partition_worker_large": 0.001, "cube_partition_worker": 1},
+    }
+    # Logical work keeps running on the default worker group.
+    assert _ray_partition_task_options(1)["resources"] == {"cube_partition_worker": 1}
+
+
 def test_ray_client_uses_node_local_credentials_without_runtime_env(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(runner_module.runtime_config, "require_ray_address", lambda: "ray://10.3.100.182:10001")

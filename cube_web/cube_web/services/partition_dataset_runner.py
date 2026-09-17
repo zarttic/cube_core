@@ -44,6 +44,22 @@ def _entity_ray_parallelism(default: int = 16) -> int:
 
 ENTITY_RAY_PARALLELISM = _entity_ray_parallelism()
 ENTITY_PLANNING_OVERLAP_DEGREES = 0.02
+
+
+def _entity_node_resource() -> str | None:
+    """Label that pins isea4h entity tasks to the large-memory worker group."""
+    return runtime_config.env_text("CUBE_ENTITY_NODE_RESOURCE") or None
+
+
+def _entity_task_options(worker_container_limit: int | None, *, include_num_cpus: bool = True) -> dict[str, Any]:
+    """Task options for entity work, pinned to the entity worker group when configured."""
+    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
+
+    return _ray_partition_task_options(
+        worker_container_limit,
+        include_num_cpus=include_num_cpus,
+        node_resource=_entity_node_resource(),
+    )
 _ENTITY_COVER_CACHE: dict[tuple[str, int, str, tuple[float, ...]], list[dict[str, Any]]] = {}
 _ENTITY_COVER_CACHE_LOCK = Lock()
 _RAY_INIT_LOCK = Lock()
@@ -983,8 +999,6 @@ def _run_dataset_on_ray(
                 )
         else:
             driver_timing.add_counter("ray_init_reused")
-    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
-
     assets = list((payload.get("dataset") or {}).get("assets") or [])
     worker_container_limit = _requested_worker_container_limit(payload)
     ray_parallelism = _entity_ray_parallelism()
@@ -993,7 +1007,7 @@ def _run_dataset_on_ray(
     driver_timing.set_attribute("ray_parallelism", ray_parallelism)
     if not assets:
         with driver_timing.phase("ray.task_submit"):
-            reference = execute.options(**_ray_partition_task_options(
+            reference = execute.options(**_entity_task_options(
                 payload.get("worker_container_limit"), include_num_cpus=False,
             )).remote(payload)
         with driver_timing.phase("ray.wait_get"):
@@ -1005,7 +1019,7 @@ def _run_dataset_on_ray(
             "workers": [existing_timings["worker"]] if isinstance(existing_timings.get("worker"), dict) else [],
         }
         return result
-    options = _ray_partition_task_options(payload.get("worker_container_limit"))
+    options = _entity_task_options(payload.get("worker_container_limit"))
     pending: list[Any] = []
     merged: dict[str, dict[str, Any]] = {"tiles": {}, "indexes": {}, "grid_cells": {}}
     worker_timings: list[dict[str, Any]] = []
@@ -1252,9 +1266,8 @@ def _run_entity_dataset_batch_on_ray(
             batch_timing.add_counter("ray_init_reused")
 
     execute = _run_dataset_on_ray({}, runtime_env, _executor_only=True)
-    from cube_split.jobs.ray_logical_partition_job import _ray_partition_task_options
 
-    options = _ray_partition_task_options(payloads[0].get("worker_container_limit"))
+    options = _entity_task_options(payloads[0].get("worker_container_limit"))
     pending: list[Any] = []
     ref_to_group: dict[int, int] = {}
     unit_to_group: dict[int, int] = {

@@ -281,22 +281,28 @@ def _ensure_ray_worker_project_paths() -> None:
 DEFAULT_PARTITION_WORKER_RESOURCE = "cube_partition_worker"
 
 
-def _ray_actor_options_from_env() -> dict[str, Any]:
-    node_resource = runtime_config.env_text("RAY_ACTOR_NODE_RESOURCE")
-    if not node_resource:
+def _ray_node_resource_options(node_resource: str | None = None) -> dict[str, Any]:
+    """Pin a task to the nodes that declare ``node_resource`` (any quantity wins)."""
+    name = (node_resource or runtime_config.env_text("RAY_ACTOR_NODE_RESOURCE") or "").strip()
+    if not name:
         return {}
-    return {"resources": {node_resource: 0.001}}
+    return {"resources": {name: 0.001}}
+
+
+def _ray_actor_options_from_env() -> dict[str, Any]:
+    return _ray_node_resource_options()
 
 
 def _ray_partition_task_options(
     worker_container_limit: int | None = None,
     *,
     include_num_cpus: bool = True,
+    node_resource: str | None = None,
 ) -> dict[str, Any]:
     """Request one logical Worker slot when a task-level limit is configured."""
     options: dict[str, Any] = {
         **({"num_cpus": 1} if include_num_cpus else {}),
-        **_ray_actor_options_from_env(),
+        **_ray_node_resource_options(node_resource),
     }
     try:
         configured_limit = int(worker_container_limit or 0)
