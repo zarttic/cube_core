@@ -96,7 +96,7 @@ function stepWorkerContainerLimit(delta) {
     </div>
     <div class="form-group worker-container-form-group">
       <div class="worker-limit-head">
-        <label for="partition-worker-container-limit">最多的容器数量</label>
+        <label for="partition-worker-container-limit">容器数量</label>
         <el-tooltip
           data-testid="worker-container-limit-tooltip"
           content="限制本次任务最多使用的容器数量；0 表示按系统默认值运行。"

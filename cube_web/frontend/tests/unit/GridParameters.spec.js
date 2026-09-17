@@ -52,7 +52,7 @@ describe('GridParameters', () => {
       'REFLECT_20260717143357_8E3F',
       'mock-two-optical-datasets-20260717-01',
     ]);
-    expect(wrapper.get('.worker-container-form-group label').text()).toBe('最多的容器数量');
+    expect(wrapper.get('.worker-container-form-group label').text()).toBe('容器数量');
     expect(wrapper.get('[data-testid="worker-container-limit-tooltip"]').attributes('data-content')).toBe(
       '限制本次任务最多使用的容器数量；0 表示按系统默认值运行。',
     );
