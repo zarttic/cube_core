@@ -213,7 +213,6 @@ def _ingest_raster(conn: Any, snapshot: dict[str, Any], version: str, job_id: st
     # （此前 _bbox 每 fact 重复 3 次、cell_geometry_geojson 每波段重复 1 次）。
     cell_bounds: dict[tuple[str, int, str, str], tuple[float, float, float, float]] = {}
     cell_geom_text: dict[tuple[str, int, str, str], str] = {}
-    missing = object()
     for row in snapshot["indexes"]:
         scene = asset_scenes.get(str(row["source_asset_id"]))
         if scene is None:

@@ -344,6 +344,7 @@ def test_load_snapshot_fetches_cell_geometry_once_per_cell() -> None:
 def test_load_snapshot_rejects_index_without_grid_cell() -> None:
     """批量取回后仍必须保证每个索引行都能配上格元, 缺失要立刻报错而不是默默产生坏几何。"""
     import pytest
+
     from cube_split.ingest.managed_output_ingest import _load_snapshot
 
     class FakeCursor:
