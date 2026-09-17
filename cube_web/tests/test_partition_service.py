@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -21,6 +22,22 @@ def _wait_for_terminal_status(store: PartitionTaskStore, task_id: str, timeout: 
         deadline.wait(0.01)
     task = store.get(task_id)
     return task.status if task is not None else "missing"
+
+
+def _wait_for_task_log(caplog: pytest.LogCaptureFixture, event: str, timeout: float = 5.0):
+    """Return the ``partition.task_*`` record once it has been emitted.
+
+    The worker commits the terminal status before it writes the matching log
+    line, so waiting for the status alone can assert before the record exists.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for record in caplog.records:
+            if record.name == "cube_web.services.partition_service" and record.getMessage().startswith(event):
+                return record
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
 
 
 def test_cancel_between_runner_return_and_completion_commit_is_honoured() -> None:
@@ -287,13 +304,12 @@ def test_task_logs_bind_task_id_context(caplog) -> None:
     store = PartitionTaskStore(max_workers=1)
     with caplog.at_level(logging.INFO, logger="cube_web.services.partition_service"):
         task = store.submit(data_type="optical", operation="run", runner=lambda: {"ok": True})
-        _wait_for_terminal_status(store, task.task_id)
+        assert _wait_for_terminal_status(store, task.task_id) == "completed"
+        events = {}
+        for event in ("partition.task_queued", "partition.task_started", "partition.task_finished"):
+            record = _wait_for_task_log(caplog, event)
+            assert record is not None, f"{event} was not logged"
+            events[event] = record
 
-    events = {
-        record.getMessage().split(" ", 1)[0]: record
-        for record in caplog.records
-        if record.name == "cube_web.services.partition_service"
-    }
-    for event in ("partition.task_queued", "partition.task_started", "partition.task_finished"):
-        assert event in events
-        assert events[event].cube_context["task_id"] == task.task_id
+    for event, record in events.items():
+        assert record.cube_context["task_id"] == task.task_id
