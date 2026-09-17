@@ -108,7 +108,19 @@ kubectl -n kuberay-system patch raycluster cube-partition --type=json \
   每节点可分配 16 CPU / 31.5Gi；扣除 head 的 2 CPU / 8.5Gi 后留给 worker 约 51Gi，因此
   `maxReplicas` 取 14（小）+ 5（大）≈ 48Gi。照搬 36 会得到长期 Pending 的 Pod。
 
-只读校验：
+实体任务的读取现在是**分块流式**的：窗口像素不超过 `CUBE_ENTITY_READ_BLOCK_PIXELS`（默认
+4,000,000 px ≈ 8 MB/int16 波段）时仍走原来的一次性 `rasterio.mask.mask` 快路径；超过则逐块读取 +
+逐块掩膜，写入 `CUBE_ENTITY_TILE_TMP_DIR`（默认 `$CUBE_SOURCE_CACHE_DIR/entity_tiles`）下的临时
+GeoTIFF，再流式 `fput_object` 上传并删除临时文件。内存上界随块预算而不是格元大小增长，代价是墙钟时间。
+
+同一景、同一 L1 格元（窗口 34,025×15,457 px）的实测对比：
+
+| | 峰值内存 | 耗时 | 产物 |
+| --- | --- | --- | --- |
+| 一次性 mask 读取 | **1.62 GB**（2Gi Pod 上被 Ray 内存监控杀掉） | 31.6 s | 346.0 MB，34025×15457 |
+| 分块流式（4 Mpx 预算） | **422 MB** | 22.9 s | **同尺寸、同字节数、逐像素完全一致（0 个不一致）** |
+
+校验只读命令：
 
 ```bash
 kubectl -n kuberay-system get raycluster cube-partition \
