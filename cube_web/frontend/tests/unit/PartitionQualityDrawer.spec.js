@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { mount } from '@vue/test-utils';
+import { h } from 'vue';
 
 import PartitionQualityDrawer from '@/views/quality/PartitionQualityDrawer.vue';
+
+// Renders el-tree's scoped slot recursively so node rows can be asserted on.
+const treeStub = {
+  props: ['data'],
+  setup(props, { slots }) {
+    const renderNode = (node) => h('div', { class: 'quality-tree-stub' }, [
+      slots.default?.({ data: node }),
+      ...(node.children || []).map(renderNode),
+    ]);
+    return () => h('div', props.data.map(renderNode));
+  },
+};
 
 describe('PartitionQualityDrawer', () => {
   it('shows automatic quality rule results for the partition batch', () => {
@@ -88,6 +101,8 @@ describe('PartitionQualityDrawer', () => {
 
     await wrapper.findAll('button').find((button) => button.text() === '重新提交失败数据剖分').trigger('click');
     expect(wrapper.emitted('retry-failed-partition').length).toBeGreaterThan(0);
+    expect(wrapper.get('[data-testid="quality-failure-log-quality-run-1"]').text()).toContain('失败日志');
+    expect(wrapper.get('[data-testid="quality-failure-log-quality-run-1"]').classes()).toContain('quality-log-failure');
     expect(wrapper.text()).toContain('质检规则执行失败');
     expect(wrapper.text()).toContain('源数据不存在或无法打开');
     expect(wrapper.text()).toContain('源数据无法读取');
@@ -183,5 +198,129 @@ describe('PartitionQualityDrawer', () => {
     expect(wrapper.text()).not.toContain('old failure should not be shown');
     expect(wrapper.text()).not.toContain('old rule error');
     expect(wrapper.find('[data-testid="quality-failure-log-quality-run-2"]').exists()).toBe(false);
+  });
+
+  it('labels a warning-only quality log as 告警日志 with warning styling', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-warn',
+          summary: { band_count: 1, partitioned_count: 1, quality_pass_count: 1, quality_failed_count: 0 },
+          datasets: [{
+            dataset_id: 'dataset-warn', dataset_code: 'PRODUCT-1', scenes: [],
+            quality_runs: [{
+              quality_run_id: 'quality-run-warn', output_version: 'output-warn', status: 'warn', results_complete: true,
+              items: [
+                { rule_code: 'asset_crs', status: 'warn', finding_count: 1 },
+                { rule_code: 'asset_readability', status: 'pass', finding_count: 0 },
+              ],
+              error_logs: [{
+                error_code: 'crs_metadata_mismatch', message: 'declared CRS does not match the source raster CRS',
+                source_asset_id: 'asset-warn', field: 'crs', context: { declared: 'EPSG:4326', actual: 'EPSG:32648' },
+              }],
+            }],
+          }],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    const log = wrapper.get('[data-testid="quality-failure-log-quality-run-warn"]');
+    expect(log.text()).toContain('告警日志');
+    expect(log.text()).not.toContain('失败日志');
+    expect(log.classes()).toContain('quality-log-warning');
+    expect(log.classes()).not.toContain('quality-log-failure');
+    expect(log.text()).toContain('声明坐标系：EPSG:4326');
+    expect(log.text()).toContain('实际坐标系：EPSG:32648');
+  });
+
+  it('labels band contract contexts as values instead of coordinate systems', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-radar-warn',
+          summary: { band_count: 1, quality_pass_count: 1, quality_failed_count: 0 },
+          datasets: [{
+            dataset_id: 'dataset-radar', dataset_code: 'RADAR-S1-WIND', scenes: [],
+            quality_runs: [{
+              quality_run_id: 'quality-run-radar', output_version: 'output-radar', status: 'warn', results_complete: true,
+              items: [{ rule_code: 'asset_crs', status: 'warn', finding_count: 1 }],
+              error_logs: [{
+                error_code: 'invalid_band_type', message: 'band_type must be polarization for radar data',
+                source_asset_id: 'asset-s1-wind', band_code: 'RADAR_WindSpeed', field: 'band_type',
+                context: { band_code: 'RADAR_WindSpeed', actual: 'variable', expected: 'polarization' },
+              }],
+            }],
+          }],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    const log = wrapper.get('[data-testid="quality-failure-log-quality-run-radar"]');
+    expect(log.text()).toContain('实际值：variable');
+    expect(log.text()).toContain('期望值：polarization');
+    expect(log.text()).toContain('波段：RADAR_WindSpeed');
+    expect(log.text()).not.toContain('实际坐标系');
+    expect(log.text()).not.toContain('band_code：');
+  });
+
+  it('shows only partition, quality and ingest progress on band tree nodes', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-warn',
+          summary: { band_count: 1, quality_pass_count: 1 },
+          datasets: [{
+            dataset_id: 'dataset-warn', dataset_code: 'PRODUCT-1', dataset_title: '真实信息产品质检warn探针',
+            scenes: [{
+              scene_id: 'scene-warn', scene_name: 'real-accept-quality-warn-scene',
+              source_load_batch_name: 'Controlled quality warn real-accept',
+              bands: [{
+                band_unit_id: 'band-warn', band_code: 'B1',
+                partition_status: 'completed', quality_status: 'warn', ingest_status: 'pending',
+              }],
+            }],
+            quality_runs: [],
+          }],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['domain', 'value'], template: '<span class="tag">{{ domain }}:{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': treeStub,
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain('real-accept-quality-warn-scene');
+    expect(wrapper.text()).toContain('来源 Controlled quality warn real-accept');
+    const bandNode = wrapper.get('.quality-node-band');
+    expect(bandNode.text()).toContain('partition:completed');
+    expect(bandNode.text()).toContain('quality:warn');
+    expect(bandNode.text()).toContain('ingest:pending');
+    expect(bandNode.text()).not.toContain('等待手动入库');
+    expect(wrapper.text()).not.toContain('质检通过，等待手动入库');
+    expect(wrapper.text()).not.toContain('流程完成');
+    expect(wrapper.text()).not.toContain('修复产物后重剖该波段');
   });
 });

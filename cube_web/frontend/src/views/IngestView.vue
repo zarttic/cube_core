@@ -199,7 +199,7 @@ async function openManualIngest(partitionRunId = '') {
       <summary>入库记录 <span>{{ store.pageState.total }} 条</span></summary>
       <div class="ingest-history-body">
     <el-form class="filter-bar" label-position="top" @submit.prevent="refresh">
-      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="Search" clearable placeholder="运行 ID 或数据集" /></el-form-item>
+      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="Search" clearable placeholder="剖分批次、运行 ID 或数据集" /></el-form-item>
       <el-form-item label="数据集 ID"><el-input v-model="store.filters.datasetId" clearable /></el-form-item>
       <el-form-item label="运行状态"><el-select v-model="store.filters.status" clearable><el-option label="已排队" value="queued" /><el-option label="运行中" value="running" /><el-option label="已完成" value="completed" /><el-option label="部分失败" value="partial_failure" /><el-option label="失败" value="failed" /><el-option label="已取消" value="cancelled" /></el-select></el-form-item>
       <el-form-item class="filter-action"><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
@@ -212,8 +212,8 @@ async function openManualIngest(partitionRunId = '') {
       <div><strong>{{ store.summary.failed_band_count || 0 }}</strong><span>失败波段</span></div>
     </div>
     <AppTable :data="store.records" :loading="store.loading" row-key="ingest_run_id" :page="store.pageState.page" :page-size="store.pageState.pageSize" :total="store.pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="(row) => store.openDetail(row.ingest_run_id).catch(() => {})">
-      <el-table-column label="数据入库" min-width="240"><template #default="{ row }"><div class="run-cell"><strong>{{ row.ingest_run_id }}</strong><span>{{ row.dataset_code || row.dataset_id }}</span></div></template></el-table-column>
-      <el-table-column prop="partition_run_id" label="剖分运行" min-width="180" show-overflow-tooltip />
+      <el-table-column label="数据入库" min-width="260"><template #default="{ row }"><div class="run-cell"><strong :title="row.partition_batch_name || row.dataset_code || row.dataset_id">{{ row.partition_batch_name || row.dataset_code || row.dataset_id }}</strong><span :title="`${row.dataset_code || row.dataset_id} · ${row.ingest_run_id}`">{{ row.dataset_code || row.dataset_id }} · {{ row.ingest_run_id }}</span></div></template></el-table-column>
+      <el-table-column prop="partition_run_id" label="剖分批次" min-width="180" show-overflow-tooltip />
       <el-table-column label="状态" width="115"><template #default="{ row }"><StatusTag domain="ingest" :value="row.status" size="small" /></template></el-table-column>
       <el-table-column label="进度" min-width="170"><template #default="{ row }"><div class="run-progress"><el-progress :percentage="row.band_count ? Math.round((row.completed_band_count || 0) * 100 / row.band_count) : 0" :stroke-width="7" /><span>{{ row.completed_band_count || 0 }}/{{ row.band_count || 0 }} 波段<span v-if="row.failed_band_count"> · {{ row.failed_band_count }} 失败</span></span></div></template></el-table-column>
       <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
@@ -311,6 +311,7 @@ async function openManualIngest(partitionRunId = '') {
 .run-cell { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
 .run-cell strong { overflow: hidden; color: #263247; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .run-cell span, .run-progress > span { color: #8993a4; font-size: 12px; }
+.ingest-history .run-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-progress { min-width: 130px; }
 .run-progress :deep(.el-progress__text) { min-width: 36px; font-size: 12px !important; }
 .manual-ingest-tree { width: 100%; max-height: 480px; overflow: auto; border: 1px solid #dfe4ec; border-radius: 5px; }

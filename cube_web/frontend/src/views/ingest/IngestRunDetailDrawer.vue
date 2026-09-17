@@ -13,7 +13,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'retry-band-units', 'cancel']);
 const cancelDialog = ref(false);
 const cancelReason = ref('');
-const title = computed(() => props.detail?.ingest_run_id || props.runId || '数据入库详情');
+const title = computed(() => props.detail?.partition_batch_name || props.detail?.ingest_run_id || props.runId || '数据入库详情');
 const bandUnits = computed(() => props.detail?.scenes || []);
 const failedBandUnitIds = computed(() => bandUnits.value.filter((unit) => unit.status === 'failed').flatMap((unit) => unit.band_unit_ids || []));
 const cancellable = computed(() => ['pending', 'queued', 'running'].includes(props.detail?.status));
@@ -41,7 +41,7 @@ function confirmCancel() {
         <el-descriptions-item label="数据入库">{{ detail.ingest_run_id }}</el-descriptions-item>
         <el-descriptions-item label="状态"><StatusTag domain="ingest" :value="detail.status" size="small" /></el-descriptions-item>
         <el-descriptions-item label="数据集">{{ detail.dataset_code || detail.dataset_id }}</el-descriptions-item>
-        <el-descriptions-item label="剖分运行">{{ detail.partition_run_id }}</el-descriptions-item>
+        <el-descriptions-item label="剖分批次"><div class="batch-cell"><strong>{{ detail.partition_batch_name || detail.partition_run_id }}</strong><span>{{ detail.partition_run_id }}</span></div></el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatShanghaiTime(detail.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="完成时间">{{ formatShanghaiTime(detail.completed_at) }}</el-descriptions-item>
         <el-descriptions-item label="错误" :span="2">{{ detail.error_message || '-' }}</el-descriptions-item>
@@ -68,5 +68,8 @@ function confirmCancel() {
 
 <style scoped>
 .drawer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+.batch-cell { display: flex; flex-direction: column; gap: 2px; }
+.batch-cell strong { color: #263247; font-weight: 600; overflow-wrap: anywhere; }
+.batch-cell span { color: #8993a4; font-size: 12px; overflow-wrap: anywhere; }
 h3 { margin: 20px 0 10px; font-size: 16px; letter-spacing: 0; }
 </style>

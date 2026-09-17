@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia';
+import { h } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 
@@ -17,6 +18,7 @@ beforeEach(() => {
   setActivePinia(createPinia());
   pendingGets.splice(0);
   vi.clearAllMocks();
+  requestGet.mockImplementation(() => new Promise((resolve) => pendingGets.push(resolve)));
 });
 
 describe('ingest run detail drawer', () => {
@@ -43,8 +45,7 @@ describe('ingest run detail drawer', () => {
     expect(wrapper.get('[data-testid="detail-drawer"]').attributes('data-lock-scroll')).toBe('false');
   });
 
-  it('treats partial failure as retryable but not cancellable and emits explicit failed band ids', async () => {
-    const wrapper = mount(IngestRunDetailDrawer, {
+  it('treats partial failure as retryable but not cancellable and emits explicit failed band ids', async () => {    const wrapper = mount(IngestRunDetailDrawer, {
       props: {
         visible: true,
         runId: 'ingest-a',
@@ -78,6 +79,94 @@ describe('ingest run detail drawer', () => {
     expect(wrapper.text()).not.toContain('取消运行');
     await wrapper.findAll('button').find((button) => button.text() === '重试全部失败波段').trigger('click');
     expect(wrapper.emitted('retry-band-units')).toEqual([[['band-failed-a', 'band-failed-b']]]);
+  });
+
+  it('labels the source partition batch and shows its readable name above the run id', () => {
+    const wrapper = mount(IngestRunDetailDrawer, {
+      props: {
+        visible: true,
+        runId: 'ingest-run-auto-3d142c7a',
+        detail: {
+          ingest_run_id: 'ingest-run-auto-3d142c7a',
+          partition_run_id: 'partition-run-mu4amci4-2s5mss0ogt',
+          partition_batch_name: '2021年中国黄土高原GF-1 ARD地表反射率数据-01',
+          status: 'completed',
+          scenes: [],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          AppTable: { template: '<div><slot /></div>' },
+          StatusTag: { template: '<span />' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-input': { template: '<input />' },
+          'el-descriptions': { template: '<div><slot /></div>' },
+          'el-descriptions-item': { props: ['label'], template: '<div><span>{{ label }}</span><slot /></div>' },
+          'el-table-column': { template: '<div />' },
+          'el-empty': { template: '<div />' },
+          'el-dialog': { template: '<div />' },
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain('剖分批次');
+    expect(wrapper.text()).not.toContain('剖分运行');
+    expect(wrapper.text()).toContain('2021年中国黄土高原GF-1 ARD地表反射率数据-01');
+    expect(wrapper.text()).toContain('partition-run-mu4amci4-2s5mss0ogt');
+  });
+});
+
+describe('ingest run records table', () => {
+  it('shows the partition batch name and keeps the run id traceable', async () => {
+    const row = {
+      ingest_run_id: 'ingest-run-auto-3d142c7a',
+      partition_run_id: 'partition-run-mu4amci4-2s5mss0ogt',
+      partition_batch_name: '2021年中国黄土高原GF-1 ARD地表反射率数据-01',
+      dataset_code: 'ARD-OPTICAL-f031c14c1623',
+      status: 'completed',
+      band_count: 1,
+      completed_band_count: 1,
+      created_at: '2026-09-17T00:12:20+08:00',
+    };
+    requestGet.mockImplementation((url) => Promise.resolve(url.startsWith('/v1/ingest-runs?')
+      ? { items: [row], total: 1, page: 1, page_size: 20 }
+      : { items: [], total: 0, page: 1, page_size: 20 }));
+    const wrapper = mount(IngestView, {
+      global: {
+        stubs: {
+          AppTable: { template: '<div><slot /></div>' },
+          StatusTag: { template: '<span />' },
+          IngestRunDetailDrawer: { template: '<div />' },
+          'el-form': { template: '<form><slot /></form>' },
+          'el-form-item': { template: '<div><slot /></div>' },
+          'el-select': { template: '<div><slot /></div>' },
+          'el-option': { template: '<div><slot /></div>' },
+          'el-alert': { template: '<div />' },
+          'el-progress': { template: '<div />' },
+          'el-icon': { template: '<span><slot /></span>' },
+          'el-checkbox-group': { template: '<div><slot /></div>' },
+          'el-checkbox': { template: '<label><slot /></label>' },
+          'el-dialog': { template: '<div><slot /></div>' },
+          'el-input': { template: '<input />' },
+          'el-pagination': { template: '<div />' },
+          'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+          'el-table-column': {
+            props: ['label', 'prop'],
+            setup(props, { slots }) {
+              const content = () => (slots.default ? slots.default({ row }) : String(row[props.prop] ?? ''));
+              return () => h('div', { 'data-label': props.label }, content());
+            },
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('2021年中国黄土高原GF-1 ARD地表反射率数据-01'));
+    expect(wrapper.find('[data-label="剖分批次"]').exists()).toBe(true);
+    expect(wrapper.find('[data-label="剖分运行"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('ingest-run-auto-3d142c7a');
+    expect(wrapper.text()).toContain('partition-run-mu4amci4-2s5mss0ogt');
   });
 });
 

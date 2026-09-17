@@ -67,8 +67,19 @@ function executionError(run) {
   return isActiveQualityRun(run) ? '' : (run?.execution_error || '');
 }
 
-function hasFailureLog(run) {
+function hasQualityLog(run) {
   return Boolean(executionError(run) || ruleExecutionErrors(run).length || (!isActiveQualityRun(run) && run?.error_logs?.length));
+}
+
+function qualityLogSeverity(run) {
+  if (executionError(run) || ruleExecutionErrors(run).length) return 'failure';
+  if (['fail', 'error'].includes(run?.status)) return 'failure';
+  if ((run?.items || []).some((item) => ['fail', 'error'].includes(item?.status))) return 'failure';
+  return 'warning';
+}
+
+function qualityLogTitle(run) {
+  return qualityLogSeverity(run) === 'failure' ? '失败日志' : '告警日志';
 }
 
 function errorLogLocation(item) {
@@ -83,26 +94,23 @@ function errorLogLocation(item) {
   return labels.join(' · ');
 }
 
+const CRS_ERROR_CODES = new Set(['crs_metadata_mismatch', 'invalid_crs', 'missing_crs']);
+
 function errorLogContext(item) {
   const context = item?.context;
   if (!context || typeof context !== 'object' || !Object.keys(context).length) return '';
+  const crsFinding = CRS_ERROR_CODES.has(String(item?.error_code || ''));
   const contextLabels = {
-    reason: '异常类型', declared: '声明坐标系', actual: '实际坐标系', expected: '期望值', observed: '实际值',
+    reason: '异常类型',
+    declared: crsFinding ? '声明坐标系' : '声明值',
+    actual: crsFinding ? '实际坐标系' : '实际值',
+    observed: crsFinding ? '实际坐标系' : '实际值',
+    expected: '期望值',
+    band_code: '波段',
   };
   return `具体原因：${Object.entries(context)
     .map(([key, value]) => `${contextLabels[key] || key}：${key === 'reason' ? qualityExecutionErrorLabel(String(value)) : String(value)}`)
     .join('；')}`;
-}
-
-function workflowAdvice(band) {
-  if (band.partition_status === 'failed') return '剖分失败，重试该波段的原剖分批次';
-  if (band.partition_status !== 'completed') return '等待剖分完成';
-  if (band.quality_status === 'error') return '质检执行异常，可直接重新质检';
-  if (band.quality_status === 'fail') return '质检未通过，修复产物后重剖该波段';
-  if (band.quality_status !== 'pass' && band.quality_status !== 'warn') return '等待或提交质检';
-  if (band.ingest_status === 'failed') return '入库失败，可重试入库';
-  if (band.ingest_status !== 'completed') return '质检通过，等待手动入库';
-  return '流程完成';
 }
 
 function attemptOperationLabel(operation) {
@@ -245,8 +253,8 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
             <div><span>质检耗时</span><strong>{{ formatQualityElapsed(run.metrics.quality_elapsed_sec) }}</strong></div>
             <div><span>吞吐</span><strong>{{ formatThroughput(run.metrics.grid_throughput_per_sec) }}</strong></div>
           </section>
-          <section v-if="hasFailureLog(run)" class="quality-failure-log" :data-testid="`quality-failure-log-${run.quality_run_id}`">
-            <strong>失败日志</strong>
+          <section v-if="hasQualityLog(run)" class="quality-log" :class="`quality-log-${qualityLogSeverity(run)}`" :data-testid="`quality-failure-log-${run.quality_run_id}`">
+            <strong>{{ qualityLogTitle(run) }}</strong>
             <p v-if="executionError(run)">{{ qualityExecutionErrorLabel(executionError(run)) }}</p>
             <p v-for="item in ruleExecutionErrors(run)" :key="`${item.rule_code}:${item.execution_error}`">{{ qualityRuleLabel(item.rule_code) }}：{{ qualityExecutionErrorLabel(item.execution_error) }}</p>
             <p v-for="item in run.error_logs || []" :key="`${item.quality_error_id || item.error_code}:${item.message}`"><span>{{ qualityErrorLabel(item.error_code) }}</span>：{{ qualityExecutionErrorLabel(item.message) }}<small v-if="errorLogLocation(item)">{{ errorLogLocation(item) }}</small><small v-if="errorLogContext(item)">{{ errorLogContext(item) }}</small></p>
@@ -265,7 +273,6 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
               <StatusTag domain="partition" :value="data.band.partition_status" size="small" />
               <StatusTag domain="quality" :value="data.band.quality_status" size="small" />
               <StatusTag domain="ingest" :value="data.band.ingest_status" size="small" />
-              <small>{{ workflowAdvice(data.band) }}</small>
             </template>
           </div>
         </template>
@@ -313,11 +320,13 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .quality-item-list { display: grid; gap: 5px; margin-top: 8px; }
 .quality-item-row > span { flex: 1; min-width: 0; }
 .quality-item-row small { min-width: 82px; text-align: right; }
-.quality-failure-log { display: grid; gap: 4px; margin-top: 9px; border-left: 3px solid #c24d45; background: #fff7f6; padding: 8px 10px; color: #7f2d28; }
-.quality-failure-log > strong { color: #9b2c2c; }
-.quality-failure-log > small { color: #667085; overflow-wrap: anywhere; }
-.quality-failure-log p { margin: 0; overflow-wrap: anywhere; }
-.quality-failure-log p span { font-weight: 600; }
+.quality-log { display: grid; gap: 4px; margin-top: 9px; border-left: 3px solid #c24d45; background: #fff7f6; padding: 8px 10px; color: #7f2d28; }
+.quality-log > strong { color: #9b2c2c; }
+.quality-log-warning { border-left-color: #e6a23c; background: #fdf6ec; color: #7a5312; }
+.quality-log-warning > strong { color: #b88230; }
+.quality-log > small { color: #667085; overflow-wrap: anywhere; }
+.quality-log p { margin: 0; overflow-wrap: anywhere; }
+.quality-log p span { font-weight: 600; }
 .partition-quality-tree { border: 1px solid #dfe4ec; padding: 8px; max-height: 560px; overflow: auto; }
 .attempt-history { margin-top: 12px; border: 1px solid #dfe4ec; padding: 8px 10px; }
 .attempt-history summary { color: #344054; cursor: pointer; font-weight: 600; }
