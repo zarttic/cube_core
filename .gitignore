@@ -19,6 +19,9 @@ cube_encoder/DGGSCode.zip
 .cube_web.env
 .claude/
 CLAUDE.md
+
+# Local agent/session state (pi harness); stays on the workstation.
+.pi/
 *.egg-info/
 
 # Local remote-sensing samples and uploaded reference projects.
