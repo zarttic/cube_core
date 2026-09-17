@@ -118,6 +118,10 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
     now = now or datetime.now(UTC)
     base_store = get_partition_domain_store()
     store = require_open_gauss_domain_store()
+    # 启用可选规则的读取是全局配置（实测 ~23 ms/次），原来每个事件都查一次：
+    # 一轮 100 条就是 ~2.3 s 的纯配置读取，新产生的 output-version.completed 事件
+    # 只能等这一轮跑完（实测 event→delivered 1.31 s、质检 run→start 1.4 s）。
+    enabled_optional = get_enabled_optional_quality_rules()
     allocated = 0
     for event in base_store.claim_outbox(worker_id, limit=limit):
         try:
@@ -127,9 +131,7 @@ def dispatch_quality_events(*, worker_id: str, limit: int = 100, now: datetime |
                     dataset = cur.fetchone()
                 if dataset is None:
                     raise RuntimeError("dataset disappeared before quality dispatch")
-                enabled_optional = get_enabled_optional_quality_rules()
-                snapshots = snapshot_rules(
-                    default_rule_registry(),
+                snapshots = snapshot_rules(                    default_rule_registry(),
                     data_type=dataset["data_type"],
                     product_type=dataset.get("product_type"),
                     enabled_optional_rules=enabled_optional,
@@ -366,17 +368,36 @@ def execute_quality_run(lease: QualityLease) -> None:
         _finalize_failed_quality_run(store, lease=lease, results=results, exc=exc)
 
 
+DEFAULT_POLL_SECONDS = 1.0
+MIN_POLL_SECONDS = 0.05
+
+
+def _resolve_poll_seconds() -> float:
+    """Worker 轮询间隔：环境变量 CUBE_WEB_WORKER_POLL_SECONDS，默认 1.0 s。
+
+    质检/入库是轮询驱动的：“入队→开始执行”的延迟是轮询间隔的整数倍（实测两段合计可占 2–3 s），
+    因此这是“剖分→入库”端到端墙钟上最廉价的一档调节。
+    """
+    raw = runtime_config.env_text("CUBE_WEB_WORKER_POLL_SECONDS")
+    if not raw:
+        return DEFAULT_POLL_SECONDS
+    try:
+        return max(MIN_POLL_SECONDS, float(raw))
+    except ValueError:
+        return DEFAULT_POLL_SECONDS
+
+
 class QualityRuntime:
     def __init__(
         self,
         *,
         worker_id: str = "cube-web-quality",
-        poll_seconds: float = 1.0,
+        poll_seconds: float | None = None,
         execution_workers: int | None = None,
         ingest_workers: int | None = None,
     ) -> None:
         self.worker_id = worker_id
-        self.poll_seconds = poll_seconds
+        self.poll_seconds = _resolve_poll_seconds() if poll_seconds is None else max(MIN_POLL_SECONDS, float(poll_seconds))
         self.execution_workers = max(1, execution_workers or _resolve_quality_max_workers())
         self.ingest_workers = max(1, ingest_workers or _resolve_ingest_max_workers())
         self._stop = Event()
@@ -403,7 +424,9 @@ class QualityRuntime:
     def _dispatch_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                dispatch_quality_events(worker_id=f"{self.worker_id}:dispatch")
+                # 每轮少处理一些事件：一轮的时长不再随 backlog 线性增长，
+                # 新事件（output-version.completed）等的是一轮短迭代而不是一整批。
+                dispatch_quality_events(worker_id=f"{self.worker_id}:dispatch", limit=20)
             except Exception:
                 logger.exception("quality outbox dispatch failed")
             self._stop.wait(self.poll_seconds)
