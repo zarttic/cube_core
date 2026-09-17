@@ -167,6 +167,17 @@ PYTHONPATH=cube_encoder python3.11 -m ruff check cube_encoder/
 | `mgrs` 邻居码算术生成 + 有效性记忆化 | 热 cover 约 **2×**（邻居枚举占 57%） | 高（纬度带别名/跨 zone 语义） |
 | `isea4h` `locate_point` 每点算两遍环 | ~78× 的 API 路径小幅改善 | 低 |
 
+**§五 现状核查（2026-09-18，HEAD `dead6bf`）**：
+
+- `isea4h` 非局地 AOI 走 WALK：**未做**（`isea4h_engine.py` 的 `indexed_candidates` 仍保留 8° 阈值与全层 STRtree 索引）。
+- `cover_geometry` 不再“每 cell 算两次 ring”：**未做**（`_cover_cells` 内的 `shape_cache` / `cached_cell_shape` 只服务候选/结果收集；`cover_geometry` 仍对每个输出 cell 重新 `_make_cell` 造 ring，`_make_cell` 自本轮起共用一个 ring）。
+- `snyder_inv` 向量化：**未做**（`isea4h_engine.py` 内无 numpy 引用）。
+- `geohash` 位展开：`_cell_index_to_code` 整数枚举已随本轮 `c06dcbd` 落地（§三.7），未再做进一步的位展开优化。
+- `_continuous_ring` 消除 6 旋转候选 + 环复用：**已做**（`2a9a074`，§2.2）。
+- WALK 路径 `_cell_shape` LRU 复用：`_cover_cells` 内已有 `shape_cache` / `cached_cell_shape`（早于本轮）；未登记按此候选单独测量的收益。
+- `mgrs` 邻居码算术生成：**未做**（`mgrs/topology.py` 的 `neighbors_for_address` 仍按几何边界 + candidate 枚举）。
+- `isea4h` `locate_point` 每点算两遍环：`_make_cell` 已改为共用一个 ring（本轮 `2a9a074`）。
+
 ## 六、状态
 
 - 本轮已提交 5 个 commit（`a687033` / `ceb2c6f` / `c06dcbd` / `2a9a074` / `60628d8`），工作区对 `cube_encoder/` 干净。

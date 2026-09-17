@@ -45,7 +45,7 @@ Current production grid contract: `geohash` and `mgrs` use logical partitioning;
 - API 和 SDK 共享同一套服务层能力。
 - 引擎实现可替换，但输出模型保持稳定。
 - CRS 默认按 `EPSG:4326` 对外表达，特殊投影细节封装在引擎内部。
-- ISEA4H cover 从 AOI 各连通分量定位局部格网，并沿六边拓扑遍历实际相交候选，不按目标层级枚举全球格网；候选上限按本次请求实际访问的格网计数。`intersect` 只保留正面积相交单元，`contain` 只保留被 AOI 完整覆盖的单元；`minimal` 可返回低层级单元。
+- ISEA4H cover 从 AOI 各连通分量定位局部格网，并沿六边拓扑遍历实际相交候选；小范围局部 AOI（`Polygon` 且经纬跨度均不超过 8°、经度在 ±170° 以内、纬度在 ±80° 以内）走局部遍历，其余大范围或跨日界线/极区 AOI 在目标层级格元数不超过 200000（`_INDEXED_LEVEL_MAX_CELLS`）时构建该层级的全量 STRtree 索引，超过该值则回退局部遍历；2026-07-22 起不再有按请求计数的候选上限。`intersect` 只保留正面积相交单元，`contain` 只保留被 AOI 完整覆盖的单元；`minimal` 可返回低层级单元。
 - `cover_mode=minimal` 允许返回低于请求层级的格网单元，用于减少复杂边界的冗余覆盖。
 - 请求层级字段统一为 `requested_grid_level`；返回单元保留实际 `grid_level`。拓扑与几何操作以 `GridAddress` 为入参，因为 ISEA4H 的 seqnum 只有连同分辨率才有意义；MGRS 使用标准 `space_code` 标识格网。
 - ISEA4H `space_code` 为未补零的十进制 DGGRID SEQNUM，且 `cell_count(r) = 10 * 4**r + 2`。`minimal` cover 可以返回不同于请求层级的 cell；运行时不依赖 H3 或 DGGRID。

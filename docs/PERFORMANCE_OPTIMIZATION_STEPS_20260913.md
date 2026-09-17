@@ -7,6 +7,10 @@
 >
 > **测量时间**：2026-09-12（本文写作于 2026-09-13 00:30 CST）。测量机当时负载 10–15/16 vCPU，
 > 计时项噪声很大；**整数计数才是硬证据**（格元数、行数、脏页数、逐字节一致数）。
+>
+> **后续状态（2026-09-18 核查，HEAD `dead6bf`）**：§1 第 7、8 项已由 `f280e16`（2026-09-17）提交
+> （`_backfill_missing_cell_geom`、`_load_snapshot` 批量回填均在当前生产代码中）；`fillfactor=80`
+> 已设置（2026-09-13）但 HOT 占比仍约 0.16%；本文引用的 `/tmp` 临时脚本已不存在。原始测量值一律不改。
 
 ---
 
@@ -27,13 +31,13 @@
 | # | 优化 | 一句话方法 | 收益 | 状态 |
 |---|---|---|---|---|
 | 1 | geohash 覆盖向量化 | shapely 广播 + 保留 `area>0` 门限 | **2.9×** | 已提交 `c06dcbd` |
-| 2 | isea4h 覆盖：25 次求交 → 9 次 | 相对经度位移的代数等价变换 | **1.25–1.95×**（格元数一致） | 已提交 `2a9a074` |
+| 2 | isea4h 覆盖：25 次求交 → 9 次 | 相对经度位移的代数等价变换 | **1.25–1.95×**（格元数一致） | 已提交 `a687033` |
 | 3 | mgrs 裁剪/解码缓存 | `(domain, band)` 裁剪缓存 + decode 缓存 | **1.40×**（cover/几何）；decode 8000 次 25.0→0.2 ms | 已提交 `ceb2c6f` |
 | 4 | mgrs 解码去 warnings 竞争 | 直接读 C 扩展状态位，不碰进程级过滤器 | 并发泄漏 71/320 → **0**；冷调用 **9.3→4.58 µs** | 已提交 `60628d8` |
 | 5 | carbon MERGE 去掉 ON 键 CAST | 两侧同为 TEXT，CAST 把唯一索引藏起来了 | seq scan(227 MB, cost 38030) → **Index Only Scan(cost 8.28)**；0.41–0.51 s/次且不再随表增长 | 已提交 `39e323c` |
 | 6 | promote 三段分开计时 | 把 `promote_logical_staging` 拆成三阶段 | 定位 promote = 逻辑剖分 **80%**（106.9 s / 133.3 s） | 已提交 `61ad6fa` |
-| 7 | cube fact MERGE 不再重写几何 | UPDATE 分支去掉 `ST_GeomFromGeoJSON(cell_geom)` | **min −30.6% / 中位 −12%**（48.8→33.8 µs/行） | **未提交** |
-| 8 | `_load_snapshot` 批量取格元 | TOAST 几何逐行 JOIN → 按版本取一次 | **8.71 s → 5.30 s（−39%）** | **未提交** |
+| 7 | cube fact MERGE 不再重写几何 | UPDATE 分支去掉 `ST_GeomFromGeoJSON(cell_geom)` | **min −30.6% / 中位 −12%**（48.8→33.8 µs/行） | 已提交 `f280e16`（2026-09-17；当时状态为未提交） |
+| 8 | `_load_snapshot` 批量取格元 | TOAST 几何逐行 JOIN → 按版本取一次 | **8.71 s → 5.30 s（−39%）** | 已提交 `f280e16`（2026-09-17；当时状态为未提交） |
 
 ---
 
@@ -46,11 +50,11 @@
 - **注意**：探索阶段报出的 4.53× 是**错的**——那是纯 `intersects` 的结果，会把"只在边/顶点接触"的零面积格元也算进来，与 `cover_mode=intersect` 的既有语义冲突，已撤回。回归测试见 `cube_encoder/tests/test_geohash_engine.py`（零面积接触用例）。
 - 细节与完整对比见 `GRID_OPTIMIZATION_ROUND1_20260912.md`。
 
-### 2.2 isea4h 覆盖：经度变体 5×5 → 9 个相对平移（`2a9a074`）
+### 2.2 isea4h 覆盖：经度变体 5×5 → 9 个相对平移（`a687033`）
 
 - **方法**：利用代数恒等式
   `area(translate(cell, 360a) ∩ translate(target, 360b)) == area(cell ∩ translate(target, 360(b−a)))`，
-  把"每个 cell 对 25 个平移变体求交"降为"**9 个相对位移**"；同时让每个 cell 由一条 ring 构造、去掉不必要的旋转。
+  把"每个 cell 对 25 个平移变体求交"降为"**9 个相对位移**"；每个 cell 由一条 ring 构造、去掉不必要的旋转属另一提交 `2a9a074`（测量见 `GRID_OPTIMIZATION_ROUND1_20260912.md` §2.2）。
 - **收益（格子数逐例完全一致）**：
 
 | 场景 | 优化前 | 优化后 | 幅度 |
@@ -96,7 +100,7 @@
 - **收益**：把"逻辑剖分 133.3 s 里 106.9 s（80%）在 promote、吞吐 243 rows/s"这件事的**账目**补齐，下一步优化有了落点。
 - **验证**：假连接证明新旧实现语句文本与参数序列完全一致（7 条语句），只是多了 3 个子阶段；969 passed。
 
-### 2.7 `rs_cube_cell_fact` MERGE：不再重写由键决定的 `cell_geom`（**未提交**）
+### 2.7 `rs_cube_cell_fact` MERGE：不再重写由键决定的 `cell_geom`（当时未提交；2026-09-17 由 `f280e16` 提交）
 
 - **问题**：`WHEN MATCHED THEN UPDATE SET` 里包含
   `cell_geom = ST_SetSRID(ST_GeomFromGeoJSON(source.cell_geom_geojson), 4326)`。
@@ -116,7 +120,7 @@
 - **语义论证**：几何修正通过**新的 `cube_version`** 交付（内容哈希 → 新键 → 走 INSERT 分支，照常解析 GeoJSON）；历史 NULL 几何由 `_backfill_missing_cell_geom` 兜底（生产当前 0 行 NULL）。
 - **验证**：真库功能检查 5/5 通过（历史 NULL 几何被回填；其余 MATCHED 行几何**逐字节未变**；`st_code`/`run_id`/`value_ref_uri` 仍更新；NOT MATCHED 行照常插入带几何；生产表未变）；新增 2 个单元测试。
 
-### 2.8 `_load_snapshot`：格元几何改为按版本批量取一次（**未提交**）
+### 2.8 `_load_snapshot`：格元几何改为按版本批量取一次（当时未提交；2026-09-17 由 `f280e16` 提交）
 
 - **问题**：`managed_output_ingest._load_snapshot` 的主查询对**每个索引行**都 JOIN `partition_grid_cells` 取 `bbox`/`geometry`，而 `geometry` 是 **TOAST 列** → 上万次随机 TOAST 读。
 - **关键事实**：被测 carbon 版本 `a17df5d3…` 有 **70,909 个索引行，却只有 248 个格元**；整版格元一次性取回只要 **0.01 s**。
@@ -151,7 +155,12 @@
 
 1. **重复 ingest 的 134 万次非 HOT 更新**：来源已定位——`rs_ingest_job` 里 **16 个版本对应 214 次 ingest 作业**，同一 `output_version` 最多被 ingest **60 次**（主要是验收/演示重跑）；`n_tup_upd=1,340,000` vs `n_tup_ins=203,613`，`n_tup_hot_upd` 仅 2,121（0.16%）。要消除必须**同时**改 `_verify_targets` 口径（改成按版本 + 作业台账）**或**让重复更新走 HOT。
 2. **`fillfactor` + HOT**：语义不变、只让更新便宜（当前 0.16% HOT 说明页里没空间）。**前置：维护窗口授权**（`ALTER TABLE ... SET (fillfactor=70~85)` + 重写表才生效）。
+   **2026-09-18 核查**：`rs_cube_cell_fact` 的 `reloptions` 已是 `fillfactor=80`（2026-09-13 由「B」设置，见
+   `PERF_SINGLE_SCENE_10S_20260913.md` §四.5）；HOT 占比仍 0.16%，重复 ingest 问题未消除。
 3. **回收膨胀**：`rs_cube_cell_fact` heap **410 MB / 6 万活行**、索引密度 4–5 entries/page。**前置：授权** `VACUUM FULL` + `REINDEX`。
+   **2026-09-18 核查**：`rs_cube_cell_fact` 已于 2026-09-13 执行 `VACUUM FULL` + `fillfactor=80`
+   （现 heap 95 MB / 88,103 行、索引 11 MB，`last_vacuum=2026-09-13`）；
+   `partition_tiles`/`partition_indexes`/`partition_grid_cells` 的索引尚未治理。
 4. **`_load_snapshot` 剩余 ~4 s**：行传输 + `dict_row` 物化。候选：`SELECT i.*` 收敛到实际消费的 20 列（注意：单独去掉 `a.attributes`（−428 B/行）**没有**时间收益，说明字节数不是唯一驱动）、换 tuple 游标 / 分批流式。
 5. **`ORDER BY i.output_id` 的落盘排序**：`Sort Method: external merge Disk: 171 MB`；去掉 ORDER BY 只省 0.08 s（计划改变），需专门设计（如按主键索引序读取）后再评估。
 6. **promote 三段里的哪一段最贵**：`grid_cells / tiles / indexes` 已埋点，**尚未测量**。
@@ -178,7 +187,10 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 /tmp/verify-grid/probe_gu
 ```
 
 - 探索阶段原始证据归档：`~/perf-probe-evidence-20260912/`（19 个 agent JSON + workflow JSONL）
-- 本文档引用的提交：`ceb2c6f`、`c06dcbd`、`2a9a074`、`60628d8`、`39e323c`、`61ad6fa`
+- 本文档引用的提交：`ceb2c6f`、`c06dcbd`、`a687033`（9 个经度平移）、`2a9a074`（单环构建）、`60628d8`、`39e323c`、`61ad6fa`
+
+**核查注（2026-09-18）**：`/tmp/perf-probe/...` 与 `/tmp/verify-grid/...` 均为当时的临时脚本，现已不存在；
+上面命令保留原文以便对照当时的证据路径，`~/perf-probe-evidence-20260912/` 归档仍在。
 
 ---
 
@@ -186,6 +198,7 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 /tmp/verify-grid/probe_gu
 
 | 项 | 内容 |
 |---|---|
-| 已提交 | `ceb2c6f` `c06dcbd` `2a9a074` `60628d8`（格网）、`39e323c` `61ad6fa`（入库/剖分） |
-| **未提交（4 文件）** | `cube_split/cube_split/ingest/ray_ingest_job.py`、`cube_split/cube_split/ingest/managed_output_ingest.py`、`cube_split/tests/test_ray_ingest_job.py`、`cube_split/tests/test_managed_output_ingest.py`；本轮全量 **973 passed** |
+| 已提交 | `ceb2c6f` `c06dcbd` `a687033` `2a9a074` `60628d8`（格网）、`39e323c` `61ad6fa`（入库/剖分） |
+| **未提交（4 文件，2026-09-13 写作时）** | `cube_split/cube_split/ingest/ray_ingest_job.py`、`cube_split/cube_split/ingest/managed_output_ingest.py`、`cube_split/tests/test_ray_ingest_job.py`、`cube_split/tests/test_managed_output_ingest.py`；本轮全量 **973 passed** |
+| 提交状态（2026-09-18 核查） | 上述 4 个文件已由 `f280e16`（2026-09-17）提交；当时的全量结果是 **973 passed** |
 | 真实库边界 | 本轮所有真库操作均只读 + scratch schema 同名影子表 + OID 断言；`rs_cube_cell_fact` 全程 60,400 行未变（有一次探针事故已在 `PERFORMANCE_OPTIMIZATION_DIRECTIONS_20260912.md` §0.1 记录并清理） |

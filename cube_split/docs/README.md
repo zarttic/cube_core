@@ -1,10 +1,10 @@
 # cube_split 文档
 
-更新时间：2026-09-10
+更新时间：2026-09-18
 
 ## 1. 定位
 
-`cube_split` 是基于 cube_encoder SDK 的剖分与入库工作流实现：按数据族执行剖分、生成 COG/瓦片产物、
+`cube_split` 是基于 cube_encoder SDK 的剖分与入库工作流实现：按数据族执行剖分、生成逻辑索引或实体瓦片产物、
 把结果入库到 OpenGauss 与 MinIO、对产物做质检，并提供 AOI 回读。执行后端支持 Ray 与本地线程/进程。
 
 目录职责：
@@ -25,13 +25,13 @@
 | --- | --- | --- | --- |
 | optical | `jobs/ray_logical_partition_job.py` | `geohash`、`mgrs` | 逻辑剖分 |
 | radar | `jobs/ray_logical_partition_job.py` | `geohash`、`mgrs` | 逻辑剖分 |
-| carbon | `partition/carbon.py` | `geohash`、`mgrs`、`isea4h`（默认 `isea4h`） | 逻辑/实体按作业参数 |
+| carbon | `partition/carbon.py` | `geohash`、`mgrs`、`isea4h`（默认 `isea4h`） | 由格网类型派生（`geohash`/`mgrs`=logical，`isea4h`=entity） |
 | product | `jobs/product_partition_job.py` | `geohash`、`mgrs` | 逻辑剖分 |
 | 实体剖分 | `jobs/entity_partition_job.py` | 强制 `isea4h` | 实体剖分（`clip_mode` 支持 `bbox`、`exact`） |
 
 - 生产格网白名单：`geohash`、`mgrs`、`isea4h`，其余值在作业入口即被拒绝。
-- 逻辑剖分只写元数据与窗口引用（`tile_kind="logical_reference"`），落到 staging 表与
-  `logical-chunks/*.jsonl.gz`；实体剖分切真实瓦片并写入 `rs_entity_tile_asset`。
+- 逻辑分块作业（`run_logical_chunk_jobs`）只写元数据与窗口引用（`tile_kind="logical_reference"`），落到 staging 表与
+  `logical-chunks/*.jsonl.gz`；直接运行 `ray_logical_partition_job` 则写 `index_rows.jsonl`。实体剖分切真实瓦片并写入 `rs_entity_tile_asset`。
 - 产品族解析：optical 支持 `landsat`、`sentinel2`、`other`、`generic_tif`；radar 为 `sentinel1`；
   carbon 适配器为 `xco2`、`tansat`、`sif`；product 文件名需以 `_YYYY年` 结尾。
 
@@ -40,7 +40,7 @@
 | 作业 | 入口 | 常用参数 |
 | --- | --- | --- |
 | 逻辑剖分 | `run_logical_partition(args)` | `--grid-type{geohash,mgrs}`、`--grid-level`、`--cover-mode`、`--time-granularity`、`--max-cells-per-asset`（0 不限）、`--ray-parallelism`、`--chunk-size`、`--partition-backend{auto,ray,thread}`、`--metadata-backend{none,sqlite,postgres}` |
-| 逻辑分块 | `run_logical_chunk_jobs(payloads, runtime_env, cancellation_check)` | `CUBE_LOGICAL_MAX_IN_FLIGHT`（4）、`CUBE_LOGICAL_SHARD_DEGREES`（1，需 (0,10]）、`CUBE_LOGICAL_SHARDS_PER_TASK`（16） |
+| 逻辑分块 | `run_logical_chunk_jobs(payloads, runtime_env, cancellation_check)` | `CUBE_LOGICAL_SHARD_DEGREES`（1，需 (0,10]）、`CUBE_LOGICAL_SHARDS_PER_TASK`（16）、`CUBE_LOGICAL_MAX_IN_FLIGHT`（4，仅 `cube_split` 直接运行；web ray_job 模式改用请求中的 `worker_container_limit`） |
 | 碳卫星剖分 | `run_carbon_partition` | `--grid-type`（默认 `isea4h`）、`--grid-level`（默认 6）、`--product-type`、`--partition-backend{auto,ray,process,thread}` |
 | 实体剖分 | `run_entity_partition(args)` | 强制 `isea4h`；`clip_mode`、`DEFAULT_ENTITY_TASKS_PER_GROUP=64`、MinIO 上传并发 16 |
 | 产品剖分 | `run_product_partition` | `--grid-type{geohash,mgrs}`、`--partition-backend{auto,ray,thread}`、`--asset-storage-backend{local,minio}` |
@@ -63,6 +63,10 @@
   worker 日志经 stdout 由 Ray 采集。
 - `CUBE_WEB_RAY_JOB_DRIVER=1` 时不再套 runtime env（由 Ray Jobs 提供运行环境）。
 - **凭据不进 task 参数**：MinIO 凭据通过 `runtime_env.env_vars` 注入 worker 运行时环境。
+- web 托管批次的实体 worker 侧开关：`CUBE_ENTITY_RAY_PARALLELISM`（默认 16）、`CUBE_ENTITY_BANDS_PER_TASK`（默认 1）、`CUBE_ENTITY_UPLOAD_WORKERS`（默认 4）、
+  `CUBE_ENTITY_MINIO_PARALLEL_UPLOADS`（默认 3）、`CUBE_ENTITY_READ_BLOCK_PIXELS`（默认 4000000）、`CUBE_ENTITY_TILE_TMP_DIR`（默认 `<CUBE_SOURCE_CACHE_DIR>/entity_tiles`）；
+  设置 `CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large` 可把实体任务固定到大内存 worker 组。web ray_job 模式转发这些变量（`cube_web/cube_web/services/ray_job_submitter.py`）；
+  `CUBE_LOGICAL_*` 与 `RAY_ACTOR_NODE_RESOURCE` 不在转发列表中，只在 `cube_split` 直接/CLI 运行生效。
 - Ray 模式下实体剖分强制由 worker 上传 MinIO，本地路径直接报错。
 
 ## 5. 入库
@@ -81,7 +85,7 @@
 | `quality/optical_quality.py` | `index_rows`、`index_schema`、`time_bucket`、`cell_bbox`、`logical_duplicates`、`asset_readability`、`cog_crs`、`window_bounds`、`pixel_sample` |
 | `quality/radar_quality.py` | 复用 optical 全部检查，`data_type` 置为 `radar` |
 | `quality/product_quality.py` | `index_rows` + optical 的 `index_schema`/`cell_bbox`/`duplicates`/`assets`，另加 `product_years`（可用 `--expected-years`） |
-| `quality/carbon_quality.py` | `carbon_rows`、`carbon_schema`、`time_bucket`、`carbon_coordinates`、`xco2` 或 `sif`、`carbon_quality_flags`、`carbon_duplicates`、`carbon_footprint` |
+| `quality/carbon_quality.py` | `carbon_rows`、`carbon_schema`、`time_bucket`、`carbon_coordinates`、`xco2` 或 `sif`、`carbon_quality_flag`、`carbon_duplicates`、`carbon_footprint` |
 
 ## 7. 运行时配置
 

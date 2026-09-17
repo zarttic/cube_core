@@ -1,6 +1,6 @@
 # cube_web
 
-更新时间：2026-07-17
+更新时间：2026-09-18
 
 `cube_web` 承载 FastAPI 后端、独立 Vue/Vite 前端，以及面向前端的
 encoder SDK facade、托管剖分任务和质检报告 API。
@@ -26,15 +26,15 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 -m uvicorn cube_web.app:a
 
 认证默认开启，并可由运行时环境变量 `CUBE_WEB_AUTH_REQUIRED` 显式控制。本地自测可设置
 `CUBE_WEB_AUTH_REQUIRED=false`，跳过前端登录跳转和后端 `/v1/*` Bearer Token 校验。
-启用认证时，载入系统调用的 `POST /v1/partition/schemas/import` 保持公开；其他 `/v1/*` 默认需要 Bearer Token。前端导航和页面显示按主认证系统 `/api/me` 返回的 `user.permissions` 控制；页面隐藏不替代后端接口鉴权。
+启用认证时，载入系统调用的 `POST /v1/partition/schemas/import` 保持公开；`/v1/client-errors` 为可选鉴权（匿名可用，供登录前上报浏览器错误）；其他 `/v1/*` 默认需要 Bearer Token。前端导航和页面显示按主认证系统 `/api/me` 返回的 `user.permissions` 控制；页面隐藏不替代后端接口鉴权。
 
 剖分运行从运行时配置读取 Ray、MinIO 和 OpenGauss 设置。使用分布式后端时设置
 `CUBE_WEB_RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`、`CUBE_WEB_MINIO_ACCESS_KEY`、
 `CUBE_WEB_MINIO_SECRET_KEY` 和 `CUBE_WEB_MINIO_BUCKET`。MinIO 凭据也可以来自节点本地
 MinIO 服务环境。
 
-内置演示剖分批次默认不加载。只有演示环境才设置
-`CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1`；生产启动不自动写入剖分批次表。
+内置演示剖分批次默认不加载，`master` 也没有演示 seed 代码；只有 `demo/*` 分支的演示环境才设置
+`CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1`，生产启动不自动写入剖分批次表。
 
 本地前端开发：
 
@@ -59,6 +59,7 @@ npm run dev
 - `/v1/datasets/*`：Dataset 结果、质量、入库和发布管理。
 - `/v1/ingest-runs/*`：Scene 入库状态、取消和失败重试。
 - `/v1/quality/*`：规则、全部质检记录、详情、错误和完整导出。
+- `/v1/config/*`：读取、更新和重置 `partition`、`ingest`、`quality` 业务默认值（不保存运行时凭据）。
 
 Web 生产剖分格网严格限定为 `geohash`、`mgrs`、`isea4h`。剖分方式不独立选择：
 `geohash`、`mgrs` 固定为逻辑剖分，`isea4h` 固定为实体剖分。

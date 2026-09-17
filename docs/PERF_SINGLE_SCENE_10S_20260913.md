@@ -9,7 +9,8 @@
 
 **口径说明**：经确认，MGRS 采用"往上选一层（更粗、格元更少）"的层级选择，即调用方对 mgrs 请求
 **L0**（100 km 网格；数据集自身配置也是 0），geohash 用 **L4**。层级与格元尺寸的关系是
-`格元尺寸 = 100 km / 10^level`（`cube_web/services/grid_preview.py`）。
+`格元尺寸 = 100 km / 10^level`（MGRS level 定义见 `cube_encoder/grid_core/app/engines/mgrs_engine.py` 的
+`MGRSEngine` docstring；`cube_web/cube_web/services/grid_preview.py` 只是显示预览，不改变生产格元身份与几何）。
 
 | 格网 | 格元数 | 索引行 | 剖分 | 质检 | 入库 | **端到端（DB 时钟）** | 判定 |
 |---|---|---|---|---|---|---|---|
@@ -119,6 +120,8 @@ geohash 不要用过细的 L5+）。
 3. **剖分抖动**：mgrs 剖分 5.4–8.8 s 的波动与 `workflow.run`（覆盖+瓦片+索引写入）相关，
    下一步可给 driver 内部的 chunk 写入加阶段埋点。
 4. 可选的结构性项：`fillfactor=80` 已生效，继续观察多轮 HOT 命中是否改善重复 ingest。
+   **后续核查（2026-09-18，只读）**：`rs_cube_cell_fact` 的 `n_tup_hot_upd=2,124` vs
+   `n_tup_upd=1,344,636`（仍约 0.16%），fillfactor 未改善重复 ingest 的 HOT 占比。
 
 ## 七、复现命令
 
@@ -136,6 +139,9 @@ PYTHONPATH=cube_encoder:cube_split:cube_web python3.11 /tmp/perf_proc_parallel.p
 
 注意：同一 `(band unit, grid_type, grid_level)` 重复提交会被幂等守卫拒绝（用别的景或先清
 `perf-` 守卫行）；跑之前先确认 worker 已预热（空置 30 分钟会被回收，冷启动约 90 s，不计入剖分时间）。
+
+**核查注（2026-09-18）**：上面两个 `/tmp` 脚本是当时的临时脚本，现已不存在；本节只保留命令形态，
+不属于随仓库保存的复现材料。
 
 ## 八、本轮新增的否定结果（工程侧"砍每行成本"）
 

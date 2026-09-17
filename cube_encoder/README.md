@@ -1,6 +1,6 @@
 # cube_encoder
 
-更新时间：2026-07-17
+更新时间：2026-09-18
 
 `cube_encoder` 是 cube 项目的底层格网编码 SDK 与 API 提供方，负责离散格网编码、
 时空编码、拓扑元操作和统一能力输出。其他包应通过 `grid_core.sdk.CubeEncoderSDK`
@@ -24,6 +24,7 @@
 python3.11 -m venv .venv
 source .venv/bin/activate
 python3.11 -m pip install -e ".[dev]"
+python3.11 -m pip install uvicorn   # 独立 HTTP 服务需要 uvicorn（本包依赖未包含）
 python3.11 -m uvicorn grid_core.app.main:app --host 0.0.0.0 --port 50012 --reload
 ```
 

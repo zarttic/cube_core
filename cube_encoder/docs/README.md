@@ -1,6 +1,6 @@
 # cube_encoder 文档索引
 
-更新时间：2026-09-10
+更新时间：2026-09-18
 
 `cube_encoder` 是底层格网编码 SDK（包名 `grid_core`、分发名 `cube-encoder`），提供格网定位、覆盖、
 拓扑和时空编码能力。剖分与入库执行链路见 [cube_split/docs/README.md](../../cube_split/docs/README.md)，
@@ -17,6 +17,7 @@ Web 入口与托管剖分 API 见 [cube_web/docs/README.md](../../cube_web/docs/
 ```bash
 cd cube_encoder
 python3.11 -m pip install -e .                     # 本地安装
+python3.11 -m pip install uvicorn                  # 独立 HTTP 服务需要 uvicorn（本包依赖未包含）
 python3.11 -m uvicorn grid_core.app.main:app --port 50012   # 独立 HTTP 服务（可选）
 python3.11 -m grid_core.app.perf_smoke            # 性能烟测，发布前必跑
 python3.11 -m build                                # 构建 wheel / sdist
@@ -45,9 +46,9 @@ from grid_core.sdk import CubeEncoderSDK
 
 sdk = CubeEncoderSDK()
 cell = sdk.locate("geohash", requested_grid_level=6, point=(116.4, 39.9))
-cells = sdk.cover("mgrs", requested_grid_level=2, cover_mode="intersect", bbox=(100, 23, 104, 27))
-neighbors = sdk.neighbors(cell.address, k=1)
-st_code = sdk.generate_st_code(cell.address, timestamp=..., time_granularity=...)
+cells = sdk.cover("mgrs", requested_grid_level=2, cover_mode="intersect", boundary_type="bbox", bbox=(100, 23, 104, 27))
+neighbors = sdk.neighbors(cell, k=1)
+st_code = sdk.generate_st_code(cell, timestamp=..., time_granularity=...)
 ```
 
 主要方法（`grid_core/sdk/client.py`）：

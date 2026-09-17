@@ -1,6 +1,6 @@
 # cube_split 当前工作流
 
-更新时间：2026-07-26
+更新时间：2026-09-18
 
 ## 1. 定位
 
@@ -24,18 +24,22 @@ ISEA4H 是 entity 格网。其 `space_code` 使用未补零十进制 DGGRID SEQN
 
 ## 4. Ray 实体执行
 
-生产 ISEA4H 按源 COG 的空间范围拆成固定 `4 x 4` 的 16 个 Ray 分片。每个分片以
-`num_cpus=1` 独立调度；并行度来自 16 个可调度 task，而不是向单 task 声明 16 CPU。为避免
-分片边界漏格，分片范围带有小范围 WGS84 重叠；driver 按稳定 `output_id` 去重实体瓦片、
-索引和 cell。
+生产 ISEA4H 按源 COG 的空间范围拆成方形 Ray 分片网格：并行度取
+`CUBE_ENTITY_RAY_PARALLELISM`（默认 16），边长 `max(1, floor(sqrt(并行度)))`，默认即
+`4 x 4` 的 16 个分片，空分片会被跳过。每个分片以 `num_cpus=1` 独立调度；并行度来自可
+调度 task，而不是向单 task 声明多 CPU。为避免分片边界漏格，分片范围带有 0.02° 的 WGS84
+重叠；driver 按稳定 `output_id` 去重实体瓦片、索引和 cell。设置
+`CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large` 时实体任务固定到 KubeRay 大内存
+worker 组。
 
 同一 worker 节点的分片可复用按源 URI 稳定哈希命名的本地缓存。源下载的 `.part` 临时文件
 必须持有源级文件锁，避免并发任务互相覆盖。worker 从 MinIO 缓存源对象并将实体瓦片上传回
 MinIO；任何 driver 本地临时路径都不得作为跨节点输入。
 
-`max_cells_per_asset=0` 仍表示无上限，不会因采用 16 分片而自动降低层级或截断。2026-07-26
+`max_cells_per_asset=0` 仍表示无上限，不会因采用分片而自动降低层级或截断。2026-07-26
 在同一景、同一波段、ISEA4H level 11 的真实 COG 上，4783 个实体瓦片的剖分从单 task 约
-192 秒降至 16 分片约 24 秒墙钟时间。该环境测量仅用于容量评估，不是性能承诺。
+192 秒降至 16 分片约 24 秒墙钟时间（当时 ISEA4H 层级范围为 `0..15`，2026-08-16 起生产层级为
+`1..6`；该测量只说明分片并行的收益量级）。该环境测量仅用于容量评估，不是性能承诺。
 
 ## 5. 运行时配置
 

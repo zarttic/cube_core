@@ -1,6 +1,6 @@
 # cube_split
 
-更新时间：2026-07-17
+更新时间：2026-09-18
 
 `cube_split` 负责剖分、入库、质检和 AOI 回读。它不实现格网算法，而是通过
 `grid_core.sdk.CubeEncoderSDK` 使用 `cube_encoder` 能力。
@@ -9,9 +9,11 @@
 
 ## 职责边界
 
-- `cube_split`：输入解析、COG 转换、grid/window 剖分行、元数据写入、质检和 AOI 回读。
+- `cube_split`：输入解析、grid/window 剖分行与实体瓦片生成、元数据/资产入库、质检和 AOI 回读。
 - `cube_encoder`：格网 locate、cover、topology 和时空编码生成。
 - `cube_web`：可视化、托管剖分 API、任务编排和 Web 质检报告展示。
+
+剖分链路不做 COG 转换：源 COG 由 `jobs/ray_partition_core.cache_source_cog` 原样缓存后读取，逻辑剖分只落 `s3://` 引用；COG 转换属于载入子系统。
 
 ## 常用命令
 
@@ -53,16 +55,17 @@ PYTHONPATH=../cube_encoder:. python3.11 -m cube_split.jobs.carbon_partition_job 
   --output-dir data/ray_output/carbon \
   --grid-type isea4h \
   --grid-level 5 \
-  --partition-backend ray \
-  --ray-address "$RAY_ADDRESS"
+  --partition-backend ray
 ```
+
+`--ray-address` 省略时默认取 `runtime_config.ray_address()`；`.cube_web.env` 的变量不会自动导出到 shell，不要用 `"$CUBE_WEB_RAY_ADDRESS"` 展开传参。
 
 光学入库端到端检查脚本已归档，见
 [archive/scripts/cube_split/run_ray_ingest_e2e.sh](../archive/scripts/cube_split/run_ray_ingest_e2e.sh)；
 它需要外部 Ray、MinIO 与 OpenGauss，当前不随代码维护。
 
-Ray 剖分与入库作业从 `CUBE_WEB_POSTGRES_DSN`/`POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`/`RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、
-`MINIO_SECRET_KEY` 和 `MINIO_BUCKET` 读取 OpenGauss、Ray 和 MinIO 配置。
+Ray 剖分与入库作业从 `CUBE_WEB_POSTGRES_DSN`/`POSTGRES_DSN`/`DATABASE_URL`、`CUBE_WEB_RAY_ADDRESS`/`RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`MINIO_ENDPOINT`、
+`CUBE_WEB_MINIO_ACCESS_KEY`/`MINIO_ACCESS_KEY`、`CUBE_WEB_MINIO_SECRET_KEY`/`MINIO_SECRET_KEY` 和 `CUBE_WEB_MINIO_BUCKET`/`MINIO_BUCKET` 读取 OpenGauss、Ray 和 MinIO 配置。
 分布式后端缺少必需配置时会显式失败。
 
 运行光学 Ray 剖分并在同一作业内入库：

@@ -9,6 +9,11 @@
 > `fatal: not a git repository`，也无法从文件内容中取到版本号；`backend/app/main.py:319`
 > 的应用版本号固定写为 `1.0.0`、`core/config.py:16` 的 `VERSION` 写为 `2.0.0`，二者不一致
 > 且都不能当作代码 commit。文档基于代码版本：快照文件系统时间 `2026-09-09/2026-09-10`。
+>
+> **2026-09-17/18 复核（只读）**：对 `10.3.100.182:6000` 与 `:5177` 的存活/路由/鉴权探针
+> 与 2026-09-12 勘察结果完全一致（`/health` 200、openapi **125** 条路径、`/api/ard/listen/status` 401、
+> F-1 的 404/405 对照）；但快照对应的对端 `cube_web` 已删掉 `POST /v1/partition/load-batches/{id}/delete`
+> （见 7.1 末尾说明）。
 
 ---
 
@@ -61,7 +66,7 @@
 | 上游 | NFS 本地数据根 | `/nfs/public_data1/raw_data/ARD数据`、`/nfs/public_data1/shared_delivery_ard` | `core/config.py:29`、`:32` |
 | 下游 | ②分析就绪数据剖分（`cube_web` @ `10.3.100.179:50039`） | `POST /v1/partition/schemas/import` | `services/metadata_extractor.py:28`、`:1692` |
 | 下游 | ②分析就绪数据剖分 | `GET /v1/partition/load-batches/{id}/scenes`（查询剖分状态） | `services/cube_sync.py:22`、`routers/ard.py:278` |
-| 下游 | ②分析就绪数据剖分 | `POST /v1/partition/load-batches/{id}/delete`、`/archive`、`POST /v1/datasets/{id}/archive` | `services/cube_sync.py:10`、`:14`、`:18` |
+| 下游 | ②分析就绪数据剖分 | `POST /v1/partition/load-batches/{id}/delete`（**2026-09-17/18 复核时对端已无该路由，见 7.1**）、`/archive`、`POST /v1/datasets/{id}/archive` | `services/cube_sync.py:10`、`:14`、`:18` |
 | 下游 | MinIO 分布式集群 | 用户桶 `user-{user_id}`（`services/minio_service.py:23`）、团队桶 `team-{team_id}`（`:168`、`:189`、`:279` 等多处） | `services/minio_service.py:23`、`:168` |
 | 下游 | 前端 `ARD.vue` | REST `/api/ard/*` + WebSocket `/api/ws/orders` | `frontend/src/views/ARD.vue:1607` |
 | 下游 | ⑤后台管理 | 共享 `users`/`teams`/`audit_logs` 表；本子系统调用 `quota_guard` | `services/quota_guard.py`、`services/quota_checker.py` |
@@ -93,7 +98,7 @@
 | 前端端口 | `5177`，`/api` 代理到 `http://127.0.0.1:6000` | `frontend/vite.config.js:14`、`:19` |
 | Mock 外部系统 | `MOCK_PORT=8001`，`mock_remote_system.py`；**快照内不存在脚本所引用的 `backend/datas/mock_remote_system.py`**（只有仓根 `simulate_remote_system.py`），按脚本无法拉起 mock | `start-tmux-services.sh:24`~`:25` |
 | 运行用户 | **未能确认**（无证据表明 tmux 会话语主） | `start-tmux-services.sh` 未指定用户；快照文件属主为 `lyajun`，但那是同步产物、非远端真实属主 |
-| Python 版本 | 3.11（README 要求；环境名 `ard`） | `README.md:60`、`start-tmux-services.sh:10` |
+| Python 版本 | 3.11（README 要求；环境名 `ard`） | `README.md:54`（Python 3.11+）、`:64`（`conda create -n ard python=3.11`）、`start-tmux-services.sh:10` |
 | 应用版本号 | `main.py:319` 写 `1.0.0`；`core/config.py:16` 写 `2.0.0` | 两处不一致，无实际语义 |
 | 前端构建 | Vue 3 + Vite（`frontend/package.json`） | `frontend/src/router/index.js` 使用 `createWebHistory` |
 
@@ -104,7 +109,7 @@
 | OpenGauss 7.0.0-RC3 主节点 | `10.3.100.180:15400`，db `postgres` | 业务表 + 监听业务表（同库双引擎） | `core/config.py:71`~`:81`、`db/database.py:7`（主引擎）、`:19`（`client_encoding=LATIN1` 业务引擎） |
 | MinIO 分布式集群 | `http://10.3.100.179:9000` | 源数据下载、COG/原始归档、缩略图 | `core/config.py:174`、`services/minio_service.py:14` |
 | Redis | `redis://localhost:16379/0` | 配额计数、鉴权 code、邮件验证码 | `core/config.py:147`、`services/audit_service.py:36` |
-| ② 剖分数据服务（cube_web） | `http://10.3.100.179:50039` | schema 导入 + 批次 scenes/delete/archive | `services/metadata_extractor.py:28`、`services/cube_sync.py:10`~`:26` |
+| ② 剖分数据服务（cube_web） | `http://10.3.100.179:50039` | schema 导入 + 批次 scenes/delete/archive（2026-09-17/18 复核该服务可达；删除路由已不存在，见 7.1） | `services/metadata_extractor.py:28`、`services/cube_sync.py:10`~`:26` |
 | 外部业务系统（mock） | `http://127.0.0.1:8001` | 网络清单/数据投递 | `core/config.py:35`、`services/order_watcher.py:2982` |
 | NODA 统一身份认证 | `https://noda.ac.cn/ca/oauth/*` | OAuth2 登录 | `core/config.py:122`~`:125` |
 | Prometheus/Grafana | `monitoring/docker-compose.yml` | 节点与 MinIO 监控（非 T1 必需） | `monitoring/` |
@@ -199,7 +204,7 @@ snapshots/poufennode04_my_demo/
 - 鉴权方式：`Depends(require_permission(...))`（`core/security.py:85`）。
   权限常量：`PERMISSION_DATA_IMPORT_VIEW = "data_import:view"`、
   `PERMISSION_DATA_IMPORT_OPERATE = "data_import:operate"`（`core/permissions.py:30`、`:31`）。
-- **运行时证据**（2026-09-12 实测，只读 curl）：
+- **运行时证据**（2026-09-12 实测，只读 curl；2026-09-17/18 复核结果相同）：
   - `curl -s -o /dev/null -w '%{http_code}' http://10.3.100.182:6000/health` → `200`，body `{"status":"healthy"}`
   - `curl -s -o /dev/null -w '%{http_code}' http://10.3.100.182:6000/api/ard/listen/status` → `401`，body `{"detail":"Not authenticated"}`
   - `curl -s http://10.3.100.182:6000/openapi.json` → HTTP 200，共 **125** 条路径。
@@ -436,7 +441,7 @@ ard_dataset_metadata.dataset_id
 | 名称 | 作用 | 默认值 | 来源 | 必填 |
 | --- | --- | --- | --- | --- |
 | `PARTITION_SCHEMA_IMPORT_URL` | Cube schema 导入端点 | `http://10.3.100.179:50039/v1/partition/schemas/import` | `services/metadata_extractor.py:28` | 否 |
-| `PARTITION_BATCH_DELETE_URL_TEMPLATE` | 批次物理删除 | `http://10.3.100.179:50039/v1/partition/load-batches/{load_batch_id}/delete` | `services/cube_sync.py:10` | 否 |
+| `PARTITION_BATCH_DELETE_URL_TEMPLATE` | 批次物理删除（对端已无该路由，实际总是 404 后回落 archive；见 7.1） | `http://10.3.100.179:50039/v1/partition/load-batches/{load_batch_id}/delete` | `services/cube_sync.py:10` | 否 |
 | `PARTITION_BATCH_ARCHIVE_URL_TEMPLATE` | 批次归档 | `.../load-batches/{load_batch_id}/archive` | `services/cube_sync.py:14` | 否 |
 | `PARTITION_DATASET_ARCHIVE_URL_TEMPLATE` | 数据集归档 | `http://10.3.100.179:50039/v1/datasets/{dataset_id}/archive` | `services/cube_sync.py:18` | 否 |
 | `PARTITION_BATCH_SCENES_URL_TEMPLATE` | 批次 scenes 查询 | `.../load-batches/{load_batch_id}/scenes` | `services/cube_sync.py:22` | 否 |
@@ -480,6 +485,15 @@ ard_dataset_metadata.dataset_id
 | ③ 剖分数据服务 | 无直接依赖，全部经 ② 的 HTTP 接口 | — | — |
 | ⑥ 全球离散格网模型与编码 | 无依赖 | — | — |
 
+**对端 `cube_web` 接口现状（2026-09-17/18 复核）**：`cube_web` 当前 openapi 只有
+`GET /v1/partition/load-batches`、`GET /v1/partition/load-batches/{id}`、
+`POST /v1/partition/load-batches/{id}/archive`、`GET /v1/partition/load-batches/{id}/scenes`
+（`cube_web/cube_web/routes/scene_partition.py:28`、`:50`、`:54`、`:63`），**没有** `POST .../delete`。
+因此快照代码的 `delete_cube_load_batches`（`services/cube_sync.py:120`）每次请求都会命中 404，
+按 `:165` 的回落改走 `/archive`（archive 成功时行为等价于“归档而非物理删除”）；
+`routers/orders.py` 内联的第二条删除链（`:660`、`:812`）同理。`GET /v1/partition/load-batches`
+与 `GET .../scenes` 仍存在，批次列表反查与剖分状态隐藏不受影响。
+
 ### 7.2 外部依赖
 
 **Python 包**：`requirements.txt` 为 **UTF-16LE 编码**（`iconv -f UTF-16` 才能读），内容与代码
@@ -512,7 +526,7 @@ ard_dataset_metadata.dataset_id
 
 | 组件 | 版本/地址 | 用途 |
 | --- | --- | --- |
-| Python | 3.11 | 运行时（`README.md:60`） |
+| Python | 3.11 | 运行时（`README.md:54`） |
 | Node.js + Vite | 18+ | 前端 5177 |
 | OpenGauss | 7.0.0-RC3，主 `10.3.100.180:15400`；asyncpg 驱动 + `ssl=disable` | 全部关系数据 |
 | MinIO | 4 节点分布式，API `10.3.100.179:9000`，bucket `user-{id}` / `team-{id}` | 对象存储 |
@@ -725,9 +739,9 @@ ard_dataset_metadata.dataset_id
 
 ## 10. 验证方法
 
-以下命令中，标 **[已执行]** 的是本次勘察真实运行并记录输出的；其余为**建议验证命令，未执行**。
+以下命令中，标 **[已执行]** 的是 2026-09-12 勘察真实运行并记录输出的；标 **[2026-09-17/18 复核]** 的已用相同命令重跑并得到相同结果；其余为**建议验证命令，未执行**。
 
-### 10.1 服务存活与路由清点 **[已执行]**
+### 10.1 服务存活与路由清点 **[已执行]** **[2026-09-17/18 复核]**
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://10.3.100.182:6000/health
@@ -739,7 +753,7 @@ curl -s http://10.3.100.182:6000/openapi.json | python3 -c "import json,sys;prin
 # 实测输出：125
 ```
 
-### 10.2 鉴权边界 **[已执行]**
+### 10.2 鉴权边界 **[已执行]** **[2026-09-17/18 复核]**
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://10.3.100.182:6000/api/ard/listen/status
@@ -748,7 +762,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://10.3.100.182:6000/api/ard/batche
 # 实测输出：401
 ```
 
-### 10.3 复现 F-1（路由双前缀） **[已执行]**
+### 10.3 复现 F-1（路由双前缀） **[已执行]** **[2026-09-17/18 复核]**
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X GET  http://10.3.100.182:6000/api/ard/completed-batch/xxx
@@ -757,7 +771,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X GET  http://10.3.100.182:6000/api/ar
 # 实测输出：405   → 路由存在（仅注册了 DELETE）
 curl -s http://10.3.100.182:6000/openapi.json | python3 -c \
   "import json,sys; print([p for p in json.load(sys.stdin)['paths'] if 'completed-batch' in p])"
-# 实测输出：['/api/ard/ard/completed-batch/{batch_id}']
+# 实测输出：['/api/ard/ard/completed-batch/{batch_id}', '/api/ard/completed-batches/batch-delete']
 ```
 
 ### 10.4 API 配额中间件短路（静态验证）**[已执行]**

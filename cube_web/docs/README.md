@@ -1,6 +1,6 @@
 # cube_web 文档
 
-更新时间：2026-09-10
+更新时间：2026-09-18
 
 ## 1. 定位
 
@@ -38,6 +38,7 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 - 鉴权只作用于 `/v1/` 前缀；`/api/*`、`/health`、`/`、`/GNent` 不校验。
 - `GET`/`POST /GNent` 是外部探活入口：只返回 200 + 纯文本 `格网系统正常`，不带其它内容。
 - 公开入口：`POST /v1/partition/schemas/import`（载入系统交付入口）。
+- 可选认证入口：`POST /v1/client-errors`（浏览器错误上报，无需登录；携带凭证时记录上报人身份）。
 - 其余 `/v1/*` 需要 Bearer Token；无凭证 401，非管理员角色 403。
 - 管理员判定为角色归一化后等于 `ADMIN`（含 `admin`、`administrator`、`管理员` 等别名）。
 - 前端非管理员只保留公共编码入口，直接访问剖分页面会跳回编码页或门户首页；
@@ -146,7 +147,7 @@ MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `prev
 
 | 对象 | 状态 |
 | --- | --- |
-| 剖分批次 / attempt | `pending`、`queued`、`running`、`retrying`、`cancel_requested` → `completed`、`failed`、`manual_required`、`cancelled` |
+| 剖分批次 / attempt | `pending`、`queued`、`running`、`retrying`、`cancel_requested` → `succeeded`、`failed`、`manual_required`、`cancelled`；批次另有隐藏终态 `archived`（归档后不出现在默认列表） |
 | 质检 run | `pending`、`running` → `pass`、`warn`、`fail`、`error`、`cancelled` |
 | 入库 run / scene | `pending`、`queued`、`running`、`completed`、`partial_failure`、`failed`、`cancelled` |
 
@@ -154,6 +155,8 @@ MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `prev
   `CUBE_WEB_PARTITION_EXECUTOR=ray_job` 时改为 Ray Jobs 提交。
 - 取消走 `request_cancel` 标记，终止（`terminate`）会立即发布取消终态并回收未关闭的输出版本。
 - 质检 run 由常驻线程抢占租约执行，租约默认 300 秒并按需续约；失败在独立事务中终结为 `error`。
+  质检派发、质检执行和入库三条常驻线程的轮询间隔由 `CUBE_WEB_WORKER_POLL_SECONDS` 控制
+  （默认 1.0 秒，最小 0.05 秒）。
 
 ## 7. 前端
 

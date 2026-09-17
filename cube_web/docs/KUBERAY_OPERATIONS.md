@@ -24,7 +24,7 @@ CUBE_WEB_RAY_ADDRESS=auto
 Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址和凭据
 同样只从运行时环境读取。凭据不可写入任务业务 payload、业务配置表或仓库。
 
-异构 worker 组存在时，实体剖分任务要钝到大内存组，需额外设置：
+异构 worker 组存在时，实体剖分任务要钉到大内存组，需额外设置：
 
 ```text
 CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large
@@ -99,14 +99,15 @@ kubectl -n kuberay-system patch raycluster cube-partition --type=json \
 
 - 两组都用 `num-cpus: 1` 且各声明 1 个逻辑槽位，所以“一个 Worker Pod 同时只跑一个剖分任务”
   的语义不变；`limits.cpu` 给到 2 只是让单任务在 cgroup 层能突发多核，不改变调度语义。
-- `isea4h` 任务通过 `CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large` 钝到 4Gi 组
+- `isea4h` 任务通过 `CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large` 钉到 4Gi 组
   （任务请求 `cube_partition_worker_large: 0.001`，只有该组声明了这个标签）。未设置该变量时
   实体任务与逻辑任务一样落在默认组，行为向后兼容。
 - **每个组都必须声明 `cube_partition_worker: 1`**，否则 `worker_container_limit > 0` 的任务在该组上
   是不可调度请求，会永久 pending（见上一节的失败模式）；两边都声明才能保证 `limit=N` 跨组合计生效。
-- 容量：可调度节点为 `poufennode02`/`poufennode03`（`poufennode01` 已 cordon、`poufennode04` 不在集群），
-  每节点可分配 16 CPU / 31.5Gi；扣除 head 的 2 CPU / 8.5Gi 后留给 worker 约 51Gi，因此
-  `maxReplicas` 取 14（小）+ 5（大）≈ 48Gi。照搬 36 会得到长期 Pending 的 Pod。
+- 容量：可调度节点为 `poufennode02`/`poufennode03`/`gmhnode02`（`10.3.100.184`；`poufennode01` 已 cordon、`poufennode04` 不在集群），
+  每节点可分配 16 CPU / `31564756Ki`（约 30.1Gi）；head 请求 2 CPU / 8Gi。worker 组请求合计
+  14（小）× 2Gi + 5（大）× 4Gi ≈ 48Gi，在扣除 head 后的三节点理论余量内，因此
+  `maxReplicas` 取 14（小）+ 5（大）（2026-09-18 集群只读核对）。照搬 36 会得到长期 Pending 的 Pod。
 
 实体任务的读取现在是**分块流式**的：窗口像素不超过 `CUBE_ENTITY_READ_BLOCK_PIXELS`（默认
 4,000,000 px ≈ 8 MB/int16 波段）时仍走原来的一次性 `rasterio.mask.mask` 快路径；超过则逐块读取 +
@@ -135,7 +136,9 @@ kubectl -n kuberay-system exec <worker-pod> -- bash -lc 'RAY_ADDRESS=auto ray st
   `cube_encoder`、`cube_split`、`cube_web` 和栅格、对象存储、OpenGauss 驱动依赖。
 - Worker 允许 `minReplicas: 0`，并设置明确的 `maxReplicas`。容量、CPU、内存
   与临时盘按真实影像大小和并发度配置；不能依赖节点本地源码目录或镜像携带影像。
-- 生产集群的空闲 Worker 回收时间为 600 秒（`autoscalerOptions.idleTimeoutSeconds: 600`）。
+- 生产集群的 `autoscalerOptions.idleTimeoutSeconds` 为 600 秒，但两个 worker 组各自设置了
+  `workerGroupSpecs[].idleTimeoutSeconds: 1800`（组级值优先），因此空闲 Worker 实际按 1800 秒回收。
+  归档模板只在 `autoscalerOptions` 上设置 600 秒，组级值由运行实例单独维护。
   这个参数由 RayCluster 运行时配置控制，不写入业务配置表。
 - 源影像和成果均使用 MinIO `s3://` URI。Worker 在自己的缓存目录下载源对象、
   校验哈希、处理后把成果写回 MinIO。

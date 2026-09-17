@@ -1,6 +1,6 @@
 # 剖分格网与方式契约
 
-更新时间：2026-07-26
+更新时间：2026-09-18
 
 本文记录当前生产代码、API 和页面共同遵守的格网契约。历史实现仅在 Git 历史中保留，
 不得作为新调用依据。
@@ -37,19 +37,20 @@ mgrs    -> logical
 isea4h  -> entity
 ```
 
-请求中的 `partition_method` 必须与派生值一致，否则后端返回校验错误。生产 Web 请求固定
-使用 `cover_mode=intersect`、`time_granularity=day`、`max_cells_per_asset=0`；页面不显示
-这三个高级字段。
+请求中的 `partition_method` 必须与派生值一致，否则后端返回校验错误。碳卫星数据集是特例：
+使用 `isea4h` 时 `partition_method` 仍记为 `entity`，但所有瓦片以 `tile_kind=logical_reference`
+引用原始观测文件，不生成实体瓦片。生产 Web 请求固定使用 `cover_mode=intersect`、
+`time_granularity=day`、`max_cells_per_asset=0`；页面不显示这三个高级字段。
 
 `max_cells_per_asset=0` 表示不限制单数据单元的格网数量，不允许自动降低格网层级、静默
 截断或改用其他覆盖方式。smoke、调试和故障复现可以显式使用小的正数。
 
 ## ISEA4H 实体并行执行
 
-生产 ISEA4H 实体剖分以单个源 COG 为单位固定拆为 `4 x 4` 共 16 个 Ray 空间分片。每个
-分片以 `num_cpus=1` 提交，因此一个数据单元可同时占用最多 16 个 CPU slot；这不是让一个
-Ray task 申请 16 CPU。分片边缘保留小范围 WGS84 重叠，driver 按稳定 `output_id` 合并并去重，
-以同时避免边界漏格和重复产物。
+生产 ISEA4H 实体剖分以单个源 COG 为单位默认拆为 `4 x 4` 共 16 个 Ray 空间分片
+（`CUBE_ENTITY_RAY_PARALLELISM` 默认 16，可覆盖）。每个分片以 `num_cpus=1` 提交，因此一个
+数据单元可同时占用最多 16 个 CPU slot；这不是让一个 Ray task 申请 16 CPU。分片边缘
+保留小范围 WGS84 重叠，driver 按稳定 `output_id` 合并并去重，以同时避免边界漏格和重复产物。
 
 同一节点上的并发分片共享按源 URI 稳定哈希隔离的本地缓存；下载临时文件由源级锁保护，
 防止并发写入同一个 `.part` 文件。worker 直接从 MinIO 获取源数据并写出 `s3://` 实体瓦片，
@@ -57,13 +58,21 @@ driver 不得先生成本地 COG 再把本机路径交给远端 worker。
 
 16 分片只优化实体剖分及其 MinIO 产物写入，不包含后续 OpenGauss 领域提交、质检和入库。
 2026-07-26 在同一景、同一波段、ISEA4H level 11 的真实 COG 上验证：4783 个实体瓦片从原先
-单 task 约 192 秒降至 16 分片约 24 秒墙钟时间。该结果是一次环境测量，不构成吞吐 SLA。
+单 task 约 192 秒降至 16 分片约 24 秒墙钟时间（当时 ISEA4H 层级范围为 `0..15`，
+2026-08-16 起生产层级为 `1..6`；该测量只说明分片并行的收益量级）。该结果是一次环境
+测量，不构成吞吐 SLA。
 
 ## MGRS 语义
 
 系统使用标准 UTM/UPS MGRS 编码，保留 zone、纬度带、100 km 方格和精度数字。它覆盖
 全球有效坐标并支持跨 zone、反经线及 UTM/UPS 边界，但不伪装成 Geohash 式的全球连续
 父子树。标准 MGRS `space_code` 是业务格网身份。
+
+层级由调用方通过 `requested_grid_level` 显式指定（`0..5`），格元边长 = `100 km / 10^level`；
+服务端不会按源数据分辨率改写调用方传入的合法层级。页面上的建议层级只是默认值：
+分辨率小于 10 m 时建议 `1`，否则建议 `0`，用户仍可覆盖。当前单景端到端性能验收以调用方
+显式请求的 `level 0`（约 100 km 格元）为逻辑格网基线（2026-09-13 实测），页面建议层级
+不会覆盖该显式请求。
 
 ## 数据组织
 

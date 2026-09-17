@@ -292,7 +292,7 @@ DELETE FROM rs_cube_cell_fact WHERE run_id='probe' AND cube_version LIKE 'probe-
 | **P6** | 逻辑 worker 去重（真实 −17.6%）+ 每 asset 一次 cover/geometry（808→168） | 中高（整数行数硬判据；收益归因已被修正） | 中（chunk 幂等需加计划版本盐） | 两件事不可相加；改 chunk 内容必须改 chunk 身份 |
 | **P7** | 大 AOI 走 WALK 替代全层索引（35.7×）、`isea4h` 6 旋转候选/环复用、向量化 | 高（27 组集合等价、0/20,000 数值一致） | 高（正确性风险） | 保留索引 fallback + 穷举对照 |
 | **P8** | 死代码清理（`_run_logical_dataset_on_ray`）、分语句计时、`cell_parent` 死工作、目标表索引瘦身 | 中 | 低 | 可顺手做 |
-| **P9** | 补测量：实体相位归因、DB 并发扩展性、Web/AOI 读侧、质量阶段伸缩 | — | 低 | 见 §7 |
+| **P9** | 补测量：实体相位归因、DB 并发扩展性、Web/AOI 读侧、质量阶段伸缩 | — | 低 | 见 §6 |
 
 ---
 
@@ -313,7 +313,7 @@ DELETE FROM rs_cube_cell_fact WHERE run_id='probe' AND cube_version LIKE 'probe-
 
 ## 七、复现材料
 
-- 探测/验证/设计脚本：`/tmp/perf-probe/{grid-speed,isea4h,logical-ray,partition-entity-io,verify-ingest,plan-ingest,verify-geohash-mgrs,against-isea4h,design,...}/`（临时目录，未入库；如需长期保留应整理进 `cube_split/scripts` 或 `cube_web/scripts`）。
+- 探测/验证/设计脚本：`/tmp/perf-probe/{grid-speed,isea4h,logical-ray,partition-entity-io,verify-ingest,plan-ingest,verify-geohash-mgrs,against-isea4h,design,...}/`（临时目录，未入库；如需长期保留应整理进 `cube_split/scripts` 或 `cube_web/scripts`）。**2026-09-18 核查**：该临时目录已不存在，本节保留原始路径以对照当时的证据位置。
 - 工作流完整产出（19 个 agent 的原始 JSON）：`/tmp/perf-probe/results/{probe,verify,design,critique}__*.json`。
 - 既有基准设施（**本次未使用，建议后续先用它建回归基线**）：`cube_encoder/grid_core/app/perf_smoke.py`（含 `geohash_locate` / `mgrs_cover_intersect` / `topology_batch_geometries_20` 与 `threshold_ms`）与 `cube_encoder/tests/test_perf_smoke.py`。
 - 真实门禁：`cube_web/scripts/run_real_partition_acceptance.py`（本文档未运行；任何 promote/实体/入库改动的收益与回归都必须在它上面复跑并 `status=passed`，`ray.wait` / Ray Job 排队单独记录、不计入 DB 写入耗时）。
@@ -321,5 +321,27 @@ DELETE FROM rs_cube_cell_fact WHERE run_id='probe' AND cube_version LIKE 'probe-
 ## 八、边界与安全
 
 - 本文档**不含**任何 DSN、口令、MinIO 凭据或 token。运行时凭据只从环境变量 / `CUBE_WEB_ENV_FILE` / 本地 `.cube_web.env` 读取。
-- 所有微基准都遵守「真实表只读、写入实验仅用 session TEMP 表」；唯一例外是 §0.1 记录的 harness 事故（已定位、已量化、待授权清理）。
+- 所有微基准都遵守「真实表只读、写入实验仅用 session TEMP 表」；唯一例外是 §0.1 记录的 harness 事故（已定位、已量化；2026-09-18 只读核对 `run_id='probe'` 行数为 0，清理已完成）。
 - 本文档的绝对耗时数字来自**共享集群（load 10–15/16 vCPU）单次或 best-of-3 测量**，只能作方向性依据；进入验收基线前必须按 §6#8 补误差棒，并把 `ray.wait` / 排队单独剥离。
+
+---
+
+## 九、方向现状核查（2026-09-18，HEAD `dead6bf`）
+
+> 本节只更新「方向是否已落地」，不改上文任何原始测量值。库内数字为 2026-09-18 只读探针结果。
+
+**口径变化（先读）**：2026-09-13 确认源数据本身已是 COG，剖分路径不再做 COG 转换（worker 只
+`cache_source_cog` 原样缓存），本文 §3.2 中「转 COG」的描述属于 2026-09-12 测量时的状态。
+
+| 优先级 | 现状 | 证据（2026-09-18 核查） |
+|---|---|---|
+| **P0** 清理 200,000 行污染 + 防误写断言 | **已完成** | `rs_cube_cell_fact` 中 `run_id='probe'` 行数为 **0**；「同名影子表 + OID 断言」已写入 `AGENTS.md`「真实库探针安全模板」 |
+| **P1** 索引膨胀治理 | **部分** | `partition_tiles` / `partition_indexes` / `partition_grid_cells` **未 REINDEX**（2026-09-18 只读核查：索引体积与 2026-09-12 handoff §3.6 相同，行数 397,439 / 397,439 / 301,989）；四张 `rs_*` 表（`rs_cube_cell_fact` / `rs_product_cell_fact` / `rs_carbon_observation_fact` / `rs_entity_tile_asset`）已由 2026-09-13 的「B」处理（`PERF_SINGLE_SCENE_10S_20260913.md` §四.5），`rs_cube_cell_fact` 现索引 11 MB；仓库内未见接入的清理脚本 |
+| **P2** `intersects_area` 5×5→9 平移 | **已完成** | `a687033`（2026-09-12），`isea4h_engine.py` 的 `_RELATIVE_LONGITUDE_SHIFTS` |
+| **P3** `cache_source_cog` 命中改 stat 身份 | **未完成** | 命中路径仍对本地缓存文件做全文件 sha256（`cube_split/jobs/ray_partition_core.py` 的 `_local_file_identity`）；远端身份已用 ETag sidecar（`4f614a9`，2026-08-17，早于本文） |
+| **P4** 三处机械改动 | **部分** | carbon 去 CAST 已完成 `39e323c`；product 的 postgres 路径仍是参数化 VALUES 分批（`product_ingest_job.py` 的 `upsert_product_assets_postgres` / `upsert_product_facts_postgres`）；entity 仍 `executemany`（`entity_partition_job.py:1231`）；`ray_ingest` 的 `batch_size` 仍未被两个 upsert 使用（`ray_ingest_job.py:693/751`） |
+| **P5** mgrs 裁剪缓存 + 去 warnings | **已完成** | `ceb2c6f`、`60628d8`（2026-09-12） |
+| **P6** 逻辑 worker 去重 / per-asset cover | **部分** | 当前 live 路径每个 shard 只 cover 一次、band 在 chunk 内循环（`cube_split/jobs/ray_logical_chunk_job.py` 的 `_plan_logical_chunk`）；跨 chunk 的最终去重仍由 promote 的 `DISTINCT ON` / `NOT EXISTS` 承担（`partition_domain_store.py:1148-1178`），当前放大倍数未重测 |
+| **P7** 大 AOI WALK / 环复用 / 向量化 | **部分** | 9 平移已落地 `a687033`，环复用已落地 `2a9a074`（均 2026-09-12）；大 AOI WALK 未做（`isea4h_engine.py` 的 8° 阈值与全层索引仍在）；向量化未做（`isea4h_engine.py` 内无 numpy 引用） |
+| **P8** 死代码 / 计时 / 索引瘦身 | **部分** | 分语句计时已完成 `61ad6fa`；`cell_parent` 已改惰性（`isea4h/topology.py`）；`_run_logical_dataset_on_ray` 仍在且无调用点（`partition_dataset_runner.py:449`）；目标表索引瘦身未做 |
+| **P9** 补测量 | **部分** | 实体读取已在 `56c4b13`（2026-09-17）改分块流式：单 cell 峰值内存 **1.62 GB → 422 MB**、31.6 s → 22.9 s（按提交信息，**2026-09-17 口径**，与上文 2026-09-12 数字不可混算）；§6 的实体相位归因、DB 并发扩展性、Web/AOI 读侧、质量伸缩在本轮核查中未见后续测量记录 |

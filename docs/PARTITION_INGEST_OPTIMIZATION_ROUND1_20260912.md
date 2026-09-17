@@ -2,6 +2,11 @@
 
 > 上游：`docs/PERFORMANCE_OPTIMIZATION_DIRECTIONS_20260912.md`（探索与优先级）、`docs/PARTITION_WRITE_PERFORMANCE_HANDOFF.md`（写入路径 handoff）。
 > 本轮范围：把探索阶段排序里的**零风险/低风险**项落地。含 2 个 commit，均未触碰公共接口与生产数据。
+>
+> **后续状态（2026-09-18 核查，HEAD `dead6bf`）**：§四 的下一步现状：
+> - REINDEX 治理：四张 `rs_*` 表已由 2026-09-13 的「B」处理（`PERF_SINGLE_SCENE_10S_20260913.md` §四.5）；`partition_tiles` / `partition_indexes` / `partition_grid_cells` 仍未 REINDEX（2026-09-18 索引体积与 2026-09-12 相同）。
+> - 去除 staging→目标表二次搬运、product `VALUES`→COPY、entity `executemany`→COPY、`ray_ingest` 的 `batch_size` 接通：均未实施。
+> - 本轮已具备 promote 子阶段计时，但本文档之后未记录子阶段实测值。
 
 ## 一、本轮改动
 

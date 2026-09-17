@@ -1,6 +1,6 @@
 # cube_core
 
-更新时间：2026-09-10
+更新时间：2026-09-17
 
 本仓库是 Python monorepo，覆盖格网编码、遥感数据剖分、入库/回读、质检和 Web 管理入口。
 
@@ -50,5 +50,6 @@ Web、剖分作业和编码 SDK 共用这一契约。`s2`、`tile_matrix`、`pla
 | [cube_encoder/docs/README.md](cube_encoder/docs/README.md) | 编码器架构、SDK 与发布规范 |
 | [cube_split/docs/README.md](cube_split/docs/README.md) | 剖分、入库、质检作业 |
 | [cube_web/docs/README.md](cube_web/docs/README.md) | Web API、任务编排与前端 |
+| [cube_web/docs/KUBERAY_OPERATIONS.md](cube_web/docs/KUBERAY_OPERATIONS.md) | KubeRay 生产集群、Worker 组与运行校验 |
 | [archive/README.md](archive/README.md) | 历史文档、站点与脚本归档总索引 |
 | [archive/docs/README.md](archive/docs/README.md) | 归档文档详细索引 |

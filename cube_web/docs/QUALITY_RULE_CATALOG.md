@@ -16,7 +16,7 @@
 | `grid_method_agreement` | 格网与剖分方式一致性 |
 | `cell_bbox_validity` | 格网边界有效性 |
 | `time_bucket_consistency` | 采集时间分桶一致性 |
-| `asset_readability` | 资产可读性 |
+| `asset_readability` | 数据单元可读性 |
 | `window_bounds` | 像素窗口边界 |
 
 ## 数据类型专属可选项
@@ -34,7 +34,8 @@
 
 已移除、不再参与新质检运行的规则：`product_band_contract`（信息产品变量规范）、
 `radar_band_contract`（雷达极化通道规范）、
-`carbon_observation_duplicates`（碳卫星观测重复）、`carbon_footprints`（碳卫星观测足迹）。
+`carbon_observation_duplicates`（碳卫星观测重复）、`carbon_footprints`（碳卫星观测足迹）、
+`carbon_quality_flags`（碳卫星质量标识）。
 历史质检记录仍按当时写入的规则快照解释。
 
 雷达数据按真实语义允许 `variable` 波段（例如 Sentinel-1 反演海面风场产品），
@@ -46,5 +47,5 @@
 生产 `asset_readability` 会从 MinIO 下载缓存并真实打开数据；读取器也支持本地路径用于
 测试和诊断，但生产领域表只接受 `s3://`。COG 使用 rasterio，NetCDF 使用 netCDF4，
 非 NetCDF 数据模型的 HDF5 使用 GDAL/rasterio fallback。读取错误只记录
-通用错误类型，不保存连接异常文本或凭据。XCO2 碳卫星使用观测结构、坐标、XCO2、质量标识
-专项规则；TanSat SIF 使用 `SIF_758nm`、`SIF_771nm` 观测值和坐标专项规则，不执行栅格像素抽样。
+通用错误类型，不保存连接异常文本或凭据。XCO2 碳卫星使用观测结构、坐标、XCO2 专项规则；
+TanSat SIF 使用 `SIF_758nm`、`SIF_771nm` 观测值和坐标专项规则，不执行栅格像素抽样。

@@ -21,7 +21,8 @@
 
 ## 性能基线管理
 
-- 阈值集中维护在 `.github/perf-thresholds.env`。
+- 阈值文件 `.github/perf-thresholds.env` 由 CI 在运行 `perf_smoke.py` 前导入环境；`perf_smoke.py` 的 `_env_float` 对未设置或非数字的变量静默回落到代码默认值。
+- 该文件当前仍是旧变量名：`PERF_MAX_S2_*` / `PERF_MAX_H3_*` 已无读取方，`PERF_MAX_GEOHASH_*` / `PERF_MAX_ISEA4H_*` 缺失，仅 `PERF_MAX_MGRS_*` 与 `PERF_MAX_BATCH_GEOMETRY_MS` 名称匹配（其中 MGRS cover/neighbors 的文件值 180 / 12 ms 比代码默认值 50 / 2.5 ms 更宽松）。变量名和取值对齐前，该文件不能定义完整的当前门禁，缺失项以代码默认为准（差异记录见 T6 技术手册 §9.8）。
 - CI 每次运行导出 `perf-smoke.json` artifact，用于趋势检查。
 
 ## API/SDK 兼容性说明
