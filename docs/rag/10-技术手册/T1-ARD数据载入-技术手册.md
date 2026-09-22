@@ -441,7 +441,7 @@ ard_dataset_metadata.dataset_id
 | 名称 | 作用 | 默认值 | 来源 | 必填 |
 | --- | --- | --- | --- | --- |
 | `PARTITION_SCHEMA_IMPORT_URL` | Cube schema 导入端点 | `http://10.3.100.179:50039/v1/partition/schemas/import` | `services/metadata_extractor.py:28` | 否 |
-| `PARTITION_BATCH_DELETE_URL_TEMPLATE` | 批次物理删除（对端已无该路由，实际总是 404 后回落 archive；见 7.1） | `http://10.3.100.179:50039/v1/partition/load-batches/{load_batch_id}/delete` | `services/cube_sync.py:10` | 否 |
+| `PARTITION_BATCH_DELETE_URL_TEMPLATE` | 批次物理删除（对端 2026-09-19 起已实现；见 7.1） | `http://10.3.100.179:50039/v1/partition/load-batches/{load_batch_id}/delete` | `services/cube_sync.py:10` | 否 |
 | `PARTITION_BATCH_ARCHIVE_URL_TEMPLATE` | 批次归档 | `.../load-batches/{load_batch_id}/archive` | `services/cube_sync.py:14` | 否 |
 | `PARTITION_DATASET_ARCHIVE_URL_TEMPLATE` | 数据集归档 | `http://10.3.100.179:50039/v1/datasets/{dataset_id}/archive` | `services/cube_sync.py:18` | 否 |
 | `PARTITION_BATCH_SCENES_URL_TEMPLATE` | 批次 scenes 查询 | `.../load-batches/{load_batch_id}/scenes` | `services/cube_sync.py:22` | 否 |
@@ -475,7 +475,7 @@ ard_dataset_metadata.dataset_id
 | --- | --- | --- | --- |
 | ② 分析就绪数据剖分 | `POST /v1/partition/schemas/import` | `services/metadata_extractor.py:1701` | 捕获 `HTTPStatusError`/`Exception`，写 `CUBE_SYNC_FAILED` 日志并返回 `False`；**不回滚 ARD 本地结果**（`:1697` 注释） |
 | ② 分析就绪数据剖分 | `GET /v1/partition/load-batches/{id}/scenes` | `routers/ard.py:279` | 超时 10s；非 200 / 异常 → 返回 `None`，批次保持可见 |
-| ② 分析就绪数据剖分 | `POST .../load-batches/{id}/delete` → 404 时回落 `/archive` | `services/cube_sync.py:156`（delete）、`:165`（404 回落）、`:175`/`:182`（失败抛错） | 抛 `RuntimeError`，删除接口整体失败 |
+| ② 分析就绪数据剖分 | `POST .../load-batches/{id}/delete`（批次物理删除，管理员 token）→ 404 时回落 `/archive`（archive 已废弃，仅保留回落兼容） | `services/cube_sync.py:156`（delete）、`:165`（404 回落）、`:175`/`:182`（失败抛错） | 404/409 之外的失败抛 `RuntimeError`，删除接口整体失败 |
 | ② 分析就绪数据剖分 | `POST /v1/datasets/{id}/archive` | `services/cube_sync.py:72`（调用）、`:80`（失败抛错） | 抛 `RuntimeError` |
 | ② 分析就绪数据剖分 | `GET PARTITION_BATCH_LIST_URL` + `archive/delete load-batches`（订单批量删除的独立实现） | `routers/orders.py:209`、`:648`、`:660`、`:812` | 单条失败记入 `failed[]`，不阻断其余删除 |
 | ⑤ 后台管理 | 共享 `users` 表；`user.cpu_used += 0.5`、`api_used += 1` 计费写回 | `services/metadata_extractor.py:1410`~`:1413` | 无独立异常处理 |
@@ -485,14 +485,17 @@ ard_dataset_metadata.dataset_id
 | ③ 剖分数据服务 | 无直接依赖，全部经 ② 的 HTTP 接口 | — | — |
 | ⑥ 全球离散格网模型与编码 | 无依赖 | — | — |
 
-**对端 `cube_web` 接口现状（2026-09-17/18 复核）**：`cube_web` 当前 openapi 只有
+**对端 `cube_web` 接口现状（2026-09-19 复核）**：`cube_web` 的 openapi 现在包含
 `GET /v1/partition/load-batches`、`GET /v1/partition/load-batches/{id}`、
-`POST /v1/partition/load-batches/{id}/archive`、`GET /v1/partition/load-batches/{id}/scenes`
-（`cube_web/cube_web/routes/scene_partition.py:28`、`:50`、`:54`、`:63`），**没有** `POST .../delete`。
-因此快照代码的 `delete_cube_load_batches`（`services/cube_sync.py:120`）每次请求都会命中 404，
-按 `:165` 的回落改走 `/archive`（archive 成功时行为等价于“归档而非物理删除”）；
-`routers/orders.py` 内联的第二条删除链（`:660`、`:812`）同理。`GET /v1/partition/load-batches`
-与 `GET .../scenes` 仍存在，批次列表反查与剖分状态隐藏不受影响。
+`POST /v1/partition/load-batches/{id}/archive`（已废弃，仅保留 404 回落兼容）、
+**`POST /v1/partition/load-batches/{id}/delete`**、`GET /v1/partition/load-batches/{id}/scenes`
+（`cube_web/cube_web/routes/scene_partition.py`）。因此 `delete_cube_load_batches`
+（`services/cube_sync.py:120`）不再命中 404，而是真正物理删除：
+- 语义：批次 → 场景 → 数据集；**数据集仅被该批次引用时整删**（连带 `partition_*`、`rs_*` 行与
+  MinIO `partition/<dataset_id>/versions/…` 对象）；被其它批次共享时只删本批次血缘，场景与产物保留。
+- 守卫：批次仍在 `pending/running` → 409；数据集有未撤回发布 → 409；批次不存在 → 404。
+- 鉴权：管理员 token（`require_admin`）；`dry_run: true` 可只预览删除范围。
+- 因此 `routers/orders.py` 内联的第二条删除链（`:660`、`:812`）同样不再退化为归档。
 
 ### 7.2 外部依赖
 

@@ -62,6 +62,16 @@ There is no runtime mode switch. These APIs are the only production chain.
   context to merge several source load batches into the same PartitionRun.
 - `GET /v1/datasets` and its detail endpoints expose management, provenance,
   quality, publication, and current output state.
+- `DELETE /v1/datasets/{dataset_id}` plans the deletion and returns 202 with a
+  `deletion_id`; the background worker (`cube-web-dataset-deletion`) executes the
+  plan in committed batches and removes the dataset's own
+  `partition/{dataset_id}/` objects in batched requests. `GET
+  /v1/datasets/deletions/{deletion_id}` reports status, per-step rows and
+  seconds; a failed attempt is retried with backoff (`CUBE_WEB_DELETION_MAX_ATTEMPTS`,
+  default 3) and every step is idempotent, so a resumed attempt just finds fewer
+  rows. Batch size defaults to 20 000 rows (`CUBE_WEB_DELETION_BATCH_SIZE`).
+  A dataset with running work or a live publication is rejected with 409 before
+  anything is deleted.
 - `/v1/ingest-runs` exposes ingest execution grouped by Scene, with explicit
   `band_unit_ids` for every new request. Completion, failure and manual
   collection selection are evaluated at band-unit granularity; retry retains

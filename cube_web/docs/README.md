@@ -93,6 +93,23 @@ cd cube_web && PYTHONPATH=../cube_encoder:../cube_split:. python3.11 -m pytest t
 MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `preview_cells` 中返回显示用方格，
 不改变剖分编码、源影像 CRS 或入库几何。
 
+预览规模上限（2026-09-20 起）：`/v1/grid/cover` 与 `/v1/topology/children` 会把全部格元一次性
+materialize 到内存，因此现在都做了封顶：
+
+- `CUBE_WEB_PREVIEW_MAX_CELLS`（默认 `10000`）：cover 的格元数上限。超过上限时**不报错**，
+  而是按行带（strip）分块覆盖并在上限处截断，响应带 `truncated=true` 与 `notice`
+  （“最多显示 10,000 个格网，多余格网已截断”），前端在地图工具栏以 warning 标签展示该 notice。
+  仅当请求只给 `geometry`、没有可用 `bbox` 时无法安全分块，才返回 `413` +
+  `error.code=preview_limit_exceeded`。
+  依据：实测 3.5 KB/格元，1°×1° geohash L7 约 53 万格元 / 1.8 GB 峰值，3°×3° 约 478 万格元 /
+  16 GB（即 2026-09-17 冻死主机的量级）。
+- `CUBE_WEB_PREVIEW_MAX_CHILDREN`（默认 `10000`）：children 的子格元数上限；按每层分叉数
+  （geohash 32 / MGRS 100 / ISEA4H 4）指数外推，只生成一层用于测分叉数，超限返回 `413`
+  （子格元是数据而非显示，静默截断会错）。
+
+这两个上限**只作用于预览接口**：剖分链路（`cube_split`）由分片规划器按 `TARGET_ROWS_PER_CHUNK`
+约束单个 worker 的规模，不受此限制。
+
 ### 5.2 剖分（`/v1/partition`）
 
 `GET /tasks`、`GET /tasks/{task_id}`、`POST /tasks/{id}/cancel`、`POST /tasks/{id}/terminate`、
@@ -115,6 +132,12 @@ MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `prev
 `POST /datasets/{id}/publish`、`POST /datasets/{id}/publications/{pub}/withdraw`、
 `POST /datasets/{id}/archive`、`DELETE /datasets/{id}`。
 
+`DELETE /datasets/{id}` 是**异步**的：接口在同一个短事务里校验守卫（运行中的任务、未撤回的发布）并把删除计划
+（场景、载入批次、剖分运行、输出版本、入库作业 id）写入 `dataset_deletion_runs`，随后返回 **202** 与
+`deletion_id`；行与 MinIO 对象由后台 worker（`cube-web-dataset-deletion` 线程）按批次提交删除。查询进度用
+`GET /datasets/deletions/{deletion_id}`，列表用 `GET /datasets/deletions`（都要求管理员）。
+这样单次删除不再占用一个 HTTP 请求和一个长事务（2026-09-19 实测 13 分钟并拖慢整库）。
+
 动态详情子资源 `GET /datasets/{id}/{detail}`，`detail` 取值：
 `scenes`、`assets`、`bands`、`outputs`、`grid`、`tiles`、`indexes`、`ingest-records`、`quality`、
 `publications`、`provenance`。
@@ -123,7 +146,7 @@ MGRS 连续预览：服务仍在 `cells` 返回真实 MGRS 单元，只在 `prev
 
 `GET /rules`、`PUT /rules/settings`、`PUT /rules/{code}/enabled`、`GET /records`、
 `GET /records/{id}`、`GET /records/{id}/results`、`GET /records/{id}/results/export`（csv/json）、
-`GET /records/{id}/export`（xlsx 工作簿，成功/失败双 Sheet）、`GET /records/{id}/errors`、
+`GET /records/{id}/export`（默认 csv，成功/失败内容按“结果分组”列合并导出；显式 `format=xlsx` 仍返回成功/失败双 Sheet 工作簿）、`GET /records/{id}/errors`、
 `GET /records/{id}/errors/export`、`POST /runs`（触发/重跑质检）。
 
 错误导出接口流式返回完整内容，不使用页面的 `page`/`page_size`。

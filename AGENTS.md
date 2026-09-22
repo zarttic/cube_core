@@ -160,6 +160,29 @@ CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
   该值不会下发到 Ray worker（worker 只配置 stdout）。
 - `CUBE_LOG_RAY_LEVEL`：Ray 自身日志级别，默认 `ERROR`，可设 `WARNING`/`INFO` 放开。
 - `CUBE_LOG_ACCESS`：`0` 时关闭应用访问日志。
+- `CUBE_WEB_PREVIEW_MAX_CELLS` / `CUBE_WEB_PREVIEW_MAX_CHILDREN`：`/v1/grid/cover` 与
+  `/v1/topology/children` 的预览规模上限，默认各 `10000`。这两个接口会把全部格元一次性
+  materialize 到内存，且**只用于交互预览**；cover 超限时按行带分块并在上限处截断（响应
+  `truncated=true` + `notice`，前端显示“最多显示 10,000 个格网，多余格网已截断”），
+  children 超限仍返回 413。剖分链路由分片规划器约束，不受此限制。
+  2026-09-17 生产 Web 节点因一个无上限的 cover 请求在 90 秒内吃掉 16 GB 匿名内存并冻死
+  （需硬复位），因此默认封顶。
+
+### 数据集身份与批次下线（2026-09-19 起）
+
+- `CUBE_WEB_IMPORT_DATASET_IDENTITY`：`legacy`（默认，历史行为）或 `name`。
+  `name` 模式下导入先按 `(dataset_title, data_type)` 解析既有数据集：命中就复用它的
+  `dataset_id`（批次只作血缘记录在 `load_batch_sources`），未命中才新建；可选白名单
+  `CUBE_WEB_IMPORT_IDENTITY_PRODUCTS=<产品标题1>|<产品标题2>`（用 `|` 分隔）先单产品灰度。
+  回退即改回 `legacy`，已写入的行不回滚但不再产生新副本。
+- 场景身份 = `sha256(source_namespace + scene_key)`，**全局唯一**。因此载入方的 `scene_key`
+  不再拼批次号，`source_namespace` 为产品级；同一产品重载会命中同一场景并刷新内容
+  （旧 checksum 记入 `scenes.attributes.content_history`），资产行原地更新以保留历史
+  `band_unit_id` 引用。
+- `POST /v1/partition/load-batches/{load_batch_id}/delete`：批次物理删除（管理员 token），
+  数据集仅被该批次引用时整删（连带 `partition_*`/`rs_*` 行与 MinIO 对象），被其它批次共享时
+  只删本批次血缘；运行中批次与未撤回发布返回 409，批次不存在返回 404；支持 `dry_run`。
+  归档（`/archive`）已废弃，仅为载入方的 404 回落保留。
 
 ### 隔离 worktree 与真实门禁
 
@@ -187,6 +210,19 @@ CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
 - 生成最终集成补丁前，待纳入的新增文件必须先 `git add`；`git diff <base>` 不会包含
   未跟踪文件。最终干净集成 worktree 应从前置哈希重建并执行 `git apply --index` 和
   `git diff --cached --check`，以避免把协调 worktree 的无关改动带入单一里程碑提交。
+
+### 验收账号（门户管理员）
+
+真实页面验收（手工点击或无头浏览器 E2E）使用门户管理员账号：
+
+- 用户名 `admin`，登录角色选「管理员」；门户登录页 `http://10.3.100.182:5177/login`，
+  应用回调地址（`redirect_uri`）必须是 `http://10.3.100.179:50040/callback`。
+- **口令不入仓库**：保存在本地未跟踪的 `.cube_web.env`（`CUBE_WEB_TEST_ADMIN_USER` /
+  `CUBE_WEB_TEST_ADMIN_PASSWORD`，单引号包裹，方便 `set -a; . .cube_web.env; set +a`）。
+  无头浏览器脚本按 `NEAT_ADMIN_USER` / `NEAT_ADMIN_PASSWORD` 读取（见
+  `cube_web/frontend/tests/e2e/neat/login.mjs`），运行前从本地文件取值即可，不要打印或回显。
+- 本文件（`AGENTS.md`）受版本控制并推送到 GitHub，禁止写入明文口令、token、DSN 或
+  MinIO 密钥；需要记录凭据时只写变量名和本地文件位置。
 
 当前运行端点：
 
@@ -241,6 +277,7 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 
 ### 已落地优化的语义边界
 
+- **逻辑剖分行只写一遍（2026-09-20）**：`CUBE_LOGICAL_CHUNK_PERSIST` 默认 `direct` —— Ray worker 把每个 chunk 的行用「会话临时表 + `INSERT ... WHERE NOT EXISTS`」**一次写入目标表**（`cube_split/jobs/logical_row_writer.py`），web 进程只做计数校验，不再写 JSONB 暂存再集合式 promote；设 `staging` 可回退旧流程。生产实测 36 万行 65.6 s → 7.8 s（旧路径在 12 并发后负扩展，直写在 12→36 并发保持 33–46k 行/秒）。openGauss 无 `ON CONFLICT`，边界格元唯一冲突靠有界重试（实测 10% 重复键仅 2 次重试）；两条路径产物已用逐列比对验证等价（本地实例 + 生产库 scratch schema）。因此 `partition_logical_staging_rows` 正常路径不再增长，其 1475 MB 空间属历史膨胀，回收需维护窗口授权。
 - `rs_cube_cell_fact` 的 MERGE **不再在 UPDATE 分支重写 `cell_geom`**（几何由 ON 键中的 `grid_type/grid_level/space_code` 唯一确定；实测 20k 行全 MATCHED 时 min −30.6%）。因此**同一 `cube_version` 重跑不再修复“非 NULL 但过期”的几何**；`cell_geom IS NULL` 的历史行由 `_backfill_missing_cell_geom` 兜底。几何修正的正规出口是：新的 `cube_version`、迁移脚本，或**手动入库**（见下）。
 - `_load_snapshot` 按 `(dataset_id, output_version)` **一次性取格元再回填**，不再逐行 JOIN TOAST 几何（实测 70,909 索引行 : 248 格元时 8.71 s → 5.30 s）；JOIN 仍保留作“索引行必须有格元”的过滤，格元缺失立即报错。
 - 改写入/快照路径前必读：`cube_split/cube_split/ingest/managed_output_ingest._verify_targets` 用 `run_id = job_id AND cube_version` 计数且要求 `cell_geom IS NOT NULL`，**任何“跳过写入”的优化都必须同步调整该口径**，否则 managed ingest 自检失败。
@@ -248,9 +285,11 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 
 ### 已知结构性问题（未授权前不要动）
 
+- **`partition_dataset_assets` 无法在全新库上建表**（2026-09-20 实测）：`CREATE TABLE` 同时声明内联 `CHECK (source_format IN ...)` 与同名命名约束 `partition_dataset_assets_source_format_check`，新建时直接报 `DuplicateObject`；生产库因表早已存在而未暴露。`apply_schema()` 因此无法从零建库，修复前不要依赖它做全新部署。
+
 - `rs_cube_cell_fact` 累计 **134 万次非 HOT 更新**（2026-09-13 测量 `n_tup_upd≈1.34M`；2026-09-18 只读核对为 `n_tup_upd=1,344,636`、`n_tup_ins=533,960`、`n_tup_hot_upd=2,124`（0.158%）），来源是重复 ingest：16 个版本对应 214 次作业，同一 `output_version` 最多重跑 60 次。`fillfactor=80` 已于 2026-09-13 设置，HOT 命中仍无明显改善；继续降低需要维护窗口重写表或改 `_verify_targets` 口径。
 - 该表 heap 曾膨胀到 410 MB / 6 万活行；2026-09-13 已执行 `fillfactor=80` + `VACUUM FULL` + 相关表 `REINDEX/ANALYZE`，当前 `pg_relation_size≈99.8 MB` / 8.8 万活行（2026-09-17 只读核对）。后续 `VACUUM FULL`/`REINDEX` 仍属破坏性运维，需明确授权。
-- 性能记录与复现命令：`docs/PERFORMANCE_OPTIMIZATION_STEPS_20260913.md`（方法+收益+撤回项）、`docs/GRID_OPTIMIZATION_ROUND1_20260912.md`、`docs/PARTITION_WRITE_PERFORMANCE_HANDOFF.md`、`docs/PERFORMANCE_OPTIMIZATION_DIRECTIONS_20260912.md`。
+- 性能记录与复现命令：`docs/PERFORMANCE_OPTIMIZATION_STEPS_20260913.md`（方法+收益+撤回项）、`docs/GRID_OPTIMIZATION_ROUND1_20260912.md`、`docs/PARTITION_WRITE_PERFORMANCE_HANDOFF.md`、`docs/PERFORMANCE_OPTIMIZATION_DIRECTIONS_20260912.md`、`docs/PARTITION_WRITE_OPTIONS_OLAP_20260921.md`（2026-09-21 写入变体实测 + StarRocks/Doris 选型结论与出处）、`docs/PARTITION_CHAIN_PERF_BREAKDOWN_20260922.md`（2026-09-22 格网→入库逐阶段剖析与未实施优化清单）。
 
 ---
 
@@ -270,6 +309,30 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
 - **连接 DSN**: `postgresql://<user>:<password>@10.3.100.180:15400/<database>`（database 由 DSN 指定，当前本地部署为 `cube_v3`）
 - **凭据来源**: 运行时从环境变量、`CUBE_WEB_ENV_FILE` 或本地 `.cube_web.env` 读取；不要把明文口令写入仓库。
 - **兼容说明**: 代码变量和部分错误信息沿用 PostgreSQL 命名，但实际目标库是 OpenGauss。
+- **HA 目标与实况（2026-09-21 定稿）**：上表的“1 主 3 备”是 2026-07-04 安装时的定义
+  （XML 的 `dataNode1` 把 poufennode01/03/04 都列为备机，四节点共享同一个 system identifier）。
+  **现定拓扑 = `10.3.100.180` 主 + `10.3.100.181`/`10.3.100.182` 两备；`10.3.100.179` 已出集群**
+  （其 `replconninfo1-3` 已于 2026-09-21 23:18 全部停用，实例也一直未运行；该节点另有系统安装的
+  `/usr/local/opengauss`，与本集群无关）。
+  `10.3.100.182` 已于 2026-09-21 23:20-23:24 用 `gs_ctl build -b full -q` 全量重建并拉起（实例名
+  **`dn_6003`**，对应槽 `dn_6003`；原先 `.180/.181/.182` 的 `application_name` 都是 `dn_6004`，而
+  **槽名=备机实例名**，不改名会与 `.181` 撞槽；另：`gs_ctl build` **不会**生成 `recovery.conf`，
+  缺它备机起不来，需手写 `standby_mode='on'` + `recovery_target_timeline='latest'`）。
+  核对方式：`pg_stat_replication` 应有两条 `Streaming`、`pg_replication_slots` 应有 `dn_6003`+`dn_6004`
+  两个 active 槽——不要只看 `gs_ctl query` 的 `static_connections`（不是热更值，要重启才归位）。
+  四个节点仍然**都没有自启机制**（无 systemd unit、`rc.local` 无 gauss 行），实例全靠人工 `gs_ctl start`。
+  完整取证与重建步骤见 `docs/OPENGAUSS_CLUSTER_MEMBERSHIP_20260921.md`。
+- **节点准入**：`ssh root@10.3.100.180`（`.179/.181/.182` 同）免密可用；管理入口是
+  `su - og_user` → `gsql -h /data/og_user/openGauss/tmp -p 15400`（本地 socket 免密）。
+  `remote_user` + `.cube_web.env` 的 DSN 指向 `cube_v3`，是**另一个库**，不是节点管理入口。
+- **`pg_xlog` 治理（2026-09-21 事故记录见 `docs/OPENGAUSS_XLOG_RETENTION_20260921.md`）**：
+  根盘曾因一个自 2026-08-21 起不再推进的非活跃复制槽（`dn_6002`，属 `.179`）把 WAL 钉到 **39G**、
+  根盘 95%（4.8G 可用）；删除该槽 + `checkpoint` 后 30 秒内回收至 3.1G（正常值 =
+  `wal_keep_segments + checkpoint_segments*2 + 1` ≈ 3.1G），根盘回到 54%。
+  **禁止手工 `rm` `pg_xlog`**；处置路径是「查 `pg_replication_slots` 的 `active`/`restart_lsn`
+  → 确认无消费者后 `pg_drop_replication_slot()` → `checkpoint`」。
+  已落地防护：主库 `max_size_for_xlog_prune=5242880`（5GB，SIGHUP）+ `enable_xlog_prune=on`，
+  并把 `replconninfo1` 从已断连的 `.182` 改为真实备机 `.181`（配置里挂连不上的备机是官方记录的头号成因）。
 
 ### MinIO 分布式集群
 
@@ -352,7 +415,7 @@ CUBE_WEB_LOAD_DEMO_PARTITION_SCHEMAS=1
   ```bash
   ray job submit --address http://10.3.100.183:30826 --working-dir <dir> --no-wait -- python <script.py>
   ```
-- **ray_job 转发内容**：`cube_web/services/ray_job_submitter.py` 在基础 runtime env（主机设置了 `CUBE_SOURCE_CACHE_DIR` 时会带上）之外，注入 `CUBE_WEB_RAY_JOB_DRIVER`、`CUBE_WEB_POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`ACCESS_KEY`/`SECRET_KEY`/`BUCKET`，并按固定白名单透传 `CUBE_WEB_RAY_BATCH_SCHEDULER`、`CUBE_ENTITY_*`（`RAY_PARALLELISM`/`BANDS_PER_TASK`/`UPLOAD_WORKERS`/`MINIO_PARALLEL_UPLOADS`/`NODE_RESOURCE`/`READ_BLOCK_PIXELS`/`TILE_TMP_DIR`）和 `CUBE_WEB_RAY_WORKER_RESOURCE`；`CUBE_LOGICAL_*`、`RAY_ACTOR_NODE_RESOURCE` **不在转发白名单内**（2026-09-17 确认）：写在 Web 主机 `.cube_web.env` 里的覆盖值不会进入 ray_job 作业，集群内 driver 仍按自己的环境变量取值（未设置时用代码默认 4 / 1 / 16）；要覆盖需在提交作业的 runtime_env 里显式传入。
+- **ray_job 转发内容**：`cube_web/services/ray_job_submitter.py` 在基础 runtime env（主机设置了 `CUBE_SOURCE_CACHE_DIR` 时会带上）之外，注入 `CUBE_WEB_RAY_JOB_DRIVER`、`CUBE_WEB_POSTGRES_DSN`、`CUBE_WEB_RAY_ADDRESS`、`CUBE_WEB_MINIO_ENDPOINT`/`ACCESS_KEY`/`SECRET_KEY`/`BUCKET`，并按固定白名单透传 `CUBE_WEB_RAY_BATCH_SCHEDULER`、`CUBE_ENTITY_*`（`RAY_PARALLELISM`/`BANDS_PER_TASK`/`UPLOAD_WORKERS`/`MINIO_PARALLEL_UPLOADS`/`NODE_RESOURCE`/`READ_BLOCK_PIXELS`/`TILE_TMP_DIR`）和 `CUBE_WEB_RAY_WORKER_RESOURCE`；`CUBE_LOGICAL_*`（`SHARD_MODE` / `SHARD_DEGREES` / `SHARDS_PER_TASK` / `TARGET_ROWS_PER_CHUNK` / `MAX_CHUNKS` / `MAX_IN_FLIGHT`）自 2026-09-19 起**已加入转发白名单**，写在 Web 主机 `.cube_web.env` 即可覆盖；`RAY_ACTOR_NODE_RESOURCE` 仍**不在白名单内**，集群内 driver 按自己的环境变量取值（未设置时用代码默认）。逻辑剖分默认按预估格元动态分片（`SHARD_MODE=auto`）：先估算 AOI 的格元数与行数，再按 `TARGET_ROWS_PER_CHUNK`（默认 20000）与 2×并行度决定 chunk 数，以 `MAX_CHUNKS`（默认 512，软上限）封顶；行数爆炸时宁可超过对象数上限也不做出单 chunk 上百万行的巨型 chunk。`SHARD_MODE=legacy` 恢复旧的固定 `SHARD_DEGREES` 分片。
 - **在集群内/作业内**用 `ray.init(address="auto")` 是正确的（`.cube_web.env` 的 `CUBE_WEB_RAY_ADDRESS=auto` 就属于这种用法）。
 - **不要**把 NodePort 地址写进 `CUBE_WEB_RAY_ADDRESS`：head 是 `--num-cpus=0`，**外部 `ray.init(address="<节点>:30637")` 在 0 worker 时必报 `No node info found matching attributes`**；即使 worker 已拉起，从集群外主机实测仍然连不上，所以外部 driver 不是支持的接入路径。
 - **跑测试或生产作业前先预热**：先确认有 Running 的 `cube-partition-partition-workers-worker-*`（`kubectl -n kuberay-system get pods`），或按本节末尾的预热 job 拉起 worker。

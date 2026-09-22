@@ -30,14 +30,18 @@ Ray Job driver 在集群内部连接 Head。OpenGauss、MinIO 与 Ray 的地址�
 CUBE_ENTITY_NODE_RESOURCE=cube_partition_worker_large
 ```
 
-## 单任务容器数量限制
+## 单任务容器限制
 
-前端“容器数量”对应请求字段 `worker_container_limit`，表示一次剖分任务最多
+前端「容器限制」开关对应请求字段 `worker_container_limit`，表示一次剖分任务最多
 占用的 KubeRay Worker Pod 逻辑槽位：
 
-- `0` 表示不设置单任务上限，沿用系统默认并发，兼容历史请求；
-- 大于 `0` 时，每个剖分 Ray task 请求一个 `cube_partition_worker` 逻辑资源，
-  同一任务的 driver 同时最多保持该数量的活动 task；
+- 开关关闭（发送 `0`，界面默认）表示不设置单任务限制，沿用系统默认并发，兼容历史请求；
+- 开关开启后填写大于 `0` 的整数，每个剖分 Ray task 请求一个 `cube_partition_worker`
+  逻辑资源，同一任务的 driver 同时最多保持该数量的活动 task；
+- 界面 2026-09-18 起改为开关 + 单个数字框（`GridParameters.vue:107`–`:159`）：关闭时
+  不渲染数字框，开启后直接输入（`−／＋` 步进，下限 `1`，输入框内数字居中），没有
+  「1／2／4／8」快捷值；开启时默认填 `4`，重新开启沿用上次填过的值；API 侧契约不变，
+  `worker_container_limit` 仍是非负整数、`0` = 系统默认；
 - 该限制属于共享 RayCluster 中的任务级上限，不会为该任务独占一套 RayCluster。
   多个任务仍可共享集群容量，所有任务合计容量受 `maxReplicas`、CPU、内存和
   Kubernetes 配额约束；
@@ -65,7 +69,7 @@ Ray 不报错也不超时，task 永久 pending，`ray_job` 任务一直处于�
 `(raylet) There are tasks with infeasible resource requests ...` 和每 5 秒重复的
 `(autoscaler) No available node types can fulfill resource requests
 {'CPU': 1.0, 'cube_partition_worker': 1.0}*N`；此时扩容 worker 也不会让任务完成。
-2026-09-17 的运行实例即因此导致容器数量大于 0 的剖分任务全部被人工取消。
+2026-09-17 的运行实例即因此导致容器限制大于 0 的剖分任务全部被人工取消。
 
 只读校验（第二处的输出必须出现 `cube_partition_worker`）：
 
@@ -84,7 +88,7 @@ kubectl -n kuberay-system patch raycluster cube-partition --type=json \
 ```
 
 补丁对**新创建**的 Worker Pod 生效；改动后确认 `ray status` 出现
-`cube_partition_worker`，再用一个容器数量大于 0 的小规模真实任务端到端确认。
+`cube_partition_worker`，再用一个容器限制大于 0 的小规模真实任务端到端确认。
 
 ### 异构 worker 组（大/小两组）
 
