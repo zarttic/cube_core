@@ -8,7 +8,7 @@ from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
-from cube_split.jobs.ray_logical_chunk_job import _time_bucket, logical_output_id, run_logical_chunk_jobs
+from cube_split.jobs.ray_logical_chunk_job import _plan_logical_chunk, _time_bucket, logical_output_id, run_logical_chunk_jobs
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
@@ -322,6 +322,106 @@ def test_logical_chunk_identity_includes_selected_bands():
 
     assert logical_chunk_id(**common, bands=[band_1, band_2]) == logical_chunk_id(**common, bands=[band_2, band_1])
     assert logical_chunk_id(**common, bands=[band_1]) != logical_chunk_id(**common, bands=[band_2])
+
+
+class _FakeStCodeCell:
+    def __init__(self, space_code: str, grid_level: int = 4) -> None:
+        self.space_code = space_code
+        self.grid_level = grid_level
+        self.topology_code = None
+        self.geometry = None
+        self.bbox = [114.0, 33.0, 114.1, 33.1]
+
+
+class _FakeStCodeValue:
+    def __init__(self, value: str) -> None:
+        self.st_code = value
+
+
+class _CountingStCodeSDK:
+    """Encoder stub that records every ST-code call together with its address."""
+
+    def __init__(self, cells: list[_FakeStCodeCell]) -> None:
+        self._cells = cells
+        self.st_code_calls: list[str] = []
+
+    def cover(self, **kwargs):
+        return list(self._cells)
+
+    def code_to_geometry(self, address=None):
+        return {"type": "Polygon", "coordinates": [[[114.0, 33.0], [114.1, 33.0], [114.1, 33.1], [114.0, 33.1], [114.0, 33.0]]]}
+
+    def generate_st_code(self, *, address, timestamp, time_granularity):
+        self.st_code_calls.append(address.space_code)
+        return _FakeStCodeValue(f"st:{address.space_code}")
+
+
+def test_plan_logical_chunk_computes_st_code_once_per_cell(monkeypatch):
+    """ST code only depends on the cell, so every band must reuse one computation."""
+    import gzip
+    from types import SimpleNamespace
+
+    cells = [_FakeStCodeCell("wzz00001"), _FakeStCodeCell("wzz00002")]
+    sdk = _CountingStCodeSDK(cells)
+    uploaded: dict[str, bytes] = {}
+
+    class _MissingObject(Exception):
+        code = "NoSuchKey"
+
+    class _FakeMinio:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def stat_object(self, bucket, key):
+            raise _MissingObject(key)
+
+        def put_object(self, bucket, key, data, length, content_type=None, metadata=None):
+            uploaded[key] = data.getvalue()
+
+    monkeypatch.setattr("grid_core.sdk.CubeEncoderSDK", lambda: sdk)
+    monkeypatch.setattr("minio.Minio", _FakeMinio)
+    monkeypatch.setattr(
+        "cube_split.runtime_config.minio_settings",
+        lambda: SimpleNamespace(endpoint="localhost:9000", access_key="key", secret_key="secret", secure=False, bucket="cube"),
+    )
+    # Persistence is stubbed for both codec generations: HEAD writes through
+    # ``_stage_chunk_rows`` while the direct-write path uses ``_persist_chunk_rows``.
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job._persist_chunk_rows",
+        lambda **kwargs: {"grid_cells": 0, "tiles": 0, "indexes": 0},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job._stage_chunk_rows",
+        lambda **kwargs: None,
+        raising=False,
+    )
+
+    bands = [
+        {"source_asset_id": "asset-a", "band_code": "B01", "attributes": {"band_unit_id": "unit-1"}},
+        {"source_asset_id": "asset-a", "band_code": "B02", "attributes": {"band_unit_id": "unit-2"}},
+    ]
+    _plan_logical_chunk({
+        "dataset": {"dataset_id": "dataset-a", "bands": bands},
+        "asset": {"source_asset_id": "asset-a", "time_start": "2020-07-01T00:00:00Z", "cog_uri": "s3://cube/cube/x.tif"},
+        "output_version": "version-a",
+        "grid_type": "geohash",
+        "requested_grid_level": 4,
+        "cover_mode": "intersect",
+        "time_granularity": "day",
+        "shard_id": "asset-a:0",
+        "shards": [[114.0, 33.0, 114.2, 33.2]],
+    })
+
+    assert sdk.st_code_calls == ["wzz00001", "wzz00002"], "st_code must run once per cell, not once per band"
+    assert len(uploaded) == 1
+    records = [json.loads(line) for line in gzip.decompress(next(iter(uploaded.values()))).decode("utf-8").splitlines()]
+    index_rows = [record["row"] for record in records if record["kind"] == "indexes"]
+    st_codes_by_cell: dict[str, set[str]] = {}
+    for row in index_rows:
+        st_codes_by_cell.setdefault(row["space_code"], set()).add(row["st_code"])
+    assert st_codes_by_cell == {"wzz00001": {"st:wzz00001"}, "wzz00002": {"st:wzz00002"}}
+    assert len(index_rows) == len(cells) * len(bands)
 
 
 def test_parse_args_allows_mgrs_grid_type(monkeypatch):

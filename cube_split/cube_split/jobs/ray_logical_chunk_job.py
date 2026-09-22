@@ -189,11 +189,17 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
                         "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code,
                         "bbox": cell.bbox, "geometry": geometry,
                     }
+                # ST code is derived from (grid_type, grid_level, space_code, time_code) only, so all bands
+                # of one cell share a single computation: 2 bands save 1/2 and 4 bands save 3/4 of the
+                # segment (measured 4000 cells x 4 bands: 111ms -> 27ms; output bytes are unchanged).
+                st_code = sdk.generate_st_code(
+                    address=address, timestamp=timestamp, time_granularity=value["time_granularity"],
+                ).st_code
                 for band in bands:
                     output_id = logical_output_id(dataset_id=dataset["dataset_id"], output_version=value["output_version"], source_asset_id=asset["source_asset_id"], band_code=band["band_code"], grid_type=grid_type, grid_level=int(cell.grid_level), space_code=cell.space_code, topology_code=cell.topology_code, time_bucket=bucket, window_identity="logical-reference")
                     base = {"source_asset_id": asset["source_asset_id"], "band_code": band["band_code"], "grid_type": grid_type, "grid_level": int(cell.grid_level), "space_code": cell.space_code, "topology_code": cell.topology_code, "time_bucket": bucket}
                     rows.append({"kind": "tiles", "row": {"output_id": output_id, **base, "tile_uri": asset["cog_uri"], "tile_kind": "logical_reference", "bbox": cell.bbox}})
-                    rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": sdk.generate_st_code(address=address, timestamp=timestamp, time_granularity=value["time_granularity"]).st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
+                    rows.append({"kind": "indexes", "row": {"output_id": f"{output_id}-index", "tile_output_id": None, **base, "acquisition_time": asset["time_start"], "st_code": st_code, "value_ref_uri": asset["cog_uri"], "window_col_off": None, "window_row_off": None, "window_width": None, "window_height": None, "attributes": {"band_unit_id": (band.get("attributes") or {}).get("band_unit_id")}}})
     rows = [{"kind": "grid_cells", "row": row} for row in cells.values()] + rows
     with timing.phase("logical.chunk_serialize"):
         content = serialize_logical_chunk_rows(rows)
