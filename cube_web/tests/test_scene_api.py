@@ -1577,7 +1577,10 @@ def test_public_import_contract_accepts_explicit_load_batch_id() -> None:
     assert payload.load_batch_id == "load-mixed"
 
 
-def test_scene_import_is_additive_and_writes_scene_assets_and_bands() -> None:
+def test_scene_import_is_additive_and_writes_scene_assets_and_bands(monkeypatch) -> None:
+    # 身份模式必须显式固定：否则本机 .cube_web.env 的配置会改变期望值
+    monkeypatch.setenv("CUBE_WEB_IMPORT_DATASET_IDENTITY", "legacy")
+
     class Cursor:
         def __init__(self):
             self.statements = []
@@ -1640,13 +1643,22 @@ def test_scene_import_is_additive_and_writes_scene_assets_and_bands() -> None:
     )
 
     sql = "\n".join(statement for statement, _ in connection.cursor_instance.statements)
-    assert result == {"load_batch_id": "load-001", "status": "succeeded", "dataset_count": 1, "scene_count": 1}
+    assert result == {
+        "load_batch_id": "load-001",
+        "status": "succeeded",
+        "dataset_count": 1,
+        "scene_count": 1,
+        "dataset_identity": {"mode": "legacy", "resolutions": []},
+        "content_refreshes": [],
+    }
     assert connection.committed is True
     assert "MERGE INTO load_batches" in sql
     assert "MERGE INTO scenes" in sql
     assert "MERGE INTO scene_assets" in sql
     assert "MERGE INTO scene_bands" in sql
     assert "MERGE INTO load_batch_scenes" in sql
+    # 导入路径现在也写批次→数据集血缘（load_batch_sources），供“多批次挂同一数据集”追溯
+    assert "MERGE INTO load_batch_sources" in sql
     assert "DELETE FROM" not in sql
     assert "DROP TABLE" not in sql
     band_write = next(

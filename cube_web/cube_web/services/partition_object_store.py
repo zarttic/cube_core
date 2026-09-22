@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from minio.deleteobjects import DeleteObject
+
 _MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject", "ResourceNotFound"}
+
+#: S3/MinIO delete-objects accepts at most 1000 keys per request.
+DELETE_BATCH_SIZE = 1000
 
 
 def version_prefix(dataset_id: str, output_version: str) -> str:
@@ -112,8 +118,11 @@ class PartitionObjectStore:
         This is deliberately narrower than version cleanup: callers provide
         exact ``s3://`` URIs that were already checked against the database.
         Source objects and keys outside the partition namespace are rejected.
+        Keys are removed in batches of %s instead of one request per key: a
+        dataset can own thousands of chunk manifests, and the per-request round
+        trip dominated the deletion (2026-09-19).
         """
-        deleted: list[str] = []
+        keys: list[str] = []
         for uri in object_uris:
             parsed = urlparse(str(uri))
             if parsed.scheme != "s3" or parsed.netloc != self._bucket:
@@ -121,9 +130,81 @@ class PartitionObjectStore:
             key = unquote(parsed.path.lstrip("/"))
             if not key.startswith("partition/") or any(part in {"", ".", ".."} for part in key.split("/")):
                 raise ValueError("only partition objects can be removed")
-            self._remove_if_present(key)
-            deleted.append(key)
-        return deleted
+            keys.append(key)
+        return self._remove_keys_batched(keys)
+
+    def remove_prefix(
+        self,
+        prefix: str,
+        *,
+        batch_size: int = DELETE_BATCH_SIZE,
+        workers: int = 4,
+        on_progress: Any = None,
+    ) -> dict[str, Any]:
+        """Remove every object under a dataset's own partition prefix.
+
+        Used by the background dataset-deletion job, which cannot materialise one
+        URI per row after the rows are gone.  The prefix is validated to be a
+        ``partition/...`` namespace so a caller can never point this at source
+        data, and the bucket is fixed by construction.
+        """
+        if not prefix.startswith("partition/") or not prefix.endswith("/"):
+            raise ValueError("prefix must be a partition/<dataset>/ namespace")
+        if any(part in {"", ".", ".."} for part in prefix.split("/")[1:-1]):
+            raise ValueError("prefix must not contain empty or relative segments")
+        keys = [str(item.object_name) for item in self._minio.list_objects(self._bucket, prefix=prefix, recursive=True)]
+        deleted = self._remove_keys_batched(keys, batch_size=batch_size, workers=workers, on_progress=on_progress)
+        return {"status": "completed", "prefix": prefix, "object_count": len(deleted), "deleted_object_keys": len(deleted)}
+
+    def _remove_keys_batched(
+        self,
+        keys: Iterable[str],
+        *,
+        batch_size: int = DELETE_BATCH_SIZE,
+        workers: int = 4,
+        on_progress: Any = None,
+    ) -> list[str]:
+        unique = list(dict.fromkeys(str(key) for key in keys if key))
+        if not unique:
+            return []
+        size = max(1, min(int(batch_size), DELETE_BATCH_SIZE))
+        batches = [unique[offset : offset + size] for offset in range(0, len(unique), size)]
+        removed: list[str] = []
+        concurrency = max(1, int(workers))
+
+        def record(batch: list[str]) -> None:
+            removed.extend(batch)
+            if callable(on_progress):
+                on_progress(len(removed), len(unique))
+
+        if len(batches) == 1 or concurrency == 1:
+            for batch in batches:
+                record(self._remove_batch(batch))
+            return removed
+
+        # Keep a bounded window of in-flight requests: enough parallelism to
+        # hide the per-request round trip, never one request per 1000 keys.
+        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="cube-object-cleanup") as pool:
+            pending: dict[Any, list[str]] = {}
+            for batch in batches:
+                pending[pool.submit(self._remove_batch, batch)] = batch
+                if len(pending) >= concurrency:
+                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        pending.pop(future, None)
+                        record(future.result())
+            for future in as_completed(list(pending)):
+                record(future.result())
+        return removed
+
+    def _remove_batch(self, batch: list[str]) -> list[str]:
+        result = self._minio.remove_objects(self._bucket, [DeleteObject(key) for key in batch])
+        for item in result or ():
+            if getattr(item, "code", None) in _MISSING_OBJECT_CODES:
+                continue
+            if item is not None:
+                raise RuntimeError(f"object cleanup failed: {getattr(item, 'code', 'unknown')}")
+        return batch
 
     @staticmethod
     def _tile_name(tile_name: str) -> str:

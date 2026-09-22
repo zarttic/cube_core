@@ -382,6 +382,12 @@ def test_archive_preserves_scenes_and_source_objects() -> None:
 
 
 def test_admin_deletes_dataset_and_its_managed_records() -> None:
+    """DELETE queues the deletion (202) and the job is observable until it ends.
+
+    The heavy lifting moved from the request to the background worker after a
+    790 s synchronous delete stalled the whole database (2026-09-19), so the API
+    contract is now "queue + poll" instead of "block until everything is gone".
+    """
     client, repository, _ = _fixture()
     details = repository.details["dataset-a"]
     details["load_batches"] = [{"load_batch_id": "load-1", "status": "succeeded"}]
@@ -391,20 +397,62 @@ def test_admin_deletes_dataset_and_its_managed_records() -> None:
 
     response = client.delete("/v1/datasets/dataset-a")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     body = response.json()
-    assert body["deleted"] is True
-    assert body["deleted_scenes"] == 2
-    assert body["deleted_load_batches"] == 1
-    assert body["object_cleanup"]["status"] == "pending"
-    assert body["object_cleanup"]["durable"] is False
-    assert body["object_cleanup"]["object_uris"] == [
-        "s3://cube/partition/dataset-a/versions/out-a/index.json",
-        "s3://cube/partition/dataset-a/versions/out-a/tile.tif",
-    ]
+    assert body["dataset_id"] == "dataset-a"
+    assert body["status"] in {"queued", "running", "succeeded"}
+    deletion_id = body["deletion_id"]
+
+    job = client.get(f"/v1/datasets/deletions/{deletion_id}")
+    assert job.status_code == 200
+    assert job.json()["status"] == "succeeded"
     assert client.get("/v1/datasets/dataset-a").status_code == 404
     assert client.get("/v1/datasets/dataset-b").status_code == 200
     assert "dataset-a" not in repository.details
+
+
+def test_deletion_queue_rejects_a_second_request_for_the_same_dataset() -> None:
+    client, repository, _ = _fixture()
+    repository.deletions["dataset-deletion-inflight"] = {
+        "deletion_id": "dataset-deletion-inflight",
+        "dataset_id": "dataset-a",
+        "dataset_title": "dataset-a",
+        "status": "running",
+        "requested_by": "admin",
+        "requested_at": "2026-09-19T00:00:00+00:00",
+        "started_at": "2026-09-19T00:00:01+00:00",
+        "finished_at": None,
+        "attempt_count": 1,
+        "progress": {"deleted_total": 0, "steps": []},
+        "result": None,
+        "error_message": None,
+        "updated_at": "2026-09-19T00:00:01+00:00",
+    }
+
+    response = client.delete("/v1/datasets/dataset-a")
+
+    assert response.status_code == 409
+    assert "dataset-deletion-inflight" in response.json()["detail"]["message"]
+    assert "dataset-a" in repository.datasets
+
+
+def test_deletion_queue_lists_and_filters_jobs() -> None:
+    client, repository, _ = _fixture()
+    client.delete("/v1/datasets/dataset-a")
+
+    listed = client.get("/v1/datasets/deletions", params={"page": 1, "page_size": 10})
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["dataset_id"] == "dataset-a"
+    assert payload["items"][0]["status"] == "succeeded"
+
+    filtered = client.get("/v1/datasets/deletions", params={"status": "failed"})
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 0
+
+    missing = client.get("/v1/datasets/deletions/dataset-deletion-missing")
+    assert missing.status_code == 404
 
 
 def test_dataset_delete_waits_for_active_workflows() -> None:

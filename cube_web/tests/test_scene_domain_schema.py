@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-07-23-scene-domain-v12"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-09-19-scene-domain-v13"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -30,6 +30,7 @@ def test_schema_is_a_fresh_production_install() -> None:
         "ingest_run_scenes",
         "scene_dataset_audit",
         "dataset_role_restrictions",
+        "dataset_deletion_runs",
         "scene_domain_schema_version",
     }
     assert "migration_lineage" not in sql

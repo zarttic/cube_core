@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-07-23-scene-domain-v12"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-09-19-scene-domain-v13"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -24,6 +24,7 @@ SCENE_DOMAIN_TABLES = {
     "ingest_run_scenes",
     "scene_dataset_audit",
     "dataset_role_restrictions",
+    "dataset_deletion_runs",
     "scene_domain_schema_version",
 }
 
@@ -269,6 +270,25 @@ def schema_statements() -> tuple[str, ...]:
           changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           attributes JSONB NOT NULL DEFAULT '{}'::jsonb
         )""",
+        """CREATE TABLE IF NOT EXISTS dataset_deletion_runs (
+          deletion_id TEXT PRIMARY KEY,
+          dataset_id TEXT NOT NULL,
+          dataset_title TEXT,
+          status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed')),
+          requested_by TEXT NOT NULL,
+          requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          started_at TIMESTAMPTZ,
+          finished_at TIMESTAMPTZ,
+          available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          claimed_by TEXT,
+          claimed_at TIMESTAMPTZ,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+          progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+          result JSONB,
+          error_message TEXT,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""",
         """CREATE TABLE IF NOT EXISTS scene_domain_schema_version (
           singleton BOOLEAN PRIMARY KEY CHECK (singleton),
           schema_version TEXT NOT NULL,
@@ -287,6 +307,11 @@ def schema_statements() -> tuple[str, ...]:
         "CREATE INDEX IF NOT EXISTS idx_ingest_run_scenes_status ON ingest_run_scenes(status, updated_at)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_run_scenes_idempotency ON ingest_run_scenes(idempotency_key)",
         "CREATE INDEX IF NOT EXISTS idx_scene_dataset_audit_scene ON scene_dataset_audit(scene_id, changed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_dataset_deletion_claim ON dataset_deletion_runs(status, available_at, claimed_at, requested_at)",
+        "CREATE INDEX IF NOT EXISTS idx_dataset_deletion_dataset ON dataset_deletion_runs(dataset_id, requested_at DESC)",
+        # One dataset can have at most one unfinished deletion, so a double click
+        # or a retried request cannot queue the same heavy work twice.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_dataset_deletion_active ON dataset_deletion_runs(dataset_id) WHERE status IN ('queued','running')",
     )
 
 

@@ -12,6 +12,8 @@ class FakeMinio:
     def __init__(self) -> None:
         self.objects: dict[str, dict[str, object]] = {}
         self.put_calls = 0
+        self.batch_calls = 0
+        self.batch_requests = 0
 
     def put_object(self, _bucket, key, data, length, **kwargs) -> None:
         self.put_calls += 1
@@ -25,6 +27,19 @@ class FakeMinio:
 
     def remove_object(self, _bucket, key) -> None:
         del self.objects[key]
+
+    def remove_objects(self, _bucket, delete_object_list):
+        """Batched delete API used by remove_objects/remove_prefix."""
+        errors = []
+        self.batch_requests += 1
+        for item in delete_object_list:
+            self.batch_calls += 1
+            key = item.name if hasattr(item, "name") else str(item)
+            if key in self.objects:
+                del self.objects[key]
+            else:
+                errors.append(SimpleNamespace(code="NoSuchKey", name=key))
+        return iter(errors)
 
     def list_objects(self, _bucket, *, prefix, recursive):
         assert recursive is True
@@ -157,3 +172,30 @@ def test_cleanup_is_idempotent_after_all_guards_pass(fake_minio: FakeMinio, obje
 def test_version_prefix_rejects_path_traversal(value: str) -> None:
     with pytest.raises(ValueError, match="path segments"):
         version_prefix(value, "version-a")
+
+
+def test_remove_objects_deletes_in_batches_instead_of_one_request_per_key(
+    fake_minio: FakeMinio, object_record: dict[str, object]
+) -> None:
+    """A dataset can own thousands of objects; per-key requests dominated it."""
+    objects = PartitionObjectStore(fake_minio, bucket="cube")
+    prefix = str(object_record["object_key"]).rsplit("/", 1)[0] + "/"
+    for index in range(2500):
+        fake_minio.objects[f"{prefix}tile-{index}.tif"] = {"bytes": b"x", "metadata": {}}
+
+    fake_minio.batch_requests = 0
+    result = objects.remove_prefix(prefix, batch_size=1000, workers=4)
+
+    assert result["object_count"] == 2500
+    assert fake_minio.keys() == []
+    assert fake_minio.batch_calls == 2500, "every key must be deleted"
+    # 2500 keys / 1000 per request = 3 requests instead of 2500 round trips.
+    assert fake_minio.batch_requests == 3
+
+
+def test_remove_prefix_rejects_paths_outside_the_partition_namespace(fake_minio: FakeMinio) -> None:
+    objects = PartitionObjectStore(fake_minio, bucket="cube")
+
+    for prefix in ("cube/source/optocal/", "partition/dataset-a", "partition/../source/"):
+        with pytest.raises(ValueError, match="prefix must"):
+            objects.remove_prefix(prefix)

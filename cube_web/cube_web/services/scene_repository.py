@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
@@ -9,10 +10,13 @@ from uuid import uuid4
 
 from cube_split.partition_timing import finish_partition_timing, partition_timing_from_workers
 
+from cube_web.services import dataset_identity
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
 from cube_web.services.quality_contracts import quality_run_metrics
 from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest, reload_selection_band_unit_ids
+
+logger = logging.getLogger(__name__)
 
 
 class OpenGaussSceneRepository:
@@ -73,6 +77,15 @@ class OpenGaussSceneRepository:
         if created_to:
             clauses.append("pr.created_at < (%s::date + INTERVAL '1 day')")
             params.append(created_to)
+        # A batch whose datasets were all deleted has nothing left to show: once it
+        # is no longer running, hide it instead of listing an empty batch.  The
+        # deletion job also removes such rows; this keeps any legacy leftover out
+        # of the list too.
+        clauses.append(
+            "(pr.status IN ('pending','queued','running','retrying','cancel_requested') "
+            " OR EXISTS (SELECT 1 FROM partition_run_scenes visible_prs "
+            "             WHERE visible_prs.partition_run_id = pr.partition_run_id))"
+        )
         where = " AND ".join(clauses)
 
         with self._connection() as connection:
@@ -598,6 +611,7 @@ class OpenGaussSceneRepository:
         load_batch_id = str(payload.get("load_batch_id") or "").strip()
         if not load_batch_id:
             raise ValueError("load_batch_id is required")
+        created_by = str(payload.get("source_system") or payload.get("created_by") or "loader")
         datasets = _load_schema_datasets(payload, load_batch_id=load_batch_id)
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -628,7 +642,49 @@ class OpenGaussSceneRepository:
                     ),
                 )
                 scene_count = 0
+                identity_resolutions: list[dict[str, Any]] = []
+                content_refreshes: list[dict[str, Any]] = []
                 for dataset in datasets:
+                    # Name mode: resolve the dataset by (dataset_title, data_type) before the
+                    # MERGE, so a re-imported product appends into the dataset it already has
+                    # instead of creating another batch-derived copy.
+                    if dataset_identity.uses_name_identity(dataset):
+                        payload_dataset_id = str(dataset["dataset_id"])
+                        existing, candidates = dataset_identity.match_dataset_by_name(
+                            cursor,
+                            dataset_title=str(dataset["dataset_title"]),
+                            data_type=str(dataset["data_type"]),
+                        )
+                        if len(candidates) > 1:
+                            # Legacy duplicates that were never archived: never fail the
+                            # import, but make the ambiguity loud (audit + log + response).
+                            logger.warning(
+                                "import identity is ambiguous for %r / %s: %d live datasets, using %s",
+                                dataset["dataset_title"],
+                                dataset["data_type"],
+                                len(candidates),
+                                existing["dataset_id"] if existing else None,
+                            )
+                        if existing is not None:
+                            dataset["dataset_id"] = str(existing["dataset_id"])
+                            dataset["dataset_code"] = str(existing["dataset_code"])
+                            identity_resolutions.append(
+                                {
+                                    "dataset_id": dataset["dataset_id"],
+                                    "previous_dataset_id": payload_dataset_id,
+                                    "action": "reused",
+                                    "ambiguous": len(candidates) > 1,
+                                    "candidate_dataset_ids": [str(row["dataset_id"]) for row in candidates],
+                                }
+                            )
+                        else:
+                            identity_resolutions.append(
+                                {
+                                    "dataset_id": payload_dataset_id,
+                                    "previous_dataset_id": None,
+                                    "action": "created",
+                                }
+                            )
                     cursor.execute(
                         """
                         MERGE INTO datasets target USING (
@@ -667,17 +723,84 @@ class OpenGaussSceneRepository:
                             json.dumps(dataset["attributes"]),
                         ),
                     )
+                    for resolution in [entry for entry in identity_resolutions if entry["dataset_id"] == str(dataset["dataset_id"])][-1:]:
+                        dataset_identity.record_identity_audit(
+                            cursor,
+                            dataset_id=str(dataset["dataset_id"]),
+                            load_batch_id=load_batch_id,
+                            action=str(resolution["action"]),
+                            previous_dataset_id=resolution["previous_dataset_id"],
+                            details={
+                                key: value
+                                for key, value in (
+                                    ("ambiguous", resolution.get("ambiguous")),
+                                    ("candidate_dataset_ids", resolution.get("candidate_dataset_ids")),
+                                )
+                                if value
+                            }
+                            or None,
+                        )
+                    # Lineage: one row per batch -> dataset, so a dataset can carry many
+                    # batches and the import itself stays idempotent on retries.
+                    cursor.execute(
+                        """MERGE INTO load_batch_sources target USING (
+                             SELECT %s::text AS load_batch_id, %s::text AS source_load_batch_id,
+                                    %s::text AS source_dataset_id, %s::text AS created_by
+                           ) source ON (
+                             target.load_batch_id = source.load_batch_id
+                             AND target.source_load_batch_id = source.source_load_batch_id
+                             AND target.source_dataset_id = source.source_dataset_id
+                           )
+                           WHEN NOT MATCHED THEN INSERT (
+                             load_batch_id, source_load_batch_id, source_dataset_id, created_by
+                           ) VALUES (
+                             source.load_batch_id, source.source_load_batch_id,
+                             source.source_dataset_id, source.created_by
+                           )""",
+                        (load_batch_id, load_batch_id, dataset["dataset_id"], created_by),
+                    )
                     for scene in dataset["scenes"]:
                         cursor.execute(
                             "SELECT scene_id,dataset_id,checksum FROM scenes WHERE identity_key = %s FOR UPDATE",
                             (scene["identity_key"],),
                         )
                         identity_row = cursor.fetchone()
+                        refreshed_in_place = False
                         if identity_row is not None:
                             stored_checksum = str(identity_row[2] or "")
                             incoming_checksum = str(scene.get("checksum") or "")
+                            # A re-import with an unchanged identity but a new COG revision is a
+                            # refresh, not a conflict: keep the scene and point it at the new
+                            # revision, recording the previous checksum in the audit trail.
                             if stored_checksum and incoming_checksum and stored_checksum != incoming_checksum:
-                                raise ValueError(f"scene identity checksum conflict: {scene['scene_key']}")
+                                refreshed_in_place = _refresh_scene_assets_in_place(
+                                    cursor,
+                                    scene_id=str(identity_row[0]),
+                                    assets=scene["assets"],
+                                )
+                                dataset_identity.record_scene_content_refresh(
+                                    cursor,
+                                    scene_id=str(identity_row[0]),
+                                    load_batch_id=load_batch_id,
+                                    previous_checksum=stored_checksum,
+                                    incoming_checksum=incoming_checksum,
+                                    refreshed_in_place=refreshed_in_place,
+                                )
+                                content_refreshes.append(
+                                    {
+                                        "scene_id": str(identity_row[0]),
+                                        "previous_checksum": stored_checksum,
+                                        "checksum": incoming_checksum,
+                                        "refreshed_in_place": refreshed_in_place,
+                                    }
+                                )
+                                if not refreshed_in_place:
+                                    logger.warning(
+                                        "scene content refresh fell back to the multi-asset merge "
+                                        "(scene_id=%s, assets=%d)",
+                                        identity_row[0],
+                                        len(scene["assets"]),
+                                    )
                         cursor.execute(
                             """
                             MERGE INTO scenes target USING (
@@ -744,6 +867,11 @@ class OpenGaussSceneRepository:
                                 f"scene identity already belongs to dataset {persisted_dataset_id}: {scene['scene_key']}"
                             )
                         for asset in scene["assets"]:
+                            if refreshed_in_place and _is_single_data_asset(asset):
+                                # The asset row (and its bands, hence every band_unit_id
+                                # referenced by earlier partitions/ingest runs) is kept;
+                                # only the revision fields move forward.
+                                continue
                             cursor.execute(
                                 """
                                 MERGE INTO scene_assets target USING (
@@ -843,7 +971,17 @@ class OpenGaussSceneRepository:
                     (load_batch_id,),
                 )
             connection.commit()
-        return {"load_batch_id": load_batch_id, "status": "succeeded", "dataset_count": len(datasets), "scene_count": scene_count}
+        return {
+            "load_batch_id": load_batch_id,
+            "status": "succeeded",
+            "dataset_count": len(datasets),
+            "scene_count": scene_count,
+            "dataset_identity": {
+                "mode": dataset_identity.identity_mode(),
+                "resolutions": identity_resolutions,
+            },
+            "content_refreshes": content_refreshes,
+        }
 
     @contextmanager
     def _connection(self) -> Iterator[Any]:
@@ -1811,6 +1949,68 @@ def _scene_inputs(
     if not bands:
         raise ValueError(f"scene bands are required for partition: {row['scene_id']}")
     return assets, bands
+
+
+def _is_single_data_asset(asset: dict[str, Any]) -> bool:
+    """True for a plain single-asset scene (the ARD COG reload case)."""
+    return str(asset.get("asset_role") or "data") == "data"
+
+
+def _refresh_scene_assets_in_place(cursor: Any, *, scene_id: str, assets: list[dict[str, Any]]) -> bool:
+    """Point the scene's existing asset at the incoming COG revision, in place.
+
+    Replacing the asset row (instead of inserting the payload's asset_id) keeps
+    exactly one ``asset_role='data'`` row per scene, and -- because the row and its
+    ``scene_bands`` survive untouched -- every ``band_unit_id`` referenced by older
+    partition/quality/ingest records stays valid.
+
+    Returns ``True`` when the revision was applied in place.  Any other shape
+    (multi-asset scene, several existing data assets, or a changed band set) returns
+    ``False`` so the caller falls back to the normal asset-id keyed merge.
+    """
+    data_assets = [asset for asset in assets if _is_single_data_asset(asset)]
+    if len(data_assets) != 1:
+        return False
+    incoming = data_assets[0]
+    cursor.execute(
+        "SELECT asset_id, band_code FROM scene_assets LEFT JOIN scene_bands USING (scene_id, asset_id) "
+        "WHERE scene_assets.scene_id = %s AND scene_assets.asset_role = 'data'",
+        (scene_id,),
+    )
+    rows = cursor.fetchall() or []
+    existing_asset_ids = {str(dataset_identity.row_value(row, 0, "asset_id")) for row in rows}
+    if len(existing_asset_ids) != 1:
+        return False
+    existing_band_codes = {
+        str(dataset_identity.row_value(row, 1, "band_code"))
+        for row in rows
+        if dataset_identity.row_value(row, 1, "band_code") is not None
+    }
+    incoming_band_codes = {str(band.get("band_code")) for band in incoming.get("bands") or ()}
+    if existing_band_codes != incoming_band_codes:
+        return False
+
+    cursor.execute(
+        """UPDATE scene_assets
+              SET source_uri = %s, cog_uri = %s, source_kind = %s, source_format = %s,
+                  checksum = %s, acquisition_time = %s, bbox = %s, crs = %s,
+                  attributes = attributes || %s::jsonb, updated_at = now()
+            WHERE scene_id = %s AND asset_id = %s""",
+        (
+            incoming.get("source_uri"),
+            incoming.get("cog_uri"),
+            incoming.get("source_kind"),
+            incoming.get("source_format"),
+            incoming.get("checksum"),
+            incoming.get("acquisition_time"),
+            json.dumps(incoming.get("bbox")),
+            incoming.get("crs"),
+            json.dumps(incoming.get("attributes") or {}),
+            scene_id,
+            next(iter(existing_asset_ids)),
+        ),
+    )
+    return True
 
 
 def _load_schema_datasets(payload: dict[str, Any], *, load_batch_id: str) -> list[dict[str, Any]]:

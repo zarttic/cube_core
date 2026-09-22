@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,11 +10,21 @@ from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from cube_split.ingest.dataset_cleanup import (
+    SOURCE_BUCKET_PREFIXES,
+    SOURCE_PATH_MARKERS,
+)
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from cube_web.services.access_control import is_admin_role
 from cube_web.services.access_control import viewer_role as canonical_viewer_role
+from cube_web.services.dataset_deletion import (
+    DatasetDeletionRejected,
+    DeletionPlan,
+    build_deletion_plan,
+    execute_deletion_plan,
+)
 from cube_web.services.db_pool import _PostgresPool
 
 
@@ -92,6 +101,14 @@ class DatasetManagementRepository(Protocol):
     def archive_dataset(self, dataset_id: str, *, reason: str, actor: str) -> dict[str, Any]: ...
 
     def delete_dataset(self, dataset_id: str, *, actor: str) -> dict[str, Any]: ...
+
+    def request_dataset_deletion(self, dataset_id: str, *, actor: str, deletion_id: str) -> dict[str, Any]: ...
+
+    def get_dataset_deletion(self, deletion_id: str) -> dict[str, Any] | None: ...
+
+    def list_dataset_deletions(
+        self, *, page: int = 1, page_size: int = 20, status: str | None = None
+    ) -> dict[str, Any]: ...
 
 
 DETAILS = {
@@ -385,7 +402,12 @@ class DatasetManagementService:
         return self.repository.archive_dataset(dataset_id, reason=reason, actor=actor)
 
     def delete_dataset(self, dataset_id: str, *, actor: str) -> dict[str, Any]:
-        """Delete a dataset and its managed partition/load-batch records."""
+        """Delete a dataset and its managed partition/load-batch records.
+
+        Synchronous entry point for internal callers (the load-batch cascade).
+        The HTTP layer uses :meth:`request_deletion` instead, which defers the
+        expensive part to the background worker.
+        """
         self.get_dataset(dataset_id)
         result = self.repository.delete_dataset(dataset_id, actor=actor)
         object_uris = tuple(str(value) for value in result.pop("object_uris", ()) if value)
@@ -417,6 +439,29 @@ class DatasetManagementService:
             }
         return result
 
+    def request_deletion(self, dataset_id: str, *, actor: str) -> dict[str, Any]:
+        """Queue a dataset deletion and return its job record (HTTP 202).
+
+        Only the plan is built here, in one short transaction; the rows, the
+        scenes and the objects are removed by the background worker so a large
+        dataset can no longer hold a request (and the database) hostage.
+        """
+        self.get_dataset(dataset_id)
+        return self.repository.request_dataset_deletion(
+            dataset_id, actor=actor, deletion_id=f"dataset-deletion-{uuid4().hex}"
+        )
+
+    def get_deletion(self, deletion_id: str) -> dict[str, Any]:
+        record = self.repository.get_dataset_deletion(deletion_id)
+        if record is None:
+            raise ManagedDatasetNotFound(deletion_id)
+        return record
+
+    def list_deletions(
+        self, *, page: int = 1, page_size: int = 20, status: str | None = None
+    ) -> dict[str, Any]:
+        return self.repository.list_dataset_deletions(page=page, page_size=page_size, status=status)
+
 
 class InMemoryDatasetManagementRepository:
     """Small deterministic repository used by API and service tests."""
@@ -432,6 +477,7 @@ class InMemoryDatasetManagementRepository:
         self.metadata_audit: list[dict[str, Any]] = []
         self.scene_audit: list[dict[str, Any]] = []
         self.object_cleanup_pending: list[dict[str, Any]] = []
+        self.deletions: dict[str, dict[str, Any]] = {}
         self.hidden_roles: dict[str, set[str]] = {}
         self._lock = RLock()
 
@@ -714,7 +760,57 @@ class InMemoryDatasetManagementRepository:
                 })
             return self._overview(dataset_id)
 
-    def delete_dataset(self, dataset_id: str, *, actor: str) -> dict[str, Any]:
+    def request_dataset_deletion(
+        self, dataset_id: str, *, actor: str, deletion_id: str
+    ) -> dict[str, Any]:
+        """Test double: performs the deletion at once and records a finished job.
+
+        The production repository only records a queued plan, because the real
+        work belongs to the background worker; the in-memory repository has no
+        worker, so it keeps the API tests synchronous.
+        """
+        with self._lock:
+            active = next(
+                (
+                    row
+                    for row in self.deletions.values()
+                    if row["dataset_id"] == dataset_id and row["status"] in {"queued", "running"}
+                ),
+                None,
+            )
+            if active is not None:
+                raise DatasetManagementConflict(
+                    "数据集已有进行中的删除任务（deletion_id=%s）" % active["deletion_id"]
+                )
+        self.delete_dataset(dataset_id, actor=actor, deletion_id=deletion_id)
+        with self._lock:
+            return dict(self.deletions[deletion_id])
+
+    def get_dataset_deletion(self, deletion_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self.deletions.get(deletion_id)
+            return copy.deepcopy(record) if record else None
+
+    def list_dataset_deletions(
+        self, *, page: int = 1, page_size: int = 20, status: str | None = None
+    ) -> dict[str, Any]:
+        with self._lock:
+            rows = [
+                copy.deepcopy(row)
+                for row in sorted(self.deletions.values(), key=lambda row: row["requested_at"], reverse=True)
+                if status is None or row["status"] == status
+            ]
+        offset = (max(1, int(page)) - 1) * max(1, int(page_size))
+        return {
+            "items": rows[offset : offset + max(1, int(page_size))],
+            "total": len(rows),
+            "page": max(1, int(page)),
+            "page_size": max(1, int(page_size)),
+        }
+
+    def delete_dataset(
+        self, dataset_id: str, *, actor: str, deletion_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
             self._dataset(dataset_id)
             details = self.details.get(dataset_id, {})
@@ -752,6 +848,23 @@ class InMemoryDatasetManagementRepository:
                 ),
                 "deleted_load_batches": len(details.get("load_batches", [])),
             }
+            record = {
+                "deletion_id": deletion_id or "",
+                "dataset_id": dataset_id,
+                "dataset_title": str(self.datasets[dataset_id].get("dataset_title") or ""),
+                "status": "succeeded",
+                "requested_by": actor,
+                "requested_at": _now_text(),
+                "started_at": _now_text(),
+                "finished_at": _now_text(),
+                "attempt_count": 1,
+                "progress": {"deleted_total": sum(counts.values()), "steps": []},
+                "result": {"deleted_scenes": counts["deleted_scenes"]},
+                "error_message": None,
+                "updated_at": _now_text(),
+            }
+            if deletion_id is not None:
+                self.deletions[deletion_id] = record
             del self.datasets[dataset_id]
             self.details.pop(dataset_id, None)
             self.hidden_roles.pop(dataset_id, None)
@@ -833,7 +946,10 @@ class OpenGaussDatasetManagementRepository:
     def list_datasets(self, query: ManagedDatasetQuery, *, viewer_role: str | None = None) -> dict[str, Any]:
         where, params = self._filters(query)
         visibility, visibility_params = self._visibility_filter(viewer_role)
-        where = " AND ".join(part for part in (where, visibility) if part)
+        # A dataset with a queued/running deletion is on its way out; hiding it keeps
+        # every client consistent with the 202 the operator already received, not
+        # just the browser that happens to be polling.
+        where = " AND ".join(part for part in (where, visibility, ACTIVE_DELETION_FILTER) if part)
         params = (*params, *visibility_params)
         base = self._overview_sql(where)
         sort = SORT_COLUMNS[query.sort_by]
@@ -847,7 +963,8 @@ class OpenGaussDatasetManagementRepository:
                 "count(s.scene_id) FILTER (WHERE s.status='available') AS ready_scene_count, "
                 "count(s.scene_id) FILTER (WHERE s.status='failed') AS failed_scene_count "
                 "FROM datasets d LEFT JOIN scenes s ON s.dataset_id=d.dataset_id "
-                f"WHERE {self._canonical_dataset_filter('d')} AND ({visibility or 'TRUE'})",
+                f"WHERE {self._canonical_dataset_filter('d')} AND ({visibility or 'TRUE'}) "
+                f"AND {ACTIVE_DELETION_FILTER}",
                 visibility_params,
             )
             summary = self._normalize(cursor.fetchone())
@@ -1500,296 +1617,100 @@ class OpenGaussDatasetManagementRepository:
     def delete_dataset(self, dataset_id: str, *, actor: str) -> dict[str, Any]:
         """Delete a dataset and all owned scene, partition, quality and load data.
 
-        The database rows are removed in foreign-key order.  Only explicitly
-        recorded objects below ``partition/{dataset_id}/versions/`` are returned
-        for object-store cleanup; source assets are deliberately never included.
+        The chain is described as a plan and then executed in committed batches,
+        so a large dataset can no longer hold one long transaction (and the
+        database) hostage: measured 790 s before this change (2026-09-19).
+        Source objects are never touched -- only generated objects below
+        ``partition/{dataset_id}/versions/`` are handed to object cleanup.
         """
-        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("SELECT dataset_id FROM datasets WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
-            if cursor.fetchone() is None:
-                raise ManagedDatasetNotFound(dataset_id)
+        with self._connection() as connection:
+            plan, object_uris = self._build_plan(connection, dataset_id, actor, collect_object_uris=True)
+            outcome = execute_deletion_plan(connection, plan)
+        return deletion_result(plan, outcome, object_uris=object_uris, actor=actor)
 
-            cursor.execute("SELECT scene_id FROM scenes WHERE dataset_id=%s FOR UPDATE", (dataset_id,))
-            scene_ids = [str(row["scene_id"]) for row in cursor.fetchall()]
-            scene_id_array = scene_ids or ["__no_scene__"]
-
-            cursor.execute(
-                """SELECT draft_id,submitted_partition_run_id,source_load_batch_ids
-                     FROM partition_drafts
-                    WHERE selection->'datasets' @> %s::jsonb
-                    FOR UPDATE""",
-                (json.dumps([{"dataset_id": dataset_id}]),),
-            )
-            draft_rows = cursor.fetchall()
-            draft_ids = [str(row["draft_id"]) for row in draft_rows]
-            draft_partition_run_ids = [
-                str(row["submitted_partition_run_id"])
-                for row in draft_rows
-                if row.get("submitted_partition_run_id")
-            ]
-            draft_load_batch_ids = [
-                str(load_batch_id)
-                for row in draft_rows
-                for load_batch_id in (row.get("source_load_batch_ids") or [])
-            ]
-
-            cursor.execute(
-                """SELECT DISTINCT load_batch_id FROM load_batch_scenes
-                   WHERE scene_id=ANY(%s::text[])
-                   UNION
-                   SELECT DISTINCT load_batch_id FROM load_batch_sources
-                   WHERE source_dataset_id=%s
-                   UNION
-                   SELECT DISTINCT source_load_batch_id AS load_batch_id FROM load_batch_sources
-                   WHERE source_dataset_id=%s""",
-                (scene_id_array, dataset_id, dataset_id),
-            )
-            load_batch_ids = list(dict.fromkeys([
-                *(str(row["load_batch_id"]) for row in cursor.fetchall()),
-                *draft_load_batch_ids,
-            ]))
-            load_batch_id_array = load_batch_ids or ["__no_load_batch__"]
-
-            cursor.execute(
-                "SELECT batch_id FROM partition_datasets WHERE dataset_id=%s FOR UPDATE",
-                (dataset_id,),
-            )
-            scheduler_batch_ids = list(dict.fromkeys(str(row["batch_id"]) for row in cursor.fetchall()))
-            scheduler_batch_id_array = scheduler_batch_ids or ["__no_scheduler_batch__"]
-
-            cursor.execute(
-                """SELECT tile_uri AS object_uri FROM partition_tiles WHERE dataset_id=%s
-                   UNION SELECT value_ref_uri AS object_uri FROM partition_indexes WHERE dataset_id=%s
-                   UNION SELECT object_uri FROM partition_output_chunks WHERE dataset_id=%s""",
-                (dataset_id, dataset_id, dataset_id),
-            )
-            object_uris = {
-                str(row["object_uri"])
-                for row in cursor.fetchall()
-                if _owned_partition_object(row.get("object_uri"), dataset_id)
-            }
-
-            cursor.execute(
-                "SELECT partition_run_id FROM partition_run_scenes WHERE dataset_id=%s FOR UPDATE",
-                (dataset_id,),
-            )
-            partition_run_ids = list(dict.fromkeys([
-                *(str(row["partition_run_id"]) for row in cursor.fetchall()),
-                *draft_partition_run_ids,
-            ]))
-            cursor.execute(
-                "SELECT partition_run_id FROM ingest_runs WHERE dataset_id=%s FOR UPDATE",
-                (dataset_id,),
-            )
-            partition_run_ids = list(dict.fromkeys([
-                *partition_run_ids,
-                *(str(row["partition_run_id"]) for row in cursor.fetchall() if row.get("partition_run_id")),
-            ]))
-            partition_run_id_array = partition_run_ids or ["__no_partition_run__"]
-
-            if partition_run_ids:
+    def request_dataset_deletion(
+        self, dataset_id: str, *, actor: str, deletion_id: str
+    ) -> dict[str, Any]:
+        """Validate a deletion, record its plan, and leave execution to the worker."""
+        with self._connection() as connection:
+            active = self._active_dataset_deletion(connection, dataset_id)
+            if active is not None:
+                raise DatasetManagementConflict(
+                    "数据集已有进行中的删除任务（deletion_id=%s, status=%s）"
+                    % (active["deletion_id"], active["status"])
+                )
+            plan, _ = self._build_plan(connection, dataset_id, actor, collect_object_uris=False)
+            with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
-                    "SELECT source_load_batch_ids FROM partition_runs WHERE partition_run_id=ANY(%s::text[])",
-                    (partition_run_ids,),
+                    f"""INSERT INTO dataset_deletion_runs
+                          (deletion_id, dataset_id, dataset_title, status, requested_by, plan)
+                        VALUES (%s, %s, %s, 'queued', %s, %s)
+                        RETURNING {DELETION_COLUMN_LIST}""",
+                    (deletion_id, dataset_id, plan.dataset_title, actor, Jsonb(plan.to_json())),
                 )
-                run_load_batch_ids = [
-                    str(load_batch_id)
-                    for row in cursor.fetchall()
-                    for load_batch_id in (row.get("source_load_batch_ids") or [])
-                ]
-                load_batch_ids = list(dict.fromkeys([*load_batch_ids, *run_load_batch_ids]))
-                load_batch_id_array = load_batch_ids or ["__no_load_batch__"]
+                row = cursor.fetchone()
+            connection.commit()
+        if row is None:  # pragma: no cover - INSERT ... RETURNING always returns
+            raise DatasetManagementConflict("删除任务未能登记")
+        return deletion_record(row)
 
-            cursor.execute(
-                """SELECT EXISTS (
-                     SELECT 1 FROM partition_job_attempts
-                      WHERE batch_id=ANY(%s::text[])
-                        AND status IN ('queued','running','retrying','cancel_requested')
-                     UNION ALL
-                     SELECT 1 FROM partition_datasets
-                      WHERE dataset_id=%s
-                        AND (partition_status IN ('queued','running') OR quality_status='running')
-                     UNION ALL
-                     SELECT 1 FROM partition_quality_runs
-                      WHERE dataset_id=%s AND status IN ('pending','running')
-                     UNION ALL
-                     SELECT 1 FROM partition_runs
-                      WHERE partition_run_id=ANY(%s::text[])
-                        AND status IN ('pending','queued','running')
-                     UNION ALL
-                     SELECT 1 FROM ingest_runs
-                      WHERE dataset_id=%s AND status IN ('pending','queued','running')
-                     UNION ALL
-                     SELECT 1 FROM load_batches
-                      WHERE load_batch_id=ANY(%s::text[])
-                        AND status IN ('pending','running')
-                   ) AS active""",
-                (
-                    scheduler_batch_id_array,
-                    dataset_id,
-                    dataset_id,
-                    partition_run_id_array,
-                    dataset_id,
-                    load_batch_id_array,
-                ),
+    @staticmethod
+    def _build_plan(
+        connection: Any, dataset_id: str, actor: str, *, collect_object_uris: bool
+    ) -> tuple[DeletionPlan, list[str]]:
+        try:
+            return build_deletion_plan(
+                connection,
+                dataset_id=dataset_id,
+                actor=actor,
+                collect_object_uris=collect_object_uris,
             )
-            if cursor.fetchone()["active"]:
-                raise DatasetManagementConflict("数据集存在运行中的剖分、质检、入库或载入任务，请先终止任务")
+        except DatasetDeletionRejected as exc:
+            raise translate_deletion_rejection(exc) from exc
 
-            deleted_partition_records = 0
-
-            def delete_rows(statement: str, params: tuple[Any, ...]) -> int:
-                nonlocal deleted_partition_records
-                cursor.execute(statement, params)
-                count = max(int(cursor.rowcount), 0)
-                deleted_partition_records += count
-                return count
-
-            # Quality/publication rows must be removed before their output and
-            # dataset foreign-key parents.
-            delete_rows("DELETE FROM partition_quality_errors WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_quality_results WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_quality_warn_approvals WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_publication_targets WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_publications WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_domain_outbox WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_quality_runs WHERE dataset_id=%s", (dataset_id,))
-
-            # Ingest records reference both scenes and partition runs.
-            delete_rows(
-                """DELETE FROM ingest_run_scenes
-                   WHERE ingest_run_id IN (SELECT ingest_run_id FROM ingest_runs WHERE dataset_id=%s)""",
+    def _active_dataset_deletion(self, connection: Any, dataset_id: str) -> dict[str, Any] | None:
+        with connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """SELECT deletion_id, status FROM dataset_deletion_runs
+                    WHERE dataset_id=%s AND status IN ('queued','running')
+                    ORDER BY requested_at DESC LIMIT 1""",
                 (dataset_id,),
             )
-            delete_rows("DELETE FROM ingest_runs WHERE dataset_id=%s", (dataset_id,))
+            return cursor.fetchone()
 
-            delete_rows("DELETE FROM partition_data_unit_grid_status WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_run_scenes WHERE dataset_id=%s", (dataset_id,))
-            if draft_ids:
-                delete_rows("DELETE FROM partition_drafts WHERE draft_id=ANY(%s::text[])", (draft_ids,))
-            if partition_run_ids:
-                delete_rows(
-                    """DELETE FROM partition_drafts draft
-                       WHERE draft.submitted_partition_run_id=ANY(%s::text[])
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_run_scenes scene
-                            WHERE scene.partition_run_id=draft.submitted_partition_run_id
-                         )""",
-                    (partition_run_ids,),
-                )
-                delete_rows(
-                    """DELETE FROM partition_runs run
-                       WHERE run.partition_run_id=ANY(%s::text[])
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_run_scenes scene
-                            WHERE scene.partition_run_id=run.partition_run_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM ingest_runs ingest
-                            WHERE ingest.partition_run_id=run.partition_run_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_data_unit_grid_status grid
-                            WHERE grid.partition_run_id=run.partition_run_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_drafts other_draft
-                            WHERE other_draft.submitted_partition_run_id=run.partition_run_id
-                         )""",
-                    (partition_run_ids,),
-                )
+    def get_dataset_deletion(self, deletion_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"SELECT {DELETION_COLUMN_LIST} FROM dataset_deletion_runs WHERE deletion_id=%s",
+                (deletion_id,),
+            )
+            row = cursor.fetchone()
+        return deletion_record(row) if row else None
 
-            # Indexes point to tiles, so remove them explicitly before the
-            # output-version cascade.  This also covers staging/chunk rows.
-            delete_rows("DELETE FROM partition_indexes WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_tiles WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_grid_cells WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_output_chunks WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_logical_staging_rows WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_output_versions WHERE dataset_id=%s", (dataset_id,))
-            delete_rows("DELETE FROM partition_datasets WHERE dataset_id=%s", (dataset_id,))
-
-            # Remove load-batch links for the dataset's scenes/source records;
-            # retain a batch if another dataset, run or draft still references it.
-            if scene_ids:
-                delete_rows("DELETE FROM load_batch_scenes WHERE scene_id=ANY(%s::text[])", (scene_ids,))
-            delete_rows("DELETE FROM load_batch_sources WHERE source_dataset_id=%s", (dataset_id,))
-            deleted_load_batches = 0
-            if load_batch_ids:
-                deleted_load_batches = delete_rows(
-                    """DELETE FROM load_batches batch
-                       WHERE batch.load_batch_id=ANY(%s::text[])
-                         AND NOT EXISTS (
-                           SELECT 1 FROM load_batch_scenes scene
-                            WHERE scene.load_batch_id=batch.load_batch_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM load_batch_sources source
-                            WHERE source.load_batch_id=batch.load_batch_id
-                               OR source.source_load_batch_id=batch.load_batch_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_runs run
-                            WHERE run.source_load_batch_ids ? batch.load_batch_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_run_scenes run_scene
-                            WHERE run_scene.source_load_batch_id=batch.load_batch_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_drafts draft
-                            WHERE draft.source_load_batch_ids ? batch.load_batch_id
-                         )""",
-                    (load_batch_ids,),
-                )
-
-            if scene_ids:
-                delete_rows(
-                    "DELETE FROM scene_dataset_audit WHERE scene_id=ANY(%s::text[]) OR dataset_id=%s OR previous_dataset_id=%s",
-                    (scene_ids, dataset_id, dataset_id),
-                )
-                delete_rows(
-                    "DELETE FROM scene_bands WHERE scene_id=ANY(%s::text[])",
-                    (scene_ids,),
-                )
-                delete_rows(
-                    "DELETE FROM scene_assets WHERE scene_id=ANY(%s::text[])",
-                    (scene_ids,),
-                )
-                delete_rows(
-                    "DELETE FROM scenes WHERE scene_id=ANY(%s::text[])",
-                    (scene_ids,),
-                )
-            else:
-                delete_rows(
-                    "DELETE FROM scene_dataset_audit WHERE dataset_id=%s OR previous_dataset_id=%s",
-                    (dataset_id, dataset_id),
-                )
-
-            delete_rows("DELETE FROM datasets WHERE dataset_id=%s", (dataset_id,))
-
-            if scheduler_batch_ids:
-                deleted_scheduler_batches = delete_rows(
-                    """DELETE FROM partition_batches batch
-                       WHERE batch.batch_id=ANY(%s::text[])
-                         AND NOT EXISTS (
-                           SELECT 1 FROM partition_datasets dataset
-                            WHERE dataset.batch_id=batch.batch_id
-                         )""",
-                    (scheduler_batch_ids,),
-                )
-            else:
-                deleted_scheduler_batches = 0
-
+    def list_dataset_deletions(
+        self, *, page: int = 1, page_size: int = 20, status: str | None = None
+    ) -> dict[str, Any]:
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 200))
+        where = ""
+        params: list[Any] = []
+        if status:
+            where = " WHERE status=%s"
+            params.append(status)
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT count(*) AS total FROM dataset_deletion_runs" + where, tuple(params))
+            total = int(cursor.fetchone()["total"])
+            cursor.execute(
+                f"SELECT {DELETION_COLUMN_LIST} FROM dataset_deletion_runs{where}"
+                " ORDER BY requested_at DESC LIMIT %s OFFSET %s",
+                (*params, page_size, (page - 1) * page_size),
+            )
+            rows = cursor.fetchall()
         return {
-            "dataset_id": dataset_id,
-            "deleted": True,
-            "deleted_scenes": len(scene_ids),
-            "deleted_partition_records": deleted_partition_records,
-            "deleted_load_batches": deleted_load_batches,
-            "deleted_scheduler_batches": deleted_scheduler_batches,
-            "object_uris": sorted(object_uris),
-            "deleted_by": actor,
+            "items": [deletion_record(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
         }
 
     @staticmethod
@@ -2005,18 +1926,95 @@ class OpenGaussDatasetManagementRepository:
         return value
 
 
+#: Datasets whose deletion job has not finished yet stay out of the list.
+ACTIVE_DELETION_FILTER = (
+    "NOT EXISTS (SELECT 1 FROM dataset_deletion_runs deletion "
+    "WHERE deletion.dataset_id = d.dataset_id AND deletion.status IN ('queued','running'))"
+)
+
+
+DELETION_RECORD_COLUMNS = (
+    "deletion_id", "dataset_id", "dataset_title", "status", "requested_by",
+    "requested_at", "started_at", "finished_at", "available_at", "claimed_by",
+    "claimed_at", "attempt_count", "progress", "result", "error_message", "updated_at",
+)
+DELETION_COLUMN_LIST = ", ".join(DELETION_RECORD_COLUMNS)
+
+
+def translate_deletion_rejection(rejection: "DatasetDeletionRejected") -> Exception:
+    """Map a plan rejection onto the exception the router already handles."""
+    if rejection.code == "not_found":
+        return ManagedDatasetNotFound(str(rejection))
+    return DatasetManagementConflict(str(rejection))
+
+
+def deletion_record(row: Any) -> dict[str, Any]:
+    """Expose one deletion job row as JSON-safe fields (plan stays internal)."""
+    record: dict[str, Any] = {}
+    for key, value in dict(row).items():
+        if isinstance(value, datetime):
+            record[key] = value.astimezone(UTC).isoformat()
+        else:
+            record[key] = value
+    return record
+
+
+def deletion_result(
+    plan: DeletionPlan,
+    outcome: dict[str, Any],
+    *,
+    object_uris: list[str],
+    actor: str,
+) -> dict[str, Any]:
+    """Rebuild the historical delete response from the batched step outcome."""
+    steps = list(outcome.get("steps") or [])
+    ingest_rows = {
+        step["name"].split(".", 1)[1]: int(step["deleted"])
+        for step in steps
+        if step.get("group") == "ingest"
+    }
+    by_name = {step["name"]: int(step["deleted"]) for step in steps}
+    return {
+        "dataset_id": plan.dataset_id,
+        "deleted": True,
+        "deleted_scenes": len(plan.ids("scene_ids")),
+        "deleted_partition_records": sum(
+            int(step["deleted"]) for step in steps if step.get("group") == "partition"
+        ),
+        "deleted_load_batches": by_name.get("load.load_batches", 0),
+        "deleted_scheduler_batches": by_name.get("scheduler.partition_batches", 0),
+        "deleted_ingest_rows": sum(ingest_rows.values()),
+        "deleted_ingest_rows_by_table": ingest_rows,
+        "object_uris": sorted(object_uris),
+        "deleted_by": actor,
+        "steps": steps,
+        "elapsed_seconds": outcome.get("elapsed_seconds"),
+        "batch_size": outcome.get("batch_size"),
+    }
+
+
 def _now_text() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _owned_partition_object(value: Any, dataset_id: str) -> bool:
+    """Only generated partition outputs below this dataset's version prefix qualify.
+
+    Loader/user source objects are refused outright (defence in depth: the version
+    prefix never contains source data, but a bad row must not be able to reach it).
+    """
     if not value:
         return False
     parsed = urlparse(unquote(str(value)))
-    return (
-        parsed.scheme.lower() == "s3"
-        and bool(parsed.netloc)
-        and not parsed.query
-        and not parsed.fragment
-        and parsed.path.startswith(f"/partition/{dataset_id}/versions/")
-    )
+    if (
+        parsed.scheme.lower() != "s3"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(f"/partition/{dataset_id}/versions/")
+    ):
+        return False
+    lowered = parsed.path.lower()
+    if parsed.netloc.lower().startswith(SOURCE_BUCKET_PREFIXES):
+        return False
+    return not any(marker in lowered for marker in SOURCE_PATH_MARKERS)

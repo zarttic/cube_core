@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any, Callable
 
+from cube_split import runtime_config
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from cube_web.routes.auth import current_actor, require_admin
+from cube_web.services import load_batch_deletion
+from cube_web.services.db_pool import _PostgresPool
 from cube_web.services.scene_contracts import (
     CarbonFootprintPreviewRequest,
     CarbonGridPreviewRequest,
@@ -22,7 +26,31 @@ class ArchiveLoadBatchRequest(BaseModel):
     reason: str = Field(default="ARD 删除归档", min_length=1, max_length=2000)
 
 
-def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
+class DeleteLoadBatchRequest(BaseModel):
+    reason: str = Field(default="ARD 批次物理删除", min_length=1, max_length=2000)
+    dry_run: bool = Field(default=False, description="只返回将要删除的范围，不写库")
+
+
+class DeleteLoadBatchResponse(BaseModel):
+    load_batch_id: str
+    status: str | None = None
+    source_type: str | None = None
+    dry_run: bool = False
+    scene_ids: list[str] = Field(default_factory=list)
+    dataset_ids: list[str] = Field(default_factory=list)
+    deletable_dataset_ids: list[str] = Field(default_factory=list)
+    retained_dataset_ids: list[str] = Field(default_factory=list)
+    deleted: dict[str, int] = Field(default_factory=dict)
+    dataset_results: list[dict] = Field(default_factory=list)
+    reason: str | None = None
+    actor: str | None = None
+
+
+def create_scene_partition_router(
+    service: SceneDomainService,
+    *,
+    dataset_service_factory: Callable[[], Any] | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/partition", tags=["partition-scenes"])
 
     @router.get("/load-batches")
@@ -59,6 +87,42 @@ def create_scene_partition_router(service: SceneDomainService) -> APIRouter:
             raise HTTPException(status_code=404, detail="Load batch not found")
         batch["reason"] = payload.reason
         return batch
+
+    @router.post("/load-batches/{load_batch_id}/delete", response_model=DeleteLoadBatchResponse)
+    def delete_load_batch_endpoint(
+        load_batch_id: str, payload: DeleteLoadBatchRequest, request: Request
+    ) -> DeleteLoadBatchResponse:
+        """Physically delete one load batch (ARD loader contract; replaces archive).
+
+        Admin-only.  A batch whose dataset is shared with another batch only drops
+        its own lineage rows; the dataset is deleted only when this batch is its
+        sole owner.  Missing batch -> 404 so the caller's legacy fallback keeps
+        working; guards -> 409.
+        """
+        actor = require_admin(current_actor(request))
+        dataset_admin = dataset_service_factory() if dataset_service_factory else None
+        if dataset_admin is None:
+            raise HTTPException(status_code=503, detail="dataset deletion is not configured")
+        database = runtime_config.postgres_dsn()
+        if not database:
+            raise HTTPException(status_code=503, detail="database is not configured")
+        try:
+            with _PostgresPool.for_dsn(database).connection() as connection:
+                result = load_batch_deletion.delete_load_batch(
+                    connection,
+                    load_batch_id=load_batch_id,
+                    actor=actor.username,
+                    reason=payload.reason,
+                    dataset_admin=dataset_admin,
+                    dry_run=payload.dry_run,
+                )
+        except load_batch_deletion.LoadBatchNotFound as exc:
+            raise HTTPException(status_code=404, detail="Load batch not found") from exc
+        except load_batch_deletion.LoadBatchDeletionConflict as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "load_batch_delete_conflict", "message": str(exc)}
+            ) from exc
+        return DeleteLoadBatchResponse(**result)
 
     @router.get("/load-batches/{load_batch_id}/scenes")
     def list_load_batch_scenes(

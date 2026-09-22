@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
 from typing import Any, Callable
 
 from cube_split import runtime_config
+from cube_split.ingest.dataset_cleanup import make_ingest_job_id
 from cube_split.ingest.managed_output_ingest import ingest_managed_output
 from psycopg.rows import dict_row
 
@@ -95,8 +95,9 @@ def _process_claimed_item(
         if len(band_unit_ids) != 1:
             raise RuntimeError("ingest execution unit must contain exactly one band")
         band_unit_id = band_unit_ids[0]
-        identity = f"{group['dataset_id']}\0{group['output_version']}\0{band_unit_id}"
-        ingest_job_id = f"ingest-{sha256(identity.encode()).hexdigest()[:24]}"
+        ingest_job_id = make_ingest_job_id(
+            str(group["dataset_id"]), str(group["output_version"]), band_unit_id
+        )
         kwargs = {
             "dataset_id": group["dataset_id"], "output_dataset_id": output_dataset_id,
             "output_version": group["output_version"], "ingest_job_id": ingest_job_id,

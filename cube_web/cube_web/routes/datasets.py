@@ -4,13 +4,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from cube_split import runtime_config
 from fastapi import APIRouter, HTTPException, Query, Request
-from minio import Minio
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cube_web.routes.auth import current_actor, require_admin
 from cube_web.services.access_control import HIDEABLE_DATASET_ROLES, normalize_role
+from cube_web.services.dataset_admin import build_dataset_management_service
 from cube_web.services.dataset_management import (
     DETAILS,
     DatasetManagementConflict,
@@ -18,21 +17,14 @@ from cube_web.services.dataset_management import (
     ManagedDatasetNotFound,
     ManagedDatasetQuery,
     ManagedSceneNotFound,
-    OpenGaussDatasetManagementRepository,
 )
 from cube_web.services.partition_contracts import GridType
-from cube_web.services.partition_object_store import PartitionObjectStore
 from cube_web.services.publication_service import (
     PublicationNotFound,
     PublicationPolicyRejected,
     PublicationWithdrawalConflict,
-    PublishRequest,
-    publish_dataset,
-    withdraw_publication,
 )
-from cube_web.services.quality_ingest_bridge import ManualIngestRejected, request_manual_ingest
 from cube_web.services.quality_repository import DatasetNotFound, OutputVersionNotFound, QualityRunNotFound
-from cube_web.services.quality_run_service import request_manual_quality_run
 
 
 class StrictPayload(BaseModel):
@@ -121,6 +113,22 @@ def create_datasets_router(service: DatasetManagementService | None = None, task
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "invalid_dataset_query", "message": str(exc)}) from exc
 
+    # Registered before "/{dataset_id}" so the literal path wins the match.
+    @router.get("/deletions")
+    def list_dataset_deletions(
+        request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=200),
+        status: str | None = Query(default=None),
+    ) -> dict:
+        require_admin(current_actor(request))
+        return _call(lambda: service.list_deletions(page=page, page_size=page_size, status=status))
+
+    @router.get("/deletions/{deletion_id}")
+    def get_dataset_deletion(deletion_id: str, request: Request) -> dict:
+        require_admin(current_actor(request))
+        return _call(lambda: service.get_deletion(deletion_id))
+
     @router.get("/{dataset_id}")
     def get_dataset(dataset_id: str, request: Request) -> dict:
         return _call(lambda: service.get_dataset(dataset_id, viewer_role=current_actor(request).role))
@@ -197,10 +205,16 @@ def create_datasets_router(service: DatasetManagementService | None = None, task
         actor = require_admin(current_actor(request))
         return _call(lambda: service.archive(dataset_id, reason=payload.reason, actor=actor.username))
 
-    @router.delete("/{dataset_id}")
+    @router.delete("/{dataset_id}", status_code=202)
     def delete_dataset(dataset_id: str, request: Request) -> dict:
+        """Queue the deletion and return its job; the worker removes the rows.
+
+        Deleting synchronously meant one 790 s transaction for a large dataset
+        (2026-09-19), which stalled every other session.  The response carries the
+        deletion id the UI polls: ``GET /v1/datasets/deletions/{deletion_id}``.
+        """
         actor = require_admin(current_actor(request))
-        return _call(lambda: service.delete_dataset(dataset_id, actor=actor.username))
+        return _call(lambda: service.request_deletion(dataset_id, actor=actor.username))
 
     for detail in sorted(DETAILS):
         router.add_api_route(
@@ -238,33 +252,6 @@ def _call(callback):
 
 
 def _production_service() -> DatasetManagementService:
-    repository = OpenGaussDatasetManagementRepository(runtime_config.postgres_dsn())
-
-    def quality_hook(dataset_id, actor):
-        return request_manual_quality_run(dataset_id, None, actor).model_dump(mode="json")
-
-    def ingest_hook(dataset_id, actor):
-        try:
-            return request_manual_ingest(dataset_id, requested_by=actor.username)
-        except ManualIngestRejected as exc:
-            raise DatasetManagementConflict(str(exc)) from exc
-
-    def publish_hook(dataset_id, actor, targets=()):
-        return publish_dataset(dataset_id, PublishRequest(targets=tuple(targets)), actor).model_dump(mode="json")
-
-    def withdraw_hook(dataset_id, publication_id, reason, actor):
-        return withdraw_publication(dataset_id, UUID(publication_id), reason, actor).model_dump(mode="json")
-
-    def grid_object_cleanup(object_uris):
-        settings = runtime_config.minio_settings()
-        store = PartitionObjectStore(
-            Minio(settings.endpoint, access_key=settings.access_key, secret_key=settings.secret_key, secure=settings.secure),
-            bucket=settings.bucket,
-        )
-        deleted_keys = store.remove_objects(object_uris)
-        return {"status": "completed", "object_count": len(deleted_keys), "deleted_object_keys": deleted_keys}
-
-    return DatasetManagementService(
-        repository, quality_hook=quality_hook, ingest_hook=ingest_hook,
-        publish_hook=publish_hook, withdraw_hook=withdraw_hook, grid_object_cleanup=grid_object_cleanup
-    )
+    # Wiring lives in services/dataset_admin.py so the load-batch deletion route
+    # shares the exact same hooks (quality/ingest/publish/withdraw/object cleanup).
+    return build_dataset_management_service()

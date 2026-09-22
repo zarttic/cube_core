@@ -29,6 +29,7 @@ from cube_web.services.api_errors import (
     error_response,
     request_id_from_header,
 )
+from cube_web.services.dataset_deletion_worker import DatasetDeletionRuntime
 from cube_web.services.dataset_management import (
     DatasetManagementConflict,
     ManagedDatasetNotFound,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         quality_runtime = QualityRuntime()
+        deletion_runtime = DatasetDeletionRuntime()
         reconciled = 0
         try:
             reconciled = partition_workflow_service.reconcile_orphaned_tasks()
@@ -86,8 +88,10 @@ def create_app() -> FastAPI:
         )
         try:
             quality_runtime.start()
+            deletion_runtime.start()
             yield
         finally:
+            deletion_runtime.stop()
             quality_runtime.stop()
             logger.info("web.shutdown")
 
@@ -182,6 +186,13 @@ class _LazyRepository:
         return getattr(instance, name)
 
 
+def _dataset_admin_service_factory() -> Any:
+    """Dataset management service with the runtime hooks (imported lazily)."""
+    from cube_web.services.dataset_admin import build_dataset_management_service
+
+    return build_dataset_management_service()
+
+
 def _build_domain_components() -> tuple[Any, tuple[APIRouter, ...]]:
     from cube_split import runtime_config
 
@@ -204,7 +215,10 @@ def _build_domain_components() -> tuple[Any, tuple[APIRouter, ...]]:
     )
     ingest_service = IngestRunService(_LazyRepository(lambda: OpenGaussIngestRepository(dsn)))
     return scene_service, (
-        create_scene_partition_router(scene_service),
+        create_scene_partition_router(
+            scene_service,
+            dataset_service_factory=_dataset_admin_service_factory,
+        ),
         create_datasets_router(),
         create_ingest_runs_router(ingest_service),
     )
