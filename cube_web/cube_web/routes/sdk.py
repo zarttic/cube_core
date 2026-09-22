@@ -33,6 +33,12 @@ from pydantic import Field
 
 from cube_web.schemas import SpatiotemporalQueryRequest
 from cube_web.services.grid_preview import build_continuous_mgrs_preview
+from cube_web.services.preview_limits import (
+    cover_preview_cells,
+    ensure_preview_children_within_limit,
+    preview_max_cells,
+    truncation_notice,
+)
 
 
 class WebCoverRequest(CoverRequest):
@@ -46,6 +52,9 @@ class WebCoverResponse(CoverResponse):
     """The web facade may return a separate display-only cell collection."""
 
     preview_cells: list[GridCell] = Field(default_factory=list)
+    # Set when the preview was cut at CUBE_WEB_PREVIEW_MAX_CELLS so the UI can say so.
+    truncated: bool = False
+    notice: str | None = None
 
 
 def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
@@ -58,13 +67,17 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
 
     @router.post("/grid/cover", response_model=WebCoverResponse)
     def cover(req: WebCoverRequest) -> WebCoverResponse:
-        cells = sdk.cover(
+        # A cover materialises every cell in memory, so it is bounded and truncated at
+        # the preview limit instead of allocating the whole extent (see preview_limits:
+        # an unbounded request froze the host on 2026-09-17).
+        cells, truncated = cover_preview_cells(
+            sdk,
             grid_type=req.grid_type,
-            requested_grid_level=req.requested_grid_level,
+            grid_level=req.requested_grid_level,
             cover_mode=req.cover_mode,
             boundary_type=req.boundary_type,
-            geometry=req.geometry,
             bbox=req.bbox,
+            geometry=req.geometry,
             crs=req.crs,
         )
         preview_cells: list[GridCell] = []
@@ -85,6 +98,8 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
             cover_mode=req.cover_mode.value,
             cells=cells,
             preview_cells=preview_cells,
+            truncated=truncated,
+            notice=truncation_notice(preview_max_cells()) if truncated else None,
             statistics={"cell_count": len(cells), "preview_cell_count": len(preview_cells)},
         )
 
@@ -110,6 +125,11 @@ def create_sdk_router(sdk: CubeEncoderSDK) -> APIRouter:
 
     @router.post("/topology/children", response_model=ChildrenResponse)
     def children(req: ChildrenRequest) -> ChildrenResponse:
+        # Children grow by the branching factor per level; bound the extrapolation
+        # before the engine builds the whole list in memory.
+        ensure_preview_children_within_limit(
+            sdk, address=req.address, target_grid_level=req.target_grid_level,
+        )
         addresses = sdk.children(req.address, req.target_grid_level)
         return ChildrenResponse(addresses=addresses, statistics={"count": len(addresses)})
 
