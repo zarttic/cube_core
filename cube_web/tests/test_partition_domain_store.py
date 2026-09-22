@@ -533,3 +533,167 @@ def test_cleanup_state_contains_tile_manifest_shape() -> None:
             "byte_size": 12,
         }
     ]
+
+
+def _chunk_result(version: str, *, inserted: dict[str, int] | None, manifest: dict[str, int] | None = None) -> SimpleNamespace:
+    """A logical result carrying Ray chunk descriptors."""
+    result = _result(version)
+    counts = manifest or {"grid_cells": 1, "tiles": 1, "indexes": 1}
+    descriptor = {
+        "chunk_id": "chunk-a",
+        "object_uri": "s3://cube/partition/dataset-a/versions/%s/logical-chunks/chunk-a.jsonl.gz" % version,
+        "checksum": "a" * 64,
+        "byte_size": 100,
+        "grid_cell_count": counts["grid_cells"],
+        "tile_count": counts["tiles"],
+        "index_count": counts["indexes"],
+    }
+    if inserted is not None:
+        descriptor["inserted_counts"] = dict(inserted)
+    result.chunks = (descriptor,)
+    return result
+
+
+def test_direct_write_counts_detect_legacy_and_direct_chunks() -> None:
+    from cube_web.services.partition_domain_store import _direct_write_counts
+
+    assert _direct_write_counts(()) is None
+    legacy = _chunk_result("version-a", inserted=None).chunks
+    assert _direct_write_counts(legacy) is None
+    direct = _chunk_result("version-a", inserted={"grid_cells": 3, "tiles": 4, "indexes": 5}).chunks
+    assert _direct_write_counts(direct) == {"grid_cells": 3, "tiles": 4, "indexes": 5}
+
+
+def test_direct_write_counts_reject_empty_or_partial_mappings() -> None:
+    """Only a full three-table mapping counts as a direct write."""
+    from cube_web.services.partition_domain_store import _direct_write_counts
+
+    assert _direct_write_counts(_chunk_result("version-a", inserted={}).chunks) is None
+    partial = _chunk_result("version-a", inserted={"tiles": 1, "indexes": 1}).chunks
+    assert _direct_write_counts(partial) is None
+
+
+def test_promote_logical_staging_skips_direct_written_chunks(monkeypatch) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    result = _chunk_result("version-a", inserted={"grid_cells": 1, "tiles": 1, "indexes": 1})
+
+    store.promote_logical_staging(result)
+
+    assert connection.statements == []
+
+
+@pytest.mark.parametrize("inserted", [None, {}], ids=["legacy-missing-key", "staging-empty-map"])
+def test_promote_logical_staging_still_merges_legacy_staging_rows(monkeypatch, inserted) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    monkeypatch.setattr(store, "_assert_live_schema", lambda _connection: None)
+
+    def fetchall(_connection, sql, _params=()):
+        if "GROUP BY kind" in sql:
+            return [
+                {"kind": "grid_cells", "count": 1},
+                {"kind": "tiles", "count": 1},
+                {"kind": "indexes", "count": 1},
+            ]
+        return []
+
+    monkeypatch.setattr(store, "_fetchall", fetchall)
+
+    store.promote_logical_staging(_chunk_result("version-a", inserted=inserted))
+
+    statements = [sql for sql, _params in connection.statements]
+    assert any("INSERT INTO partition_grid_cells" in sql for sql in statements)
+    assert any("INSERT INTO partition_tiles" in sql for sql in statements)
+    assert any("INSERT INTO partition_indexes" in sql for sql in statements)
+
+
+def test_result_rows_skip_minio_when_workers_wrote_directly(monkeypatch) -> None:
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: _RecordingConnection())
+    calls: list[str] = []
+    monkeypatch.setattr(store, "_fetchall", lambda *_args, **_kwargs: calls.append("fetchall") or [])
+    monkeypatch.setattr(
+        store, "_iter_persisted_chunk_rows",
+        lambda *_args, **_kwargs: calls.append("minio") or iter(()),
+    )
+
+    rows = list(store._result_rows(_RecordingConnection(), _chunk_result("version-a", inserted={"grid_cells": 1, "tiles": 1, "indexes": 1}), "tiles"))
+
+    assert rows == []
+    assert calls == []
+
+
+def test_result_rows_read_minio_chunks_for_legacy_staging(monkeypatch) -> None:
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: _RecordingConnection())
+    calls: list[str] = []
+    monkeypatch.setattr(store, "_fetchall", lambda *_args, **_kwargs: [{"count": 0}])
+    monkeypatch.setattr(
+        store, "_iter_persisted_chunk_rows",
+        lambda *_args, **_kwargs: calls.append("minio") or iter([{"output_id": "row-a"}]),
+    )
+
+    rows = list(store._result_rows(_RecordingConnection(), _chunk_result("version-a", inserted=None), "tiles"))
+
+    assert rows == [{"output_id": "row-a"}]
+    assert calls == ["minio"]
+
+
+def test_complete_output_fails_when_direct_rows_are_missing(monkeypatch) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    monkeypatch.setattr(store, "_assert_live_schema", lambda _connection: None)
+    monkeypatch.setattr(store, "_execute", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(store, "_merge_insert", lambda *_args, **_kwargs: None)
+
+    def fetchall(_connection, sql, _params=()):
+        if "FROM partition_datasets" in sql:
+            return [{"dataset_id": "dataset-a", "batch_id": "batch-a"}]
+        if "FROM partition_job_attempts" in sql:
+            return [{
+                "task_id": "task-a",
+                "batch_id": "batch-a",
+                "payload": {"strict_partition_request": True, "datasets": [{"dataset_id": "dataset-a"}]},
+            }]
+        if "FROM partition_output_versions" in sql:
+            return [{"task_id": "task-a", "status": "staging"}]
+        if "AS grid_cells" in sql:
+            return [{"tiles": 4, "indexes": 4, "grid_cells": 0}]
+        return []
+
+    monkeypatch.setattr(store, "_fetchall", fetchall)
+    result = _chunk_result("version-a", inserted={"grid_cells": 2, "tiles": 4, "indexes": 4})
+
+    with pytest.raises(RuntimeError, match="logical chunk rows are missing"):
+        store.complete_output(result)
+
+
+def test_complete_output_accepts_direct_rows_matching_counts(monkeypatch) -> None:
+    connection = _RecordingConnection()
+    store = OpenGaussPartitionDomainStore(connection_factory=lambda: connection)
+    monkeypatch.setattr(store, "_assert_live_schema", lambda _connection: None)
+    monkeypatch.setattr(store, "_execute", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(store, "_merge_insert", lambda *_args, **_kwargs: None)
+    committed: list = []
+
+    def fetchall(_connection, sql, _params=()):
+        if "FROM partition_datasets" in sql:
+            return [{"dataset_id": "dataset-a", "batch_id": "batch-a"}]
+        if "FROM partition_job_attempts" in sql:
+            return [{
+                "task_id": "task-a",
+                "batch_id": "batch-a",
+                "payload": {"strict_partition_request": True, "datasets": [{"dataset_id": "dataset-a"}]},
+            }]
+        if "FROM partition_output_versions" in sql:
+            return [{"task_id": "task-a", "status": "staging"}]
+        if "AS grid_cells" in sql:
+            return [{"tiles": 4, "indexes": 4, "grid_cells": 2}]
+        return []
+
+    monkeypatch.setattr(store, "_fetchall", fetchall)
+    monkeypatch.setattr(store, "_recover_ambiguous_commit", lambda *_args, **_kwargs: committed.append("recover") or None)
+    result = _chunk_result("version-a", inserted={"grid_cells": 2, "tiles": 4, "indexes": 4})
+
+    store.complete_output(result)
+
+    assert committed == []

@@ -8,7 +8,13 @@ from cube_web.services.partition_contracts import OutputIdentity, make_output_id
 
 from cube_split.jobs.cancellation import shutdown_ray_if_needed
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
-from cube_split.jobs.ray_logical_chunk_job import _plan_logical_chunk, _time_bucket, logical_output_id, run_logical_chunk_jobs
+from cube_split.jobs.ray_logical_chunk_job import (
+    _persist_chunk_rows,
+    _plan_logical_chunk,
+    _time_bucket,
+    logical_output_id,
+    run_logical_chunk_jobs,
+)
 from cube_split.jobs.ray_logical_partition_job import (
     _chunk_task_groups_by_actor,
     _chunk_tasks_for_ray,
@@ -543,3 +549,30 @@ def test_logical_partition_does_not_shutdown_shared_ray(monkeypatch, tmp_path: P
     shutdown_ray_if_needed(fake_ray, already_initialized=True)
 
     assert fake_ray.shutdown_calls == 0
+
+
+def test_staging_persist_reports_no_counts(monkeypatch):
+    """``staging`` must not look like a direct write that landed zero rows.
+
+    The store tells the two modes apart by ``inserted_counts``: ``None`` (staging,
+    promote still pending) versus a full per-table mapping (rows already in the
+    target tables).  An empty mapping made the store skip the promote and then drop
+    the staged rows, silently completing the output with zero rows.
+    """
+    staged: list[dict] = []
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job.runtime_config.env_text",
+        lambda name, default=None: {"CUBE_LOGICAL_CHUNK_PERSIST": "staging"}.get(name, default),
+    )
+    monkeypatch.setattr(
+        "cube_split.jobs.ray_logical_chunk_job._stage_chunk_rows",
+        lambda **kwargs: staged.append(kwargs),
+    )
+
+    counts = _persist_chunk_rows(
+        dataset_id="dataset-a", output_version="version-a", chunk_id="chunk-a",
+        rows=[{"kind": "tiles", "row": {"output_id": "tile-1"}}],
+    )
+
+    assert counts is None
+    assert len(staged) == 1

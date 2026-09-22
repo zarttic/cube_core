@@ -551,13 +551,39 @@ def _run_logical_dataset_on_ray(
 
     if not ray.is_initialized():
         ray.init(address=payload["ray_address"], ignore_reinit_error=True, include_dashboard=False, logging_level=ray_logging_level(), runtime_env=_ray_init_runtime_env(runtime_env))
-    shard_degrees = float(runtime_config.env_text("CUBE_LOGICAL_SHARD_DEGREES", "1"))
-    if not 0 < shard_degrees <= 10:
-        raise ValueError("CUBE_LOGICAL_SHARD_DEGREES must be within (0, 10]")
+    from cube_split.jobs.logical_sharding import iter_shards, plan_logical_shards
+    from grid_core.sdk import CubeEncoderSDK
+
     shards_per_task = max(1, int(runtime_config.env_text("CUBE_LOGICAL_SHARDS_PER_TASK", "16")))
+    parallelism = max(1, _requested_worker_container_limit(payload) or 1)
+    planner_sdk = CubeEncoderSDK()
     task_values: list[dict[str, Any]] = []
+    shard_plans: list[dict[str, Any]] = []
     for asset in payload["dataset"]["assets"]:
-        asset_shards = _logical_shards(asset["bbox"], shard_degrees)
+        bands = [band for band in payload["dataset"]["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
+        plan = plan_logical_shards(
+            sdk=planner_sdk,
+            bbox=asset["bbox"],
+            grid_type=str(payload["grid_type"]),
+            grid_level=int(payload["requested_grid_level"]),
+            bands=len(bands) or 1,
+            shards_per_task=shards_per_task,
+            parallelism=parallelism,
+        )
+        shard_plans.append({
+            "source_asset_id": asset["source_asset_id"],
+            "mode": plan.mode,
+            "shards": plan.shard_count,
+            "chunks": plan.chunk_count,
+            "est_cells": plan.estimated_cells,
+            "est_rows": plan.estimated_rows,
+            "rows_per_chunk": plan.rows_per_chunk,
+            "cells_per_shard": plan.cells_per_shard,
+            "shard_width_deg": round(plan.shard_width, 5),
+            "shard_height_deg": round(plan.shard_height, 5),
+            "reason": plan.reason,
+        })
+        asset_shards = list(iter_shards(asset["bbox"], plan.shard_width, plan.shard_height))
         for start in range(0, len(asset_shards), shards_per_task):
             shards = asset_shards[start:start + shards_per_task]
             task_values.append({**payload, "asset": asset, "shards": shards, "shard_id": f"{asset['source_asset_id']}:{start // shards_per_task}"})
@@ -592,7 +618,7 @@ def _run_logical_dataset_on_ray(
         "dataset_id": payload["dataset"]["dataset_id"], "task_id": payload["task_id"], "output_version": payload["output_version"],
         "grid_type": payload["grid_type"], "requested_grid_level": payload["requested_grid_level"], "partition_method": "logical",
         "execution_engine": "ray", "object_prefix": f"partition/{payload['dataset']['dataset_id']}/versions/{payload['output_version']}/",
-        "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks,
+        "tiles": [], "indexes": [], "grid_cells": [], "chunks": chunks, "shard_plan": shard_plans,
     }
 
 

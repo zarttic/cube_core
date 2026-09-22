@@ -119,6 +119,15 @@ class RayJobPartitionSubmitter:
             "CUBE_ENTITY_READ_BLOCK_PIXELS",
             "CUBE_ENTITY_TILE_TMP_DIR",
             "CUBE_WEB_RAY_WORKER_RESOURCE",
+            # 逻辑剖分的分片/分块规划（2026-09-19 起支持预估格元动态分片）
+            "CUBE_LOGICAL_SHARD_MODE",
+            "CUBE_LOGICAL_SHARD_DEGREES",
+            "CUBE_LOGICAL_SHARDS_PER_TASK",
+            "CUBE_LOGICAL_TARGET_ROWS_PER_CHUNK",
+            "CUBE_LOGICAL_MAX_CHUNKS",
+            "CUBE_LOGICAL_MAX_IN_FLIGHT",
+            # 行落地方式：direct=worker 直写目标表（默认），staging=回退旧的 JSONB 暂存+promote
+            "CUBE_LOGICAL_CHUNK_PERSIST",
         ):
             value = runtime_config.env_text(name)
             if value is not None:

@@ -53,6 +53,32 @@ _PUBLIC_TILE_COLUMNS = (
 )
 
 
+def _direct_write_counts(chunks: tuple[Any, ...]) -> dict[str, int] | None:
+    """Sum the per-table inserted counts reported by direct-writing Ray workers.
+
+    ``None`` means the chunks came from the legacy staging flow; that is how the
+    store tells the two persistence modes apart without a schema change.  A direct
+    write always reports all three target tables, so a missing or partial mapping
+    (the staging worker reports nothing) has to fall back to the promote instead of
+    being read as "direct, zero rows" — that reading would delete the staged rows
+    without ever promoting them.
+    """
+    if not chunks:
+        return None
+    totals: dict[str, int] = {}
+    for raw in chunks:
+        chunk = _value(raw)
+        counts = chunk.get("inserted_counts")
+        if not isinstance(counts, dict) or not all(kind in counts for kind in _DIRECT_WRITE_KINDS):
+            return None
+        for kind in _DIRECT_WRITE_KINDS:
+            totals[kind] = totals.get(kind, 0) + int(counts.get(kind) or 0)
+    return totals
+
+
+_DIRECT_WRITE_KINDS = ("grid_cells", "tiles", "indexes")
+
+
 def _timing_phase(timing: Any | None, name: str) -> AbstractContextManager[None]:
     """Time one statement inside an existing recorder, or do nothing.
 
@@ -1118,11 +1144,19 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
             )
 
     def promote_logical_staging(self, result: "PartitionDatasetResult", timing: Any | None = None) -> None:
-        """Merge Ray-written logical staging rows with set-based OpenGauss SQL."""
+        """Merge Ray-written logical rows with set-based OpenGauss SQL.
+
+        Ray workers write the target tables directly by default
+        (``CUBE_LOGICAL_CHUNK_PERSIST=direct``), in which case there is nothing to
+        promote and ``_result_rows`` verifies the rows instead.  ``staging`` keeps the
+        legacy JSONB staging promote for rollback.
+        """
         dataset_id = str(_field(result, "dataset_id"))
         version = str(_field(result, "output_version"))
         chunks = tuple(_field(result, "chunks", ()))
         if not chunks:
+            return
+        if _direct_write_counts(chunks) is not None:
             return
         expected = {"grid_cells": 0, "tiles": 0, "indexes": 0}
         count_fields = {"grid_cells": "grid_cell_count", "tiles": "tile_count", "indexes": "index_count"}
@@ -1182,11 +1216,19 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 connection.commit()
 
     def _result_rows(self, connection: Any, result: "PartitionDatasetResult", noun: str):
-        if _field(result, "chunks", ()):
+        chunks = tuple(_field(result, "chunks", ()))
+        if chunks:
+            dataset_id = str(_field(result, "dataset_id"))
+            version = str(_field(result, "output_version"))
+            if _direct_write_counts(chunks) is not None:
+                # Workers already wrote the target tables; ``complete_output`` verifies the
+                # counts it reads anyway, so the immutable MinIO chunks are not downloaded
+                # and re-inserted a second time.
+                return
             staged = self._fetchall(
                 connection,
                 "SELECT count(*) AS count FROM partition_logical_staging_rows WHERE dataset_id=%s AND output_version=%s",
-                (str(_field(result, "dataset_id")), str(_field(result, "output_version"))),
+                (dataset_id, version),
             )
             if staged and int(staged[0]["count"]):
                 return
@@ -1796,6 +1838,17 @@ class OpenGaussPartitionDomainStore(InMemoryPartitionDomainStore):
                 (dataset_id, version, dataset_id, version, dataset_id, version),
             )
             counts = count_rows[0] if count_rows else {"tiles": 0, "indexes": 0, "grid_cells": 0}
+            direct = _direct_write_counts(tuple(_field(result, "chunks", ())))
+            if direct is not None:
+                # The workers own the write in direct mode; a chunk that failed to land
+                # must fail the output instead of silently completing it.
+                missing = {
+                    kind: {"written": int(counts.get(kind) or 0), "expected": direct.get(kind, 0)}
+                    for kind in direct
+                    if int(counts.get(kind) or 0) < direct.get(kind, 0)
+                }
+                if missing:
+                    raise RuntimeError(f"logical chunk rows are missing from the target tables: {missing}")
             self._execute(
                 connection,
                 "UPDATE partition_output_versions SET status = 'completed', completed_at = now(), tile_count = %s, index_count = %s, grid_cell_count = %s, counts = %s::jsonb WHERE dataset_id = %s AND output_version = %s",

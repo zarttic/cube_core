@@ -10,8 +10,11 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Callable, Iterator
 
+from grid_core.sdk import CubeEncoderSDK
+
 from cube_split import runtime_config
 from cube_split.jobs.logical_chunk_codec import compress_logical_chunk, logical_chunk_id, serialize_logical_chunk_rows
+from cube_split.jobs.logical_sharding import iter_shards, plan_logical_shards
 from cube_split.logging_config import ray_logging_level
 from cube_split.partition_timing import TimingRecorder
 
@@ -81,22 +84,44 @@ def _time_bucket(value: str, granularity: str) -> str:
 def _iter_shards(
     bbox: list[float] | tuple[float, float, float, float], degrees: float,
 ) -> Iterator[tuple[float, float, float, float]]:
-    west, south, east, north = (float(value) for value in bbox)
-    if not -180 <= west <= 180 or not -180 <= east <= 180 or not -90 <= south <= 90 or not -90 <= north <= 90 or west > east or south > north:
-        raise ValueError("logical chunk source bbox must be a non-wrapping WGS84 bbox")
-    lat = south
-    while lat < north:
-        next_lat = min(north, lat + degrees)
-        lon = west
-        while lon < east:
-            next_lon = min(east, lon + degrees)
-            yield lon, lat, next_lon, next_lat
-            lon = next_lon
-        lat = next_lat
+    """Equal-sided shards (kept for callers that still pass a single ``degrees``)."""
+    return iter_shards(bbox, degrees, degrees)
 
 
 def _shards(bbox: list[float] | tuple[float, float, float, float], degrees: float) -> list[tuple[float, float, float, float]]:
     return list(_iter_shards(bbox, degrees))
+
+
+def logical_chunk_persist_mode() -> str:
+    """How a Ray worker persists its chunk rows.
+
+    ``direct`` (default) writes the target tables once; ``staging`` keeps the legacy
+    JSONB staging flow for rollback.  See ``logical_row_writer`` for measurements.
+    """
+    raw = str(runtime_config.env_text("CUBE_LOGICAL_CHUNK_PERSIST", "direct") or "").strip().lower()
+    return "staging" if raw == "staging" else "direct"
+
+
+def _persist_chunk_rows(
+    *, dataset_id: str, output_version: str, chunk_id: str, rows: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    """Persist one chunk's rows and report how many landed per target table.
+
+    ``None`` means the rows went to the JSONB staging table and still have to be
+    promoted by the web process; reporting an empty mapping would make the store
+    mistake a staging chunk for a direct write and skip the promote.
+    """
+    if logical_chunk_persist_mode() == "staging":
+        _stage_chunk_rows(
+            dataset_id=dataset_id, output_version=output_version, chunk_id=chunk_id, rows=rows,
+        )
+        return None
+    from cube_split.jobs.logical_row_writer import write_chunk_rows
+
+    return write_chunk_rows(
+        dsn=runtime_config.require_postgres_dsn(),
+        dataset_id=dataset_id, output_version=output_version, rows=rows,
+    )
 
 
 def _logical_task_limit(requested_limit: int | None = None) -> int:
@@ -114,14 +139,21 @@ def _logical_task_limit(requested_limit: int | None = None) -> int:
 
 
 def _logical_task_values(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    degrees = float(runtime_config.env_text("CUBE_LOGICAL_SHARD_DEGREES", "1"))
-    if not 0 < degrees <= 10:
-        raise ValueError("CUBE_LOGICAL_SHARD_DEGREES must be within (0, 10]")
     per_task = max(1, int(runtime_config.env_text("CUBE_LOGICAL_SHARDS_PER_TASK", "16")))
+    planner_sdk = CubeEncoderSDK()
     for asset in payload["dataset"]["assets"]:
+        bands = [band for band in payload["dataset"]["bands"] if band["source_asset_id"] == asset["source_asset_id"]]
+        plan = plan_logical_shards(
+            sdk=planner_sdk,
+            bbox=asset["bbox"],
+            grid_type=str(payload["grid_type"]),
+            grid_level=int(payload["requested_grid_level"]),
+            bands=len(bands) or 1,
+            shards_per_task=per_task,
+        )
         shards: list[tuple[float, float, float, float]] = []
         shard_number = 0
-        for shard in _iter_shards(asset["bbox"], degrees):
+        for shard in iter_shards(asset["bbox"], plan.shard_width, plan.shard_height):
             shards.append(shard)
             if len(shards) < per_task:
                 continue
@@ -130,6 +162,13 @@ def _logical_task_values(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 "asset": asset,
                 "shards": shards,
                 "shard_id": f"{asset['source_asset_id']}:{shard_number}",
+                "shard_plan": {
+                    "mode": plan.mode, "shards": plan.shard_count, "chunks": plan.chunk_count,
+                    "est_cells": plan.estimated_cells, "est_rows": plan.estimated_rows,
+                    "rows_per_chunk": plan.rows_per_chunk, "cells_per_shard": plan.cells_per_shard,
+                    "shard_width_deg": round(plan.shard_width, 5), "shard_height_deg": round(plan.shard_height, 5),
+                    "reason": plan.reason,
+                },
             }
             shard_number += 1
             shards = []
@@ -139,6 +178,13 @@ def _logical_task_values(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 "asset": asset,
                 "shards": shards,
                 "shard_id": f"{asset['source_asset_id']}:{shard_number}",
+                "shard_plan": {
+                    "mode": plan.mode, "shards": plan.shard_count, "chunks": plan.chunk_count,
+                    "est_cells": plan.estimated_cells, "est_rows": plan.estimated_rows,
+                    "rows_per_chunk": plan.rows_per_chunk, "cells_per_shard": plan.cells_per_shard,
+                    "shard_width_deg": round(plan.shard_width, 5), "shard_height_deg": round(plan.shard_height, 5),
+                    "reason": plan.reason,
+                },
             }
 
 
@@ -227,7 +273,7 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
         if int(getattr(existing, "size", -1)) != len(body) or (metadata.get("checksum-sha256") or metadata.get("x-amz-meta-checksum-sha256")) != checksum:
             raise RuntimeError(f"immutable logical chunk collision for {key}")
     with timing.phase("opengauss.logical_stage"):
-        _stage_chunk_rows(
+        inserted_counts = _persist_chunk_rows(
             dataset_id=dataset["dataset_id"], output_version=value["output_version"],
             chunk_id=chunk_id, rows=rows,
         )
@@ -241,6 +287,7 @@ def _plan_logical_chunk(value: dict[str, Any]) -> dict[str, Any]:
         "grid_cell_count": len(cells),
         "tile_count": sum(row["kind"] == "tiles" for row in rows),
         "index_count": sum(row["kind"] == "indexes" for row in rows),
+        "inserted_counts": inserted_counts,
         "timing": timing.finish(),
     }
 
