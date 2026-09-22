@@ -15,7 +15,7 @@ from cube_web.services.config_store import (
     set_optional_quality_rule_enabled,
 )
 from cube_web.services.quality_contracts import Page, QualityErrorFilter, page_offset, validate_sort
-from cube_web.services.quality_export import stream_quality_errors, stream_quality_results, stream_quality_workbook
+from cube_web.services.quality_export import stream_quality_errors, stream_quality_export, stream_quality_results
 from cube_web.services.quality_repository import (
     QualityRunNotFound,
     count_quality_errors,
@@ -183,9 +183,9 @@ def create_quality_router() -> APIRouter:
         )
 
     @router.get("/records/{quality_run_id}/export")
-    def export_quality_workbook(quality_run_id: UUID, format: Literal["xlsx"]) -> StreamingResponse:
+    def export_quality_run(quality_run_id: UUID, format: Literal["csv", "xlsx"] = "csv") -> StreamingResponse:
         try:
-            stream, total, filename, media_type = stream_quality_workbook(quality_run_id)
+            stream, total, filename, media_type = stream_quality_export(quality_run_id, format)
         except QualityRunNotFound as exc:
             raise _not_found(exc) from exc
         return StreamingResponse(

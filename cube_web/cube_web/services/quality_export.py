@@ -55,6 +55,7 @@ RESULT_CSV_COLUMNS = (
     "started_at",
     "completed_at",
 )
+QUALITY_CSV_GROUP_COLUMN = "结果分组"
 QUALITY_XLSX_COLUMNS = (
     "批次ID",
     "批次名称",
@@ -166,6 +167,28 @@ def json_result_chunks(rows: Iterator[QualityResult]) -> Iterator[bytes]:
         first = False
         yield json.dumps(row.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     yield b"]"
+
+
+def rows_to_csv_chunks(
+    success_rows: list[Mapping[str, Any]],
+    failed_rows: list[Mapping[str, Any]],
+) -> Iterator[bytes]:
+    """Stream the combined quality export rows as one CSV with a group column."""
+    columns = (QUALITY_CSV_GROUP_COLUMN, *QUALITY_XLSX_COLUMNS)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=columns)
+    writer.writeheader()
+    yield buffer.getvalue().encode("utf-8-sig")
+    buffer.seek(0)
+    buffer.truncate(0)
+    for group, rows in (("成功内容", success_rows), ("失败内容", failed_rows)):
+        for row in rows:
+            payload = {QUALITY_CSV_GROUP_COLUMN: group}
+            payload.update({column: _xlsx_value(row.get(column)) for column in QUALITY_XLSX_COLUMNS})
+            writer.writerow(payload)
+            yield buffer.getvalue().encode("utf-8")
+            buffer.seek(0)
+            buffer.truncate(0)
 
 
 def _xlsx_value(value: Any) -> str:
@@ -454,9 +477,11 @@ def stream_quality_results(
     return stream(), total, quality_export_filename(run, export_format, False, resource="results"), media_type
 
 
-def stream_quality_workbook(
+def stream_quality_export(
     quality_run_id: UUID,
-) -> tuple[Iterator[bytes], int, str, Literal["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]]:
+    export_format: Literal["csv", "xlsx"],
+) -> tuple[Iterator[bytes], int, str, str]:
+    """Stream the whole quality run (success content + failed content) as CSV or XLSX."""
     store = require_open_gauss_domain_store()
     with store.transaction() as tx:
         run = get_quality_run(tx, quality_run_id=quality_run_id)
@@ -464,10 +489,18 @@ def stream_quality_workbook(
         errors = tuple(iter_quality_errors(tx, quality_run_id=quality_run_id, filters=QualityErrorFilter()))
         scene_bands = tuple(list_quality_scene_bands(tx, dataset_id=run.dataset_id, output_version=run.output_version))
     success_rows, failed_rows = _quality_export_rows(run, results, errors, scene_bands)
+    total = len(success_rows) + len(failed_rows)
+    if export_format == "csv":
+        return (
+            rows_to_csv_chunks(success_rows, failed_rows),
+            total,
+            quality_export_filename(run, "csv", False, resource="quality"),
+            "text/csv; charset=utf-8",
+        )
     workbook = _xlsx_workbook(success_rows, failed_rows)
     return (
         iter((workbook,)),
-        len(success_rows) + len(failed_rows),
+        total,
         quality_export_filename(run, "xlsx", False, resource="quality"),
         XLSX_MEDIA_TYPE,
     )

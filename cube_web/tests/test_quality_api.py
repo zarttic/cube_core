@@ -93,11 +93,37 @@ def test_results_export_route_streams_rule_results(monkeypatch) -> None:
     assert response.text == "rule_code,status\nindex_schema,pass\n"
 
 
-def test_quality_export_route_streams_xlsx_workbook(monkeypatch) -> None:
+def test_quality_export_route_streams_csv_by_default(monkeypatch) -> None:
+    calls: list[tuple[object, str]] = []
+
+    def fake_export(quality_run_id, export_format):
+        calls.append((quality_run_id, export_format))
+        return (
+            iter((b"\xef\xbb\xbf\xe7\xbb\x93\xe6\x9e\x9c\xe5\x88\x86\xe7\xbb\x84,\xe6\x89\xb9\xe6\xac\xa1ID\n\xe6\x88\x90\xe5\x8a\x9f\xe5\x86\x85\xe5\xae\xb9,batch-a\n",)),
+            2,
+            "dataset_quality.csv",
+            "text/csv; charset=utf-8",
+        )
+
+    monkeypatch.setattr(quality_routes, "stream_quality_export", fake_export)
+    app = FastAPI()
+    app.include_router(create_quality_router(), prefix="/v1")
+    client = TestClient(app)
+
+    response = client.get("/v1/quality/records/00000000-0000-0000-0000-000000000001/export")
+
+    assert response.status_code == 200
+    assert response.headers["x-export-count"] == "2"
+    assert response.headers["content-disposition"] == 'attachment; filename="dataset_quality.csv"'
+    assert response.headers["content-type"].startswith("text/csv")
+    assert calls[0][1] == "csv"
+
+
+def test_quality_export_route_still_streams_xlsx_for_explicit_format(monkeypatch) -> None:
     monkeypatch.setattr(
         quality_routes,
-        "stream_quality_workbook",
-        lambda quality_run_id: (
+        "stream_quality_export",
+        lambda quality_run_id, export_format: (
             iter((b"xlsx-payload",)),
             2,
             "dataset_quality.xlsx",

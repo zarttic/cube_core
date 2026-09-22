@@ -14,6 +14,7 @@ from cube_web.services.quality_export import (
     json_result_chunks,
     quality_export_filename,
     quality_workbook_bytes,
+    rows_to_csv_chunks,
 )
 
 
@@ -78,6 +79,16 @@ def test_result_exports_include_successful_rule_rows_and_metrics() -> None:
 
     json_payload = b"".join(json_result_chunks(iter((result,)))).decode("utf-8")
     assert json.loads(json_payload)[0]["status"] == "pass"
+
+
+def test_combined_export_csv_groups_success_and_failure_rows() -> None:
+    payload = b"".join(rows_to_csv_chunks([{"质检项": "index_schema", "结果状态": "pass"}], [{"质检项": "bounds", "结果状态": "fail", "错误信息": "=unsafe"}]))
+    assert payload.startswith(b"\xef\xbb\xbf")
+    parsed = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"))))
+    assert [row["结果分组"] for row in parsed] == ["成功内容", "失败内容"]
+    assert parsed[0]["质检项"] == "index_schema"
+    assert parsed[1]["质检项"] == "bounds"
+    assert parsed[1]["错误信息"] == "'=unsafe"
 
 
 def test_quality_workbook_puts_success_before_failure_and_keeps_context() -> None:
