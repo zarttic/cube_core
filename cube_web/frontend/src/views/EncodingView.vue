@@ -39,7 +39,7 @@ const topology = ref({
   lat: 39.9042,
   lng: 116.4074,
   neighborK: 1,
-  targetLevel: 6,
+  targetLevel: 7,
 });
 
 const conversion = ref({
@@ -56,6 +56,7 @@ const encodingParts = ref({
 
 const resultRows = ref([]);
 const topologyRows = ref([]);
+const topologyContextRows = ref([]);
 const conversionContextRows = ref([]);
 const conversionRows = ref([]);
 const markers = ref([{ position: [39.9042, 116.4074], label: '北京样例点' }]);
@@ -76,19 +77,31 @@ const emptyText = computed(() => {
   return activeOperation.value === 'topology' ? '选择点位并执行拓扑运算' : '选择点位并执行坐标转换';
 });
 
-const primaryActionLabel = computed(() => {
-  if (activeModule.value === 'division') return '查看结果';
-  return encoding.value.operation === 'decode' ? '执行解码' : '执行编码';
-});
-
 const gridTypeLabels = {
   geohash: '经纬度格网',
   mgrs: '平面格网',
   isea4h: '六边形格网',
 };
 
+const topologyOperationLabels = {
+  neighbors: '邻接单元计算',
+  parent: '父单元推导',
+  children: '子单元生成',
+};
+
 function formatGridType(gridType) {
   return gridTypeLabels[gridType] || gridType || '-';
+}
+
+function formatTopologyOperation(operation) {
+  return topologyOperationLabels[operation] || operation || '-';
+}
+
+function formatLatLng(lat, lng) {
+  const latValue = Number(lat);
+  const lngValue = Number(lng);
+  if (!Number.isFinite(latValue) || !Number.isFinite(lngValue)) return '-';
+  return `${Math.abs(latValue).toFixed(6)}\u00b0${latValue >= 0 ? 'N' : 'S'}, ${Math.abs(lngValue).toFixed(6)}\u00b0${lngValue >= 0 ? 'E' : 'W'}`;
 }
 
 function gridLevelMinimum(gridType) {
@@ -101,6 +114,10 @@ function gridLevelMaximum(gridType) {
 
 function clampGridLevel(value, gridType) {
   return Math.min(gridLevelMaximum(gridType), Math.max(gridLevelMinimum(gridType), Number(value) || 0));
+}
+
+function defaultChildLevel(level, gridType) {
+  return clampGridLevel(Number(level) + 1, gridType);
 }
 
 const activeGridType = computed(() => {
@@ -308,7 +325,7 @@ async function runGridDivision() {
       ...(config.gridType === 'mgrs' && data.cell.metadata?.precision !== undefined
         ? [{ label: '精度', value: String(data.cell.metadata.precision) }]
         : []),
-      { label: '中心坐标', value: `${data.cell.center[1].toFixed(6)}, ${data.cell.center[0].toFixed(6)}` },
+      { label: '中心坐标', value: formatLatLng(data.cell.center[1], data.cell.center[0]) },
       { label: '时间', value: formatShanghaiTime(new Date()) },
     ]);
     return;
@@ -388,7 +405,7 @@ async function runGridEncoding() {
   setRows([
     { label: '操作', value: '点选编码' },
     { label: '格网类型', value: formatGridType(config.gridType) },
-    { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
+    { label: '点选坐标', value: formatLatLng(config.lat, config.lng) },
     { label: '空间编码', value: located.cell.space_code, code: true },
     ...(config.gridType === 'mgrs' && located.cell.metadata?.zone
       ? [{ label: '分带', value: located.cell.metadata.zone }]
@@ -411,8 +428,11 @@ watch(() => encoding.value.operation, () => {
 });
 watch(() => topology.value.gridType, (gridType) => {
   topology.value.level = clampGridLevel(topology.value.level, gridType);
-  topology.value.targetLevel = clampGridLevel(topology.value.targetLevel, gridType);
+  topology.value.targetLevel = defaultChildLevel(topology.value.level, gridType);
   conversion.value.targetLevel = clampGridLevel(conversion.value.targetLevel, gridType);
+});
+watch(() => topology.value.level, (level) => {
+  topology.value.targetLevel = defaultChildLevel(level, topology.value.gridType);
 });
 
 async function resolveTopologySelection(gridPrefix) {
@@ -444,7 +464,7 @@ async function appendConversionRows(rows, ctx) {
     });
     const bbox = bboxResp.geometry.bbox;
     rows.push({ label: '转换方向', value: '编码 -> 坐标' });
-    rows.push({ label: '转换结果', value: `${((bbox[1] + bbox[3]) / 2).toFixed(6)}, ${((bbox[0] + bbox[2]) / 2).toFixed(6)}` });
+    rows.push({ label: '转换结果', value: formatLatLng((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2) });
     return;
   }
 
@@ -465,15 +485,21 @@ function setOperationRows(target, rows) {
 
 async function runTopologyOperation() {
   loading.value = true;
+  topologyContextRows.value = [];
   topologyRows.value = [];
   topologyGeometries.value = [];
   gridGeometries.value = [];
   try {
     const { gridPrefix, topologyPrefix } = apiPrefixes();
     const config = topology.value;
+    if (config.operation === 'children') {
+      // 子单元只能比基准层级深；无效输入回落到默认的 +1 级。
+      config.targetLevel = Number(config.targetLevel) > Number(config.level)
+        ? clampGridLevel(config.targetLevel, config.gridType)
+        : defaultChildLevel(config.level, config.gridType);
+    }
     const selection = await resolveTopologySelection(gridPrefix);
     let baseAddresses = selection.baseAddresses;
-    const originalBaseCount = baseAddresses.length;
     if (baseAddresses.length > 120) baseAddresses = baseAddresses.slice(0, 120);
 
     const resultAddresses = new Map();
@@ -510,18 +536,24 @@ async function runTopologyOperation() {
       }
     }
 
-    const rows = [
+    // 输入侧（转换前）走上下文样式，结果侧走卡片样式，与坐标转换面板一致。
+    const contextRows = [
       { label: '格网类型', value: formatGridType(config.gridType) },
-      { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
-      { label: '基准编码数', value: String(originalBaseCount) },
-      { label: '运算类型', value: config.operation },
-      { label: '输入编码样例', value: baseAddresses.slice(0, 8).map((item) => item.space_code).join(', '), code: true },
+      { label: '点选坐标', value: formatLatLng(config.lat, config.lng) },
+      { label: '运算类型', value: formatTopologyOperation(config.operation) },
+    ];
+    if (config.operation === 'neighbors') contextRows.push({ label: 'k', value: String(config.neighborK) });
+    contextRows.push({
+      label: '输入编码',
+      value: baseAddresses.slice(0, 8).map((item) => item.space_code).join(', '),
+      code: true,
+    });
+    const rows = [
       { label: '结果数量', value: String(resultAddresses.size) },
       { label: '结果编码样例', value: Array.from(resultAddresses.values()).slice(0, 8).map((item) => item.space_code).join(', '), code: true },
     ];
-    if (config.operation === 'neighbors') rows.splice(5, 0, { label: 'k', value: String(config.neighborK) });
-    if (config.operation === 'children') rows.splice(5, 0, { label: '目标层级', value: String(config.targetLevel) });
     if (failedCodes.length) rows.push({ label: '跳过编码数', value: String(failedCodes.length) });
+    setOperationRows(topologyContextRows, contextRows);
     setOperationRows(topologyRows, rows);
     const resultStyle = config.operation === 'parent'
       ? gridGeometryStyle(config.gridType, 'parent')
@@ -551,7 +583,7 @@ async function runCoordinateConversion() {
     const baseAddress = selection.baseAddresses[0];
     const contextRows = [
       { label: '格网类型', value: formatGridType(config.gridType) },
-      { label: '点选坐标', value: `${Number(config.lat).toFixed(6)}, ${Number(config.lng).toFixed(6)}` },
+      { label: '点选坐标', value: formatLatLng(config.lat, config.lng) },
       { label: '基准编码', value: baseAddress.space_code, code: true },
     ];
     const rows = [];
@@ -671,12 +703,9 @@ async function runDemo() {
                   </div>
                   <div v-if="encoding.operation !== 'decode'" class="form-group">
                     <label>点选坐标</label>
-                    <div class="task-note">
-                      <span>请在右侧地图点击选择编码点。</span>
-                    </div>
                     <div class="result-item">
                       <div class="result-label">当前点位</div>
-                      <div class="result-value">{{ Number(encoding.lat).toFixed(6) }}, {{ Number(encoding.lng).toFixed(6) }}</div>
+                      <div class="result-value">{{ formatLatLng(encoding.lat, encoding.lng) }}</div>
                     </div>
                   </div>
                   <div v-else class="form-group">
@@ -705,12 +734,9 @@ async function runDemo() {
                     </div>
                     <div class="form-group">
                       <label>基准坐标</label>
-                      <div class="task-note">
-                        <span>请在右侧地图点击选择元操作基准点。</span>
-                      </div>
                       <div class="result-item">
                         <div class="result-label">当前点位</div>
-                        <div class="result-value">{{ Number(topology.lat).toFixed(6) }}, {{ Number(topology.lng).toFixed(6) }}</div>
+                        <div class="result-value">{{ formatLatLng(topology.lat, topology.lng) }}</div>
                       </div>
                     </div>
                   </section>
@@ -751,13 +777,9 @@ async function runDemo() {
                         <label>邻域阶数 (k)</label>
                         <input v-model.number="topology.neighborK" type="number" class="form-input" min="1" max="3">
                       </div>
-                      <div v-if="topology.operation === 'children'" class="form-group">
-                        <label>子单元目标层级</label>
-                        <input v-model.number="topology.targetLevel" type="number" class="form-input" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)">
-                      </div>
                       <div class="form-group action-buttons compact">
-                        <button class="btn btn-secondary" type="button" @click="topologyRows = []">清空拓扑结果</button>
-                        <button class="btn btn-primary" type="button" :disabled="loading" @click="runTopologyOperation">执行拓扑运算</button>
+                        <button class="btn btn-secondary" type="button" @click="topologyContextRows = []; topologyRows = []">重置</button>
+                        <button class="btn btn-primary" type="button" :disabled="loading" @click="runTopologyOperation">执行</button>
                       </div>
                     </section>
                   </div>
@@ -777,8 +799,8 @@ async function runDemo() {
                         <input v-model.number="conversion.targetLevel" type="number" class="form-input" :min="gridLevelMinimum(topology.gridType)" :max="gridLevelMaximum(topology.gridType)">
                       </div>
                       <div class="form-group action-buttons compact">
-                        <button class="btn btn-secondary" type="button" @click="conversionContextRows = []; conversionRows = []">清空转换结果</button>
-                        <button class="btn btn-primary" type="button" :disabled="loading" @click="runCoordinateConversion">执行坐标转换</button>
+                        <button class="btn btn-secondary" type="button" @click="conversionContextRows = []; conversionRows = []">重置</button>
+                        <button class="btn btn-primary" type="button" :disabled="loading" @click="runCoordinateConversion">执行</button>
                       </div>
                     </section>
                   </div>
@@ -786,9 +808,7 @@ async function runDemo() {
 
                 <div v-if="activeModule !== 'operations'" class="form-group action-buttons">
                   <button class="btn btn-secondary" type="button" @click="resultRows = []">重置</button>
-                  <button class="btn btn-primary" type="button" :disabled="loading" @click="runDemo">
-                    {{ primaryActionLabel }}
-                  </button>
+                  <button class="btn btn-primary" type="button" :disabled="loading" @click="runDemo">执行</button>
                 </div>
               </div>
             </div>
@@ -830,6 +850,12 @@ async function runDemo() {
                   <template v-if="activeModule === 'operations'">
                     <div v-if="activeOperation === 'topology'" class="result-section" data-testid="topology-result">
                       <h4 class="result-section-title">拓扑运算</h4>
+                      <div v-if="topologyContextRows.length" class="operation-context" data-testid="topology-context">
+                        <div v-for="row in topologyContextRows" :key="`topology-context-${row.label}`" class="operation-context-item">
+                          <div class="result-label">{{ row.label }}</div>
+                          <div class="result-value" :class="{ code: row.code }">{{ row.value }}</div>
+                        </div>
+                      </div>
                       <template v-if="topologyRows.length">
                         <div v-for="row in topologyRows" :key="`topology-${row.label}`" class="result-item">
                           <div class="result-label">{{ row.label }}</div>

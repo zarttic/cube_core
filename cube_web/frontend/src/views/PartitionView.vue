@@ -1,7 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { RefreshLeft } from '@element-plus/icons-vue';
+import { ArrowUndoOutline } from '@vicons/ionicons5';
 
 import { requestGet, requestJson } from '@/api/client';
 import { createRequestScope } from '@/api/requestScope';
@@ -41,6 +41,11 @@ const carbonFootprintLoading = ref(false);
 const mapPreviewVisible = ref(true);
 const gridGeometriesByModule = ref({});
 const gridPreviewMetaByModule = ref({});
+// 预览超过服务端上限时会被截断，这里保存服务端给出的说明文字（不用弹窗，避免遮挡面板）。
+const gridPreviewNotice = ref('');
+// dataset selection key -> { cells, footprints }（在“已载入数据”面板对应行内展示）
+const cellCountsByDataset = ref({});
+const footprintCountsByDataset = ref({});
 const mapSourceGeometriesByModule = ref({});
 const mapGridLegendsByModule = ref({});
 const carbonFootprintsByModule = ref({});
@@ -323,12 +328,21 @@ async function loadCarbonFootprints() {
       || activeModule.value !== 'carbon') return;
     carbonFootprintsByModule.value = { ...carbonFootprintsByModule.value, carbon: response.items || [] };
     mapPreviewVisible.value = true;
+    const byScene = sceneSelectionKeys();
+    const footprintCounts = {};
+    (response.items || []).forEach((item) => {
+      const key = byScene.get(String(item.scene_id || '').trim());
+      if (key) footprintCounts[key] = (footprintCounts[key] || 0) + 1;
+    });
+    if (!Object.keys(footprintCounts).length) {
+      const keys = [...uniqueDatasetSelectionKeys().values()];
+      if (keys.length === 1) footprintCounts[keys[0]] = (response.items || []).length;
+    }
+    footprintCountsByDataset.value = mergeCounts(footprintCountsByDataset.value, footprintCounts);
     const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
     const suffix = response.truncated ? '，已按上限截断' : '';
-    if (unavailableCount) {
+    if (unavailableCount || response.truncated) {
       ElMessage.warning(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}；${unavailableCount} 个源文件不可访问。`);
-    } else {
-      ElMessage.success(`已加载 ${response.items?.length || 0} 个碳卫星足迹${suffix}。`);
     }
   } catch (error) {
     if (generation === carbonFootprintGeneration
@@ -374,6 +388,9 @@ function selectReloadBatch(reloadBatch) {
   mapPreviewVisible.value = true;
   cancelPreviewRequests();
   setModuleGridPreview(activeModule.value, []);
+  gridPreviewNotice.value = '';
+  cellCountsByDataset.value = {};
+  footprintCountsByDataset.value = {};
   if (activeModule.value === 'carbon') resetCarbonFootprints();
   refreshGridPreviewForSelection();
   ElMessage.success('已载入正式重新载入批次，请确认后提交。');
@@ -418,7 +435,54 @@ function reset() {
   rememberMapSelection(currentType, []);
   cancelPreviewRequests();
   setModuleGridPreview(currentType, []);
+  gridPreviewNotice.value = '';
+  cellCountsByDataset.value = {};
+  footprintCountsByDataset.value = {};
   if (currentType === 'carbon') resetCarbonFootprints();
+}
+
+// 与 BatchAssetsPanel.selectionKey 相同：面板行的键必须一致才能对上号。
+function datasetSelectionKey(dataset) {
+  if (dataset?.selection_id) return String(dataset.selection_id);
+  return dataset?.source_batch_id ? `${dataset.source_batch_id}:${dataset.dataset_id}` : String(dataset?.dataset_id || '');
+}
+
+// 行内计数的键：同一 dataset_id 只有一行时用 dataset_id，否则退回 selectionKey。
+// 必须与 BatchAssetsPanel.datasetRowKey 完全一致，否则计数落不到行上。
+function uniqueDatasetSelectionKeys() {
+  const datasets = activeDatasets.value;
+  const byDatasetId = new Map();
+  datasets.forEach((dataset) => {
+    const id = String(dataset?.dataset_id || '');
+    byDatasetId.set(id, (byDatasetId.get(id) || 0) + 1);
+  });
+  return new Map(datasets.map((dataset) => [
+    datasetSelectionKey(dataset),
+    byDatasetId.get(String(dataset?.dataset_id || '')) === 1
+      ? String(dataset.dataset_id || '')
+      : datasetSelectionKey(dataset),
+  ]));
+}
+
+// 碳卫星按景归属：一个景只属于一个数据集行，返回 scene_id -> 行键。
+function sceneSelectionKeys() {
+  const keys = uniqueDatasetSelectionKeys();
+  const byScene = new Map();
+  activeDatasets.value.forEach((dataset) => {
+    (dataset.scenes || []).forEach((scene) => {
+      const sceneId = String(scene?.scene_id || '').trim();
+      if (sceneId) byScene.set(sceneId, keys.get(datasetSelectionKey(dataset)));
+    });
+  });
+  return byScene;
+}
+
+function mergeCounts(current, additions) {
+  const next = { ...current };
+  Object.entries(additions).forEach(([key, value]) => {
+    if (value) next[key] = value;
+  });
+  return next;
 }
 
 async function loadGridPreview(partition, bbox, signal, previewCrs = null) {
@@ -441,6 +505,7 @@ async function loadGridPreview(partition, bbox, signal, previewCrs = null) {
     actualCount: Array.isArray(response.cells)
       ? response.cells.length
       : Number(response.statistics?.cell_count || 0),
+    notice: typeof response.notice === 'string' ? response.notice : '',
   };
 }
 
@@ -501,12 +566,33 @@ async function loadCarbonGridPreview() {
       limited: Boolean(response.cell_limit_reached),
       total: rendered.total,
     });
+    // 计数同样落到数据集行（碳卫星一个数据集含多个景，按景归属到对应行）。
+    const byScene = sceneSelectionKeys();
+    const cellCounts = {};
+    const footprintCounts = {};
+    (response.items || []).forEach((item) => {
+      const key = byScene.get(String(item.scene_id || '').trim());
+      if (key) footprintCounts[key] = (footprintCounts[key] || 0) + 1;
+    });
+    const sceneIdsByKey = new Map();
+    sceneIds.forEach((sceneId) => {
+      const key = byScene.get(String(sceneId).trim());
+      if (key) sceneIdsByKey.set(key, [...(sceneIdsByKey.get(key) || []), sceneId]);
+    });
+    // 格网单元按数据集分别统计：每个数据集只渲染它自己那些景的格网。
+    sceneIdsByKey.forEach((ids, key) => {
+      const owned = new Set(ids);
+      const cells = (response.cells || []).filter((cell) => !cell.scene_id || owned.has(String(cell.scene_id)));
+      if (cells.length) cellCounts[key] = renderGridCells(cells.map((cell) => ({ ...cell, preview_grid_type: partition.grid_type }))).total;
+    });
+    if (!Object.keys(cellCounts).length && sceneIdsByKey.size === 1) {
+      cellCounts[[...sceneIdsByKey.keys()][0]] = rendered.total;
+    }
+    cellCountsByDataset.value = mergeCounts(cellCountsByDataset.value, cellCounts);
+    footprintCountsByDataset.value = mergeCounts(footprintCountsByDataset.value, footprintCounts);
     const unavailableCount = Array.isArray(response.unavailable_sources) ? response.unavailable_sources.length : 0;
-    const suffix = '';
     if (unavailableCount) {
-      ElMessage.warning(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}；${unavailableCount} 个源文件不可访问。`);
-    } else {
-      ElMessage.success(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹${suffix}。`);
+      ElMessage.warning(`已加载 ${rendered.geometries.length} 个格网单元和 ${response.items?.length || 0} 个足迹；${unavailableCount} 个源文件不可访问。`);
     }
   } catch (error) {
     if (generation === gridPreviewGeneration
@@ -538,6 +624,8 @@ async function loadMap() {
   const generation = ++gridPreviewGeneration;
   const moduleName = activeModule.value;
   const requests = new Map();
+  const datasetRowKey = (dataset) => uniqueDatasetSelectionKeys().get(datasetSelectionKey(dataset))
+    || String(dataset.dataset_id || '');
   activeDatasets.value.forEach((dataset) => {
     const partition = dataset.partition || {
       grid_type: formModel.value.gridType,
@@ -550,7 +638,7 @@ async function loadMap() {
         ? (asset.crs || dataset.crs || null)
         : null;
       const key = [partition.grid_type, partition.requested_grid_level, bbox.join(','), previewCrs || ''].join(':');
-      if (!requests.has(key)) requests.set(key, { partition, bbox, previewCrs });
+      if (!requests.has(key)) requests.set(key, { partition, bbox, previewCrs, selectionKey: datasetRowKey(dataset) });
     });
   });
 
@@ -567,6 +655,7 @@ async function loadMap() {
     if (!successful.length && failures.length) throw failures[0].reason;
     const rendered = renderGridCells(successful.flatMap((item) => item.cells));
     const actualCount = successful.reduce((total, item) => total + item.actualCount, 0);
+    gridPreviewNotice.value = successful.map((item) => item.notice).find(Boolean) || '';
     const total = actualCount || rendered.total;
     const geometries = rendered.geometries;
     const limited = requests.size > previewRequests.length;
@@ -575,11 +664,26 @@ async function loadMap() {
       total,
       displayTotal: rendered.total,
     });
+    // 每个数据集的格网单元数直接显示在“已载入数据”面板对应行里，
+    // 不再弹全局提示（用户反馈：弹窗会挡住面板且看完即消失）。
+    const perDataset = new Map();
+    settled.forEach((item, index) => {
+      if (item.status !== 'fulfilled') return;
+      const key = previewRequests[index].selectionKey;
+      const previous = perDataset.get(key) || { total: 0, geometries: [] };
+      perDataset.set(key, {
+        total: previous.total + item.value.actualCount,
+        geometries: [...previous.geometries, ...item.value.cells],
+      });
+    });
+    const counts = {};
+    perDataset.forEach((entry, key) => {
+      const renderedCells = renderGridCells(entry.geometries);
+      counts[key] = entry.total || renderedCells.total;
+    });
+    cellCountsByDataset.value = mergeCounts(cellCountsByDataset.value, counts);
     if (failures.length) {
       ElMessage.warning(`已加载 ${total} 个格网单元，${failures.length} 个范围加载失败。`);
-    } else {
-      const displaySuffix = rendered.total < total ? `（连续预览显示 ${rendered.total} 个方格）` : '';
-      ElMessage.success('已加载 ' + total + ' 个格网单元' + (limited ? `（总计 ${total} 个）` : '') + displaySuffix + '。');
     }
   } catch (error) {
     if (generation !== gridPreviewGeneration || !gridPreviewScope.isCurrent(request.token)) return;
@@ -596,6 +700,9 @@ function resetGridPreview() {
   gridPreviewGeneration += 1;
   gridPreviewLoading.value = false;
   setModuleGridPreview(activeModule.value, []);
+  gridPreviewNotice.value = '';
+  cellCountsByDataset.value = {};
+  footprintCountsByDataset.value = {};
 }
 
 function refreshGridPreviewForSelection() {
@@ -622,6 +729,9 @@ function updateDatasets(datasets) {
   }
   cancelPreviewRequests();
   setModuleGridPreview(activeModule.value, []);
+  gridPreviewNotice.value = '';
+  cellCountsByDataset.value = {};
+  footprintCountsByDataset.value = {};
   if (activeModule.value === 'carbon') resetCarbonFootprints();
   refreshGridPreviewForSelection();
 }
@@ -702,7 +812,13 @@ onMounted(() => {
                         <span class="grid-legend-dot" :style="{ backgroundColor: legend.color }" />{{ legend.label }}
                       </el-tag>
                       <el-button data-testid="load-map" size="small" :loading="gridPreviewLoading" @click="loadMap">重新加载格网</el-button>
-                      <el-button data-testid="reset-grid" size="small" :icon="RefreshLeft" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
+                      <el-button data-testid="reset-grid" size="small" :icon="ArrowUndoOutline" :disabled="!activeGridGeometries.length && !gridPreviewLoading" @click="resetGridPreview">重置</el-button>
+                      <el-tag
+                        v-if="gridPreviewNotice"
+                        data-testid="grid-preview-truncated"
+                        size="small"
+                        type="warning"
+                      >{{ gridPreviewNotice }}</el-tag>
                       <template v-if="activeModule === 'carbon'">
                         <el-tag size="small" type="warning">{{ activeCarbonFootprints.length }} 个足迹</el-tag>
                         <el-button data-testid="load-carbon-footprints" size="small" :loading="carbonFootprintLoading" @click="loadCarbonFootprints">预览足迹</el-button>
@@ -730,6 +846,9 @@ onMounted(() => {
             :data-type-label="activeProduct.label"
             :default-grid-type="formModel.gridType"
             :default-requested-grid-level="Number(formModel.requestedGridLevel)"
+            :locked-grid-type="activeModule === 'carbon' ? 'isea4h' : ''"
+            :cell-counts="cellCountsByDataset"
+            :footprint-counts="footprintCountsByDataset"
             @update:model-value="updateDatasets"
           />
         </el-drawer>

@@ -78,6 +78,20 @@ describe('QualityView partition batch list', () => {
     );
   });
 
+  it('resets the filter state back to the unfiltered first page', async () => {
+    const wrapper = mount(QualityView, { global: { stubs } });
+    await flushPromises();
+    wrapper.vm.filters.keyword = 'landsat';
+    wrapper.vm.filters.dataType = 'optical';
+    wrapper.vm.filters.status = 'failed';
+    wrapper.vm.filters.createdAtRange = ['2026-08-01', '2026-08-24'];
+
+    await wrapper.vm.resetFilters();
+
+    expect(wrapper.vm.filters).toMatchObject({ keyword: '', dataType: '', status: '', createdAtRange: [] });
+    expect(requestGet).toHaveBeenLastCalledWith('/v1/partition/runs?page=1&page_size=20');
+  });
+
   it('keeps task detail data bound to the selected partition run when responses resolve out of order', async () => {
     const detailResolvers = [];
     requestGet.mockImplementation((url) => {

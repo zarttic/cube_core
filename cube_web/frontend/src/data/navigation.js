@@ -6,10 +6,10 @@ const localNavPaths = {
   分析就绪数据剖分: '/partition',
   质量运行记录: '/quality',
   全球离散格网模型与编码: '/encoding',
-  系统配置: '/config',
 };
 
-const hiddenNavLabels = new Set(['数据库入库管理', '数据管理与入库', '自动化质检']);
+// 系统配置入口不再展示（页面与路由保留，仅从导航隐藏）。
+const hiddenNavLabels = new Set(['数据库入库管理', '数据管理与入库', '自动化质检', '系统配置']);
 
 const navPermissions = {
   ARD数据载入: 'data_import:view',
@@ -39,7 +39,6 @@ const defaultNavItems = [
   { label: '资源调度', kind: 'external', url: '/dispatch' },
   { label: '后台管理', kind: 'external', url: '/admin' },
   { label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' },
-  { label: '系统配置', kind: 'internal', path: '/config' },
 ];
 
 const headerLabelOrder = [
@@ -50,7 +49,6 @@ const headerLabelOrder = [
   '资源调度',
   '后台管理',
   '全球离散格网模型与编码',
-  '系统配置',
 ];
 
 function normalizeNavItem(item) {

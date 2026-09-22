@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Collection, FolderOpened, Picture, Refresh, Search, Unlock } from '@element-plus/icons-vue';
+import { AlbumsOutline, FolderOpenOutline, ImageOutline, LockOpenOutline, RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 
 import { requestGet } from '@/api/client';
 import { normalizePageResponse, pageQuery } from '@/api/pagination';
@@ -13,8 +13,13 @@ const props = defineProps({
   modelValue: { type: Array, default: () => [] },
   defaultGridType: { type: String, default: 'geohash' },
   defaultRequestedGridLevel: { type: Number, default: 4 },
+  // 产品级格网锁定：碳卫星只能使用六边形（isea4h），选择器不可改。
+  lockedGridType: { type: String, default: '' },
   dataTypeFilter: { type: String, default: '' },
   dataTypeLabel: { type: String, default: '' },
+  // dataset selection key -> 已加载的格网单元数 / 足迹数（由地图预览写入，行内展示）
+  cellCounts: { type: Object, default: () => ({}) },
+  footprintCounts: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(['update:modelValue']);
 const loading = ref(false);
@@ -59,6 +64,23 @@ function bandSelectionId(dataset, bandUnitId) {
   )));
   return matchingSelections.length > 1 ? `${selectionKey(dataset)}:${bandUnitId}` : bandUnitId;
 }
+function cellCountLabel(dataset) {
+  const key = datasetRowKey(dataset);
+  const parts = [];
+  const cells = Number(props.cellCounts?.[key]);
+  if (Number.isFinite(cells) && cells > 0) parts.push(`加载 ${cells.toLocaleString('zh-CN')} 个格网单元`);
+  const footprints = Number(props.footprintCounts?.[key]);
+  if (Number.isFinite(footprints) && footprints > 0) parts.push(`${footprints.toLocaleString('zh-CN')} 个足迹`);
+  return parts.join(' · ');
+}
+
+// 行内计数的键：同一 dataset_id 只有一行时用 dataset_id，否则退回 selectionKey
+// （与 datasetTestId 的判重规则完全一致，否则计数会落到不存在的键上）。
+function datasetRowKey(dataset) {
+  const sameDatasetId = availableDatasets.value.filter((item) => item.dataset_id === dataset.dataset_id).length;
+  return sameDatasetId === 1 ? String(dataset.dataset_id || '') : selectionKey(dataset);
+}
+
 function datasetTestId(prefix, batch, dataset) {
   const count = availableDatasets.value.filter((item) => item.dataset_id === dataset.dataset_id).length;
   return count === 1 ? `${prefix}-${dataset.dataset_id}` : `${prefix}-${batch.load_batch_id}-${dataset.dataset_id}`;
@@ -113,9 +135,11 @@ function fallbackGridLevel(dataset, gridType) {
 }
 
 function defaultPartition(dataset) {
-  const recommendedGridType = ['geohash', 'mgrs'].includes(dataset?.suggested_grid_type)
-    ? dataset.suggested_grid_type
-    : props.defaultGridType;
+  const recommendedGridType = lockedGrid.value
+    ? lockedGrid.value.value
+    : (['geohash', 'mgrs'].includes(dataset?.suggested_grid_type)
+      ? dataset.suggested_grid_type
+      : props.defaultGridType);
   return normalizedPartition(
     recommendedGridType,
     suggestedLevel(dataset, recommendedGridType) ?? fallbackGridLevel(dataset, recommendedGridType),
@@ -363,6 +387,12 @@ function applyBatchFilters() {
   return loadAvailable({ preserveSelection: true, preserveExpansion: true });
 }
 
+function resetBatchFilters() {
+  batchKeyword.value = '';
+  datasetFilter.value = '';
+  return applyBatchFilters();
+}
+
 function setBatchPage(page) {
   batchPage.value.page = page;
   return loadAvailable({ preserveSelection: true, preserveExpansion: true });
@@ -564,6 +594,11 @@ function toggleSceneSelection(scene, dataType, dataset, checked) {
   toggleBandGroup(selectableBandIdsForScene(scene, dataType, dataset), checked);
 }
 
+const lockedGrid = computed(() => gridDefinition(props.lockedGridType));
+// 锁定时只展示被锁的格网，用户看不到也选不到其它格网。
+const gridTypeOptions = computed(() => (lockedGrid.value ? [lockedGrid.value] : gridDefinitions));
+const gridTypeLocked = computed(() => Boolean(lockedGrid.value));
+
 function partitionFor(dataset) {
   const partition = selectedDatasetsById.value.get(selectionKey(dataset))?.partition
     || props.modelValue.find((item) => item.dataset_id === dataset?.dataset_id)?.partition;
@@ -604,6 +639,11 @@ function levelOptions(gridType) {
 function updatePartition(dataset, patch) {
   if (typeof dataset === 'string') dataset = availableDatasets.value.find((item) => item.dataset_id === dataset) || { dataset_id: dataset };
   if (props.modelValue.some(isGridConfigLocked)) return;
+  if (gridTypeLocked.value && Object.prototype.hasOwnProperty.call(patch, 'grid_type')) {
+    const { grid_type: _lockedGridType, ...rest } = patch;
+    patch = rest;
+    if (!Object.keys(patch).length) return;
+  }
   const key = selectionKey(dataset);
   const sourceDataset = props.modelValue.find((item) => selectionKey(item) === key);
   if (!sourceDataset) return;
@@ -666,7 +706,7 @@ onBeforeUnmount(() => {
   <section class="partition-data-list">
     <div class="partition-drawer-heading">
       <h3>{{ dataTypeLabel || '' }}待剖分数据</h3>
-      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="Refresh" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable" /></div>
+      <div><span>{{ selectedBatchIds.length }} 个批次 · {{ availableDatasets.length }} 个数据集 · 已选 {{ selectedCount }} 个波段</span><el-button :icon="RefreshOutline" circle size="small" :loading="loading" aria-label="刷新已载入数据" @click="refreshAvailable" /></div>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 
@@ -674,7 +714,7 @@ onBeforeUnmount(() => {
       <div class="partition-section-title"><strong>待剖分批次</strong><span>{{ batchPage.total }} 个可用批次</span></div>
       <el-form class="batch-filter-toolbar" inline @submit.prevent="applyBatchFilters">
         <el-form-item>
-          <el-input v-model="batchKeyword" :prefix-icon="Search" clearable placeholder="载入批次名称或 ID" @keyup.enter="applyBatchFilters" />
+          <el-input v-model="batchKeyword" :prefix-icon="SearchOutline" clearable placeholder="载入批次名称或 ID" @keyup.enter="applyBatchFilters" />
         </el-form-item>
         <el-form-item>
           <el-select v-model="datasetFilter" filterable clearable placeholder="按数据集筛选" style="width: 240px">
@@ -685,7 +725,8 @@ onBeforeUnmount(() => {
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :icon="Search" native-type="submit">筛选</el-button>
+          <el-button type="primary" :icon="SearchOutline" native-type="submit">筛选</el-button>
+          <el-button @click="resetBatchFilters">重置</el-button>
         </el-form-item>
       </el-form>
       <el-checkbox-group :model-value="selectedBatchIds" data-testid="load-batch-selector" @update:model-value="updateBatchSelection">
@@ -713,14 +754,14 @@ onBeforeUnmount(() => {
 
     <div class="band-filter-toolbar">
       <div><strong>波段筛选</strong></div>
-      <el-input v-model="bandKeyword" :prefix-icon="Search" clearable placeholder="例如 B04、VV、NDVI 或 ppm" />
+      <el-input v-model="bandKeyword" :prefix-icon="SearchOutline" clearable placeholder="例如 B04、VV、NDVI 或 ppm" />
     </div>
 
     <div v-loading="loading" class="partition-batch-tree-list">
       <section v-for="batch in visibleBatchGroups" :key="batch.load_batch_id" class="partition-batch-tree" :data-testid="`batch-tree-${batch.load_batch_id}`">
         <header class="partition-batch-tree-header" :aria-expanded="!collapsedBatches.has(batchGroupKey(batch))" @click="toggleBatchGroup(batch)">
           <div class="partition-tree-identity">
-            <el-icon><FolderOpened /></el-icon>
+            <el-icon><FolderOpenOutline /></el-icon>
             <div><strong>{{ batch.batch_name || batch.load_batch_id }}</strong><span>{{ batch.load_batch_id }}</span></div>
           </div>
           <span>{{ batch.datasets.length }} 个数据集 · {{ batch.datasets.reduce((total, dataset) => total + dataset.scenes.length, 0) }} 景</span>
@@ -730,9 +771,11 @@ onBeforeUnmount(() => {
           <section v-for="dataset in batch.datasets" :key="`${batch.load_batch_id}-${dataset.dataset_id}`" class="partition-dataset-tree" :data-testid="`dataset-tree-${batch.load_batch_id}-${dataset.dataset_id}`">
             <div class="partition-scene-group-header" :aria-expanded="!collapsedDatasets.has(datasetGroupKey(batch, dataset))" @click="toggleDatasetGroup(batch, dataset)">
               <div class="partition-tree-identity">
-                <el-icon><Collection /></el-icon>
+                <el-icon><AlbumsOutline /></el-icon>
                 <div><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><span>{{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + bandsFor(scene, dataset.data_type).length, 0) }} 波段<span v-if="dataset.crs"> · {{ dataset.crs }}</span><span v-if="resolutionLabel(dataset)"> · {{ resolutionLabel(dataset) }}</span></span></div>
               </div>
+              <!-- 已加载的格网单元数固定显示在本行，替代原来的全局弹窗提示 -->
+              <span v-if="cellCountLabel(dataset)" class="dataset-cell-count" :data-testid="datasetTestId('dataset-cell-count', batch, dataset)">{{ cellCountLabel(dataset) }}</span>
               <el-checkbox
                 class="dataset-select-all"
                 @click.stop
@@ -746,10 +789,10 @@ onBeforeUnmount(() => {
                 <el-select
                   :data-testid="datasetTestId('dataset-grid', batch, dataset)"
                   :model-value="partitionFor(dataset).grid_type"
-                  :disabled="gridConfigLocked(dataset)"
+                  :disabled="gridConfigLocked(dataset) || gridTypeLocked"
                   @update:model-value="updatePartition(dataset, { grid_type: $event })"
                 >
-                  <el-option v-for="grid in gridDefinitions" :key="grid.value" :label="grid.label" :value="grid.value" />
+                  <el-option v-for="grid in gridTypeOptions" :key="grid.value" :label="grid.label" :value="grid.value" />
                 </el-select>
                 <el-select
                   :data-testid="datasetTestId('dataset-grid-level', batch, dataset)"
@@ -760,14 +803,14 @@ onBeforeUnmount(() => {
                   <el-option v-for="level in levelOptions(partitionFor(dataset).grid_type)" :key="level" :label="nativeLevelLabel(partitionFor(dataset).grid_type, level)" :value="level" />
                 </el-select>
                 <el-tooltip v-if="gridLevelLocked(dataset) && !gridConfigLocked(dataset)" content="解锁格网层级" placement="top">
-                  <el-button :data-testid="datasetTestId('unlock-grid-level', batch, dataset)" :icon="Unlock" aria-label="解锁格网层级" @click="unlockGridLevel(dataset)" />
+                  <el-button :data-testid="datasetTestId('unlock-grid-level', batch, dataset)" :icon="LockOpenOutline" aria-label="解锁格网层级" @click="unlockGridLevel(dataset)" />
                 </el-tooltip>
               </div>
             </div>
             <div v-show="!collapsedDatasets.has(datasetGroupKey(batch, dataset))" class="partition-scene-list">
               <section v-for="scene in dataset.scenes" :key="scene.scene_id" class="partition-scene-option" :data-testid="`scene-${scene.scene_id}`">
                 <div class="partition-scene-identity" :aria-expanded="!collapsedScenes.has(sceneGroupKey(dataset, scene))" @click="toggleSceneGroup(dataset, scene)">
-                  <el-icon><Picture /></el-icon>
+                  <el-icon><ImageOutline /></el-icon>
                   <span>
                     <strong>{{ scene.scene_key || scene.scene_id }}</strong>
                     <small>景 · {{ formatShanghaiTime(scene.acquisition_time, '采集时间未登记') }}</small>
@@ -812,6 +855,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .partition-drawer-heading > div { display: flex; align-items: center; gap: 8px; }
+.dataset-cell-count { flex: 0 0 auto; margin-left: 12px; padding: 2px 10px; border-radius: 10px; background: #eef4ff; color: #1769aa; font-size: 12px; white-space: nowrap; }
 .partition-batch-picker { padding: 12px 0 18px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .partition-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .partition-section-title span { color: var(--el-text-color-secondary); font-size: 12px; }
@@ -824,7 +868,7 @@ onBeforeUnmount(() => {
 .partition-batch-picker :deep(.el-checkbox) { align-items: flex-start; height: auto; margin: 0; padding: 8px 0; }
 .partition-batch-picker :deep(.el-checkbox__label), .scene-band-list :deep(.el-checkbox__label) { min-width: 0; white-space: normal; }
 .partition-batch-option { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-.partition-batch-option strong { color: var(--el-text-color-primary); font-size: 13px; line-height: 1.4; }
+.partition-batch-option strong { display: block; min-width: 0; overflow: hidden; color: var(--el-text-color-primary); font-size: 13px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .partition-batch-option span { color: var(--el-text-color-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .partition-batch-tree-list { min-height: 180px; padding-top: 14px; }
 .band-filter-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 14px 0 2px; }

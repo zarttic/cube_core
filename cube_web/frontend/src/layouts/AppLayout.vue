@@ -40,7 +40,7 @@ async function handleLogout() {
               <circle cx="12" cy="7" r="4" />
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
             </svg>
-            <span>{{ userStore.username.value || userStore.role.value || '普通用户' }}</span>
+            <span class="service-user-name">{{ userStore.username.value || userStore.role.value || '普通用户' }}</span>
             <span v-if="userStore.username.value"> · {{ userStore.role.value || '普通用户' }}</span>
             <button v-if="userStore.isAuthenticated.value" class="service-auth-btn service-auth-btn-compact" type="button" @click="handleLogout">退出</button>
           </div>

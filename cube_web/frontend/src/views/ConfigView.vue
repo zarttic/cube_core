@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, RefreshLeft, Check, Connection, DataLine } from '@element-plus/icons-vue';
+import { ArrowUndoOutline, Checkmark, RefreshOutline, ServerOutline, StatsChartOutline } from '@vicons/ionicons5';
 
 import { apiPrefixes, requestJson } from '@/api/client';
 import { fixedPartitionOptions, gridDefinition, gridDefinitions } from '@/utils/grid';
@@ -148,9 +148,9 @@ onMounted(loadConfig);
         <p>集中管理光学剖分、自动质检与演示入库的默认参数。</p>
       </div>
       <div class="config-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="loadConfig">重新加载</el-button>
-        <el-button :icon="RefreshLeft" :loading="resetting" @click="resetConfig">恢复默认</el-button>
-        <el-button type="primary" :icon="Check" :loading="saving" @click="saveConfig">保存配置</el-button>
+        <el-button :icon="RefreshOutline" :loading="loading" @click="loadConfig">重新加载</el-button>
+        <el-button :icon="ArrowUndoOutline" :loading="resetting" @click="resetConfig">恢复默认</el-button>
+        <el-button type="primary" :icon="Checkmark" :loading="saving" @click="saveConfig">保存配置</el-button>
       </div>
     </section>
 
@@ -272,7 +272,7 @@ onMounted(loadConfig);
 
       <aside class="config-side-panel">
         <div class="config-status-card">
-          <div class="status-icon"><DataLine /></div>
+          <div class="status-icon"><StatsChartOutline /></div>
           <div>
             <span>配置存储</span>
             <strong>PostgreSQL JSONB</strong>
@@ -280,7 +280,7 @@ onMounted(loadConfig);
           </div>
         </div>
         <div class="config-status-card">
-          <div class="status-icon"><Connection /></div>
+          <div class="status-icon"><ServerOutline /></div>
           <div>
             <span>Ray 地址</span>
             <strong>{{ runtime.ray_address || '未设置环境变量' }}</strong>
@@ -288,7 +288,7 @@ onMounted(loadConfig);
           </div>
         </div>
         <div class="config-status-card">
-          <div class="status-icon"><Connection /></div>
+          <div class="status-icon"><ServerOutline /></div>
           <div>
             <span>MinIO 存储</span>
             <strong>{{ runtime.minio?.endpoint || '未设置环境变量' }}</strong>

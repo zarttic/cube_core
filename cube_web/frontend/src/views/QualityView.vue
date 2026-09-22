@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue';
-import { List, Refresh } from '@element-plus/icons-vue';
+import { ListOutline, RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 import { ElMessage } from 'element-plus';
 
 import { requestGet, requestPost } from '@/api/client';
@@ -210,6 +210,11 @@ function applyFilters() {
   return loadBatches({ resetPage: true });
 }
 
+function resetFilters() {
+  Object.assign(filters, { keyword: '', dataType: '', status: '', createdAtRange: [] });
+  return applyFilters();
+}
+
 function setPage(page) {
   pageState.page = page;
   return loadBatches();
@@ -305,8 +310,8 @@ async function cancelPartition() {
 
 async function exportQualityErrors(qualityRun) {
   try {
-    await store.exportQualityWorkbook(qualityRun);
-    ElMessage.success('质检结果已下载');
+    await store.exportQualityRun(qualityRun, 'csv');
+    ElMessage.success('质检结果已下载（CSV）');
   } catch (requestError) {
     notifyApiError(requestError, { scope: 'QualityView', message: qualityExecutionErrorLabel(requestError) || '质检结果下载失败' });
   }
@@ -329,12 +334,6 @@ onUnmounted(() => {
 
 <template>
   <section class="quality-view" :class="{ embedded: props.embedded }">
-    <header class="view-header">
-      <div class="header-actions">
-        <el-button :icon="List" @click="openRuleCatalog">质检规则</el-button>
-        <el-button :icon="Refresh" :loading="loading" @click="loadBatches">刷新</el-button>
-      </div>
-    </header>
     <el-form class="filter-bar" inline @submit.prevent="applyFilters">
       <el-form-item>
         <el-input v-model="filters.keyword" clearable placeholder="剖分批次、载入批次或数据集" @keyup.enter="applyFilters" />
@@ -368,8 +367,13 @@ onUnmounted(() => {
           style="width: 270px"
         />
       </el-form-item>
-      <el-form-item>
-        <el-button type="primary" native-type="submit">查询</el-button>
+      <el-form-item class="filter-actions">
+        <el-button type="primary" native-type="submit" :icon="SearchOutline">查询</el-button>
+        <el-button @click="resetFilters">重置</el-button>
+        <div class="filter-actions-end">
+          <el-button :icon="ListOutline" @click="openRuleCatalog">质检规则</el-button>
+          <el-button :icon="RefreshOutline" :loading="loading" title="刷新" aria-label="刷新" @click="loadBatches" />
+        </div>
       </el-form-item>
     </el-form>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
@@ -379,9 +383,9 @@ onUnmounted(() => {
         <el-table-column label="剖分批次" min-width="180"><template #default="{ row }"><div class="batch-cell"><strong>{{ row.partition_run_id }}</strong></div></template></el-table-column>
         <el-table-column label="数据集" min-width="180"><template #default="{ row }"><div v-if="row.datasets?.length" class="dataset-list"><div v-for="dataset in row.datasets" :key="dataset.dataset_id" class="dataset-cell"><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong></div></div><span v-else>{{ row.dataset_count || 0 }} 个数据集</span></template></el-table-column>
         <el-table-column label="数据范围" min-width="150"><template #default="{ row }">{{ row.dataset_count }} 个数据集 · {{ row.scene_count }} 景 · {{ row.band_count }} 波段</template></el-table-column>
-        <el-table-column label="剖分" min-width="120"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
+        <el-table-column label="完成剖分" min-width="120"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
         <el-table-column label="质检" min-width="130"><template #default="{ row }"><span class="pass-count">{{ row.quality_pass_count }} 通过</span><span v-if="row.quality_failed_count" class="failed-count"> · {{ row.quality_failed_count }} 失败</span></template></el-table-column>
-        <el-table-column label="入库" min-width="110"><template #default="{ row }">{{ row.ingested_count }}/{{ row.band_count }}</template></el-table-column>
+        <el-table-column label="完成入库" min-width="110"><template #default="{ row }">{{ row.ingested_count }}/{{ row.band_count }}</template></el-table-column>
         <el-table-column label="批次状态" min-width="130"><template #default="{ row }"><StatusTag domain="partition" :value="row.status" size="small" /></template></el-table-column>
         <el-table-column label="创建时间" min-width="165"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
         <el-table-column label="操作" width="105" fixed="right"><template #default="{ row }"><el-button :data-testid="`quality-task-detail-${row.partition_run_id}`" link type="primary" @click.stop="openBatch(row)">任务详情</el-button></template></el-table-column>
@@ -473,11 +477,14 @@ onUnmounted(() => {
 <style scoped>
 .quality-view { padding: 24px; }
 .quality-view.embedded { padding: 0; }
-.view-header { display: flex; justify-content: flex-end; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
-.header-actions { display: flex; gap: 8px; }
-.filter-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 0 10px; margin-bottom: 16px; }
+.filter-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0 10px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 8px; }
 .filter-bar :deep(.el-input) { width: min(330px, 44vw); }
+.filter-bar .filter-actions { flex: 1 1 auto; }
+.filter-bar .filter-actions :deep(.el-form-item__content) { flex: 1 1 auto; flex-wrap: nowrap; }
+.filter-bar .filter-actions :deep(.el-button) { margin-left: 0; }
+.filter-bar .filter-actions :deep(.el-button + .el-button) { margin-left: 8px; }
+.filter-actions-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .quality-batch-table :deep(.el-table .cell) { padding-right: 14px; padding-left: 14px; }
 .quality-batch-table :deep(.el-table th .cell), .quality-batch-table :deep(.el-table td .cell) { text-align: center; }
 .quality-batch-table { width: 100%; }
@@ -521,7 +528,6 @@ onUnmounted(() => {
 }
 @media (max-width: 760px) {
   .quality-view { padding: 16px; }
-  .header-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
   .rule-detail-grid { grid-template-columns: 1fr; }
 }
 </style>

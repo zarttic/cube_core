@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { Collection, Picture, Refresh, Search } from '@element-plus/icons-vue';
+import { AlbumsOutline, ImageOutline, RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 import { ElMessage } from 'element-plus';
 
 import AppTable from '@/components/AppTable.vue';
@@ -28,6 +28,15 @@ async function refresh() {
 function setPage(page) { store.pageState.page = page; return store.loadList(); }
 function setPageSize(pageSize) { Object.assign(store.pageState, { page: 1, pageSize }); return store.loadList(); }
 function applyManualFilters() { store.manualPageState.page = 1; return store.loadManualCandidates(); }
+function resetManualFilters() {
+  Object.assign(store.manualFilters, { keyword: '', datasetId: '' });
+  return applyManualFilters();
+}
+function resetFilters() {
+  Object.assign(store.filters, { keyword: '', datasetId: '', status: '' });
+  store.pageState.page = 1;
+  return store.loadList();
+}
 function setManualPage(page) { store.manualPageState.page = page; return store.loadManualCandidates(); }
 function setManualPageSize(pageSize) { Object.assign(store.manualPageState, { page: 1, pageSize }); return store.loadManualCandidates(); }
 
@@ -177,13 +186,13 @@ async function openManualIngest(partitionRunId = '') {
 
 <template>
   <section class="ingest-view" :class="{ embedded }">
-    <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
+    <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="RefreshOutline" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
     <section class="pending-ingest-panel">
-      <div class="pending-ingest-heading"><div><h3>待入库集合 <span>{{ store.manualPageState.total }} 条</span></h3><span>按剖分批次或数据集筛选</span></div><el-button link type="primary" :loading="store.manualCandidatesLoading" @click="store.loadManualCandidates">刷新队列</el-button></div>
+      <div class="pending-ingest-heading"><div><h3>待入库集合 <span>{{ store.manualPageState.total }} 条</span></h3><span>按剖分批次或数据集筛选</span></div></div>
       <el-form class="pending-filter-bar" inline @submit.prevent="applyManualFilters">
-        <el-form-item><el-input v-model="store.manualFilters.keyword" :prefix-icon="Search" clearable placeholder="剖分批次或数据集" /></el-form-item>
+        <el-form-item><el-input v-model="store.manualFilters.keyword" :prefix-icon="SearchOutline" clearable placeholder="剖分批次或数据集" /></el-form-item>
         <el-form-item><el-input v-model="store.manualFilters.datasetId" clearable placeholder="数据集 ID" /></el-form-item>
-        <el-form-item><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
+        <el-form-item><el-button native-type="submit" type="primary" :icon="SearchOutline">查询</el-button><el-button @click="resetManualFilters">重置</el-button></el-form-item>
       </el-form>
       <div v-if="store.manualCandidatesLoading" class="pending-state">正在加载待入库集合</div>
       <div v-else-if="!store.manualCandidates.length" class="pending-state">暂无满足入库条件的剖分批次数据集合</div>
@@ -199,18 +208,12 @@ async function openManualIngest(partitionRunId = '') {
       <summary>入库记录 <span>{{ store.pageState.total }} 条</span></summary>
       <div class="ingest-history-body">
     <el-form class="filter-bar" label-position="top" @submit.prevent="refresh">
-      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="Search" clearable placeholder="剖分批次、运行 ID 或数据集" /></el-form-item>
+      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="SearchOutline" clearable placeholder="剖分批次、运行 ID 或数据集" /></el-form-item>
       <el-form-item label="数据集 ID"><el-input v-model="store.filters.datasetId" clearable /></el-form-item>
       <el-form-item label="运行状态"><el-select v-model="store.filters.status" clearable><el-option label="已排队" value="queued" /><el-option label="运行中" value="running" /><el-option label="已完成" value="completed" /><el-option label="部分失败" value="partial_failure" /><el-option label="失败" value="failed" /><el-option label="已取消" value="cancelled" /></el-select></el-form-item>
-      <el-form-item class="filter-action"><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
+      <el-form-item class="filter-action"><el-button native-type="submit" type="primary" :icon="SearchOutline">查询</el-button><el-button @click="resetFilters">重置</el-button></el-form-item>
     </el-form>
     <el-alert v-if="store.error" :title="store.error" type="error" :closable="false" show-icon />
-    <div class="summary-strip" aria-label="入库统计">
-      <div><strong>{{ store.summary.run_count || store.pageState.total }}</strong><span>运行</span></div>
-      <div><strong>{{ store.summary.band_count || 0 }}</strong><span>波段总数</span></div>
-      <div><strong>{{ store.summary.completed_band_count || 0 }}</strong><span>已完成波段</span></div>
-      <div><strong>{{ store.summary.failed_band_count || 0 }}</strong><span>失败波段</span></div>
-    </div>
     <AppTable :data="store.records" :loading="store.loading" row-key="ingest_run_id" :page="store.pageState.page" :page-size="store.pageState.pageSize" :total="store.pageState.total" @current-change="setPage" @size-change="setPageSize" @row-click="(row) => store.openDetail(row.ingest_run_id).catch(() => {})">
       <el-table-column label="数据入库" min-width="260"><template #default="{ row }"><div class="run-cell"><strong :title="row.partition_batch_name || row.dataset_code || row.dataset_id">{{ row.partition_batch_name || row.dataset_code || row.dataset_id }}</strong><span :title="`${row.dataset_code || row.dataset_id} · ${row.ingest_run_id}`">{{ row.dataset_code || row.dataset_id }} · {{ row.ingest_run_id }}</span></div></template></el-table-column>
       <el-table-column prop="partition_run_id" label="剖分批次" min-width="180" show-overflow-tooltip />
@@ -233,7 +236,7 @@ async function openManualIngest(partitionRunId = '') {
             <section v-for="dataset in manualDatasetGroups" :key="dataset.dataset_id" class="manual-dataset-tree">
               <div class="manual-tree-header-row">
                 <button type="button" class="manual-tree-header" :aria-expanded="!collapsedManualDatasets.has(dataset.dataset_id)" @click="toggleManualDataset(dataset.dataset_id)">
-                  <el-icon><Collection /></el-icon>
+                  <el-icon><AlbumsOutline /></el-icon>
                   <span><strong>{{ dataset.dataset_title || dataset.dataset_code || dataset.dataset_id }}</strong><small>{{ gridConfigLabel(dataset.grid_configs) }} · {{ dataset.dataset_code || dataset.dataset_id }} · {{ dataset.scenes.length }} 景 · {{ dataset.scenes.reduce((total, scene) => total + scene.bands.length, 0) }} 个波段</small></span>
                 </button>
                 <el-checkbox
@@ -249,7 +252,7 @@ async function openManualIngest(partitionRunId = '') {
                 <section v-for="scene in dataset.scenes" :key="scene.scene_id" class="manual-scene-tree">
                   <div class="manual-scene-header-row">
                     <button type="button" class="manual-scene-header" :aria-expanded="!collapsedManualScenes.has(`${dataset.dataset_id}:${scene.scene_id}`)" @click="toggleManualScene(dataset, scene)">
-                      <el-icon><Picture /></el-icon><span>{{ scene.scene_key || scene.scene_id }}<small>{{ gridConfigLabel(scene.grid_configs) }}</small></span>
+                      <el-icon><ImageOutline /></el-icon><span>{{ scene.scene_key || scene.scene_id }}<small>{{ gridConfigLabel(scene.grid_configs) }}</small></span>
                     </button>
                     <el-checkbox
                       class="manual-select-all"
@@ -303,11 +306,6 @@ async function openManualIngest(partitionRunId = '') {
 .filter-bar { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 12px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 12px; }
 .filter-action { align-self: end; }
-.summary-strip { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); border: 1px solid #dfe4ec; border-radius: 6px; margin-bottom: 18px; background: #fff; overflow: hidden; }
-.summary-strip div { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px; border-right: 1px solid var(--el-border-color-lighter); }
-.summary-strip div:last-child { border-right: 0; }
-.summary-strip strong { font-size: 22px; color: #1769aa; }
-.summary-strip span { color: var(--el-text-color-secondary); }
 .run-cell { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
 .run-cell strong { overflow: hidden; color: #263247; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .run-cell span, .run-progress > span { color: #8993a4; font-size: 12px; }
@@ -337,5 +335,5 @@ async function openManualIngest(partitionRunId = '') {
 .manual-band-chip { display: flex; flex-direction: column; padding: 3px 7px; border: 1px solid #bfd5e8; border-radius: 4px; background: #f3f8fc; color: #2d628d; font-size: 11px; line-height: 1.35; }
 .manual-band-chip small { color: #748095; font-size: 10px; }
 .manual-tree-empty { padding: 18px; color: #8993a4; text-align: center; font-size: 12px; }
-@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar, .pending-filter-bar { grid-template-columns: 1fr; } .summary-strip { grid-template-columns: repeat(2, 1fr); } .summary-strip div:nth-child(2) { border-right: 0; } .manual-tree-header-row, .manual-scene-header-row { align-items: stretch; flex-direction: column; gap: 2px; } .manual-select-all { margin-left: 0; } }
+@media (max-width: 760px) { .ingest-view { padding: 16px; } .filter-bar, .pending-filter-bar { grid-template-columns: 1fr; } .manual-tree-header-row, .manual-scene-header-row { align-items: stretch; flex-direction: column; gap: 2px; } .manual-select-all { margin-left: 0; } }
 </style>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -12,15 +12,10 @@ const props = defineProps({
 });
 const emit = defineEmits(['update:modelValue', 'reset', 'submit', 'open-datasets']);
 
-// 容器数量只允许非负整数；编辑期只保留开头的数字串，避免负号/小数/科学计数法被带进来。
+// 容器限制默认不设置（模型值 0 = 按系统默认并发运行）。开启后只允许 >= 1 的整数；
+// 编辑期只保留开头的数字串，避免负号/小数/科学计数法被带进来。
 const blockedWorkerContainerKeys = new Set(['-', '+', 'e', 'E']);
-const workerContainerPresets = [
-  { value: 0, label: '默认' },
-  { value: 1, label: '1' },
-  { value: 2, label: '2' },
-  { value: 4, label: '4' },
-  { value: 8, label: '8' },
-];
+const defaultEnabledWorkerContainerLimit = 4;
 
 function blockInvalidWorkerContainerKeys(event) {
   if (blockedWorkerContainerKeys.has(event.key)) event.preventDefault();
@@ -39,19 +34,32 @@ function updateWorkerContainerLimit(value) {
 }
 
 const workerContainerLimit = computed(() => normalizeWorkerContainerLimit(props.modelValue.workerContainerLimit));
-// 编辑期展示原始输入（允许暂时为空），失焦后回写规范化后的值。
+const workerContainerLimitEnabled = computed(() => workerContainerLimit.value > 0);
+// 未开启时不渲染步进器；编辑期展示原始草稿（允许暂时为空或 0），失焦后回写模型值。
 const editingWorkerContainerLimit = ref(null);
-const workerContainerNote = computed(() => (
-  workerContainerLimit.value === 0
-    ? '不限制单任务并发，按系统默认值运行'
-    : `本次任务同时最多占用 ${workerContainerLimit.value} 个计算容器`
-));
+// 重新开启时沿用上次填过的值，没填过就用默认值。
+const lastPositiveWorkerContainerLimit = ref(0);
+watch(workerContainerLimit, (value) => {
+  if (value > 0) lastPositiveWorkerContainerLimit.value = value;
+}, { immediate: true });
+const workerContainerNote = computed(
+  () => `本次任务同时最多占用 ${workerContainerLimit.value} 个计算容器`,
+);
+
+function toggleWorkerContainerLimit(enabled) {
+  editingWorkerContainerLimit.value = null;
+  updateWorkerContainerLimit(
+    enabled ? (lastPositiveWorkerContainerLimit.value || defaultEnabledWorkerContainerLimit) : 0,
+  );
+}
 
 function onWorkerContainerInput(event) {
   const raw = String(event.target.value ?? '').trim().match(/^\d*/)[0];
   if (event.target.value !== raw) event.target.value = raw;
   editingWorkerContainerLimit.value = raw;
-  updateWorkerContainerLimit(raw === '' ? 0 : raw);
+  // 空草稿和 0 只是编辑中的临时文本，不写回模型：下限是 1，关限制用开关。
+  const parsed = normalizeWorkerContainerLimit(raw);
+  if (parsed > 0) updateWorkerContainerLimit(parsed);
 }
 
 function onWorkerContainerBlur(event) {
@@ -60,7 +68,7 @@ function onWorkerContainerBlur(event) {
 }
 
 function stepWorkerContainerLimit(delta) {
-  updateWorkerContainerLimit(workerContainerLimit.value + delta);
+  updateWorkerContainerLimit(Math.max(1, workerContainerLimit.value + delta));
 }
 </script>
 
@@ -86,7 +94,7 @@ function stepWorkerContainerLimit(delta) {
         <div class="source-batch-summary-head"><strong>{{ sourceBatchIds.length ? sourceBatchIds.length + ' 个批次' : '未关联批次' }}</strong></div>
         <div v-if="sourceBatchIds.length" class="source-batch-tags">
           <el-tooltip v-for="batchId in sourceBatchIds" :key="batchId" :content="batchId" placement="top" :show-after="300">
-            <el-tag class="source-batch-tag" size="small" effect="plain" tabindex="0">
+            <el-tag class="source-batch-tag" data-overflow-title-off size="small" effect="plain" tabindex="0">
               <span class="source-batch-id">{{ batchId }}</span>
             </el-tag>
           </el-tooltip>
@@ -96,29 +104,35 @@ function stepWorkerContainerLimit(delta) {
     </div>
     <div class="form-group worker-container-form-group">
       <div class="worker-limit-head">
-        <label for="partition-worker-container-limit">容器数量</label>
+        <label for="partition-worker-container-limit">容器限制</label>
         <el-tooltip
           data-testid="worker-container-limit-tooltip"
-          content="限制本次任务最多使用的容器数量；0 表示按系统默认值运行。"
+          content="默认不设置单任务容器限制，按系统默认并发运行；开启后可限制本次任务最多使用的容器数量。"
           placement="top"
           :show-after="200"
         >
-          <span class="worker-limit-help" tabindex="0" aria-label="容器数量说明">?</span>
+          <span class="worker-limit-help" tabindex="0" aria-label="容器限制说明">?</span>
         </el-tooltip>
+        <el-switch
+          data-testid="worker-container-limit-toggle"
+          aria-label="设置容器限制"
+          :model-value="workerContainerLimitEnabled"
+          @update:model-value="toggleWorkerContainerLimit"
+        />
       </div>
       <div
+        v-if="workerContainerLimitEnabled"
         class="worker-limit-stepper"
-        :class="{ 'is-default': workerContainerLimit === 0 }"
         @keydown.capture="blockInvalidWorkerContainerKeys"
       >
         <button
           type="button"
           class="step-button"
           data-testid="worker-container-decrease"
-          aria-label="减少容器数量"
-          :disabled="workerContainerLimit <= 0"
+          aria-label="减少容器限制"
+          :disabled="workerContainerLimit <= 1"
           @click="stepWorkerContainerLimit(-1)"
-        >−</button>
+        ><span class="step-glyph step-glyph-minus" aria-hidden="true" /></button>
         <label class="step-field" for="partition-worker-container-limit">
           <input
             id="partition-worker-container-limit"
@@ -131,28 +145,16 @@ function stepWorkerContainerLimit(delta) {
             @blur="onWorkerContainerBlur"
             @keydown.enter="$event.target.blur()"
           >
-          <span class="step-unit">容器</span>
         </label>
         <button
           type="button"
           class="step-button"
           data-testid="worker-container-increase"
-          aria-label="增加容器数量"
+          aria-label="增加容器限制"
           @click="stepWorkerContainerLimit(1)"
-        >＋</button>
+        ><span class="step-glyph step-glyph-plus" aria-hidden="true" /></button>
       </div>
-      <div class="worker-limit-chips" role="group" aria-label="常用容器数量">
-        <button
-          v-for="preset in workerContainerPresets"
-          :key="preset.value"
-          type="button"
-          class="limit-chip"
-          :class="{ 'is-active': workerContainerLimit === preset.value }"
-          :data-testid="`worker-container-preset-${preset.value}`"
-          @click="updateWorkerContainerLimit(preset.value)"
-        >{{ preset.label }}</button>
-      </div>
-      <p class="worker-limit-note" data-testid="worker-container-note">{{ workerContainerNote }}</p>
+      <p v-if="workerContainerLimitEnabled" class="worker-limit-note" data-testid="worker-container-note">{{ workerContainerNote }}</p>
     </div>
     <div class="form-group action-buttons">
       <el-button @click="$emit('reset')">重置</el-button>
@@ -172,22 +174,26 @@ function stepWorkerContainerLimit(delta) {
 .worker-container-form-group { display: grid; gap: 8px; }
 .worker-limit-head { display: flex; align-items: center; gap: 6px; }
 .worker-limit-head label { color: #263247; font-size: 13px; font-weight: 600; }
+.worker-limit-head :deep(.el-switch) { margin-left: auto; }
 .worker-limit-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: var(--el-fill-color); color: var(--el-text-color-secondary); font-size: 11px; line-height: 1; cursor: help; }
 .worker-limit-stepper { display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px; align-items: center; height: 34px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color); transition: border-color 0.2s, box-shadow 0.2s; }
-.worker-limit-stepper.is-default { border-style: dashed; }
 .worker-limit-stepper:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(26, 95, 180, 0.12); }
-.step-button { height: 100%; border: 0; background: transparent; color: #43506b; font-size: 15px; line-height: 1; cursor: pointer; transition: background 0.2s, color 0.2s; }
+/* −／＋ 用 CSS 笔画而不是字体字符：字符的墨迹上下位置随字体变化，笔画是几何居中。 */
+.step-button { display: flex; align-items: center; justify-content: center; height: 100%; border: 0; background: transparent; color: #43506b; cursor: pointer; transition: background 0.2s, color 0.2s; }
+.step-glyph { position: relative; display: block; width: 12px; height: 12px; }
+.step-glyph::before, .step-glyph::after { content: ''; position: absolute; background: currentColor; }
+.step-glyph::before { top: 50%; left: 0; width: 100%; height: 1.5px; transform: translateY(-50%); }
+.step-glyph-plus::after { left: 50%; top: 0; height: 100%; width: 1.5px; transform: translateX(-50%); }
 .step-button:first-child { border-radius: 8px 0 0 8px; }
 .step-button:last-child { border-radius: 0 8px 8px 0; }
 .step-button:hover:not(:disabled) { background: var(--primary-bg); color: var(--primary); }
 .step-button:disabled { color: #c7ccd6; cursor: not-allowed; }
-.step-field { display: flex; align-items: center; justify-content: center; gap: 4px; height: 100%; cursor: text; }
-.step-input { width: 3em; height: 100%; border: 0; outline: none; background: transparent; color: #263247; font-size: 15px; font-weight: 600; text-align: center; }
-.step-unit { color: #8993a4; font-size: 12px; }
-.worker-limit-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.limit-chip { padding: 3px 12px; border: 1px solid var(--el-border-color); border-radius: 999px; background: var(--el-bg-color); color: #5e6b85; font-size: 12px; cursor: pointer; transition: all 0.2s; }
-.limit-chip:hover { border-color: var(--primary); color: var(--primary); }
-.limit-chip.is-active { border-color: var(--primary); background: var(--primary-bg); color: var(--primary); font-weight: 600; }
+/* 输入框铺满中间格并用 text-align:center，数字落在整个步进器的正中心。
+   注意 .form-group label 全局带 10px 下边距，会把 32px 的格内内容顶高 5px，这里必须清掉。 */
+.step-field { height: 100%; margin: 0; cursor: text; }
+/* text-box 把行盒裁到“大写高/基线”，数字按墨迹高度上下居中（Chrome 133+）；
+   不支持时退回按行盒居中，不会报错。 */
+.step-input { display: block; width: 100%; height: 100%; border: 0; outline: none; background: transparent; color: #263247; font-family: inherit; font-size: 15px; font-weight: 600; text-align: center; text-box: trim-both cap alphabetic; }
 .worker-limit-note { margin: 0; color: #8993a4; font-size: 12px; line-height: 1.5; }
 .action-buttons { flex-wrap: nowrap; }
 .action-buttons :deep(.el-button) { flex: 1 1 50%; min-width: 0; }

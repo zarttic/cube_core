@@ -6,6 +6,18 @@ import GridParameters from '@/views/partition/GridParameters.vue';
 const wrappers = [];
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
 
+const tooltipStub = { props: ['content'], template: '<span class="tooltip-stub" :data-content="content"><slot /></span>' };
+// el-switch 在单测环境没有全局注册，用一个点击取反的按钮模拟它。
+const switchStub = {
+  name: 'ElSwitch',
+  props: ['modelValue'],
+  emits: ['update:modelValue'],
+  template: '<button type="button" @click="$emit(\'update:modelValue\', !modelValue)" />',
+};
+const toggleSelector = '[data-testid="worker-container-limit-toggle"]';
+const fieldSelector = '[data-testid="worker-container-limit"]';
+const noteSelector = '[data-testid="worker-container-note"]';
+
 describe('GridParameters', () => {
   it('shows production grids, derived method and server-owned load batch IDs', async () => {
     const wrapper = mount(GridParameters, {
@@ -29,7 +41,8 @@ describe('GridParameters', () => {
           },
           'el-button': { template: '<button><slot /></button>' },
           'el-tag': { template: '<span><slot /></span>' },
-          'el-tooltip': { props: ['content'], template: '<span class="tooltip-stub" :data-content="content"><slot /></span>' },
+          'el-tooltip': tooltipStub,
+          'el-switch': switchStub,
           ElInput: { props: ['modelValue', 'readonly'], template: '<input :value="modelValue" :readonly="readonly" />' },
         },
       },
@@ -52,25 +65,30 @@ describe('GridParameters', () => {
       'REFLECT_20260717143357_8E3F',
       'mock-two-optical-datasets-20260717-01',
     ]);
-    expect(wrapper.get('.worker-container-form-group label').text()).toBe('容器数量');
+    expect(wrapper.get('.worker-container-form-group label').text()).toBe('容器限制');
     expect(wrapper.get('[data-testid="worker-container-limit-tooltip"]').attributes('data-content')).toBe(
-      '限制本次任务最多使用的容器数量；0 表示按系统默认值运行。',
+      '默认不设置单任务容器限制，按系统默认并发运行；开启后可限制本次任务最多使用的容器数量。',
     );
-    expect(wrapper.text()).not.toContain('0 表示按系统默认值运行');
-    expect(wrapper.get('[data-testid="worker-container-limit"]').attributes('inputmode')).toBe('numeric');
-    expect(wrapper.get('[data-testid="worker-container-note"]').text()).toBe('不限制单任务并发，按系统默认值运行');
+    expect(wrapper.text()).not.toContain('按系统默认值运行');
+    expect(wrapper.get(toggleSelector).attributes('aria-label')).toBe('设置容器限制');
+    // 未开启时只有开关：没有数字框、没有 1／2／4／8 预设、也没有小字说明。
+    expect(wrapper.find(noteSelector).exists()).toBe(false);
+    expect(wrapper.find(fieldSelector).exists()).toBe(false);
+    expect(wrapper.find('[data-testid="worker-container-decrease"]').exists()).toBe(false);
+    expect(wrapper.findAll('.limit-chip')).toHaveLength(0);
 
-    await wrapper.get('[data-testid="worker-container-limit"]').setValue('3');
-    expect(wrapper.emitted('update:modelValue')[0][0]).toMatchObject({ workerContainerLimit: 3 });
+    await wrapper.get(toggleSelector).trigger('click');
+    expect(wrapper.emitted('update:modelValue')[0][0]).toMatchObject({ workerContainerLimit: 4 });
   });
 
 });
 
 describe('GridParameters container limit', () => {
   const containerLimitStubs = {
-    'el-tooltip': { props: ['content'], template: '<span><slot /></span>' },
+    'el-tooltip': tooltipStub,
     'el-button': { template: '<button><slot /></button>' },
     'el-tag': { template: '<span><slot /></span>' },
+    'el-switch': switchStub,
   };
 
   function mountContainerLimit(workerContainerLimit) {
@@ -88,6 +106,7 @@ describe('GridParameters container limit', () => {
   }
 
   const limitOf = (wrapper, index = 0) => wrapper.emitted('update:modelValue')[index][0].workerContainerLimit;
+  const noteOf = (wrapper) => wrapper.get(noteSelector).text();
 
   /** 模拟父组件：点击后把 emit 出的值写回 prop（组件本身是受控的）。 */
   async function clickAndSync(wrapper, selector) {
@@ -99,21 +118,94 @@ describe('GridParameters container limit', () => {
     }
   }
 
-  it('keeps the field non-negative and integral while typing', async () => {
+  it('renders nothing but the switch until the limit is switched on', () => {
     const wrapper = mountContainerLimit(0);
-    const field = wrapper.get('[data-testid="worker-container-limit"]');
+
+    expect(wrapper.find(noteSelector).exists()).toBe(false);
+    expect(wrapper.find(fieldSelector).exists()).toBe(false);
+    expect(wrapper.find('[data-testid="worker-container-decrease"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="worker-container-increase"]').exists()).toBe(false);
+    expect(wrapper.findAll('.limit-chip')).toHaveLength(0);
+  });
+
+  it('shows the number editor when the limit is switched on', async () => {
+    const wrapper = mountContainerLimit(0);
+
+    await clickAndSync(wrapper, toggleSelector);
+
+    expect(limitOf(wrapper)).toBe(4);
+    expect(noteOf(wrapper)).toBe('本次任务同时最多占用 4 个计算容器');
+    expect(wrapper.get(fieldSelector).attributes('inputmode')).toBe('numeric');
+    expect(wrapper.get(fieldSelector).element.value).toBe('4');
+    expect(wrapper.get('[data-testid="worker-container-decrease"]').attributes('disabled')).toBeUndefined();
+    expect(wrapper.findAll('.limit-chip')).toHaveLength(0);
+  });
+
+  it('re-enables with the previously entered value instead of the default', async () => {
+    const wrapper = mountContainerLimit(0);
+
+    await clickAndSync(wrapper, toggleSelector);
+    const field = wrapper.get(fieldSelector);
+    await field.setValue('7');
+    await wrapper.setProps({ modelValue: { workerContainerLimit: 7 } });
+    expect(limitOf(wrapper, 1)).toBe(7);
+
+    await clickAndSync(wrapper, toggleSelector);
+    expect(limitOf(wrapper, 2)).toBe(0);
+    expect(wrapper.find(fieldSelector).exists()).toBe(false);
+
+    await clickAndSync(wrapper, toggleSelector);
+    expect(limitOf(wrapper, 3)).toBe(7);
+    expect(wrapper.get(fieldSelector).element.value).toBe('7');
+  });
+
+  it('switching the limit off falls back to the system default concurrency', async () => {
+    const wrapper = mountContainerLimit(4);
+    expect(noteOf(wrapper)).toBe('本次任务同时最多占用 4 个计算容器');
+
+    await clickAndSync(wrapper, toggleSelector);
+
+    expect(limitOf(wrapper)).toBe(0);
+    expect(wrapper.find(noteSelector).exists()).toBe(false);
+    expect(wrapper.find(fieldSelector).exists()).toBe(false);
+  });
+
+  it('keeps digits only while typing', async () => {
+    const wrapper = mountContainerLimit(2);
+    const field = wrapper.get(fieldSelector);
 
     // 编辑期只保留开头的数字串：负数/小数/乱输入都被整流。
-    for (const [typed, expected] of [['-5', 0], ['2.5', 2], ['abc', 0], ['', 0], ['07', 7], ['12abc', 12]]) {
+    for (const [typed, expected] of [['2.5', 2], ['07', 7], ['12abc', 12]]) {
       await field.setValue(typed);
       expect(limitOf(wrapper, wrapper.emitted('update:modelValue').length - 1)).toBe(expected);
       expect(field.element.value).toBe(typed.match(/^\d*/)[0]);
     }
   });
 
+  it('ignores an empty draft and a typed zero without switching the limit off', async () => {
+    const wrapper = mountContainerLimit(2);
+    const field = wrapper.get(fieldSelector);
+
+    await field.setValue('');
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined();
+    expect(field.element.value).toBe('');
+
+    await field.setValue('0');
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined();
+    expect(wrapper.find(fieldSelector).exists()).toBe(true);
+    expect(noteOf(wrapper)).toBe('本次任务同时最多占用 2 个计算容器');
+
+    await field.setValue('-5abc');
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined();
+    expect(field.element.value).toBe('');
+
+    await field.trigger('blur');
+    expect(field.element.value).toBe('2');
+  });
+
   it('writes the normalised value back when the field loses focus', async () => {
     const wrapper = mountContainerLimit(12);
-    const field = wrapper.get('[data-testid="worker-container-limit"]');
+    const field = wrapper.get(fieldSelector);
 
     await field.setValue('07');
     await field.trigger('blur');
@@ -123,8 +215,8 @@ describe('GridParameters container limit', () => {
   });
 
   it('blocks minus and exponent keys so the field cannot display a negative number', () => {
-    const wrapper = mountContainerLimit(0);
-    const field = wrapper.get('[data-testid="worker-container-limit"]');
+    const wrapper = mountContainerLimit(1);
+    const field = wrapper.get(fieldSelector);
     for (const key of ['-', '+', 'e', 'E']) {
       const blocked = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
       field.element.dispatchEvent(blocked);
@@ -137,32 +229,19 @@ describe('GridParameters container limit', () => {
     }
   });
 
-  it('steps with the −/＋ buttons and stops at zero', async () => {
+  it('steps with the −/＋ buttons and never goes below one', async () => {
     const wrapper = mountContainerLimit(2);
     const decrease = '[data-testid="worker-container-decrease"]';
     const increase = '[data-testid="worker-container-increase"]';
 
     await clickAndSync(wrapper, decrease);
     expect(limitOf(wrapper)).toBe(1);
-    await clickAndSync(wrapper, increase);
-    expect(limitOf(wrapper, 1)).toBe(2);
-
-    await wrapper.setProps({ modelValue: { workerContainerLimit: 0 } });
     expect(wrapper.get(decrease).attributes('disabled')).toBeDefined();
     await wrapper.get(decrease).trigger('click');
-    expect(wrapper.emitted('update:modelValue')).toHaveLength(2);
-  });
+    expect(wrapper.emitted('update:modelValue')).toHaveLength(1);
 
-  it('applies the preset chips and mirrors the result in the note', async () => {
-    const wrapper = mountContainerLimit(0);
-
-    await clickAndSync(wrapper, '[data-testid="worker-container-preset-4"]');
-    expect(limitOf(wrapper)).toBe(4);
-    expect(wrapper.get('[data-testid="worker-container-note"]').text()).toBe('本次任务同时最多占用 4 个计算容器');
-    expect(wrapper.get('[data-testid="worker-container-preset-4"]').classes()).toContain('is-active');
-
-    await clickAndSync(wrapper, '[data-testid="worker-container-preset-0"]');
-    expect(limitOf(wrapper, 1)).toBe(0);
-    expect(wrapper.get('[data-testid="worker-container-note"]').text()).toBe('不限制单任务并发，按系统默认值运行');
+    await clickAndSync(wrapper, increase);
+    expect(limitOf(wrapper, 1)).toBe(2);
+    expect(wrapper.get(decrease).attributes('disabled')).toBeUndefined();
   });
 });

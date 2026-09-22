@@ -12,6 +12,9 @@ const detailTabs = [
 ];
 const paginatedTabs = detailTabs.filter((tab) => tab !== 'overview');
 const GRID_DELETE_POLL_MS = 1000;
+// 数据集删除改由后台任务执行（单次请求曾阻塞 13 分钟并拖慢整个库，2026-09-19）。
+const DELETION_POLL_MS = 2000;
+const DELETION_POLL_LIMIT_MS = 60 * 60 * 1000;
 
 function emptyDetail() {
   return Object.fromEntries(detailTabs.map((tab) => [tab, null]));
@@ -26,7 +29,7 @@ function emptyTabPages() {
 
 export const useDatasetsStore = defineStore('datasets', () => {
   const filters = reactive({
-    keyword: '', dataType: '', productType: '', ingestStatus: '', qualityStatus: '',
+    keyword: '', dataType: '',
     publishStatus: '', timeStart: '', timeEnd: '', sortBy: 'updated_at', sortOrder: 'desc',
   });
   const pageState = reactive({ page: 1, pageSize: 20, total: 0 });
@@ -38,6 +41,8 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const hiddenRoles = ref([]);
   const roleRestrictionsLoading = ref(false);
   const pendingGridDeletes = reactive({});
+  // deletionId -> {deletionId, datasetId, datasetTitle, status, progress, startedAt}
+  const pendingDeletions = reactive({});
   const selectedDatasetId = ref('');
   const detailVisible = ref(false);
   const detailLoading = ref(false);
@@ -50,13 +55,17 @@ export const useDatasetsStore = defineStore('datasets', () => {
   const tabScopes = Object.fromEntries(paginatedTabs.map((tab) => [tab, createRequestScope()]));
   let detailGeneration = 0;
   const deletePollTimers = new Map();
+  const deletionPollTimers = new Map();
 
   const selectedDataset = computed(() => detail.value.overview);
+  const deletingDatasetIds = computed(
+    () => new Set(Object.values(pendingDeletions).map((job) => job.datasetId)),
+  );
+  const activeDeletions = computed(() => Object.values(pendingDeletions));
 
   function listParameters() {
     return {
-      keyword: filters.keyword.trim(), data_type: filters.dataType, product_type: filters.productType,
-      ingest_status: filters.ingestStatus, quality_status: filters.qualityStatus,
+      keyword: filters.keyword.trim(), data_type: filters.dataType,
       publish_status: filters.publishStatus,
       time_start: filters.timeStart, time_end: filters.timeEnd,
       page: pageState.page, page_size: pageState.pageSize, sort_by: filters.sortBy, sort_order: filters.sortOrder,
@@ -71,7 +80,9 @@ export const useDatasetsStore = defineStore('datasets', () => {
       const response = await requestGet(`/v1/datasets?${pageQuery(listParameters())}`, { signal: request.signal });
       if (!listScope.isCurrent(request.token)) return;
       const page = normalizePageResponse(response, pageState.page, pageState.pageSize);
-      records.value = page.items;
+      // A dataset whose deletion is queued is gone as far as the user is
+      // concerned; the worker removes the rows in the background.
+      records.value = page.items.filter((row) => !deletingDatasetIds.value.has(row.dataset_id));
       summary.value = response.summary || summary.value;
       Object.assign(pageState, { total: page.total, page: page.page, pageSize: page.pageSize });
       if (!records.value.length && pageState.total > 0 && pageState.page > 1) {
@@ -316,6 +327,56 @@ export const useDatasetsStore = defineStore('datasets', () => {
     return runAction(`/v1/datasets/${encodeURIComponent(selectedDatasetId.value)}/publications/${encodeURIComponent(publicationId)}/withdraw`, {}, 'POST', 'publications');
   }
 
+  async function pollDatasetDeletion(deletionId) {
+    if (!pendingDeletions[deletionId]) return;
+    deletionPollTimers.delete(deletionId);
+    try {
+      const record = await requestGet(`/v1/datasets/deletions/${encodeURIComponent(deletionId)}`);
+      if (!pendingDeletions[deletionId]) return;
+      Object.assign(pendingDeletions[deletionId], {
+        status: record.status,
+        progress: record.progress || null,
+        // 失败重试时把原因带上，否则界面只显示“后台执行中”，看不出任务在打转。
+        attemptCount: record.attempt_count ?? pendingDeletions[deletionId].attemptCount ?? 0,
+        errorMessage: record.error_message || '',
+      });
+      const job = pendingDeletions[deletionId];
+      if (record.status === 'succeeded') {
+        delete pendingDeletions[deletionId];
+        try {
+          await loadList();
+        } catch (refreshError) {
+          notifyApiError(refreshError, { silent: true, scope: 'dataset-delete-refresh' });
+          error.value = '删除已完成，但列表刷新失败，请手动刷新';
+        }
+        return;
+      }
+      if (record.status === 'failed') {
+        delete pendingDeletions[deletionId];
+        try {
+          await loadList();
+        } catch (refreshError) {
+          notifyApiError(refreshError, { silent: true, scope: 'dataset-delete-refresh' });
+        }
+        // loadList() clears the error banner, so the failure goes last.
+        error.value = record.error_message || '数据集删除失败';
+        return;
+      }
+    } catch (requestError) {
+      if (!pendingDeletions[deletionId]) return;
+      notifyApiError(requestError, { silent: true, scope: 'dataset-delete-poll' });
+    }
+    const job = pendingDeletions[deletionId];
+    if (!job) return;
+    if (Date.now() - job.startedAt > DELETION_POLL_LIMIT_MS) {
+      error.value = '删除任务仍在后台执行，请稍后在删除任务状态中确认';
+      return;
+    }
+    deletionPollTimers.set(deletionId, setTimeout(() => {
+      void pollDatasetDeletion(deletionId);
+    }, DELETION_POLL_MS));
+  }
+
   async function deleteDataset() {
     const datasetId = selectedDatasetId.value;
     if (!datasetId) return;
@@ -323,10 +384,28 @@ export const useDatasetsStore = defineStore('datasets', () => {
     error.value = '';
     try {
       const response = await requestJson(`/v1/datasets/${encodeURIComponent(datasetId)}`, {}, { method: 'DELETE' });
+      const deletionId = String(response?.deletion_id || '');
+      if (!deletionId) {
+        // 服务端同步完成（旧契约）：直接刷新列表。
+        resetDetail();
+        await loadList();
+        return response;
+      }
+      pendingDeletions[deletionId] = {
+        deletionId,
+        datasetId,
+        datasetTitle: response.dataset_title || '',
+        status: response.status || 'queued',
+        progress: response.progress || null,
+        attemptCount: response.attempt_count || 0,
+        errorMessage: '',
+        startedAt: Date.now(),
+      };
       // Reset all detail identity and tab state before loading the list again;
       // otherwise a reopened drawer can display the deleted dataset briefly.
       resetDetail();
       await loadList();
+      void pollDatasetDeletion(deletionId);
       return response;
     } catch (requestError) {
       error.value = requestError.message || '数据集删除失败';
@@ -336,6 +415,10 @@ export const useDatasetsStore = defineStore('datasets', () => {
     }
   }
 
+  // 删除不再向用户弹提示：提交后列表立刻不再显示该数据集，后台完成后自动刷新。
+  // 失败由错误横幅（error）呈现。
+  function dismissDeletionNotice() {}
+
   function closeDetail() {
     resetDetail();
     detailLoading.value = false;
@@ -344,6 +427,7 @@ export const useDatasetsStore = defineStore('datasets', () => {
   function dispose() {
     listScope.dispose();
     deletePollTimers.forEach((timer) => clearTimeout(timer));
+    deletionPollTimers.forEach((timer) => clearTimeout(timer));
     deletePollTimers.clear();
     Object.keys(pendingGridDeletes).forEach((key) => delete pendingGridDeletes[key]);
     resetDetail();
@@ -354,5 +438,6 @@ export const useDatasetsStore = defineStore('datasets', () => {
     detailVisible, detailLoading, detail, activeTab, tabPages, loadList, openDetail, loadDetailTab,
     setActiveTab, setTabPage, setTabPageSize, updateMetadata, updateRoleRestrictions, reassignScene, requestIngest,
     retryBandIngest, deleteBandGrid, publish, withdraw, deleteDataset, closeDetail, dispose,
+    pendingDeletions, activeDeletions, deletingDatasetIds,
   };
 });

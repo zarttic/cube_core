@@ -41,6 +41,12 @@ beforeEach(() => {
     if (path === '/v1/topology/geometry') {
       return { geometry: { type: 'Polygon', coordinates: [] } };
     }
+    if (path === '/v1/topology/children') {
+      return { addresses: [] };
+    }
+    if (path === '/v1/topology/neighbors') {
+      return { addresses: [{ ...payload.address, space_code: 'wx4g0c' }] };
+    }
     if (path === '/v1/code/GNse') {
       return { grid_type: 'geohash', grid_level: 6, space_code: 'wx4g0b', time_code: '202603091530' };
     }
@@ -50,17 +56,17 @@ beforeEach(() => {
 });
 
 describe('EncodingView', () => {
-  it('uses the requested action label for grid division and encoding or decoding', async () => {
+  it('labels every execute button the same way and still switches decode result title', async () => {
     const wrapper = mountView();
 
-    expect(wrapper.get('button.btn-primary').text()).toContain('查看结果');
+    expect(wrapper.get('button.btn-primary').text()).toBe('执行');
 
     wrapper.vm.activeModule = 'encoding';
     await nextTick();
-    expect(wrapper.get('button.btn-primary').text()).toContain('执行编码');
+    expect(wrapper.get('button.btn-primary').text()).toBe('执行');
 
     await wrapper.get('input[value="decode"]').setValue();
-    expect(wrapper.get('button.btn-primary').text()).toContain('执行解码');
+    expect(wrapper.get('button.btn-primary').text()).toBe('执行');
     expect(wrapper.get('.result-panel h3').text()).toBe('解码结果');
   });
 
@@ -114,6 +120,60 @@ describe('EncodingView', () => {
     expect(wrapper.find('[data-testid="topology-result"]').exists()).toBe(false);
   });
 
+  it('defaults the child target level to one level above the base level', async () => {
+    const wrapper = mountView();
+    wrapper.vm.activeModule = 'operations';
+    await nextTick();
+
+    expect(wrapper.vm.topology.targetLevel).toBe(7);
+
+    wrapper.vm.topology.level = 9;
+    await nextTick();
+    expect(wrapper.vm.topology.targetLevel).toBe(10);
+
+    wrapper.vm.topology.level = 12;
+    await nextTick();
+    expect(wrapper.vm.topology.targetLevel).toBe(12);
+  });
+
+  it('falls back to one level deeper for children when the target level is not deeper', async () => {
+    const wrapper = mountView();
+    wrapper.vm.activeModule = 'operations';
+    await nextTick();
+    wrapper.vm.topology.operation = 'children';
+    wrapper.vm.topology.targetLevel = 6;
+
+    await wrapper.vm.runTopologyOperation();
+    await flushPromises();
+
+    expect(wrapper.vm.topology.targetLevel).toBe(7);
+    expect(requestJson).toHaveBeenCalledWith('/v1/topology/children', expect.objectContaining({ target_grid_level: 7 }));
+  });
+
+  it('keeps topology context separate from the result rows', async () => {
+    const wrapper = mountView();
+    wrapper.vm.activeModule = 'operations';
+    await nextTick();
+
+    await wrapper.vm.runTopologyOperation();
+    await flushPromises();
+
+    const result = wrapper.get('[data-testid="topology-result"]');
+    const context = wrapper.get('[data-testid="topology-context"]');
+    expect(context.text()).toContain('格网类型经纬度格网');
+    expect(context.text()).toContain('运算类型邻接单元计算');
+    expect(context.text()).toContain('输入编码');
+    // 已去掉的两行不再出现
+    expect(context.text()).not.toContain('基准编码数');
+    expect(context.text()).not.toContain('目标层级');
+    // 上下文（转换前）不是卡片样式，结果（转换后）才用 result-item 卡片。
+    expect(context.findAll('.result-item')).toHaveLength(0);
+    expect(context.find('.operation-context-item').exists()).toBe(true);
+    expect(result.findAll('.result-item')).toHaveLength(2);
+    expect(result.text()).toContain('结果数量1');
+    expect(result.text()).toContain('wx4g0c');
+  });
+
   it('keeps coordinate conversion context separate from the result rows', async () => {
     const wrapper = mountView();
     wrapper.vm.activeModule = 'operations';
@@ -125,7 +185,7 @@ describe('EncodingView', () => {
 
     const context = wrapper.get('[data-testid="conversion-context"]');
     expect(context.text()).toContain('格网类型经纬度格网');
-    expect(context.text()).toContain('点选坐标39.904200, 116.407400');
+    expect(context.text()).toContain('点选坐标39.904200°N, 116.407400°E');
     expect(context.text()).toContain('基准编码wx4g0b');
     expect(context.findAll('.result-item')).toHaveLength(0);
     expect(wrapper.get('[data-testid="conversion-result"]').text()).toContain('转换结果');

@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue';
-import { Download, Refresh } from '@element-plus/icons-vue';
+import { DownloadOutline, RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 
 import AppTable from '@/components/AppTable.vue';
 import DetailDrawer from '@/components/DetailDrawer.vue';
@@ -33,6 +33,11 @@ const emit = defineEmits(['close', 'tab-change', 'load-errors', 'error-page-chan
 const title = computed(() => props.detail?.dataset_code ? `${props.detail.dataset_code} 质量详情` : '质量详情');
 const errorRuleOptions = computed(() => [...new Set(props.errors.map((item) => item.rule_code).filter(Boolean))]);
 const treeProps = { children: 'children', label: 'label' };
+
+function resetErrorFilters() {
+  Object.assign(props.errorFilters, { ruleCode: '', errorCode: '', field: '' });
+  emit('load-errors');
+}
 
 function sceneLabel(row) {
   return row.scene_name || row.scene_id || row.source_asset_id || '数据集级问题';
@@ -120,9 +125,9 @@ function rerun() {
         <el-descriptions-item label="格网吞吐">{{ formatMetric(detail.metrics?.grid_throughput_per_sec, ' 格网/秒') }}</el-descriptions-item>
       </el-descriptions>
       <div class="drawer-actions">
-        <el-button :icon="Refresh" :loading="rerunning" @click="rerun">立即重试</el-button>
-        <el-button data-testid="quality-export-all" :icon="Download" :loading="exporting" @click="emit('export', { format: 'csv', filtered: false })">导出全部 CSV</el-button>
-        <el-button :icon="Download" :loading="exporting" @click="emit('export', { format: 'json', filtered: false })">导出全部 JSON</el-button>
+        <el-button :icon="RefreshOutline" :loading="rerunning" @click="rerun">立即重试</el-button>
+        <el-button data-testid="quality-export-all" :icon="DownloadOutline" :loading="exporting" @click="emit('export', { format: 'csv', filtered: false })">导出全部 CSV</el-button>
+        <el-button :icon="DownloadOutline" :loading="exporting" @click="emit('export', { format: 'json', filtered: false })">导出全部 JSON</el-button>
       </div>
       <p v-if="exportFilename" class="export-name">已导出：{{ exportFilename }}</p>
 
@@ -163,11 +168,11 @@ function rerun() {
             </el-form-item>
             <el-form-item label="错误码"><el-input v-model="errorFilters.errorCode" clearable /></el-form-item>
             <el-form-item label="字段"><el-input v-model="errorFilters.field" clearable /></el-form-item>
-            <el-form-item><el-button type="primary" @click="emit('load-errors')">筛选</el-button></el-form-item>
+            <el-form-item><el-button type="primary" :icon="SearchOutline" @click="emit('load-errors')">筛选</el-button><el-button @click="resetErrorFilters">重置</el-button></el-form-item>
           </el-form>
           <div class="drawer-actions">
-            <el-button data-testid="quality-export-filtered" :icon="Download" :loading="exporting" @click="emit('export', { format: 'csv', filtered: true })">导出当前筛选结果 CSV</el-button>
-            <el-button :icon="Download" :loading="exporting" @click="emit('export', { format: 'json', filtered: true })">导出当前筛选结果 JSON</el-button>
+            <el-button data-testid="quality-export-filtered" :icon="DownloadOutline" :loading="exporting" @click="emit('export', { format: 'csv', filtered: true })">导出当前筛选结果 CSV</el-button>
+            <el-button :icon="DownloadOutline" :loading="exporting" @click="emit('export', { format: 'json', filtered: true })">导出当前筛选结果 JSON</el-button>
           </div>
           <AppTable :data="errors" :page="errorPage" :page-size="errorPageSize" :total="errorTotal" row-key="quality_error_id" @current-change="emit('error-page-change', $event)" @size-change="emit('error-page-size-change', $event)">
             <el-table-column label="景" min-width="180"><template #default="{ row }"><span :title="row.scene_id || row.source_asset_id || ''">{{ sceneLabel(row) }}</span></template></el-table-column>
@@ -201,8 +206,9 @@ function rerun() {
 .error-filters { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .error-filters :deep(.el-form-item) { margin-bottom: 10px; }
 .location-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 0 12px; }
-.location-overview > div { border: 1px solid #d7dde5; padding: 8px 10px; background: #f8fafc; }
+.location-overview > div { border: 1px solid #d7dde5; padding: 8px 10px; background: #f8fafc; min-width: 0; }
 .location-overview span, .location-overview strong { display: block; }
+.location-overview strong { overflow-wrap: anywhere; }
 .location-overview span { color: #667085; font-size: 12px; margin-bottom: 3px; }
 .quality-execution-log { display: grid; gap: 4px; margin: 0 0 14px; border-left: 3px solid #c24d45; background: #fff7f6; padding: 8px 10px; color: #7f2d28; }
 .quality-execution-log > strong { color: #9b2c2c; }
@@ -211,6 +217,7 @@ function rerun() {
 .quality-execution-log p span { font-weight: 600; }
 .quality-location-tree { border: 1px solid #d7dde5; padding: 8px; margin-bottom: 14px; max-height: 360px; overflow: auto; }
 .quality-tree-node { display: flex; align-items: baseline; gap: 8px; min-width: 0; line-height: 1.65; }
+.quality-tree-node > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quality-tree-node small { color: #667085; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quality-tree-band strong { color: #315a7a; }
 .tree-error-code { color: #9b2c2c; flex: 0 0 auto; }

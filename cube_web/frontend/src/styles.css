@@ -309,6 +309,14 @@ body {
     flex-shrink: 0;
 }
 
+.service-user-name {
+    min-width: 0;
+    max-width: min(220px, 24vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .service-auth-btn {
     border: 1px solid rgba(255, 255, 255, 0.3);
     background: rgba(255, 255, 255, 0.1);
@@ -2631,6 +2639,7 @@ section {
 
 .encoding-structure.compact {
     flex-direction: row;
+    flex-wrap: wrap;
     padding: 12px 16px;
     gap: 8px;
 }
@@ -2644,6 +2653,7 @@ section {
 .encoding-structure.compact .encoding-part {
     padding: 8px 12px;
     min-width: auto;
+    max-width: min(240px, 100%);
 }
 
 .level-part {
@@ -2688,6 +2698,9 @@ section {
 
 .encoding-structure.compact .part-value {
     font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .result-part .part-value {
@@ -4660,4 +4673,33 @@ section {
     .partition-detail-grid {
         grid-template-columns: 1fr;
     }
+}
+
+/* ========================================
+   超长文本截断与悬停提示
+   ======================================== */
+
+.text-truncate {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 抽屉/弹窗标题超长时截断，悬停查看完整内容（overflowTitle 全局工具补齐 title） */
+.el-drawer__title,
+.el-dialog__title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.el-dialog__title {
+    display: block;
+}
+
+/* 下划线连写的长 ID/文件名（如 S1C_..._COG.SAFE）在描述表格里也要能换行，避免溢出单元格 */
+.el-descriptions__content {
+    overflow-wrap: anywhere;
 }

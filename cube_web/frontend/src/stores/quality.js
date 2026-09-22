@@ -312,16 +312,16 @@ export const useQualityStore = defineStore('quality', () => {
     }
   }
 
-  async function exportRunErrors(row) {
-    return exportQualityWorkbook(row);
+  async function exportRunErrors(row, format = 'csv') {
+    return exportQualityRun(row, format);
   }
 
-  async function exportQualityWorkbook(row) {
+  async function exportQualityRun(row, format = 'csv') {
     if (!row?.quality_run_id) return null;
     exporting.value = true;
     try {
-      const result = await download(`/v1/quality/records/${encodeURIComponent(row.quality_run_id)}/export?format=xlsx`);
-      saveDownload(result, `${row.dataset_code || 'dataset'}-quality.xlsx`);
+      const result = await download(`/v1/quality/records/${encodeURIComponent(row.quality_run_id)}/export?format=${format}`);
+      saveDownload(result, `${row.dataset_code || 'dataset'}-quality.${format}`);
       return result;
     } finally {
       exporting.value = false;
@@ -388,7 +388,7 @@ export const useQualityStore = defineStore('quality', () => {
     setActiveTab,
     exportErrors,
     exportRunErrors,
-    exportQualityWorkbook,
+    exportQualityRun,
     loadRuleCatalog,
     rerun,
     closeDetail,

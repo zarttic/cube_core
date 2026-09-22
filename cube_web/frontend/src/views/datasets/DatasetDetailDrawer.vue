@@ -1,7 +1,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessageBox } from 'element-plus';
-import { Lock, Unlock } from '@element-plus/icons-vue';
+import { LockClosedOutline, LockOpenOutline } from '@vicons/ionicons5';
 
 import AppTable from '@/components/AppTable.vue';
 import DetailDrawer from '@/components/DetailDrawer.vue';
@@ -173,6 +173,7 @@ function queuePartition() {
   queueConfirmDialog.value = false;
 }
 function changeRepartitionGrid(gridType) {
+  if (repartitionGridLocked.value) return;
   repartitionGridType.value = gridType;
   repartitionGridLevel.value = recommendedLevel(gridType);
   repartitionGridLevelLocked.value = true;
@@ -194,6 +195,11 @@ const selectedPartitionBandIds = ref([]);
 const repartitionGridType = ref('geohash');
 const repartitionGridLevel = ref(5);
 const repartitionGridLevelLocked = ref(true);
+// 碳卫星只能使用六边形格网（与剖分页一致），选择器不可改。
+const repartitionGridLocked = computed(() => props.detail?.overview?.data_type === 'carbon');
+const repartitionGridOptions = computed(() => (
+  repartitionGridLocked.value ? gridTypes.filter((grid) => grid.value === 'isea4h') : gridTypes
+));
 const linkedQualityRunId = ref('');
 const visibleRoleSelection = ref([]);
 const accessRoles = ['NORMAL', 'ADVANCED', 'SCIENTIST'];
@@ -208,6 +214,7 @@ function resetLocalState() {
   Object.assign(reassignForm, { scene_id: '', target_dataset_id: '', reason: '' });
   collapsedScenes.value = new Set((props.detail?.scenes?.items || []).map((scene) => String(scene.scene_id)));
   selectedPartitionBandIds.value = [];
+  repartitionGridType.value = repartitionGridLocked.value ? 'isea4h' : 'geohash';
   repartitionGridLevel.value = recommendedLevel();
   repartitionGridLevelLocked.value = true;
   linkedQualityRunId.value = '';
@@ -379,8 +386,6 @@ function sceneCollapsed(sceneId) {
               <el-descriptions-item label="名称">{{ detail.overview.dataset_title || '-' }}</el-descriptions-item>
               <el-descriptions-item label="景数量">{{ detail.overview.scene_count ?? 0 }}</el-descriptions-item>
               <el-descriptions-item label="时间范围">{{ formatShanghaiRange(detail.overview.time_start, detail.overview.time_end) }}</el-descriptions-item>
-              <el-descriptions-item label="产品类型">{{ detail.overview.product_type || '-' }}</el-descriptions-item>
-              <el-descriptions-item label="产品族">{{ (detail.overview.product_families || []).join('、') || '-' }}</el-descriptions-item>
               <el-descriptions-item v-if="false" label="空间范围" :span="2">{{ detail.overview.bbox || '-' }}</el-descriptions-item>
               <el-descriptions-item label="描述" :span="2">{{ detail.overview.description || '-' }}</el-descriptions-item>
             </el-descriptions>
@@ -401,8 +406,8 @@ function sceneCollapsed(sceneId) {
           <div v-if="writeEnabled" class="repartition-toolbar">
             <div class="repartition-heading"><strong>重新剖分</strong><span>选择尚未完成当前格网的数据单元，加入新的剖分批次</span></div>
             <div class="repartition-controls" aria-label="剖分格网设置">
-              <label><span>格网</span><el-select :model-value="repartitionGridType" size="small" @update:model-value="changeRepartitionGrid"><el-option v-for="grid in gridTypes" :key="grid.value" :label="grid.label" :value="grid.value" /></el-select></label>
-              <label><span>层级</span><div class="level-control"><el-select v-model="repartitionGridLevel" size="small" :disabled="repartitionGridLevelLocked"><el-option v-for="level in levelOptions(repartitionGridType)" :key="level" :label="nativeLevelLabel(repartitionGridType, level)" :value="level" /></el-select><el-tooltip v-if="repartitionGridLevelLocked" content="解锁格网层级" placement="top"><el-button :icon="Unlock" aria-label="解锁格网层级" @click="repartitionGridLevelLocked = false" /></el-tooltip><el-tooltip v-else content="恢复推荐层级" placement="top"><el-button :icon="Lock" aria-label="恢复推荐层级" @click="lockRecommendedLevel" /></el-tooltip></div></label>
+              <label><span>格网</span><el-select :model-value="repartitionGridType" size="small" :disabled="repartitionGridLocked" data-testid="repartition-grid-type" @update:model-value="changeRepartitionGrid"><el-option v-for="grid in repartitionGridOptions" :key="grid.value" :label="grid.label" :value="grid.value" /></el-select></label>
+              <label><span>层级</span><div class="level-control"><el-select v-model="repartitionGridLevel" size="small" :disabled="repartitionGridLevelLocked"><el-option v-for="level in levelOptions(repartitionGridType)" :key="level" :label="nativeLevelLabel(repartitionGridType, level)" :value="level" /></el-select><el-tooltip v-if="repartitionGridLevelLocked" content="解锁格网层级" placement="top"><el-button :icon="LockOpenOutline" aria-label="解锁格网层级" @click="repartitionGridLevelLocked = false" /></el-tooltip><el-tooltip v-else content="恢复推荐层级" placement="top"><el-button :icon="LockClosedOutline" aria-label="恢复推荐层级" @click="lockRecommendedLevel" /></el-tooltip></div></label>
             </div>
             <div class="repartition-actions">
               <div class="selection-action"><el-checkbox :model-value="selectionState(selectableBands()).checked" :indeterminate="selectionState(selectableBands()).indeterminate" :disabled="!selectableBands().length" @change="(value) => togglePartitionBands(selectableBands(), value)">全选当前页</el-checkbox></div>

@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/api/client', () => ({ requestGet: vi.fn() }));
@@ -93,6 +94,72 @@ beforeEach(() => {
   });
 });
 afterEach(() => wrappers.splice(0).forEach((wrapper) => wrapper.unmount()));
+
+describe('BatchAssetsPanel locked grid type (carbon -> hexagon)', () => {
+  const carbonBatch = { load_batch_id: 'load-carbon', batch_name: '碳卫星批次', scene_count: 1, status: 'succeeded' };
+  const carbonScene = scene('carbon-scene', 'load-carbon');
+  carbonScene.dataset_id = 'dataset-carbon';
+
+  function mockCarbon() {
+    requestGet.mockImplementation((url) => {
+      if (url.includes('/load-batches?')) return Promise.resolve({ load_batches: [carbonBatch] });
+      return Promise.resolve({
+        load_batch: carbonBatch,
+        datasets: [group('dataset-carbon', [carbonScene], 'carbon')],
+      });
+    });
+  }
+
+  /** Mount the carbon panel and confirm a band, so the dataset row (and its grid select) renders. */
+  async function mountSelectedCarbon() {
+    mockCarbon();
+    const wrapper = mountPanel({
+      dataTypeFilter: 'carbon', lockedGridType: 'isea4h',
+      defaultGridType: 'isea4h', defaultRequestedGridLevel: 6,
+    });
+    await flushPromises();
+    await wrapper.vm.loadSelectedBatches(['load-carbon']);
+    wrapper.vm.updateBandSelection(['band-carbon-scene-B08']);
+    await flushPromises();
+    await wrapper.setProps({ modelValue: wrapper.emitted('update:modelValue').at(-1)[0] });
+    return wrapper;
+  }
+
+  it('offers only the hexagon grid and disables the selector', async () => {
+    const wrapper = await mountSelectedCarbon();
+
+    expect(wrapper.vm.gridTypeOptions.map((grid) => grid.value)).toEqual(['isea4h']);
+    const gridSelect = wrapper.get('[data-testid="dataset-grid-dataset-carbon"]');
+    expect(gridSelect.attributes('disabled')).toBeDefined();
+    // 只有一条选项（el-option 桩不渲染 label 属性，标签从组件状态断言）
+    expect(gridSelect.findAll('option')).toHaveLength(1);
+    expect(wrapper.vm.gridTypeOptions.map((grid) => grid.label)).toEqual(['六边形格网']);
+  });
+
+  it('ignores a grid_type change and keeps the carbon dataset on isea4h', async () => {
+    const wrapper = await mountSelectedCarbon();
+    const emittedBefore = wrapper.emitted('update:modelValue').length;
+
+    wrapper.vm.updatePartition('dataset-carbon', { grid_type: 'geohash' });
+
+    expect(wrapper.emitted('update:modelValue')).toHaveLength(emittedBefore);
+    const dataset = wrapper.vm.availableDatasets.find((item) => item.dataset_id === 'dataset-carbon');
+    expect(wrapper.vm.partitionFor(dataset).grid_type).toBe('isea4h');
+  });
+
+  it('still allows changing the hexagon level', async () => {
+    const wrapper = await mountSelectedCarbon();
+
+    wrapper.vm.unlockGridLevel('dataset-carbon');
+    await wrapper.setProps({ modelValue: wrapper.emitted('update:modelValue').at(-1)[0] });
+    wrapper.vm.updatePartition('dataset-carbon', { requested_grid_level: 4 });
+
+    const emitted = wrapper.emitted('update:modelValue').at(-1)[0];
+    expect(emitted[0].partition).toMatchObject({
+      grid_type: 'isea4h', requested_grid_level: 4, partition_method: 'entity',
+    });
+  });
+});
 
 describe('BatchAssetsPanel dataset, scene and band selection', () => {
   it('shows a confirmed reload as a formal load batch', async () => {
@@ -513,5 +580,69 @@ describe('BatchAssetsPanel dataset, scene and band selection', () => {
     await flushPromises();
     expect(wrapper.find('input[type="text"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="load-batch-selector"]').exists()).toBe(true);
+  });
+});
+
+describe('BatchAssetsPanel cell counts', () => {
+  it('shows the loaded grid cell count inside the dataset row', async () => {
+    const { default: Panel } = await import('@/views/partition/BatchAssetsPanel.vue');
+    const wrapper = mount(Panel, {
+      props: {
+        modelValue: [],
+        dataTypeFilter: 'optical',
+        cellCounts: { 'dataset-a': 4200 },
+      },
+      global: {
+        stubs: {
+          'el-icon': true, 'el-checkbox': true, 'el-checkbox-group': true, 'el-select': true,
+          'el-option': true, 'el-input': true, 'el-form': true, 'el-form-item': true,
+          'el-button': true, 'el-tag': true, 'el-pagination': true, 'el-tooltip': true,
+          'el-empty': true,
+        },
+      },
+    });
+    wrapper.vm.availableDatasets = [{
+      dataset_id: 'dataset-a', dataset_title: '数据集 A', data_type: 'optical',
+      scenes: [{ scene_id: 'scene-a', bands: [] }],
+    }];
+    wrapper.vm.availableBatchGroups = [{
+      load_batch_id: 'batch-a', batch_name: '批次 A',
+      datasets: [{ dataset_id: 'dataset-a', dataset_title: '数据集 A', data_type: 'optical', scenes: [{ scene_id: 'scene-a', bands: [] }] }],
+    }];
+    wrapper.vm.selectedBatchIds = ['batch-a'];
+    await nextTick();
+
+    const badge = wrapper.get('[data-testid="dataset-cell-count-dataset-a"]');
+    expect(badge.text()).toBe('加载 4,200 个格网单元');
+  });
+});
+
+describe('BatchAssetsPanel carbon counts', () => {
+  it('shows grid cells and footprints together inside the dataset row', async () => {
+    const { default: Panel } = await import('@/views/partition/BatchAssetsPanel.vue');
+    const wrapper = mount(Panel, {
+      props: {
+        modelValue: [],
+        dataTypeFilter: 'carbon',
+        cellCounts: { 'dataset-carbon': 128 },
+        footprintCounts: { 'dataset-carbon': 3 },
+      },
+      global: {
+        stubs: {
+          'el-icon': true, 'el-checkbox': true, 'el-checkbox-group': true, 'el-select': true,
+          'el-option': true, 'el-input': true, 'el-form': true, 'el-form-item': true,
+          'el-button': true, 'el-tag': true, 'el-pagination': true, 'el-tooltip': true,
+          'el-empty': true,
+        },
+      },
+    });
+    const dataset = { dataset_id: 'dataset-carbon', dataset_title: '碳卫星数据集', data_type: 'carbon', scenes: [{ scene_id: 'scene-1', bands: [] }] };
+    wrapper.vm.availableDatasets = [dataset];
+    wrapper.vm.availableBatchGroups = [{ load_batch_id: 'batch-c', batch_name: '批次 C', datasets: [dataset] }];
+    wrapper.vm.selectedBatchIds = ['batch-c'];
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="dataset-cell-count-dataset-carbon"]').text())
+      .toBe('加载 128 个格网单元 · 3 个足迹');
   });
 });

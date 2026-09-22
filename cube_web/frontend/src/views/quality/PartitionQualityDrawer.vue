@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue';
-import { Download } from '@element-plus/icons-vue';
+import { DownloadOutline } from '@vicons/ionicons5';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
@@ -213,10 +213,10 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
         <div><span>剖分状态</span><StatusTag domain="partition" :value="detail.status" size="small" /></div>
       </section>
       <section class="batch-stats">
-        <div><span>剖分</span><strong>{{ summary.partitioned_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
+        <div><span>完成剖分</span><strong>{{ summary.partitioned_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
         <div><span>质检通过</span><strong>{{ summary.quality_pass_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
         <div><span>质检失败</span><strong class="failure">{{ summary.quality_failed_count || 0 }}</strong></div>
-        <div><span>已入库</span><strong>{{ summary.ingested_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
+        <div><span>完成入库</span><strong>{{ summary.ingested_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
       </section>
       <section v-if="hasPartitionTiming" class="partition-timing" data-testid="partition-timing">
         <div v-if="partitionTiming"><span>剖分耗时</span><strong>{{ formatElapsed(partitionTiming.elapsed_sec, partitionPendingLabel) }}</strong></div>
@@ -238,7 +238,7 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
           <header>
             <strong>{{ run.datasetLabel }}</strong><StatusTag domain="quality" :value="run.status" size="small" />
             <el-button v-if="['fail', 'error'].includes(run.status)" link type="primary" :loading="submitting" @click="emit('retry-quality-run', run)">立刻重试</el-button>
-            <el-button v-if="canExportQualityRun(run)" :data-testid="`quality-export-content-${run.quality_run_id}`" link type="primary" :icon="Download" :loading="exporting" @click="emit('export-quality-errors', run)">导出质检结果</el-button>
+            <el-button v-if="canExportQualityRun(run)" :data-testid="`quality-export-content-${run.quality_run_id}`" link type="primary" :icon="DownloadOutline" :loading="exporting" @click="emit('export-quality-errors', run)">导出质检结果</el-button>
           </header>
           <div v-if="run.items?.length" class="quality-item-list">
             <div v-for="item in run.items" :key="item.rule_code" class="quality-item-row">
@@ -315,7 +315,7 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .quality-run-list h3 { margin: 0; color: #344054; font-size: 14px; }
 .quality-run-card { border: 1px solid #dfe4ec; background: #fafbfd; padding: 9px 10px; }
 .quality-run-card header, .quality-item-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.quality-run-card header > strong { color: #1f3b57; }
+.quality-run-card header > strong { min-width: 0; overflow: hidden; color: #1f3b57; text-overflow: ellipsis; white-space: nowrap; }
 .quality-run-card header > span, .quality-item-row small, .quality-pending { color: #667085; font-size: 12px; }
 .quality-item-list { display: grid; gap: 5px; margin-top: 8px; }
 .quality-item-row > span { flex: 1; min-width: 0; }
@@ -335,9 +335,10 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .attempt-row:first-of-type { margin-top: 7px; }
 .attempt-row small { color: #667085; overflow-wrap: anywhere; }
 .quality-node { display: flex; align-items: center; gap: 7px; min-height: 28px; min-width: 0; }
+.quality-node > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quality-node small { color: #667085; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quality-node-dataset > strong { color: #1f3b57; }
 .quality-node-scene > strong { color: #344054; }
-.band-name { min-width: 150px; color: #315a7a; }
+.band-name { min-width: 150px; max-width: 320px; overflow: hidden; color: #315a7a; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 680px) { .batch-overview, .batch-stats, .quality-throughput { grid-template-columns: 1fr 1fr; } .partition-timing { grid-template-columns: 1fr; } .batch-overview > div:first-child { grid-column: 1 / -1; } .dataset-association { grid-template-columns: 1fr; gap: 3px; } }
 </style>

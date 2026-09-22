@@ -1,6 +1,6 @@
 <script setup>
-import { onMounted, onUnmounted } from 'vue';
-import { Refresh, Search } from '@element-plus/icons-vue';
+import { computed, onMounted, onUnmounted } from 'vue';
+import { RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 
 import AppTable from '@/components/AppTable.vue';
 import { useDatasetsStore } from '@/stores/datasets';
@@ -20,6 +20,16 @@ const dataTypeLabels = {
   product: '信息产品',
 };
 
+const timeRange = computed({
+  get: () => (store.filters.timeStart && store.filters.timeEnd
+    ? [store.filters.timeStart, store.filters.timeEnd]
+    : []),
+  set: (value) => {
+    store.filters.timeStart = value?.[0] || '';
+    store.filters.timeEnd = value?.[1] || '';
+  },
+});
+
 function dataTypeLabel(value) {
   return dataTypeLabels[value] || value || '-';
 }
@@ -27,6 +37,12 @@ function dataTypeLabel(value) {
 function refresh() {
   store.pageState.page = 1;
   return store.loadList();
+}
+
+
+function resetFilters() {
+  Object.assign(store.filters, { keyword: '', dataType: '', timeStart: '', timeEnd: '' });
+  return refresh();
 }
 
 function setPage(page) {
@@ -50,21 +66,23 @@ onUnmounted(() => store.dispose());
 
 <template>
   <section class="datasets-view" :class="{ embedded }">
-    <header class="view-header">
+    <header v-if="title" class="view-header">
       <div>
-        <h2 v-if="title">{{ title }}</h2>
-        <span>{{ store.pageState.total }} 个数据集 · {{ store.summary.scene_count || 0 }} 景</span>
+        <h2>{{ title }}</h2>
       </div>
-      <el-button :icon="Refresh" :loading="store.loading" @click="refresh">刷新</el-button>
     </header>
 
     <el-form class="filter-bar" label-position="top" @submit.prevent="refresh">
-      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="Search" clearable placeholder="数据集编码、名称或关键词" /></el-form-item>
+      <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="SearchOutline" clearable placeholder="数据集编码、名称或关键词" /></el-form-item>
       <el-form-item label="数据类型"><el-select v-model="store.filters.dataType" clearable placeholder="全部类型"><el-option v-for="(label, value) in dataTypeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
-      <el-form-item label="产品类型"><el-input v-model="store.filters.productType" clearable /></el-form-item>
-      <el-form-item label="入库状态"><el-select v-model="store.filters.ingestStatus" clearable><el-option label="运行中" value="running" /><el-option label="已完成" value="completed" /><el-option label="部分失败" value="partial_failure" /><el-option label="失败" value="failed" /></el-select></el-form-item>
-      <el-form-item label="质量状态"><el-select v-model="store.filters.qualityStatus" clearable><el-option label="通过" value="pass" /><el-option label="告警" value="warn" /><el-option label="失败" value="fail" /><el-option label="异常" value="error" /></el-select></el-form-item>
-      <el-form-item class="filter-action"><el-button native-type="submit" type="primary" :icon="Search">查询</el-button></el-form-item>
+      <el-form-item label="数据时间"><el-date-picker v-model="timeRange" type="daterange" format="YYYY年M月D日" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" clearable style="width: 100%" /></el-form-item>
+      <el-form-item class="filter-action">
+        <el-button native-type="submit" type="primary" :icon="SearchOutline">查询</el-button>
+        <el-button @click="resetFilters">重置</el-button>
+        <div class="filter-actions-end">
+          <el-button :icon="RefreshOutline" :loading="store.loading" title="刷新" aria-label="刷新" @click="refresh" />
+        </div>
+      </el-form-item>
     </el-form>
 
     <el-alert v-if="store.error" :title="store.error" type="error" :closable="false" show-icon />
@@ -87,8 +105,6 @@ onUnmounted(() => store.dispose());
         <template #default="{ row }"><div class="dataset-cell"><strong>{{ row.dataset_title || row.dataset_code }}</strong><span>{{ row.dataset_code || row.dataset_id }}</span></div></template>
       </el-table-column>
       <el-table-column label="数据类型" width="120"><template #default="{ row }">{{ dataTypeLabel(row.data_type) }}</template></el-table-column>
-      <el-table-column prop="product_type" label="产品类型" min-width="170" show-overflow-tooltip />
-      <el-table-column label="产品族" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ (row.product_families || []).join('、') || '-' }}</template></el-table-column>
       <el-table-column prop="scene_count" label="景数量" width="90" />
       <el-table-column label="时间范围" min-width="180"><template #default="{ row }">{{ formatShanghaiRange(row.time_start, row.time_end) }}</template></el-table-column>
       <el-table-column label="操作" width="86" fixed="right"><template #default="{ row }"><el-button :data-testid="`dataset-row-${row.dataset_id}`" link type="primary" @click.stop="store.openDetail(row.dataset_id).catch(() => {})">详情</el-button></template></el-table-column>
@@ -127,10 +143,13 @@ onUnmounted(() => store.dispose());
 .datasets-view.embedded { padding: 0; }
 .view-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .view-header h2 { margin: 0 0 3px; color: #172033; font-size: 18px; letter-spacing: 0; }
-.view-header span { color: #748095; font-size: 13px; }
-.filter-bar { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 12px; margin-bottom: 16px; }
+.filter-bar { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)) minmax(240px, 1fr); gap: 0 12px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 12px; }
 .filter-action { align-self: end; }
+.filter-action :deep(.el-form-item__content) { flex-wrap: nowrap; width: 100%; }
+.filter-action :deep(.el-button) { margin-left: 0; }
+.filter-action :deep(.el-button + .el-button) { margin-left: 8px; }
+.filter-actions-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .summary-strip { display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); border: 1px solid #dfe4ec; border-radius: 6px; margin-bottom: 18px; background: #fff; overflow: hidden; }
 .summary-strip div { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px; border-right: 1px solid var(--el-border-color-lighter); }
 .summary-strip div:last-child { border-right: 0; }

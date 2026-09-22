@@ -416,7 +416,8 @@ async function main() {
           await page.waitForTimeout(1500);
           const activeGrid = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 60));
           const pending = page.waitForResponse((r) => r.url().includes('/locate') || r.url().includes('/cover'), { timeout: 30000 }).catch(() => null);
-          await page.getByRole('button', { name: /查看结果/ }).first().click();
+          // 编码页的执行类按钮统一为「执行」（格网划分模块下只有这一个 btn-primary）。
+          await page.getByRole('button', { name: '执行', exact: true }).first().click();
           const captured = await pending;
           if (captured) await capture(captured);
           await page.waitForTimeout(2500);

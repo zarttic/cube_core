@@ -25,14 +25,15 @@ describe('router guards', () => {
     expect(labels).toContain('全球离散格网模型与编码');
   });
 
-  it('shows the system configuration entry only to a configured operator', () => {
+  it('hides the system configuration entry even for a configured operator', () => {
     const items = navItems({
       isSuperAdmin: false,
       can: (permission) => permission === 'system_config:view',
     });
 
-    expect(items.map((item) => item.label)).toEqual(['首页', '后台管理', '系统配置']);
-    expect(items.find((item) => item.label === '系统配置')).toMatchObject({ kind: 'internal', path: '/config' });
+    // 页面与路由保留，只是导航不再展示「系统配置」。
+    expect(items.map((item) => item.label)).toEqual(['首页', '后台管理']);
+    expect(items.find((item) => item.label === '系统配置')).toBeUndefined();
   });
 
   it('sends an unauthenticated protected route to the auth redirect with its local target', async () => {

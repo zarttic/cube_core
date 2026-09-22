@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
-import { ArrowDown, ArrowRight, Refresh, Search } from '@element-plus/icons-vue';
+import { ChevronDown, ChevronForward, RefreshOutline, SearchOutline } from '@vicons/ionicons5';
 
 import { requestGet } from '@/api/client';
 import { createRequestScope } from '@/api/requestScope';
@@ -83,8 +83,8 @@ onUnmounted(() => {
         <h2>载入批次</h2>
       </div>
       <div class="toolbar-actions">
-        <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索批次名称或 ID" />
-        <el-button :icon="Refresh" :loading="loading" @click="loadBatches">刷新</el-button>
+        <el-input v-model="keyword" :prefix-icon="SearchOutline" clearable placeholder="搜索批次名称或 ID" />
+        <el-button :icon="RefreshOutline" :loading="loading" @click="loadBatches">刷新</el-button>
       </div>
     </header>
 
@@ -109,7 +109,7 @@ onUnmounted(() => {
           @click="toggleBatch(batch)"
         >
           <span class="batch-identity">
-            <el-icon><ArrowDown v-if="isExpanded(batch.load_batch_id)" /><ArrowRight v-else /></el-icon>
+            <el-icon><ChevronDown v-if="isExpanded(batch.load_batch_id)" /><ChevronForward v-else /></el-icon>
             <span><strong>{{ batch.batch_name || batch.load_batch_id }}</strong><small>{{ batch.load_batch_id }}</small></span>
           </span>
           <strong class="numeric-cell">{{ batch.dataset_count || 0 }}</strong>

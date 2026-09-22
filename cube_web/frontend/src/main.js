@@ -9,9 +9,11 @@ import router from './router';
 import './styles.css';
 import { installErrorReporter } from './api/errorReporter';
 import { installGlobalErrorHandlers } from './utils/errorHandler';
+import { installOverflowTitles } from './utils/overflowTitle';
 
 const app = createApp(App);
 app.use(createPinia()).use(router).use(ElementPlus, { locale: zhCn });
 installGlobalErrorHandlers(app);
 installErrorReporter();
+installOverflowTitles();
 app.mount('#app');

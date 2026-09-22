@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ElMessage } from 'element-plus';
@@ -165,6 +166,42 @@ describe('PartitionView map workspace', () => {
       ...wrapper.vm.gridGeometries,
     ]);
     wrapper.unmount();
+  });
+
+  it('shows the server truncation notice when the grid preview is cut at the limit', async () => {
+    const store = usePartitionStore();
+    store.setDatasets('optical', [{
+      dataset_id: 'dataset-a',
+      dataset_title: 'Dataset A',
+      data_type: 'optical',
+      scenes: [{ scene_id: 'scene-a', source_batch_ids: ['loader-batch-a'] }],
+      assets: [{ source_asset_id: 'asset-a', bbox: [100, 20, 101, 21] }],
+      bands: [],
+    }]);
+    requestJson.mockResolvedValue({
+      cells: [{ space_code: 'grid-1', grid_level: 7, geometry: null, bbox: [100, 20, 101, 21] }],
+      truncated: true,
+      notice: '最多显示 10,000 个格网，多余格网已截断',
+    });
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub, ...layoutStubs, GridParameters: true,
+          BatchAssetsPanel: true, TaskQueuePanel: true, QualityView: true, DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    expect(wrapper.find('[data-testid="grid-preview-truncated"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    const notice = wrapper.get('[data-testid="grid-preview-truncated"]');
+    expect(notice.text()).toBe('最多显示 10,000 个格网，多余格网已截断');
+
+    await wrapper.get('[data-testid="reset-grid"]').trigger('click');
+    expect(wrapper.find('[data-testid="grid-preview-truncated"]').exists()).toBe(false);
   });
 
   it('renders the map and previews selected asset bounds', async () => {
@@ -556,8 +593,58 @@ describe('PartitionView map workspace', () => {
     await flushPromises();
 
     expect(wrapper.vm.gridGeometries).toHaveLength(5001);
+    // 计数固定挂在数据集行上（不再用全局弹窗提示），面板通过 cell-counts 收到它。
+    expect(wrapper.vm.cellCountsByDataset['dataset-large']).toBe(5001);
     expect(wrapper.text()).not.toContain('已加载 5001 个格网单元');
     expect(wrapper.get('[data-testid="partition-map-stub"]').attributes('data-geometry-count')).toBe('5002');
+  });
+
+  it('writes carbon cell and footprint counts onto the dataset row instead of a toast', async () => {
+    requestJson.mockResolvedValue({
+      items: [
+        { scene_id: 'scene-c1', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } },
+        { scene_id: 'scene-c2', geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } },
+      ],
+      cells: [
+        { space_code: 'H5-a', scene_id: 'scene-c1', grid_level: 5, geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } },
+        { space_code: 'H5-b', scene_id: 'scene-c2', grid_level: 5, geometry: { type: 'Polygon', coordinates: [[[100, 20], [101, 20], [100.5, 21], [100, 20]]] } },
+      ],
+      cell_limit_reached: false,
+      unavailable_sources: [],
+    });
+    const store = usePartitionStore();
+    store.setDatasets('carbon', [{
+      dataset_id: 'dataset-carbon', data_type: 'carbon', product_type: 'tansat',
+      scenes: [
+        { scene_id: 'scene-c1', source_batch_ids: ['load-carbon'] },
+        { scene_id: 'scene-c2', source_batch_ids: ['load-carbon'] },
+      ],
+      assets: [],
+      partition: { grid_type: 'isea4h', requested_grid_level: 6, partition_method: 'entity' },
+    }]);
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          GlobeMap: GlobeMapStub,
+          ...layoutStubs,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          ExecutionResultPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+    await wrapper.get('[data-testid="partition-module-carbon"]').trigger('click');
+    await wrapper.get('[data-testid="load-map"]').trigger('click');
+    await flushPromises();
+
+    // 碳卫星：一个数据集行同时展示格网单元与足迹数量。
+    expect(wrapper.vm.cellCountsByDataset['dataset-carbon']).toBe(2);
+    expect(wrapper.vm.footprintCountsByDataset['dataset-carbon']).toBe(2);
+    expect(wrapper.text()).not.toContain('已加载 2 个格网单元和 2 个足迹');
   });
 
   it('exposes product, quality and ingest pages as peer modules', async () => {

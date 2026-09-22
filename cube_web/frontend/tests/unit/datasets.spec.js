@@ -39,13 +39,15 @@ describe('datasets store', () => {
     setActivePinia(createPinia());
     const store = useDatasetsStore();
     store.filters.dataType = 'optical';
-    store.filters.ingestStatus = 'completed';
+    store.filters.timeStart = '2026-01-01';
+    store.filters.timeEnd = '2026-06-30';
     const pending = store.loadList();
     deferred.at(-1)({ items: [], total: 0, page: 1, page_size: 20 });
     await pending;
     const { requestGet } = await import('@/api/client');
     expect(requestGet.mock.calls.at(-1)[0]).toContain('data_type=optical');
-    expect(requestGet.mock.calls.at(-1)[0]).toContain('ingest_status=completed');
+    expect(requestGet.mock.calls.at(-1)[0]).toContain('time_start=2026-01-01');
+    expect(requestGet.mock.calls.at(-1)[0]).toContain('time_end=2026-06-30');
     expect(requestGet.mock.calls.at(-1)[0]).toContain('/v1/datasets?');
     expect(requestGet.mock.calls.at(-1)[0]).not.toContain('batch_id');
     expect(requestGet.mock.calls.at(-1)[0]).not.toContain('datasetIds');
@@ -56,14 +58,96 @@ describe('datasets store', () => {
     const store = useDatasetsStore();
     store.selectedDatasetId = 'dataset-a';
     store.detailVisible = true;
-    requestJson.mockResolvedValue({ dataset_id: 'dataset-a', deleted: true });
+    // 服务端已改为异步删除：202 返回任务 id，行与对象由后台 worker 删除。
+    requestJson.mockResolvedValue({
+      deletion_id: 'del-1', dataset_id: 'dataset-a', dataset_title: 'A', status: 'queued',
+    });
     requestGet.mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 });
+
+    const response = await store.deleteDataset();
+
+    expect(requestJson).toHaveBeenCalledWith('/v1/datasets/dataset-a', {}, { method: 'DELETE' });
+    expect(response.deletion_id).toBe('del-1');
+    expect(store.selectedDatasetId).toBe('');
+    expect(store.detailVisible).toBe(false);
+    expect(store.pendingDeletions['del-1'].status).toBe('queued');
+  });
+
+  it('hides a dataset from the list while its deletion is queued', async () => {
+    setActivePinia(createPinia());
+    const store = useDatasetsStore();
+    store.selectedDatasetId = 'dataset-a';
+    requestJson.mockResolvedValue({
+      deletion_id: 'del-1', dataset_id: 'dataset-a', dataset_title: 'A', status: 'queued',
+    });
+    requestGet.mockResolvedValueOnce({
+      items: [{ dataset_id: 'dataset-a' }, { dataset_id: 'dataset-b' }],
+      total: 2, page: 1, page_size: 20,
+    });
 
     await store.deleteDataset();
 
-    expect(requestJson).toHaveBeenCalledWith('/v1/datasets/dataset-a', {}, { method: 'DELETE' });
-    expect(store.selectedDatasetId).toBe('');
-    expect(store.detailVisible).toBe(false);
+    expect(store.records.map((row) => row.dataset_id)).toEqual(['dataset-b']);
+  });
+
+  it('polls the deletion job and clears the pending state once it succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      setActivePinia(createPinia());
+      const store = useDatasetsStore();
+      store.selectedDatasetId = 'dataset-a';
+      requestJson.mockResolvedValue({
+        deletion_id: 'del-1', dataset_id: 'dataset-a', dataset_title: 'A', status: 'queued',
+      });
+      requestGet
+        .mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 })  // 提交后的列表刷新
+        .mockResolvedValueOnce({                                                      // 第一次轮询
+          deletion_id: 'del-1', dataset_id: 'dataset-a', status: 'running',
+          progress: { deleted_total: 120, last_step: 'partition.indexes' },
+        })
+        .mockResolvedValueOnce({ deletion_id: 'del-1', dataset_id: 'dataset-a', status: 'succeeded' })
+        .mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 });  // 完成后的列表刷新
+
+      await store.deleteDataset();
+      // 首轮轮询立即发出（不等定时器），随后按 2s 间隔继续。
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.pendingDeletions['del-1'].status).toBe('running');
+      expect(store.activeDeletions[0].progress.deleted_total).toBe(120);
+
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(store.pendingDeletions['del-1']).toBeUndefined();
+      expect(requestGet.mock.calls.map((call) => call[0])).toContain('/v1/datasets/deletions/del-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces a failed deletion job and keeps the dataset listed', async () => {
+    vi.useFakeTimers();
+    try {
+      setActivePinia(createPinia());
+      const store = useDatasetsStore();
+      store.selectedDatasetId = 'dataset-a';
+      requestJson.mockResolvedValue({
+        deletion_id: 'del-2', dataset_id: 'dataset-a', dataset_title: 'A', status: 'queued',
+      });
+      requestGet
+        .mockResolvedValueOnce({ items: [{ dataset_id: 'dataset-a' }], total: 1, page: 1, page_size: 20 })
+        .mockResolvedValueOnce({
+          deletion_id: 'del-2', dataset_id: 'dataset-a', status: 'failed',
+          error_message: 'MinIO 不可用',
+        })
+        .mockResolvedValueOnce({ items: [{ dataset_id: 'dataset-a' }], total: 1, page: 1, page_size: 20 });
+
+      await store.deleteDataset();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(store.pendingDeletions['del-2']).toBeUndefined();
+      expect(store.error).toContain('MinIO');
+      expect(store.records.map((row) => row.dataset_id)).toEqual(['dataset-a']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -101,6 +185,78 @@ describe('DatasetDetailDrawer', () => {
       grid_config_locked: true,
       partition: { grid_type: 'mgrs', requested_grid_level: 0, partition_method: 'logical' },
     });
+  });
+
+  it('locks the carbon dataset repartition grid to the hexagon grid', async () => {
+    const wrapper = mount(DatasetDetailDrawer, {
+      props: {
+        visible: true, datasetId: 'dataset-carbon', activeTab: 'scenes',
+        detail: {
+          overview: { dataset_id: 'dataset-carbon', dataset_code: 'dataset-carbon', data_type: 'carbon' },
+          scenes: { items: [{
+            scene_id: 'scene-1', bands: [{ band_unit_id: 'band-1', band_code: 'xco2', grid_statuses: [] }],
+          }] },
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' }, StatusTag: { template: '<span />' }, AppTable: { template: '<div />' },
+          'el-tabs': { template: '<div><slot /></div>' }, 'el-tab-pane': { template: '<section><slot /></section>' },
+          'el-button': { template: '<button><slot /></button>' }, 'el-tooltip': { template: '<span><slot /></span>' },
+          'el-dialog': { template: '<div><slot /></div>' }, 'el-descriptions': { template: '<div><slot /></div>' },
+          'el-descriptions-item': { template: '<div><slot /></div>' }, 'el-table-column': { template: '<div />' },
+          'el-select': { props: ['disabled'], template: '<select :disabled="disabled"><slot /></select>' },
+          'el-option': { template: '<option><slot /></option>' },
+        },
+      },
+    });
+    wrappers.push(wrapper);
+
+    expect(wrapper.vm.repartitionGridLocked).toBe(true);
+    expect(wrapper.vm.repartitionGridType).toBe('isea4h');
+    expect(wrapper.vm.repartitionGridOptions.map((grid) => grid.value)).toEqual(['isea4h']);
+    const gridSelect = wrapper.get('[data-testid="repartition-grid-type"]');
+    expect(gridSelect.attributes('disabled')).toBeDefined();
+    expect(gridSelect.findAll('option')).toHaveLength(1);
+
+    wrapper.vm.changeRepartitionGrid('geohash');
+    expect(wrapper.vm.repartitionGridType).toBe('isea4h');
+
+    wrapper.vm.selectedPartitionBandIds = ['band-1'];
+    wrapper.vm.draftName = '碳卫星重剖分';
+    wrapper.vm.queuePartition();
+    expect(wrapper.emitted('queue-partition')[0][0]).toMatchObject({
+      grid_config_locked: true,
+      partition: { grid_type: 'isea4h', partition_method: 'entity' },
+    });
+  });
+
+  it('keeps every grid option for a non-carbon dataset', async () => {
+    const wrapper = mount(DatasetDetailDrawer, {
+      props: {
+        visible: true, datasetId: 'dataset-1', activeTab: 'scenes',
+        detail: {
+          overview: { dataset_id: 'dataset-1', dataset_code: 'dataset-1', data_type: 'optical' },
+          scenes: { items: [{ scene_id: 'scene-1', bands: [{ band_unit_id: 'band-1', band_code: 'B04', grid_statuses: [] }] }] },
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' }, StatusTag: { template: '<span />' }, AppTable: { template: '<div />' },
+          'el-tabs': { template: '<div><slot /></div>' }, 'el-tab-pane': { template: '<section><slot /></section>' },
+          'el-button': { template: '<button><slot /></button>' }, 'el-tooltip': { template: '<span><slot /></span>' },
+          'el-dialog': { template: '<div><slot /></div>' }, 'el-descriptions': { template: '<div><slot /></div>' },
+          'el-descriptions-item': { template: '<div><slot /></div>' }, 'el-table-column': { template: '<div />' },
+          'el-select': { props: ['disabled'], template: '<select :disabled="disabled"><slot /></select>' },
+          'el-option': { template: '<option><slot /></option>' },
+        },
+      },
+    });
+    wrappers.push(wrapper);
+
+    expect(wrapper.vm.repartitionGridLocked).toBe(false);
+    expect(wrapper.vm.repartitionGridOptions.map((grid) => grid.value)).toEqual(['geohash', 'mgrs', 'isea4h']);
+    expect(wrapper.get('[data-testid="repartition-grid-type"]').attributes('disabled')).toBeUndefined();
   });
 
   it('groups band units below their scene in the dataset detail', async () => {
