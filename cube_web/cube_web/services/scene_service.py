@@ -23,6 +23,7 @@ from cube_web.services.scene_contracts import (
     ScenePartitionRunRequest,
     reload_selection_band_unit_ids,
 )
+from cube_web.services.scene_repository import PartitionRunInProgressError
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class SceneRepository(Protocol):
 
     def materialize_partition_datasets(self, request: ScenePartitionRunRequest) -> tuple[DatasetInput, ...]: ...
 
-    def create_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]: ...
+    def create_partition_run(self, request: ScenePartitionRunRequest, *, requested_by: str = "system") -> dict[str, Any]: ...
 
     def bind_partition_task(self, partition_run_id: str, task_id: str) -> None: ...
 
@@ -363,40 +364,56 @@ class SceneDomainService:
             "cell_limit_reached": False,
         }
 
-    def submit_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
-        run = self.repository.create_partition_run(request)
+    def submit_partition_run(self, request: ScenePartitionRunRequest, *, requested_by: str = "system") -> dict[str, Any]:
+        try:
+            run = self.repository.create_partition_run(request, requested_by=requested_by)
+        except PartitionRunInProgressError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "partition_run_in_progress",
+                    "message": "同一剖分目标已有进行中的任务，请等待完成、取消或重试该记录",
+                    "partition_run_id": exc.partition_run_id,
+                    "status": exc.status,
+                },
+            ) from exc
         if not run.get("created"):
             attributes = run.get("attributes") if isinstance(run.get("attributes"), dict) else {}
             task_id = str(attributes.get("task_id") or "")
             if task_id:
                 task = self.workflow.get_task(task_id).to_dict()
                 return {
-                    "partition_run_id": request.partition_run_id,
+                    "partition_run_id": str(run.get("partition_run_id") or request.partition_run_id),
                     "source_batch_ids": list(request.source_batch_ids),
                     "task_id": task_id,
                     "status": str(task.get("status") or run.get("status") or "queued"),
                     "data_type": str(task.get("data_type") or "mixed"),
                     "operation": str(task.get("operation") or "run"),
+                    "merged": False,
+                    "attempt_no": max(1, int(run.get("attempt_no") or 1)),
                 }
             raise HTTPException(
                 status_code=409,
                 detail=f"Partition run is being created: {request.partition_run_id}",
             )
+        partition_run_id = str(run.get("partition_run_id") or request.partition_run_id)
+        merged = bool(run.get("merged"))
         try:
             datasets = self.repository.materialize_partition_datasets(request)
             strict_request = build_partition_execution_request(request, datasets)
             data_types = {dataset.data_type for dataset in datasets}
+            resubmit_kwargs = {"resubmit": True} if merged else {}
             if len(data_types) > 1:
-                task = self.workflow.submit_mixed(strict_request)
+                task = self.workflow.submit_mixed(strict_request, **resubmit_kwargs)
             else:
-                task = self.workflow.submit_strict(next(iter(data_types)), strict_request)
-            self.repository.bind_partition_task(request.partition_run_id, task.task_id)
+                task = self.workflow.submit_strict(next(iter(data_types)), strict_request, **resubmit_kwargs)
+            self.repository.bind_partition_task(partition_run_id, task.task_id)
         except Exception as exc:
             safe_error = _safe_dataset_error(exc)
             try:
-                self.repository.fail_partition_run(request.partition_run_id, safe_error)
+                self.repository.fail_partition_run(partition_run_id, safe_error)
             except Exception:
-                logger.exception("Failed to persist partition run failure %s", request.partition_run_id)
+                logger.exception("Failed to persist partition run failure %s", partition_run_id)
             raise
         try:
             current = self.workflow.get_task(task.task_id).to_dict()
@@ -410,12 +427,14 @@ class SceneDomainService:
             )
         task_value = task.to_dict()
         return {
-            "partition_run_id": request.partition_run_id,
+            "partition_run_id": partition_run_id,
             "source_batch_ids": list(request.source_batch_ids),
             "task_id": task_value["task_id"],
             "status": task_value["status"],
             "data_type": task_value["data_type"],
             "operation": task_value["operation"],
+            "merged": merged,
+            "attempt_no": max(1, int(run.get("attempt_no") or 1)),
         }
 
     def list_partition_quality_batches(

@@ -142,6 +142,21 @@ def quality_batch(dsn):
                 psycopg.types.json.Jsonb(CONTEXT),
             ),
         )
+        connection.execute(
+            "INSERT INTO partition_run_submissions "
+            "(submission_id, partition_run_id, attempt_no, requested_run_id, requested_by, request_fingerprint, "
+            "parameters, changes, status, task_ids, started_at, finished_at) "
+            "VALUES (%s, %s, 1, %s, 'alice', %s, %s, %s, 'completed', %s, now(), now())",
+            (
+                f"submission-{token}",
+                ids["partition_run_id"],
+                f"requested-{token}",
+                "f" * 64,
+                psycopg.types.json.Jsonb({"datasets": []}),
+                psycopg.types.json.Jsonb({"identical": False, "first": True, "fields": []}),
+                psycopg.types.json.Jsonb([ids["task_id"]]),
+            ),
+        )
         connection.commit()
     try:
         yield ids
@@ -149,6 +164,9 @@ def quality_batch(dsn):
         with psycopg.connect(dsn) as connection:
             connection.execute("DELETE FROM partition_quality_errors WHERE dataset_id = %s", (ids["dataset_id"],))
             connection.execute("DELETE FROM partition_quality_runs WHERE dataset_id = %s", (ids["dataset_id"],))
+            connection.execute(
+                "DELETE FROM partition_run_submissions WHERE partition_run_id = %s", (ids["partition_run_id"],)
+            )
             connection.execute(
                 "DELETE FROM partition_data_unit_grid_status WHERE partition_run_id = %s", (ids["partition_run_id"],)
             )
@@ -182,6 +200,13 @@ def test_quality_batch_detail_keeps_jsonb_context_as_object(quality_batch, dsn):
     assert error["error_code"] == ERROR_CODE
     assert error["field"] == "crs"
     assert error["context"] == CONTEXT, "jsonb context must round-trip as a nested object, not a JSON string"
+
+    submissions = batch["submissions"]
+    assert [item["attempt_no"] for item in submissions] == [1]
+    assert submissions[0]["requested_by"] == "alice"
+    assert submissions[0]["task_ids"] == [quality_batch["task_id"]]
+    assert submissions[0]["outputs"][0]["output_version"] == quality_batch["output_version"]
+    assert submissions[0]["outputs"][0]["quality_status"] == "fail"
 
 
 def test_quality_batch_detail_returns_none_for_unknown_run(dsn):

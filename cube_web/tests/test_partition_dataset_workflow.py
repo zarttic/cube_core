@@ -845,6 +845,14 @@ def test_submit_mixed_rejects_homogeneous_and_completed_dataset_partition() -> N
     with pytest.raises(Exception, match="already completed"):
         workflow.submit_mixed(request)
 
+    # A record that merged a repeat submission re-runs its whole target, so the
+    # completed-key filter must not reject the identical submission.
+    resubmitted = workflow.submit_mixed(request, resubmit=True)
+    assert resubmitted.task_id != first.task_id
+    resubmit_attempt = store.get_attempt(resubmitted.task_id)
+    assert resubmit_attempt is not None
+    assert len(resubmit_attempt["payload"]["datasets"]) == 2
+
 
 def test_submit_mixed_partial_failure_retries_only_failed_dataset() -> None:
     payload = _request().model_dump(mode="json")

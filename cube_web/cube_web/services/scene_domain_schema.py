@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-09-19-scene-domain-v13"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-09-29-scene-domain-v14"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -17,6 +17,7 @@ SCENE_DOMAIN_TABLES = {
     "load_batch_scenes",
     "load_batch_sources",
     "partition_runs",
+    "partition_run_submissions",
     "partition_drafts",
     "partition_run_scenes",
     "partition_data_unit_grid_status",
@@ -229,6 +230,40 @@ def schema_statements() -> tuple[str, ...]:
         """ALTER TABLE partition_run_scenes ADD PRIMARY KEY (partition_run_id, selection_id, scene_id)""",
         """ALTER TABLE partition_data_unit_grid_status DROP CONSTRAINT IF EXISTS partition_data_unit_grid_status_pkey""",
         """ALTER TABLE partition_data_unit_grid_status ADD PRIMARY KEY (band_unit_id, grid_type, grid_level)""",
+        # A record is one partition target: repeated submissions before ingest append
+        # attempts to the same run instead of creating sibling records that steal the
+        # single current grid-status row. merge_state is closed for every legacy run
+        # and for a record once ingest was requested.
+        """ALTER TABLE partition_runs ADD COLUMN IF NOT EXISTS merge_key TEXT""",
+        """ALTER TABLE partition_runs ADD COLUMN IF NOT EXISTS merge_state TEXT NOT NULL DEFAULT 'closed'""",
+        """ALTER TABLE partition_runs ADD COLUMN IF NOT EXISTS last_submitted_at TIMESTAMPTZ""",
+        """ALTER TABLE partition_runs ADD COLUMN IF NOT EXISTS submission_count INT NOT NULL DEFAULT 0""",
+        """DO $$ BEGIN
+          ALTER TABLE partition_runs ADD CONSTRAINT partition_runs_merge_state_check
+          CHECK (merge_state IN ('open','closed'));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_partition_runs_open_merge_key
+           ON partition_runs(merge_key) WHERE merge_state='open' AND merge_key IS NOT NULL""",
+        """CREATE TABLE IF NOT EXISTS partition_run_submissions (
+          submission_id TEXT PRIMARY KEY,
+          partition_run_id TEXT NOT NULL REFERENCES partition_runs(partition_run_id) ON DELETE CASCADE,
+          attempt_no INT NOT NULL CHECK (attempt_no > 0),
+          requested_run_id TEXT NOT NULL,
+          requested_by TEXT NOT NULL DEFAULT 'system',
+          request_fingerprint TEXT NOT NULL,
+          parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+          changes JSONB NOT NULL DEFAULT '{}'::jsonb,
+          status TEXT NOT NULL DEFAULT 'queued'
+            CHECK (status IN ('queued','running','completed','partial_failure','failed','cancelled')),
+          task_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+          error_message TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          started_at TIMESTAMPTZ,
+          finished_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (partition_run_id, attempt_no)
+        )""",
+        """ALTER TABLE partition_run_submissions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()""",
         """CREATE TABLE IF NOT EXISTS ingest_runs (
           ingest_run_id TEXT PRIMARY KEY,
           partition_run_id TEXT NOT NULL REFERENCES partition_runs(partition_run_id),
@@ -304,6 +339,7 @@ def schema_statements() -> tuple[str, ...]:
         "CREATE INDEX IF NOT EXISTS idx_partition_run_scenes_dataset_status ON partition_run_scenes(dataset_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_partition_drafts_pending ON partition_drafts(data_type, status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_partition_grid_status_run ON partition_data_unit_grid_status(partition_run_id, partition_status)",
+        "CREATE INDEX IF NOT EXISTS idx_partition_run_submissions_run ON partition_run_submissions(partition_run_id, attempt_no)",
         "CREATE INDEX IF NOT EXISTS idx_ingest_run_scenes_status ON ingest_run_scenes(status, updated_at)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_run_scenes_idempotency ON ingest_run_scenes(idempotency_key)",
         "CREATE INDEX IF NOT EXISTS idx_scene_dataset_audit_scene ON scene_dataset_audit(scene_id, changed_at)",
@@ -329,6 +365,7 @@ def _verify(cursor: Any) -> dict[str, int]:
         "partition run scene references": "SELECT COUNT(*) FROM partition_run_scenes r LEFT JOIN partition_runs p ON p.partition_run_id=r.partition_run_id LEFT JOIN scenes s ON s.scene_id=r.scene_id WHERE p.partition_run_id IS NULL OR s.scene_id IS NULL",
         "ingest run scene references": "SELECT COUNT(*) FROM ingest_run_scenes r LEFT JOIN ingest_runs i ON i.ingest_run_id=r.ingest_run_id LEFT JOIN scenes s ON s.scene_id=r.scene_id WHERE i.ingest_run_id IS NULL OR s.scene_id IS NULL",
         "partition grid band references": "SELECT COUNT(*) FROM partition_data_unit_grid_status g LEFT JOIN scene_bands b ON b.band_unit_id=g.band_unit_id WHERE b.band_unit_id IS NULL",
+        "partition run submission references": "SELECT COUNT(*) FROM partition_run_submissions s LEFT JOIN partition_runs p ON p.partition_run_id=s.partition_run_id WHERE p.partition_run_id IS NULL",
     }
     for label, query in orphan_queries.items():
         count = _scalar(cursor, query)

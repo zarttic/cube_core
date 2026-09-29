@@ -8,6 +8,8 @@ from hashlib import sha256
 from typing import Any, Iterator
 from uuid import uuid4
 
+from psycopg.errors import UniqueViolation
+
 from cube_split.partition_timing import finish_partition_timing, partition_timing_from_workers
 
 from cube_web.services import dataset_identity
@@ -17,6 +19,17 @@ from cube_web.services.quality_contracts import quality_run_metrics
 from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest, reload_selection_band_unit_ids
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_PARTITION_RUN_STATUSES = frozenset({"completed", "partial_failure", "failed", "cancelled"})
+
+
+class PartitionRunInProgressError(RuntimeError):
+    """An open record exists but its current attempt has not finished yet."""
+
+    def __init__(self, partition_run_id: str, status: str) -> None:
+        super().__init__(f"partition run is still {status}: {partition_run_id}")
+        self.partition_run_id = partition_run_id
+        self.status = status
 
 
 class OpenGaussSceneRepository:
@@ -115,6 +128,7 @@ class OpenGaussSceneRepository:
                            ), '[]'::json) AS datasets,
                            pr.error_message,
                            pr.created_at, pr.started_at, pr.completed_at,
+                           pr.last_submitted_at, pr.submission_count,
                            count(DISTINCT prs.dataset_id) AS dataset_count,
                            count(DISTINCT prs.scene_id) AS scene_count,
                            count(DISTINCT g.band_unit_id) AS band_count,
@@ -129,7 +143,7 @@ class OpenGaussSceneRepository:
                     LEFT JOIN partition_data_unit_grid_status g ON g.partition_run_id=pr.partition_run_id
                     WHERE """ + where + """
                     GROUP BY pr.partition_run_id
-                    ORDER BY pr.created_at DESC, pr.partition_run_id DESC
+                    ORDER BY COALESCE(pr.last_submitted_at, pr.created_at) DESC, pr.partition_run_id DESC
                     LIMIT %s OFFSET %s
                     """,
                     (*params, page_size, (page - 1) * page_size),
@@ -299,7 +313,8 @@ class OpenGaussSceneRepository:
                                LEFT JOIN load_batches lb ON lb.load_batch_id=source_batch.load_batch_id
                            ), '[]'::json) AS source_load_batch_names,
                            pr.error_message,
-                           pr.created_at, pr.started_at, pr.completed_at
+                           pr.created_at, pr.started_at, pr.completed_at,
+                           pr.last_submitted_at, pr.submission_count
                     FROM partition_runs pr WHERE pr.partition_run_id=%s
                     """,
                     (partition_run_id,),
@@ -401,6 +416,30 @@ class OpenGaussSceneRepository:
                 )
                 attempts = _all(cursor)
                 cursor.execute(
+                    """
+                    SELECT s.submission_id, s.attempt_no, s.requested_run_id, s.requested_by,
+                           s.parameters, s.changes, s.status, s.task_ids, s.error_message,
+                           s.created_at, s.started_at, s.finished_at,
+                           o.dataset_id AS output_dataset_id, o.output_version, o.grid_type,
+                           o.requested_grid_level, o.status AS output_status, o.grid_cell_count,
+                           q.quality_run_id, q.status AS quality_status, q.completed_at AS quality_completed_at
+                    FROM partition_run_submissions s
+                    LEFT JOIN partition_output_versions o ON o.task_id IN (
+                        SELECT jsonb_array_elements_text(s.task_ids)
+                    )
+                    LEFT JOIN LATERAL (
+                        SELECT quality_run_id, status, completed_at FROM partition_quality_runs
+                        WHERE dataset_id=o.dataset_id AND output_version=o.output_version
+                        ORDER BY quality_sequence DESC, created_at DESC, quality_run_id DESC
+                        LIMIT 1
+                    ) q ON TRUE
+                    WHERE s.partition_run_id=%s
+                    ORDER BY s.attempt_no, o.dataset_id
+                    """,
+                    (partition_run_id,),
+                )
+                submission_rows = _all(cursor)
+                cursor.execute(
                     "SELECT count(*) AS total, count(*) FILTER (WHERE ingest_status='completed') AS completed "
                     "FROM partition_data_unit_grid_status WHERE partition_run_id=%s",
                     (partition_run_id,),
@@ -413,6 +452,7 @@ class OpenGaussSceneRepository:
                 )
                 ingest_completion = _one(cursor) or {}
         batch = self._partition_quality_summary(run)
+        batch["submissions"] = _partition_submissions(submission_rows)
         batch["partition_compute_timing"] = _partition_compute_timing(attempts)
         batch["partition_write_timing"] = _partition_write_timing(attempts)
         batch["partition_execution_timing"] = _partition_execution_timing(attempts)
@@ -602,6 +642,7 @@ class OpenGaussSceneRepository:
         for key in (
             "dataset_count", "scene_count", "band_count", "partitioned_count", "partition_failed_count",
             "quality_pass_count", "quality_failed_count", "ingested_count", "ingest_failed_count",
+            "submission_count",
         ):
             if key in value:
                 value[key] = int(value[key] or 0)
@@ -1373,7 +1414,8 @@ class OpenGaussSceneRepository:
                     "FROM partition_data_unit_grid_status g "
                     "WHERE g.band_unit_id=ANY(%s::text[]) "
                     "AND g.grid_type=%s AND g.grid_level=%s "
-                    "AND g.partition_status='completed' AND g.ingest_status='completed' "
+                    "AND g.partition_status='completed' "
+                    "AND g.ingest_status IN ('queued','running','completed') "
                     "ORDER BY g.band_unit_id,g.grid_type,g.grid_level",
                     (
                         sorted(selected_for_grid),
@@ -1425,161 +1467,437 @@ class OpenGaussSceneRepository:
             )
         return tuple(materialized)
 
-    def create_partition_run(self, request: ScenePartitionRunRequest) -> dict[str, Any]:
+    def create_partition_run(
+        self,
+        request: ScenePartitionRunRequest,
+        *,
+        requested_by: str = "system",
+    ) -> dict[str, Any]:
+        """Create a partition record or append an attempt to its open record.
+
+        One submission target (data selection + grid) owns at most one open
+        record. Re-submitting the same target before ingest reopens that record
+        and records a new submission instead of creating a sibling run that would
+        take over the single current grid-status row.
+        """
         fingerprint = sha256(request.model_dump_json().encode("utf-8")).hexdigest()
-        claim_token = uuid4().hex
-        claim_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+        parameters, merge_key = self._resolve_partition_submission(request)
+        claim = {
+            "claim_token": uuid4().hex,
+            "claim_expires_at": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+        }
+
+        def attempt() -> dict[str, Any]:
+            return self._create_or_merge_partition_run(
+                request,
+                parameters=parameters,
+                merge_key=merge_key,
+                fingerprint=fingerprint,
+                claim=claim,
+                requested_by=requested_by,
+            )
+
+        try:
+            return attempt()
+        except UniqueViolation:
+            # The open-record index rejected a concurrent first submission. By the
+            # time the index reports the conflict the winner has committed, so one
+            # retry resolves into a merge or an explicit in-progress conflict.
+            return attempt()
+
+    def _create_or_merge_partition_run(
+        self,
+        request: ScenePartitionRunRequest,
+        *,
+        parameters: dict[str, Any],
+        merge_key: str,
+        fingerprint: str,
+        claim: dict[str, str],
+        requested_by: str,
+    ) -> dict[str, Any]:
+        run_id = request.partition_run_id
+        merged = False
+        new_submission = False
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                existing = self._lock_partition_run(cursor, run_id)
+                if existing is not None:
+                    attributes = _json_object(existing.get("attributes"))
+                    if attributes.get("request_fingerprint") != fingerprint:
+                        raise ValueError(f"partition_run_id belongs to a different request: {run_id}")
+                    created = attributes.get("claim_token") == claim["claim_token"]
+                    if not created:
+                        cursor.execute(
+                            """
+                            UPDATE partition_runs
+                            SET status = 'pending', error_message = NULL,
+                                completed_at = NULL, attributes = attributes || %s::jsonb
+                            WHERE partition_run_id = %s AND (attributes ->> 'task_id') IS NULL
+                              AND (
+                                status = 'failed'
+                                OR (
+                                  status = 'pending' AND COALESCE(
+                                    NULLIF(attributes ->> 'claim_expires_at','')::timestamptz,
+                                    created_at + interval '60 seconds'
+                                  ) < now()
+                                )
+                              )
+                            RETURNING *
+                            """,
+                            (json.dumps(claim), run_id),
+                        )
+                        reclaimed = _one(cursor)
+                        if reclaimed is None:
+                            connection.commit()
+                            return {
+                                **existing,
+                                "created": False,
+                                "merged": False,
+                                "attempt_no": max(1, int(existing.get("submission_count") or 0)),
+                            }
+                        existing = reclaimed
+                    run = existing
+                else:
+                    open_run = self._lock_open_partition_run(cursor, merge_key)
+                    if open_run is not None:
+                        open_run_id = str(open_run["partition_run_id"])
+                        if self._partition_run_has_ingest(cursor, open_run_id):
+                            # Ingest seals a record: a later submission opens a new
+                            # record instead of changing an already-consumed output.
+                            cursor.execute(
+                                "UPDATE partition_runs SET merge_state='closed' "
+                                "WHERE partition_run_id=%s",
+                                (open_run_id,),
+                            )
+                            open_run = None
+                        elif str(open_run["status"]) not in _TERMINAL_PARTITION_RUN_STATUSES:
+                            connection.commit()
+                            raise PartitionRunInProgressError(open_run_id, str(open_run["status"]))
+                    if open_run is not None:
+                        merged = True
+                        run_id = str(open_run["partition_run_id"])
+                        cursor.execute(
+                            """
+                            UPDATE partition_runs
+                            SET status='pending', error_message=NULL, completed_at=NULL, started_at=NULL,
+                                last_submitted_at=now(), submission_count=submission_count+1,
+                                attributes = attributes - 'task_id' - 'retry_source_task_id'
+                            WHERE partition_run_id=%s
+                            RETURNING *
+                            """,
+                            (run_id,),
+                        )
+                        run = _one(cursor)
+                        if run is None:
+                            raise RuntimeError("merged partition run disappeared")
+                        # The previous attempt's rows are history: its quality runs and
+                        # output version stay queryable through the submission history,
+                        # while the live grid state rows are re-pointed to the new
+                        # attempt. Do not mark the old output 'superseded': a delayed
+                        # quality outbox event for it would then retry forever.
+                        cursor.execute("DELETE FROM partition_run_scenes WHERE partition_run_id=%s", (run_id,))
+                        cursor.execute(
+                            """
+                            UPDATE partition_data_unit_grid_status
+                            SET partition_status='pending', quality_status='pending', ingest_status='pending',
+                                output_version=NULL, error_message=NULL, updated_at=now()
+                            WHERE partition_run_id=%s
+                            """,
+                            (run_id,),
+                        )
+                        new_submission = True
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO partition_runs (
+                              partition_run_id,status,source_load_batch_ids,attributes,
+                              merge_key,merge_state,last_submitted_at,submission_count
+                            ) VALUES (%s,'pending',%s::jsonb,%s::jsonb,%s,'open',now(),1)
+                            RETURNING *
+                            """,
+                            (
+                                run_id,
+                                json.dumps(list(request.source_batch_ids)),
+                                json.dumps({"contract": "scene-domain-v1", "request_fingerprint": fingerprint, **claim}),
+                                merge_key,
+                            ),
+                        )
+                        run = _one(cursor)
+                        if run is None:
+                            raise RuntimeError("partition run insert returned no row")
+                        new_submission = True
+                attempt_no = max(1, int(run.get("submission_count") or 1))
+                if new_submission:
+                    previous = self._latest_submission_parameters(cursor, run_id)
+                    cursor.execute(
+                        """
+                        INSERT INTO partition_run_submissions (
+                          submission_id,partition_run_id,attempt_no,requested_run_id,requested_by,
+                          request_fingerprint,parameters,changes,status
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,'queued')
+                        """,
+                        (
+                            f"partition-submission-{uuid4().hex[:16]}",
+                            run_id,
+                            attempt_no,
+                            request.partition_run_id,
+                            requested_by,
+                            fingerprint,
+                            json.dumps(parameters),
+                            json.dumps(_partition_submission_changes(previous, parameters)),
+                        ),
+                    )
+                self._write_partition_run_rows(cursor, request, run_id)
+            connection.commit()
+        return {**run, "partition_run_id": run_id, "created": True, "merged": merged, "attempt_no": attempt_no}
+
+    @staticmethod
+    def _lock_partition_run(cursor: Any, partition_run_id: str) -> dict[str, Any] | None:
+        cursor.execute("SELECT * FROM partition_runs WHERE partition_run_id = %s FOR UPDATE", (partition_run_id,))
+        return _one(cursor)
+
+    @staticmethod
+    def _lock_open_partition_run(cursor: Any, merge_key: str) -> dict[str, Any] | None:
+        cursor.execute(
+            "SELECT * FROM partition_runs WHERE merge_key = %s AND merge_state = 'open' "
+            "ORDER BY created_at DESC, partition_run_id DESC LIMIT 1 FOR UPDATE",
+            (merge_key,),
+        )
+        return _one(cursor)
+
+    @staticmethod
+    def _partition_run_has_ingest(cursor: Any, partition_run_id: str) -> bool:
+        cursor.execute("SELECT 1 FROM ingest_runs WHERE partition_run_id = %s LIMIT 1", (partition_run_id,))
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _latest_submission_parameters(cursor: Any, partition_run_id: str) -> dict[str, Any] | None:
+        cursor.execute(
+            "SELECT parameters FROM partition_run_submissions WHERE partition_run_id = %s "
+            "ORDER BY attempt_no DESC LIMIT 1",
+            (partition_run_id,),
+        )
+        row = _one(cursor)
+        return _json_object(row.get("parameters")) if row is not None else None
+
+    def _resolve_partition_submission(self, request: ScenePartitionRunRequest) -> tuple[dict[str, Any], str]:
+        """Resolve a submission into canonical parameters and its record identity.
+
+        The identity is the data selection (scenes, effective bands, asset
+        checksums) plus the grid configuration. Execution-only choices such as the
+        source load batch and the worker container limit stay parameters, so they
+        are recorded as differences instead of splitting the record.
+        """
+        scene_ids = sorted({scene_id for selection in request.datasets for scene_id in selection.scene_ids})
+        batch_rows = self._read(
+            "SELECT load_batch_id, attributes FROM load_batches "
+            "WHERE load_batch_id = ANY(%s::text[]) ORDER BY load_batch_id",
+            (list(request.source_batch_ids),),
+        )
+        known_batches = {str(row["load_batch_id"]) for row in batch_rows}
+        missing_batches = sorted(set(request.source_batch_ids) - known_batches)
+        if missing_batches:
+            raise ValueError(f"source load batches not found: {missing_batches}")
+        reload_bands: dict[tuple[str, str], set[str]] = {}
+        for row in batch_rows:
+            for selection in request.datasets:
+                bands = reload_selection_band_unit_ids(row.get("attributes"), str(selection.dataset_id))
+                if bands is not None:
+                    reload_bands[(str(row["load_batch_id"]), str(selection.dataset_id))] = bands
+        band_rows = self._read(
+            "SELECT scene_id, band_unit_id, asset_id FROM scene_bands "
+            "WHERE scene_id = ANY(%s::text[]) AND band_unit_id IS NOT NULL "
+            "ORDER BY scene_id, band_unit_id",
+            (scene_ids,),
+        )
+        bands_by_scene: dict[str, list[dict[str, Any]]] = {}
+        for row in band_rows:
+            bands_by_scene.setdefault(str(row["scene_id"]), []).append(row)
+        asset_rows = self._read(
+            "SELECT scene_id, asset_id, checksum FROM scene_assets "
+            "WHERE scene_id = ANY(%s::text[]) AND asset_role = 'data' ORDER BY scene_id, asset_id",
+            (scene_ids,),
+        )
+        checksums = {
+            (str(row["scene_id"]), str(row["asset_id"])): str(row.get("checksum") or "")
+            for row in asset_rows
+        }
+        link_rows = self._read(
+            "SELECT scene_id, load_batch_id FROM load_batch_scenes "
+            "WHERE scene_id = ANY(%s::text[]) AND load_batch_id = ANY(%s::text[]) "
+            "ORDER BY scene_id, load_batch_id",
+            (scene_ids, list(request.source_batch_ids)),
+        )
+        linked_batches: dict[str, list[str]] = {}
+        for row in link_rows:
+            linked_batches.setdefault(str(row["scene_id"]), []).append(str(row["load_batch_id"]))
+
+        parameters: list[dict[str, Any]] = []
+        content: list[dict[str, Any]] = []
+        for selection in request.datasets:
+            dataset_id = str(selection.dataset_id)
+            explicit = set(selection.band_unit_ids or ())
+            selection_batch_id: str | None = None
+            content_scenes: list[dict[str, Any]] = []
+            for scene_id in selection.scene_ids:
+                batches = [
+                    batch_id for batch_id in linked_batches.get(scene_id, [])
+                    if selection.source_batch_id is None or batch_id == selection.source_batch_id
+                ]
+                if not batches:
+                    raise ValueError(f"scene is not linked to a selected load batch: {scene_id}")
+                source_load_batch_id = batches[0]
+                selection_batch_id = selection_batch_id or source_load_batch_id
+                scene_bands = bands_by_scene.get(scene_id, [])
+                scene_band_ids = {str(row["band_unit_id"]) for row in scene_bands}
+                reload = reload_bands.get((source_load_batch_id, dataset_id))
+                if explicit:
+                    effective = explicit & scene_band_ids
+                elif reload is not None:
+                    effective = reload & scene_band_ids
+                else:
+                    effective = scene_band_ids
+                content_scenes.append({
+                    "scene_id": scene_id,
+                    "bands": sorted(
+                        (
+                            {
+                                "band_unit_id": str(row["band_unit_id"]),
+                                "asset_id": str(row["asset_id"]),
+                                "checksum": checksums.get((scene_id, str(row["asset_id"])), ""),
+                            }
+                            for row in scene_bands
+                            if str(row["band_unit_id"]) in effective
+                        ),
+                        key=lambda band: band["band_unit_id"],
+                    ),
+                })
+            parameters.append({
+                "dataset_id": dataset_id,
+                "selection_id": selection.selection_id or "",
+                "source_batch_id": selection_batch_id or selection.source_batch_id,
+                "scene_ids": sorted(selection.scene_ids),
+                "band_unit_ids": sorted({
+                    band["band_unit_id"] for scene in content_scenes for band in scene["bands"]
+                }),
+                "grid": selection.partition.model_dump(mode="json", exclude_none=True),
+            })
+            # selection_id and the source batch stay submission parameters: the
+            # record identity is the data selection and the grid only, so the same
+            # scenes re-submitted from another load batch still merge.
+            content.append({"dataset_id": dataset_id, "scenes": sorted(content_scenes, key=lambda scene: scene["scene_id"])})
+        parameters.sort(key=lambda item: (item["dataset_id"], item["selection_id"]))
+        content.sort(key=lambda item: (item["dataset_id"], json.dumps(item["scenes"], ensure_ascii=True, sort_keys=True)))
+        identity = [
+            {
+                "dataset_id": item["dataset_id"],
+                "scene_ids": item["scene_ids"],
+                "band_unit_ids": item["band_unit_ids"],
+                "grid": item["grid"],
+            }
+            for item in parameters
+        ]
+        submission_parameters = {
+            "source_batch_ids": sorted(str(value) for value in request.source_batch_ids),
+            "selection_source": request.selection_source,
+            "worker_container_limit": int(request.worker_container_limit),
+            "datasets": parameters,
+        }
+        canonical = json.dumps(
+            {"identity": identity, "content": content},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return submission_parameters, sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _write_partition_run_rows(self, cursor: Any, request: ScenePartitionRunRequest, partition_run_id: str) -> None:
+        for selection in request.datasets:
+            for scene_id in selection.scene_ids:
+                selection_id = selection.selection_id or _partition_selection_id(selection, scene_id)
+                grid_config = selection.partition.model_dump(mode="json", exclude_none=True)
+                if selection.band_unit_ids:
+                    cursor.execute(
+                        """SELECT band_unit_id FROM scene_bands
+                           WHERE scene_id=%s AND band_unit_id=ANY(%s::text[])
+                           ORDER BY band_unit_id""",
+                        (scene_id, list(selection.band_unit_ids)),
+                    )
+                    grid_config["band_unit_ids"] = [str(row[0]) for row in cursor.fetchall()]
+                cursor.execute(
+                    "SELECT band_unit_id FROM scene_bands WHERE scene_id=%s AND band_unit_id IS NOT NULL "
+                    "AND (%s::text[] IS NULL OR band_unit_id=ANY(%s::text[]))",
+                    (scene_id, list(selection.band_unit_ids) if selection.band_unit_ids else None,
+                     list(selection.band_unit_ids) if selection.band_unit_ids else None),
+                )
+                selected_grid_bands = [str(row[0]) for row in cursor.fetchall()]
                 cursor.execute(
                     """
-                    MERGE INTO partition_runs target USING (
-                      SELECT %s::text AS partition_run_id, %s::jsonb AS source_load_batch_ids,
-                             %s::jsonb AS attributes
-                    ) source ON (target.partition_run_id = source.partition_run_id)
+                    SELECT load_batch_id FROM load_batch_scenes
+                    WHERE scene_id = %s AND load_batch_id = ANY(%s::text[])
+                      AND (%s::text IS NULL OR load_batch_id = %s)
+                    ORDER BY load_batch_id LIMIT 1
+                    """,
+                    (scene_id, list(request.source_batch_ids), selection.source_batch_id, selection.source_batch_id),
+                )
+                source_row = cursor.fetchone()
+                if source_row is None:
+                    raise ValueError(f"scene is not linked to a selected load batch: {scene_id}")
+                source_load_batch_id = str(source_row[0])
+                identity = _partition_scene_idempotency_key(
+                    partition_run_id, scene_id, grid_config, source_load_batch_id,
+                )
+                cursor.execute(
+                    """
+                    MERGE INTO partition_run_scenes target USING (
+                      SELECT %s::text AS partition_run_id, %s::text AS selection_id, %s::text AS scene_id,
+                        %s::text AS dataset_id, %s::text AS source_load_batch_id,
+                        %s::jsonb AS grid_config, %s::text AS idempotency_key
+                    ) source ON (
+                      target.partition_run_id = source.partition_run_id
+                      AND target.selection_id = source.selection_id
+                      AND target.scene_id = source.scene_id
+                    )
                     WHEN NOT MATCHED THEN INSERT (
-                      partition_run_id,status,source_load_batch_ids,attributes
+                      partition_run_id, selection_id, scene_id, dataset_id, source_load_batch_id,
+                      status, grid_config, idempotency_key
                     ) VALUES (
-                      source.partition_run_id,'pending',source.source_load_batch_ids,source.attributes
+                      source.partition_run_id, source.selection_id, source.scene_id, source.dataset_id,
+                      source.source_load_batch_id, 'pending', source.grid_config,
+                      source.idempotency_key
                     )
                     """,
                     (
-                        request.partition_run_id,
-                        json.dumps(list(request.source_batch_ids)),
-                        json.dumps({
-                            "contract": "scene-domain-v1",
-                            "request_fingerprint": fingerprint,
-                            "claim_token": claim_token,
-                            "claim_expires_at": claim_expires_at,
-                        }),
+                        partition_run_id,
+                        selection_id,
+                        scene_id,
+                        selection.dataset_id,
+                        source_load_batch_id,
+                        json.dumps(grid_config),
+                        identity,
                     ),
                 )
-                cursor.execute("SELECT * FROM partition_runs WHERE partition_run_id = %s FOR UPDATE", (request.partition_run_id,))
-                run = _one(cursor)
-                if run is None:
-                    raise RuntimeError("partition run insert returned no row")
-                attributes = _json_object(run.get("attributes"))
-                if attributes.get("request_fingerprint") != fingerprint:
-                    raise ValueError(f"partition_run_id belongs to a different request: {request.partition_run_id}")
-                created = attributes.get("claim_token") == claim_token
-                if not created:
+                grid_type = str(grid_config.get("grid_type") or "geohash")
+                grid_level = int(grid_config.get("requested_grid_level") or 0)
+                for band_unit_id in selected_grid_bands:
                     cursor.execute(
                         """
-                        UPDATE partition_runs
-                        SET status = 'pending', error_message = NULL,
-                            completed_at = NULL, attributes = attributes || %s::jsonb
-                        WHERE partition_run_id = %s AND (attributes ->> 'task_id') IS NULL
-                          AND (
-                            status = 'failed'
-                            OR (
-                              status = 'pending' AND COALESCE(
-                                NULLIF(attributes ->> 'claim_expires_at','')::timestamptz,
-                                created_at + interval '60 seconds'
-                              ) < now()
-                            )
-                          )
-                        RETURNING *
+                        MERGE INTO partition_data_unit_grid_status target USING (
+                          SELECT %s::text AS dataset_id, %s::text AS scene_id, %s::text AS band_unit_id,
+                                 %s::text AS grid_type, %s::int AS grid_level, %s::text AS partition_run_id
+                        ) source ON (
+                          target.band_unit_id=source.band_unit_id
+                          AND target.grid_type=source.grid_type
+                          AND target.grid_level=source.grid_level
+                        )
+                        WHEN MATCHED THEN UPDATE SET partition_run_id=source.partition_run_id,
+                          partition_status=CASE WHEN target.partition_status IN ('failed','cancelled') THEN 'pending' ELSE target.partition_status END,
+                          error_message=NULL, updated_at=now()
+                        WHEN NOT MATCHED THEN INSERT (dataset_id,scene_id,band_unit_id,grid_type,grid_level,partition_run_id)
+                          VALUES (source.dataset_id,source.scene_id,source.band_unit_id,source.grid_type,source.grid_level,source.partition_run_id)
                         """,
-                        (
-                            json.dumps({"claim_token": claim_token, "claim_expires_at": claim_expires_at}),
-                            request.partition_run_id,
-                        ),
+                        (selection.dataset_id, scene_id, band_unit_id, grid_type, grid_level, partition_run_id),
                     )
-                    reclaimed = _one(cursor)
-                    if reclaimed is not None:
-                        run = reclaimed
-                        created = True
-                if not created:
-                    connection.commit()
-                    return {**run, "created": False}
-                for selection in request.datasets:
-                    for scene_id in selection.scene_ids:
-                        selection_id = selection.selection_id or _partition_selection_id(selection, scene_id)
-                        grid_config = selection.partition.model_dump(mode="json", exclude_none=True)
-                        if selection.band_unit_ids:
-                            cursor.execute(
-                                """SELECT band_unit_id FROM scene_bands
-                                   WHERE scene_id=%s AND band_unit_id=ANY(%s::text[])
-                                   ORDER BY band_unit_id""",
-                                (scene_id, list(selection.band_unit_ids)),
-                            )
-                            grid_config["band_unit_ids"] = [str(row[0]) for row in cursor.fetchall()]
-                        cursor.execute(
-                            "SELECT band_unit_id FROM scene_bands WHERE scene_id=%s AND band_unit_id IS NOT NULL "
-                            "AND (%s::text[] IS NULL OR band_unit_id=ANY(%s::text[]))",
-                            (scene_id, list(selection.band_unit_ids) if selection.band_unit_ids else None,
-                             list(selection.band_unit_ids) if selection.band_unit_ids else None),
-                        )
-                        selected_grid_bands = [str(row[0]) for row in cursor.fetchall()]
-                        cursor.execute(
-                            """
-                            SELECT load_batch_id FROM load_batch_scenes
-                            WHERE scene_id = %s AND load_batch_id = ANY(%s::text[])
-                              AND (%s::text IS NULL OR load_batch_id = %s)
-                            ORDER BY load_batch_id LIMIT 1
-                            """,
-                            (scene_id, list(request.source_batch_ids), selection.source_batch_id, selection.source_batch_id),
-                        )
-                        source_row = cursor.fetchone()
-                        if source_row is None:
-                            raise ValueError(f"scene is not linked to a selected load batch: {scene_id}")
-                        source_load_batch_id = str(source_row[0])
-                        identity = _partition_scene_idempotency_key(
-                            request.partition_run_id, scene_id, grid_config, source_load_batch_id,
-                        )
-                        cursor.execute(
-                            """
-                            MERGE INTO partition_run_scenes target USING (
-                              SELECT %s::text AS partition_run_id, %s::text AS selection_id, %s::text AS scene_id,
-                                %s::text AS dataset_id, %s::text AS source_load_batch_id,
-                                %s::jsonb AS grid_config, %s::text AS idempotency_key
-                            ) source ON (
-                              target.partition_run_id = source.partition_run_id
-                              AND target.selection_id = source.selection_id
-                              AND target.scene_id = source.scene_id
-                            )
-                            WHEN NOT MATCHED THEN INSERT (
-                              partition_run_id, selection_id, scene_id, dataset_id, source_load_batch_id,
-                              status, grid_config, idempotency_key
-                            ) VALUES (
-                              source.partition_run_id, source.selection_id, source.scene_id, source.dataset_id,
-                              source.source_load_batch_id, 'pending', source.grid_config,
-                              source.idempotency_key
-                            )
-                            """,
-                            (
-                                request.partition_run_id,
-                                selection_id,
-                                scene_id,
-                                selection.dataset_id,
-                                source_load_batch_id,
-                                json.dumps(grid_config),
-                                identity,
-                            ),
-                        )
-                        grid_type = str(grid_config.get("grid_type") or "geohash")
-                        grid_level = int(grid_config.get("requested_grid_level") or 0)
-                        for band_unit_id in selected_grid_bands:
-                            cursor.execute(
-                                """
-                                MERGE INTO partition_data_unit_grid_status target USING (
-                                  SELECT %s::text AS dataset_id, %s::text AS scene_id, %s::text AS band_unit_id,
-                                         %s::text AS grid_type, %s::int AS grid_level, %s::text AS partition_run_id
-                                ) source ON (
-                                  target.band_unit_id=source.band_unit_id
-                                  AND target.grid_type=source.grid_type
-                                  AND target.grid_level=source.grid_level
-                                )
-                                WHEN MATCHED THEN UPDATE SET partition_run_id=source.partition_run_id,
-                                  partition_status=CASE WHEN target.partition_status IN ('failed','cancelled') THEN 'pending' ELSE target.partition_status END,
-                                  error_message=NULL, updated_at=now()
-                                WHEN NOT MATCHED THEN INSERT (dataset_id,scene_id,band_unit_id,grid_type,grid_level,partition_run_id)
-                                  VALUES (source.dataset_id,source.scene_id,source.band_unit_id,source.grid_type,source.grid_level,source.partition_run_id)
-                                """,
-                                (selection.dataset_id, scene_id, band_unit_id, grid_type, grid_level, request.partition_run_id),
-                            )
-            connection.commit()
-        return {**run, "created": True}
 
     def bind_partition_task(self, partition_run_id: str, task_id: str) -> None:
         with self._connection() as connection:
@@ -1604,6 +1922,17 @@ class OpenGaussSceneRepository:
                     "UPDATE partition_data_unit_grid_status SET partition_status='queued',error_message=NULL,updated_at=now() "
                     "WHERE partition_run_id=%s AND partition_status='pending'",
                     (partition_run_id,),
+                )
+                cursor.execute(
+                    """
+                    UPDATE partition_run_submissions
+                    SET task_ids = CASE WHEN task_ids ? %s THEN task_ids ELSE task_ids || %s::jsonb END,
+                        status='queued', error_message=NULL,
+                        started_at=COALESCE(started_at, now()), finished_at=NULL, updated_at=now()
+                    WHERE partition_run_id=%s
+                      AND attempt_no=(SELECT max(attempt_no) FROM partition_run_submissions WHERE partition_run_id=%s)
+                    """,
+                    (task_id, json.dumps([task_id]), partition_run_id, partition_run_id),
                 )
             connection.commit()
 
@@ -1671,6 +2000,15 @@ class OpenGaussSceneRepository:
                         "WHERE partition_run_id=%s AND partition_status<>'completed'",
                         (partition_run_id,),
                     )
+                cursor.execute(
+                    """
+                    UPDATE partition_run_submissions
+                    SET task_ids = CASE WHEN task_ids ? %s THEN task_ids ELSE task_ids || %s::jsonb END,
+                        status='queued', error_message=NULL, finished_at=NULL, updated_at=now()
+                    WHERE partition_run_id=%s AND task_ids ? %s
+                    """,
+                    (task_id, json.dumps([task_id]), partition_run_id, source_task_id),
+                )
             connection.commit()
         return partition_run_id
 
@@ -1698,6 +2036,15 @@ class OpenGaussSceneRepository:
                     WHERE partition_run_id = %s AND status IN ('pending','queued')
                     """,
                     (error_message, partition_run_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE partition_run_submissions SET status='failed', error_message=%s,
+                      finished_at=COALESCE(finished_at, now()), updated_at=now()
+                    WHERE partition_run_id=%s
+                      AND attempt_no=(SELECT max(attempt_no) FROM partition_run_submissions WHERE partition_run_id=%s)
+                    """,
+                    (error_message, partition_run_id, partition_run_id),
                 )
             connection.commit()
 
@@ -1731,6 +2078,22 @@ class OpenGaussSceneRepository:
                 partition_run_id = str(row[0])
                 cursor.execute(
                     """
+                    SELECT 1 FROM partition_job_attempts attempt
+                    WHERE attempt.task_id = %s
+                      AND attempt.attempt_no = (
+                        SELECT max(newer.attempt_no) FROM partition_job_attempts newer
+                        WHERE newer.batch_id = attempt.batch_id
+                      )
+                    """,
+                    (task_id,),
+                )
+                if cursor.fetchone() is None:
+                    # A lazily delivered callback from a superseded attempt must not
+                    # overwrite the state of the record's current submission.
+                    connection.commit()
+                    return partition_run_id
+                cursor.execute(
+                    """
                     UPDATE partition_runs SET status = %s,
                       started_at = CASE WHEN %s = 'running' THEN COALESCE(started_at,now()) ELSE started_at END,
                       completed_at = CASE WHEN %s IN ('completed','partial_failure','failed','cancelled') THEN now() ELSE completed_at END,
@@ -1757,6 +2120,25 @@ class OpenGaussSceneRepository:
                 if cursor.rowcount == 0:
                     connection.commit()
                     return partition_run_id
+                cursor.execute(
+                    """
+                    UPDATE partition_run_submissions
+                    SET status = %s,
+                        started_at = CASE WHEN %s = 'running' THEN COALESCE(started_at, now()) ELSE started_at END,
+                        finished_at = CASE WHEN %s IN ('completed','partial_failure','failed','cancelled')
+                                          THEN COALESCE(finished_at, now()) ELSE finished_at END,
+                        error_message = %s, updated_at = now()
+                    WHERE partition_run_id = %s AND task_ids ? %s
+                    """,
+                    (
+                        run_status,
+                        run_status,
+                        run_status,
+                        _error_text(None if result is None else result.get("error")),
+                        partition_run_id,
+                        task_id,
+                    ),
+                )
                 if outcomes:
                     for selection_key, outcome in outcomes.items():
                         dataset_id = str(outcome.get("dataset_id") or "")
@@ -2261,6 +2643,51 @@ def _band_unit_id(scene_id: str, asset_id: str, band_code: str) -> str:
     return f"band-{digest}"
 
 
+def _submission_dataset_key(item: dict[str, Any]) -> str:
+    return f"{item.get('dataset_id')}|{item.get('selection_id') or ''}"
+
+
+def _sorted_strings(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return sorted(str(item) for item in value if str(item).strip())
+
+
+def _partition_submission_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    """Diff one submission's parameters against the previous attempt of its record."""
+    if not previous:
+        return {"identical": False, "first": True, "fields": []}
+    fields: list[dict[str, Any]] = []
+    for key in ("source_batch_ids", "selection_source", "worker_container_limit"):
+        before = _sorted_strings(previous.get(key)) if key == "source_batch_ids" else previous.get(key)
+        after = _sorted_strings(current.get(key)) if key == "source_batch_ids" else current.get(key)
+        if before != after:
+            fields.append({"field": key, "before": before, "after": after})
+    previous_datasets = {_submission_dataset_key(item): item for item in previous.get("datasets") or []}
+    current_datasets = {_submission_dataset_key(item): item for item in current.get("datasets") or []}
+    for key in sorted(set(previous_datasets) | set(current_datasets)):
+        before_dataset = previous_datasets.get(key)
+        after_dataset = current_datasets.get(key)
+        if before_dataset is None or after_dataset is None:
+            fields.append({"field": f"datasets.{key}", "before": before_dataset, "after": after_dataset})
+            continue
+        for field in ("source_batch_id", "scene_ids", "band_unit_ids"):
+            before = _sorted_strings(before_dataset.get(field)) if field != "source_batch_id" else before_dataset.get(field)
+            after = _sorted_strings(after_dataset.get(field)) if field != "source_batch_id" else after_dataset.get(field)
+            if before != after:
+                fields.append({"field": f"datasets.{key}.{field}", "before": before, "after": after})
+        grid_before = before_dataset.get("grid") or {}
+        grid_after = after_dataset.get("grid") or {}
+        for grid_field in sorted(set(grid_before) | set(grid_after)):
+            if grid_before.get(grid_field) != grid_after.get(grid_field):
+                fields.append({
+                    "field": f"datasets.{key}.grid.{grid_field}",
+                    "before": grid_before.get(grid_field),
+                    "after": grid_after.get(grid_field),
+                })
+    return {"identical": not fields, "first": False, "fields": fields}
+
+
 def _partition_scene_idempotency_key(
     partition_run_id: str,
     scene_id: str,
@@ -2589,6 +3016,60 @@ def _json_object(value: Any) -> dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     raise ValueError("expected JSON object")
+
+
+def _json_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    elif isinstance(value, (list, tuple)):
+        parsed = list(value)
+    else:
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
+
+
+def _partition_submissions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group the submission rows of one record, newest last, with their outputs."""
+    submissions: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        submission_id = str(row["submission_id"])
+        entry = by_id.get(submission_id)
+        if entry is None:
+            entry = {
+                "submission_id": submission_id,
+                "attempt_no": int(row.get("attempt_no") or 0),
+                "requested_run_id": str(row.get("requested_run_id") or ""),
+                "requested_by": str(row.get("requested_by") or "system"),
+                "status": str(row.get("status") or "queued"),
+                "parameters": _json_object(row.get("parameters")),
+                "changes": _json_object(row.get("changes")),
+                "task_ids": _json_string_list(row.get("task_ids")),
+                "error_message": row.get("error_message"),
+                "created_at": row.get("created_at"),
+                "started_at": row.get("started_at"),
+                "finished_at": row.get("finished_at"),
+                "outputs": [],
+            }
+            by_id[submission_id] = entry
+            submissions.append(entry)
+        if row.get("output_version"):
+            entry["outputs"].append({
+                "dataset_id": str(row.get("output_dataset_id") or ""),
+                "output_version": str(row["output_version"]),
+                "grid_type": row.get("grid_type"),
+                "grid_level": row.get("requested_grid_level"),
+                "status": row.get("output_status"),
+                "grid_cell_count": int(row.get("grid_cell_count") or 0),
+                "quality_status": row.get("quality_status"),
+                "quality_completed_at": row.get("quality_completed_at"),
+            })
+    return submissions
 
 
 def _all(cursor: Any) -> list[dict[str, Any]]:

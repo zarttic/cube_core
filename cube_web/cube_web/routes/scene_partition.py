@@ -156,9 +156,9 @@ def create_scene_partition_router(
 
     @router.post("/runs", response_model=ScenePartitionRunResponse, status_code=202)
     def submit_partition_run(payload: ScenePartitionRunRequest, request: Request) -> dict:
-        require_admin(current_actor(request))
+        actor = require_admin(current_actor(request))
         try:
-            return service.submit_partition_run(payload)
+            return service.submit_partition_run(payload, requested_by=actor.username)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

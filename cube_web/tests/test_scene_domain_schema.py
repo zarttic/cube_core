@@ -13,7 +13,7 @@ from cube_web.services.scene_domain_schema import (
 def test_schema_is_a_fresh_production_install() -> None:
     sql = "\n".join(schema_statements()).lower()
 
-    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-09-19-scene-domain-v13"
+    assert SCENE_DOMAIN_SCHEMA_VERSION == "2026-09-29-scene-domain-v14"
     assert SCENE_DOMAIN_TABLES == {
         "datasets",
         "scenes",
@@ -23,6 +23,7 @@ def test_schema_is_a_fresh_production_install() -> None:
         "load_batch_scenes",
         "load_batch_sources",
         "partition_runs",
+        "partition_run_submissions",
         "partition_drafts",
         "partition_run_scenes",
         "partition_data_unit_grid_status",
@@ -48,6 +49,20 @@ def test_schema_is_a_fresh_production_install() -> None:
     assert "role text not null check (role in ('normal','advanced','scientist','admin'))" in sql
     assert "source_type text not null default 'subsystem_import'" in sql
     assert "create table if not exists load_batch_sources" in sql
+    assert "create table if not exists partition_run_submissions" in sql
+    assert "uq_partition_runs_open_merge_key" in sql
+    assert "merge_state in ('open','closed')" in sql
+
+
+def test_partition_run_merge_identity_is_bounded_to_one_open_record() -> None:
+    sql = "\n".join(schema_statements()).lower()
+
+    # One submission target may only have one open record; ingest closes it and a
+    # later submission then opens a fresh record instead of touching history.
+    assert "where merge_state='open' and merge_key is not null" in sql
+    assert "unique (partition_run_id, attempt_no)" in sql
+    assert "task_ids jsonb not null default '[]'::jsonb" in sql
+    assert "changes jsonb not null default '{}'::jsonb" in sql
 
 
 def test_partition_data_unit_grid_status_enforces_band_grid_identity_and_lifecycle_states() -> None:

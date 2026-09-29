@@ -463,22 +463,24 @@ class PartitionWorkflowService:
         request: StrictPartitionRequest,
         *,
         requested_by: str = "operator",
+        resubmit: bool = False,
     ) -> PartitionTask:
         """Queue a normalized request whose worker commits to the domain store."""
         if {dataset.data_type for dataset in request.datasets} != {data_type}:
             raise HTTPException(status_code=422, detail="path data_type must match every dataset data_type")
-        return self._submit_normalized(data_type, request, requested_by=requested_by)
+        return self._submit_normalized(data_type, request, requested_by=requested_by, resubmit=resubmit)
 
     def submit_mixed(
         self,
         request: StrictPartitionRequest,
         *,
         requested_by: str = "operator",
+        resubmit: bool = False,
     ) -> PartitionTask:
         """Queue a normalized batch whose datasets may have different types."""
         if len({dataset.data_type for dataset in request.datasets}) < 2:
             raise HTTPException(status_code=422, detail="mixed partition batches require at least two dataset data types")
-        return self._submit_normalized("mixed", request, requested_by=requested_by)
+        return self._submit_normalized("mixed", request, requested_by=requested_by, resubmit=resubmit)
 
     def _submit_normalized(
         self,
@@ -491,6 +493,7 @@ class PartitionWorkflowService:
         retry_strategy: str | None = None,
         failure_reason: str | None = None,
         retry_band_unit_ids: dict[str, set[str]] | None = None,
+        resubmit: bool = False,
     ) -> PartitionTask:
         """Persist and queue a strict request under its batch-level data type."""
         if self.dataset_runner is None:
@@ -532,6 +535,11 @@ class PartitionWorkflowService:
             # output version after quality validation fails.
             if retry_band_unit_ids:
                 pending_datasets = _filter_retry_datasets(request.datasets, retry_band_unit_ids)
+            elif resubmit:
+                # A record that merged a repeat submission re-runs its whole target;
+                # the completed-key filter would otherwise reject an identical
+                # submission as "already completed".
+                pending_datasets = request.datasets
             else:
                 completed_keys = _completed_dataset_partition_keys(self.store.list_attempts(request.batch_id))
                 pending_datasets = tuple(

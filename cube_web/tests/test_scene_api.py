@@ -19,11 +19,13 @@ from cube_web.services.partition_contracts import DatasetInput
 from cube_web.services.scene_contracts import ScenePartitionRunRequest
 from cube_web.services.scene_repository import (
     OpenGaussSceneRepository,
+    PartitionRunInProgressError,
     _load_schema_datasets,
     _partition_batch_timing,
     _partition_compute_timing,
     _partition_execution_timing,
     _partition_scene_idempotency_key,
+    _partition_submission_changes,
     _partition_write_timing,
 )
 from cube_web.services.scene_service import SceneDomainService, build_partition_execution_request
@@ -111,13 +113,16 @@ class _Workflow:
         self.request = None
         self.retry = None
         self.cancelled = None
+        self.submit_kwargs = {}
 
-    def submit_mixed(self, request):
+    def submit_mixed(self, request, **kwargs):
         self.request = request
+        self.submit_kwargs = kwargs
         return _Task()
 
-    def submit_strict(self, data_type, request):
+    def submit_strict(self, data_type, request, **kwargs):
         self.request = request
+        self.submit_kwargs = kwargs
         return _Task()
 
     def retry_task(self, task_id, **kwargs):
@@ -136,9 +141,12 @@ class _Repository:
     def __init__(self) -> None:
         self.bound = None
         self.run_request = None
+        self.run_requested_by = None
         self.materialize_calls = 0
         self.fail_materialize = False
         self.existing_run = None
+        self.merge_run = None
+        self.in_progress_error = None
         self.failed_run = None
         self.drafts = {}
         self.reload_batch = None
@@ -225,11 +233,22 @@ class _Repository:
             "scene_count": len(kwargs["scene_ids"]),
         }
 
-    def create_partition_run(self, request):
+    def create_partition_run(self, request, *, requested_by="system"):
         self.run_request = request
+        self.run_requested_by = requested_by
+        if self.in_progress_error is not None:
+            raise self.in_progress_error
         if self.existing_run is not None:
             return self.existing_run
-        return {"partition_run_id": request.partition_run_id, "status": "pending", "created": True}
+        if self.merge_run is not None:
+            return {**self.merge_run, "created": True, "merged": True}
+        return {
+            "partition_run_id": request.partition_run_id,
+            "status": "pending",
+            "created": True,
+            "merged": False,
+            "attempt_no": 1,
+        }
 
     def bind_partition_task(self, partition_run_id, task_id):
         self.bound = (partition_run_id, task_id)
@@ -462,7 +481,10 @@ def test_scene_partition_run_uses_distinct_run_and_source_batch_ids(api) -> None
         "status": "queued",
         "data_type": "mixed",
         "operation": "run",
+        "merged": False,
+        "attempt_no": 1,
     }
+    assert repository.run_requested_by == "admin"
     assert workflow.request.batch_id == "partition-run-001"
     assert "load-001" not in workflow.request.batch_id
     assert repository.bound == ("partition-run-001", "partition-task-001")
@@ -500,6 +522,7 @@ def test_scene_partition_run_replay_returns_original_task_without_resubmit(api) 
         "partition_run_id": "partition-run-001",
         "status": "queued",
         "created": False,
+        "attempt_no": 1,
         "attributes": {"task_id": "partition-task-existing"},
     }
 
@@ -507,9 +530,49 @@ def test_scene_partition_run_replay_returns_original_task_without_resubmit(api) 
 
     assert response.status_code == 202
     assert response.json()["task_id"] == "partition-task-existing"
+    assert response.json()["merged"] is False
+    assert response.json()["attempt_no"] == 1
     assert workflow.request is None
     assert repository.bound is None
     assert repository.materialize_calls == 0
+
+
+def test_scene_partition_run_merges_repeat_submission_into_open_record(api) -> None:
+    client, repository, workflow = api
+    repository.merge_run = {
+        "partition_run_id": "partition-run-open",
+        "status": "queued",
+        "attempt_no": 2,
+        "submission_count": 2,
+        "attributes": {"task_id": "partition-task-previous"},
+    }
+
+    response = client.post("/v1/partition/runs", json=_payload())
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["partition_run_id"] == "partition-run-open"
+    assert body["merged"] is True
+    assert body["attempt_no"] == 2
+    assert repository.bound == ("partition-run-open", "partition-task-001")
+    assert workflow.submit_kwargs == {"resubmit": True}
+
+
+def test_scene_partition_run_rejects_a_target_with_an_in_progress_record(api) -> None:
+    client, repository, workflow = api
+    repository.in_progress_error = PartitionRunInProgressError("partition-run-open", "running")
+
+    response = client.post("/v1/partition/runs", json=_payload())
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "partition_run_in_progress",
+        "message": "同一剖分目标已有进行中的任务，请等待完成、取消或重试该记录",
+        "partition_run_id": "partition-run-open",
+        "status": "running",
+    }
+    assert workflow.request is None
+    assert repository.bound is None
 
 
 def test_partition_quality_is_grouped_by_partition_run_and_can_start_dataset_quality(api) -> None:
@@ -1230,12 +1293,10 @@ def test_create_partition_run_keeps_one_row_per_scene_under_a_shared_selection_i
         def execute(self, sql, params=()):
             self.last_sql = " ".join(str(sql).split())
             statements.append((self.last_sql, params))
-            if "MERGE INTO partition_runs" in self.last_sql:
-                self.claim = json.loads(params[2])
 
         def fetchone(self):
-            if "FROM partition_runs" in self.last_sql:
-                return ("partition-run-001", json.dumps(self.claim))
+            if "INSERT INTO partition_runs" in self.last_sql:
+                return ("partition-run-001", json.dumps({"contract": "scene-domain-v1"}))
             if "FROM load_batch_scenes" in self.last_sql:
                 return ("load-001",)
             return None
@@ -1276,7 +1337,11 @@ def test_create_partition_run_keeps_one_row_per_scene_under_a_shared_selection_i
         }],
     })
 
-    OpenGaussSceneRepository(None, connection_factory=Connection).create_partition_run(request)
+    repository = OpenGaussSceneRepository(None, connection_factory=Connection)
+    # The submission identity is resolved by its own reader; this test pins the
+    # write loop that has to key every scene of a shared selection separately.
+    repository._resolve_partition_submission = lambda _request: ({"datasets": []}, "merge-key")
+    repository.create_partition_run(request)
 
     merges = [
         params for sql, params in statements
@@ -1681,6 +1746,106 @@ def test_partition_scene_idempotency_is_scoped_to_run() -> None:
 
     assert first != retry
     assert first == _partition_scene_idempotency_key("run-a", "scene-a", config)
+
+
+def test_partition_submission_changes_record_parameter_differences() -> None:
+    previous = {
+        "source_batch_ids": ["load-b"],
+        "selection_source": "load_batch",
+        "worker_container_limit": 0,
+        "datasets": [{
+            "dataset_id": "dataset-optical",
+            "selection_id": "load-b:dataset-optical",
+            "source_batch_id": "load-b",
+            "scene_ids": ["scene-a"],
+            "band_unit_ids": ["band-a-b04"],
+            "grid": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        }],
+    }
+    current = deepcopy(previous)
+    current["worker_container_limit"] = 2
+    current["datasets"][0]["band_unit_ids"] = ["band-a-b04", "band-a-b08"]
+    current["datasets"][0]["grid"]["requested_grid_level"] = 5
+
+    changes = _partition_submission_changes(previous, current)
+
+    assert changes["identical"] is False
+    assert changes["first"] is False
+    fields = {item["field"]: (item["before"], item["after"]) for item in changes["fields"]}
+    assert fields["worker_container_limit"] == (0, 2)
+    assert fields["datasets.dataset-optical|load-b:dataset-optical.band_unit_ids"] == (
+        ["band-a-b04"], ["band-a-b04", "band-a-b08"],
+    )
+    assert fields["datasets.dataset-optical|load-b:dataset-optical.grid.requested_grid_level"] == (4, 5)
+    assert _partition_submission_changes(current, deepcopy(current)) == {
+        "identical": True, "first": False, "fields": [],
+    }
+    assert _partition_submission_changes(None, current) == {"identical": False, "first": True, "fields": []}
+
+
+def test_partition_submission_identity_uses_effective_bands_and_checksums() -> None:
+    repository = OpenGaussSceneRepository(None)
+    checksum = {"value": "a" * 64}
+
+    def read(sql, _params):
+        normalized = " ".join(str(sql).split())
+        if "FROM load_batches" in normalized:
+            return [{"load_batch_id": "load-001", "attributes": {}}]
+        if "FROM scene_bands" in normalized:
+            return [
+                {"scene_id": "scene-a", "band_unit_id": "band-a-b04", "asset_id": "asset-a"},
+                {"scene_id": "scene-a", "band_unit_id": "band-a-b08", "asset_id": "asset-a"},
+            ]
+        if "FROM scene_assets" in normalized:
+            return [{"scene_id": "scene-a", "asset_id": "asset-a", "checksum": checksum["value"]}]
+        if "FROM load_batch_scenes" in normalized:
+            return [{"scene_id": "scene-a", "load_batch_id": "load-001"}]
+        raise AssertionError(normalized)
+
+    repository._read = read
+    implicit = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "run-implicit",
+        "source_batch_ids": ["load-001"],
+        "datasets": [{
+            "dataset_id": "dataset-a", "selection_id": "batch-a:dataset-a", "scene_ids": ["scene-a"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        }],
+    })
+    explicit = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "run-explicit",
+        "source_batch_ids": ["load-001"],
+        "worker_container_limit": 3,
+        "datasets": [{
+            "dataset_id": "dataset-a", "selection_id": "batch-b:dataset-a", "scene_ids": ["scene-a"],
+            "band_unit_ids": ["band-a-b08", "band-a-b04"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 4, "partition_method": "logical"},
+        }],
+    })
+    higher_level = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "run-higher",
+        "source_batch_ids": ["load-001"],
+        "datasets": [{
+            "dataset_id": "dataset-a", "scene_ids": ["scene-a"],
+            "partition": {"grid_type": "geohash", "requested_grid_level": 5, "partition_method": "logical"},
+        }],
+    })
+
+    implicit_parameters, implicit_key = repository._resolve_partition_submission(implicit)
+    explicit_parameters, explicit_key = repository._resolve_partition_submission(explicit)
+    _, higher_key = repository._resolve_partition_submission(higher_level)
+
+    assert implicit_parameters["datasets"][0]["band_unit_ids"] == ["band-a-b04", "band-a-b08"]
+    assert implicit_parameters["datasets"][0]["source_batch_id"] == "load-001"
+    # Implicit all-bands, a different selection_id and a different container limit
+    # are parameters of the same record, not new record identities.
+    assert implicit_key == explicit_key
+    assert explicit_parameters["worker_container_limit"] == 3
+    assert explicit_parameters["datasets"][0]["selection_id"] == "batch-b:dataset-a"
+    assert implicit_key != higher_key
+
+    checksum["value"] = "b" * 64
+    _, changed_content_key = repository._resolve_partition_submission(implicit)
+    assert changed_content_key != implicit_key
 
 
 def test_opengauss_load_batch_scenes_include_ordered_band_metadata() -> None:

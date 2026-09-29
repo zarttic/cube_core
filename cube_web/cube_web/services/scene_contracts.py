@@ -90,6 +90,8 @@ class ScenePartitionRunResponse(SceneStrictModel):
     status: str
     data_type: str
     operation: str
+    merged: bool = False
+    attempt_no: int = 1
 
 
 class CarbonFootprintPreviewRequest(SceneStrictModel):

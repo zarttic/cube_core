@@ -311,6 +311,14 @@ def create_ingest_runs_after_quality(
         created = 0
         for request in requests:
             created += _insert_request(cur, request)
+        if requests:
+            # Ingest consumes this record's output: seal the record so a later
+            # submission opens a new one instead of rewriting a consumed output.
+            cur.execute(
+                "UPDATE partition_runs SET merge_state='closed' "
+                "WHERE partition_run_id = ANY(%s::text[])",
+                (sorted({str(request.partition_run_id) for request in requests}),),
+            )
         return created
 
 
