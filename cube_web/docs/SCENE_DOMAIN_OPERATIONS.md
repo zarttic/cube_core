@@ -60,6 +60,14 @@ There is no runtime mode switch. These APIs are the only production chain.
   source load batch and valid grid configuration. The production frontend sends
   selections from exactly one product context per request, while allowing that
   context to merge several source load batches into the same PartitionRun.
+  Before ingest, re-submitting the same partition target (data selection plus
+  grid) appends a submission to the existing open record instead of creating a
+  sibling run: the response carries `merged=true` and `attempt_no`, the request
+  parameters and their difference from the previous attempt are stored in
+  `partition_run_submissions`, and the live grid status rows are reset for the
+  new attempt. A target that already has an unfinished attempt returns 409 with
+  `detail.code=partition_run_in_progress`. Requesting ingest seals the record
+  (`merge_state='closed'`), so a later submission opens a new record.
 - `GET /v1/datasets` and its detail endpoints expose management, provenance,
   quality, publication, and current output state.
 - `DELETE /v1/datasets/{dataset_id}` plans the deletion and returns 202 with a

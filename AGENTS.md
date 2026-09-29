@@ -184,6 +184,19 @@ CUBE_WEB_MINIO_SECRET_KEY=<secret-key>
   只删本批次血缘；运行中批次与未撤回发布返回 409，批次不存在返回 404；支持 `dry_run`。
   归档（`/archive`）已废弃，仅为载入方的 404 回落保留。
 
+### 未入库剖分记录的合并窗口（2026-09-29 起）
+
+- 一条 `partition_runs` 记录 = 一个剖分目标（数据集+景+有效波段+资产校验和+格网类型/层级）。
+  同一目标在**未发起入库**前重复提交会合并到同一条记录：`partition_run_submissions` 逐次记录
+  提交参数（含来源批次、容器限制、选择 ID）与相对上次的 `changes` 差异，重新执行并把 grid status
+  行重置为待剖分。列表新增 `submission_count`/`last_submitted_at` 字段，详情返回 `submissions`
+  提交历史（含每次 output_version 与质检状态）。
+- 同一目标已有未结束任务时再次提交返回 409（`detail.code=partition_run_in_progress`，带
+  `partition_run_id`），不会开新记录；发起入库（自动或手动）即把记录 `merge_state='closed'`，
+  之后同一 band+grid 的重复剖分继续被已入库门禁拒绝（门禁覆盖 `queued/running/completed`）。
+- 历史记录 `merge_state` 默认 `closed`，不回填合并键；不同格网类型/层级仍是不同记录，且因
+  grid status 主键含 `grid_type/grid_level`，旧记录计数不会被清零。
+
 ### 隔离 worktree 与真实门禁
 
 - 新里程碑 worktree 必须从协调账本中已通过的前置 `integration_hash` 创建。不要从
