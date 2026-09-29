@@ -63,7 +63,7 @@ describe('PartitionQualityDrawer', () => {
     expect(history.text()).toContain('质检通过 · 120 格元');
     expect(history.text()).toContain('#2 · bob');
     expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('格网层级：4 → 5');
-    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('容器限制：0 → 2');
+    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('容器限制：无限制 → 2');
   });
 
   it('shows automatic quality rule results for the partition batch', () => {

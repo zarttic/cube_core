@@ -175,18 +175,22 @@ function submissionFieldLabel(field) {
   return `${datasetId} ${SUBMISSION_GRID_LABELS[gridField] || gridField}`;
 }
 
-function submissionChangeValue(value) {
+function submissionChangeValue(field, value) {
   if (value === null || value === undefined) return '无';
   if (Array.isArray(value)) return value.length ? value.join('、') : '空';
+  if (field === 'worker_container_limit') {
+    const limit = Number(value);
+    return Number.isFinite(limit) && limit > 0 ? String(limit) : '无限制';
+  }
   return String(value);
 }
 
 function submissionChangeText(item) {
   const before = item?.before;
   const after = item?.after;
-  if (after === null || after === undefined) return `移除（原 ${submissionChangeValue(before)}）`;
-  if (before === null || before === undefined) return `新增 ${submissionChangeValue(after)}`;
-  return `${submissionChangeValue(before)} → ${submissionChangeValue(after)}`;
+  if (after === null || after === undefined) return `移除（原 ${submissionChangeValue(item?.field, before)}）`;
+  if (before === null || before === undefined) return `新增 ${submissionChangeValue(item?.field, after)}`;
+  return `${submissionChangeValue(item?.field, before)} → ${submissionChangeValue(item?.field, after)}`;
 }
 
 function submissionChangeLabels(submission) {
