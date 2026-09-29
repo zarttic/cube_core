@@ -1,12 +1,29 @@
 from __future__ import annotations
 
-from typing import Literal
+import json
+from hashlib import sha256
+from typing import Any, Literal
 
 from grid_core.app.core.enums import GridType as EncoderGridType
 from grid_core.app.models.request import validate_requested_grid_level
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cube_web.services.partition_contracts import DatasetPartitionConfig
+
+
+def partition_merge_identity_key(identity: list[dict[str, Any]], content: list[dict[str, Any]]) -> str:
+    """Canonical hash of a partition record identity and its input content.
+
+    The identity is the data selection plus the grid *type*; the grid level and
+    the other execution knobs are submission parameters, not record identity.
+    """
+    canonical = json.dumps(
+        {"identity": identity, "content": content},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def reload_selection_band_unit_ids(attributes: object, dataset_id: str) -> set[str] | None:

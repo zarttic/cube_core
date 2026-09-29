@@ -16,7 +16,12 @@ from cube_web.services import dataset_identity
 from cube_web.services.partition_contracts import BandInput, DatasetInput, SourceAssetInput
 from cube_web.services.partition_defaults import resolution_metadata_from_assets
 from cube_web.services.quality_contracts import quality_run_metrics
-from cube_web.services.scene_contracts import SceneDatasetSelection, ScenePartitionRunRequest, reload_selection_band_unit_ids
+from cube_web.services.scene_contracts import (
+    SceneDatasetSelection,
+    ScenePartitionRunRequest,
+    partition_merge_identity_key,
+    reload_selection_band_unit_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1592,19 +1597,13 @@ class OpenGaussSceneRepository:
                             raise RuntimeError("merged partition run disappeared")
                         # The previous attempt's rows are history: its quality runs and
                         # output version stay queryable through the submission history,
-                        # while the live grid state rows are re-pointed to the new
-                        # attempt. Do not mark the old output 'superseded': a delayed
-                        # quality outbox event for it would then retry forever.
+                        # while the record's live grid state is rebuilt for the new
+                        # attempt. The level may differ, so drop the record's current
+                        # rows instead of resetting only the matching ones. Do not mark
+                        # the old output 'superseded': a delayed quality outbox event
+                        # for it would then retry forever.
                         cursor.execute("DELETE FROM partition_run_scenes WHERE partition_run_id=%s", (run_id,))
-                        cursor.execute(
-                            """
-                            UPDATE partition_data_unit_grid_status
-                            SET partition_status='pending', quality_status='pending', ingest_status='pending',
-                                output_version=NULL, error_message=NULL, updated_at=now()
-                            WHERE partition_run_id=%s
-                            """,
-                            (run_id,),
-                        )
+                        cursor.execute("DELETE FROM partition_data_unit_grid_status WHERE partition_run_id=%s", (run_id,))
                         new_submission = True
                     else:
                         cursor.execute(
@@ -1684,9 +1683,9 @@ class OpenGaussSceneRepository:
         """Resolve a submission into canonical parameters and its record identity.
 
         The identity is the data selection (scenes, effective bands, asset
-        checksums) plus the grid configuration. Execution-only choices such as the
-        source load batch and the worker container limit stay parameters, so they
-        are recorded as differences instead of splitting the record.
+        checksums) plus the grid *type*. The grid level, the source load batch
+        and the worker container limit stay parameters, so they are recorded as
+        differences instead of splitting the record.
         """
         scene_ids = sorted({scene_id for selection in request.datasets for scene_id in selection.scene_ids})
         batch_rows = self._read(
@@ -1793,7 +1792,7 @@ class OpenGaussSceneRepository:
                 "dataset_id": item["dataset_id"],
                 "scene_ids": item["scene_ids"],
                 "band_unit_ids": item["band_unit_ids"],
-                "grid": item["grid"],
+                "grid_type": str((item["grid"] or {}).get("grid_type") or ""),
             }
             for item in parameters
         ]
@@ -1803,13 +1802,7 @@ class OpenGaussSceneRepository:
             "worker_container_limit": int(request.worker_container_limit),
             "datasets": parameters,
         }
-        canonical = json.dumps(
-            {"identity": identity, "content": content},
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return submission_parameters, sha256(canonical.encode("utf-8")).hexdigest()
+        return submission_parameters, partition_merge_identity_key(identity, content)
 
     def _write_partition_run_rows(self, cursor: Any, request: ScenePartitionRunRequest, partition_run_id: str) -> None:
         for selection in request.datasets:

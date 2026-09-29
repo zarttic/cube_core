@@ -399,8 +399,16 @@ class SceneDomainService:
         partition_run_id = str(run.get("partition_run_id") or request.partition_run_id)
         merged = bool(run.get("merged"))
         try:
-            datasets = self.repository.materialize_partition_datasets(request)
-            strict_request = build_partition_execution_request(request, datasets)
+            # A merged submission must execute under the record's own id: otherwise
+            # the attempts land in a throwaway batch keyed by the client's new run id
+            # and the record's execution history loses them.
+            execution_request = (
+                request.model_copy(update={"partition_run_id": partition_run_id})
+                if partition_run_id != request.partition_run_id
+                else request
+            )
+            datasets = self.repository.materialize_partition_datasets(execution_request)
+            strict_request = build_partition_execution_request(execution_request, datasets)
             data_types = {dataset.data_type for dataset in datasets}
             resubmit_kwargs = {"resubmit": True} if merged else {}
             if len(data_types) > 1:

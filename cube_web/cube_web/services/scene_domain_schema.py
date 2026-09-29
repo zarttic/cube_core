@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-SCENE_DOMAIN_SCHEMA_VERSION = "2026-09-29-scene-domain-v14"
+SCENE_DOMAIN_SCHEMA_VERSION = "2026-09-29-scene-domain-v15"
 
 SCENE_DOMAIN_TABLES = {
     "datasets",
@@ -619,3 +619,112 @@ def backfill_partition_grid_status(connection: Any, *, commit: bool = True) -> i
     if commit:
         connection.commit()
     return updated
+
+
+def backfill_partition_run_merge_keys(
+    connection: Any, *, partition_run_ids: Sequence[str] | None = None, commit: bool = True
+) -> int:
+    """Re-key open partition records after the identity dropped the grid level.
+
+    The runtime key is recomputed from each open record's latest submission
+    parameters plus the current scene asset checksums, exactly like
+    ``_resolve_partition_submission`` builds it. When several open records
+    collapse onto one key, the newest stays open and the older ones are closed:
+    their history is kept, they just stop accepting merged submissions.
+    """
+    from cube_web.services.scene_contracts import partition_merge_identity_key
+
+    updated = 0
+    try:
+        with connection.cursor() as cursor:
+            if partition_run_ids is None:
+                cursor.execute(
+                    "SELECT partition_run_id FROM partition_runs WHERE merge_state='open' "
+                    "ORDER BY COALESCE(last_submitted_at, created_at) DESC, partition_run_id DESC"
+                )
+            else:
+                cursor.execute(
+                    "SELECT partition_run_id FROM partition_runs WHERE merge_state='open' "
+                    "AND partition_run_id = ANY(%s::text[]) "
+                    "ORDER BY COALESCE(last_submitted_at, created_at) DESC, partition_run_id DESC",
+                    (list(partition_run_ids),),
+                )
+            open_run_ids = [str(row[0]) for row in (cursor.fetchall() or [])]
+            seen: set[str] = set()
+            for partition_run_id in open_run_ids:
+                cursor.execute(
+                    "SELECT parameters FROM partition_run_submissions WHERE partition_run_id=%s "
+                    "ORDER BY attempt_no DESC LIMIT 1",
+                    (partition_run_id,),
+                )
+                submission = cursor.fetchone()
+                if submission is None or submission[0] is None:
+                    continue
+                parameters = submission[0]
+                if isinstance(parameters, str):
+                    parameters = json.loads(parameters)
+                identity, content = _merge_identity_from_parameters(cursor, parameters)
+                merge_key = partition_merge_identity_key(identity, content)
+                if merge_key in seen:
+                    cursor.execute(
+                        "UPDATE partition_runs SET merge_state='closed' WHERE partition_run_id=%s",
+                        (partition_run_id,),
+                    )
+                else:
+                    seen.add(merge_key)
+                    cursor.execute(
+                        "UPDATE partition_runs SET merge_key=%s WHERE partition_run_id=%s",
+                        (merge_key, partition_run_id),
+                    )
+                updated += 1
+        if commit:
+            connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return updated
+
+
+def _merge_identity_from_parameters(cursor: Any, parameters: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rebuild the runtime identity and content structures from stored parameters."""
+    identity: list[dict[str, Any]] = []
+    content: list[dict[str, Any]] = []
+    for item in parameters.get("datasets") or []:
+        dataset_id = str(item.get("dataset_id") or "")
+        scene_ids = sorted(str(value) for value in item.get("scene_ids") or [])
+        band_unit_ids = sorted(str(value) for value in item.get("band_unit_ids") or [])
+        grid = item.get("grid") or {}
+        identity.append({
+            "dataset_id": dataset_id,
+            "scene_ids": scene_ids,
+            "band_unit_ids": band_unit_ids,
+            "grid_type": str(grid.get("grid_type") or ""),
+        })
+        scenes: list[dict[str, Any]] = []
+        for scene_id in scene_ids:
+            cursor.execute(
+                "SELECT b.band_unit_id, b.asset_id, a.checksum FROM scene_bands b "
+                "LEFT JOIN scene_assets a ON a.scene_id=b.scene_id AND a.asset_id=b.asset_id "
+                "WHERE b.scene_id=%s AND b.band_unit_id = ANY(%s::text[]) ORDER BY b.band_unit_id",
+                (scene_id, band_unit_ids),
+            )
+            scenes.append({
+                "scene_id": scene_id,
+                "bands": [
+                    {
+                        "band_unit_id": str(values[0]),
+                        "asset_id": str(values[1]),
+                        "checksum": str(values[2] or ""),
+                    }
+                    for values in (
+                        tuple(row.values()) if isinstance(row, dict) else row
+                        for row in (cursor.fetchall() or [])
+                    )
+                ],
+            })
+        content.append({
+            "dataset_id": dataset_id,
+            "scenes": sorted(scenes, key=lambda scene: scene["scene_id"]),
+        })
+    content.sort(key=lambda item: (item["dataset_id"], json.dumps(item["scenes"], ensure_ascii=True, sort_keys=True)))
+    return identity, content

@@ -115,6 +115,7 @@ def _request(
     suffix: str,
     *,
     grid_level: int = 4,
+    grid_type: str = "geohash",
     load_batch_key: str = "load_batch_id",
 ) -> ScenePartitionRunRequest:
     load_batch_id = ids[load_batch_key]
@@ -126,7 +127,7 @@ def _request(
             "source_batch_id": load_batch_id,
             "scene_ids": [ids["scene_id"]],
             "band_unit_ids": [ids["band_unit_id"]],
-            "partition": {"grid_type": "geohash", "requested_grid_level": grid_level, "partition_method": "logical"},
+            "partition": {"grid_type": grid_type, "requested_grid_level": grid_level, "partition_method": "logical"},
         }],
     })
 
@@ -271,29 +272,79 @@ def test_repeat_submission_conflicts_with_an_in_progress_record(dsn, partition_t
         assert open_records["total"] == 1
 
 
-def test_different_grid_level_keeps_the_previous_record_intact(dsn, partition_target) -> None:
+def test_different_grid_level_merges_and_rebuilds_the_current_grid_state(dsn, partition_target) -> None:
     repository = OpenGaussSceneRepository(dsn)
     first = repository.create_partition_run(_request(partition_target, "a", grid_level=4))
-    first_run_id = str(first["partition_run_id"])
-    _finish_first_attempt(dsn, first_run_id)
+    run_id = str(first["partition_run_id"])
+    _finish_first_attempt(dsn, run_id)
 
-    second = repository.create_partition_run(_request(partition_target, "b", grid_level=5))
+    second = repository.create_partition_run(_request(partition_target, "b", grid_level=5), requested_by="bob")
 
-    assert second["partition_run_id"] != first_run_id
-    assert second["merged"] is False
+    assert second["partition_run_id"] == run_id
+    assert second["merged"] is True
     with psycopg.connect(dsn, row_factory=dict_row) as connection:
         previous = connection.execute(
             "SELECT quality_status FROM partition_data_unit_grid_status "
             "WHERE partition_run_id=%s AND grid_type='geohash' AND grid_level=4",
-            (first_run_id,),
+            (run_id,),
         ).fetchone()
-        assert previous["quality_status"] == "pass"
+        assert previous is None, "the previous attempt's live grid row is rebuilt, not kept as current state"
         current = connection.execute(
-            "SELECT partition_run_id FROM partition_data_unit_grid_status "
+            "SELECT partition_run_id, partition_status, quality_status FROM partition_data_unit_grid_status "
             "WHERE band_unit_id=%s AND grid_type='geohash' AND grid_level=5",
             (partition_target["band_unit_id"],),
         ).fetchone()
-        assert current["partition_run_id"] == second["partition_run_id"]
+        assert current["partition_run_id"] == run_id
+        assert current["partition_status"] == "pending"
+        assert current["quality_status"] == "pending"
+        changes = connection.execute(
+            "SELECT changes FROM partition_run_submissions WHERE partition_run_id=%s AND attempt_no=2",
+            (run_id,),
+        ).fetchone()["changes"]
+        fields = {item["field"]: (item["before"], item["after"]) for item in changes["fields"]}
+        assert fields["datasets.%s|.grid.requested_grid_level" % partition_target["dataset_id"]] == (4, 5)
+
+
+def test_different_grid_type_opens_a_separate_record(dsn, partition_target) -> None:
+    repository = OpenGaussSceneRepository(dsn)
+    geohash_run = repository.create_partition_run(_request(partition_target, "a", grid_type="geohash", grid_level=4))
+    geohash_run_id = str(geohash_run["partition_run_id"])
+    _finish_first_attempt(dsn, geohash_run_id)
+
+    mgrs_run = repository.create_partition_run(_request(partition_target, "b", grid_type="mgrs", grid_level=1))
+
+    assert mgrs_run["partition_run_id"] != geohash_run_id
+    assert mgrs_run["merged"] is False
+    with psycopg.connect(dsn, row_factory=dict_row) as connection:
+        previous = connection.execute(
+            "SELECT quality_status FROM partition_data_unit_grid_status "
+            "WHERE partition_run_id=%s AND grid_type='geohash' AND grid_level=4",
+            (geohash_run_id,),
+        ).fetchone()
+        assert previous["quality_status"] == "pass"
+
+
+def test_backfill_rekeys_an_open_record_so_a_new_level_merges(dsn, partition_target) -> None:
+    from cube_web.services.scene_domain_schema import backfill_partition_run_merge_keys
+
+    repository = OpenGaussSceneRepository(dsn)
+    first = repository.create_partition_run(_request(partition_target, "a", grid_level=4))
+    run_id = str(first["partition_run_id"])
+    _finish_first_attempt(dsn, run_id)
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE partition_runs SET merge_key=%s, merge_state='open' WHERE partition_run_id=%s",
+            (f"legacy-key-{partition_target['token']}", run_id),
+        )
+        connection.commit()
+
+    with psycopg.connect(dsn) as connection:
+        assert backfill_partition_run_merge_keys(connection, partition_run_ids=[run_id]) >= 1
+
+    second = repository.create_partition_run(_request(partition_target, "b", grid_level=5))
+
+    assert second["partition_run_id"] == run_id
+    assert second["merged"] is True
 
 
 def test_ingest_seals_the_record_and_the_next_submission_opens_a_new_one(dsn, partition_target) -> None:

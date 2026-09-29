@@ -556,6 +556,7 @@ def test_scene_partition_run_merges_repeat_submission_into_open_record(api) -> N
     assert body["attempt_no"] == 2
     assert repository.bound == ("partition-run-open", "partition-task-001")
     assert workflow.submit_kwargs == {"resubmit": True}
+    assert workflow.request.batch_id == "partition-run-open"
 
 
 def test_scene_partition_run_rejects_a_target_with_an_in_progress_record(api) -> None:
@@ -1829,19 +1830,31 @@ def test_partition_submission_identity_uses_effective_bands_and_checksums() -> N
             "partition": {"grid_type": "geohash", "requested_grid_level": 5, "partition_method": "logical"},
         }],
     })
+    other_grid = ScenePartitionRunRequest.model_validate({
+        "partition_run_id": "run-mgrs",
+        "source_batch_ids": ["load-001"],
+        "datasets": [{
+            "dataset_id": "dataset-a", "scene_ids": ["scene-a"],
+            "partition": {"grid_type": "mgrs", "requested_grid_level": 1, "partition_method": "logical"},
+        }],
+    })
 
     implicit_parameters, implicit_key = repository._resolve_partition_submission(implicit)
     explicit_parameters, explicit_key = repository._resolve_partition_submission(explicit)
-    _, higher_key = repository._resolve_partition_submission(higher_level)
+    higher_parameters, higher_key = repository._resolve_partition_submission(higher_level)
+    _, other_grid_key = repository._resolve_partition_submission(other_grid)
 
     assert implicit_parameters["datasets"][0]["band_unit_ids"] == ["band-a-b04", "band-a-b08"]
     assert implicit_parameters["datasets"][0]["source_batch_id"] == "load-001"
-    # Implicit all-bands, a different selection_id and a different container limit
-    # are parameters of the same record, not new record identities.
+    # Implicit all-bands, a different selection_id, a different container limit and
+    # a different grid level are parameters of the same record; only the grid type
+    # and the data selection build the record identity.
     assert implicit_key == explicit_key
+    assert implicit_key == higher_key
+    assert higher_parameters["datasets"][0]["grid"]["requested_grid_level"] == 5
     assert explicit_parameters["worker_container_limit"] == 3
     assert explicit_parameters["datasets"][0]["selection_id"] == "batch-b:dataset-a"
-    assert implicit_key != higher_key
+    assert implicit_key != other_grid_key
 
     checksum["value"] = "b" * 64
     _, changed_content_key = repository._resolve_partition_submission(implicit)
