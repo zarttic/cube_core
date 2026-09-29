@@ -17,6 +17,55 @@ const treeStub = {
 };
 
 describe('PartitionQualityDrawer', () => {
+  it('shows submission history with parameters and differences for a merged record', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-merged',
+          summary: { band_count: 1, partitioned_count: 1 },
+          submissions: [
+            {
+              submission_id: 'submission-1', attempt_no: 1, requested_by: 'alice', status: 'completed',
+              created_at: '2026-09-29T08:00:00+08:00',
+              parameters: { datasets: [{ dataset_id: 'dataset-a', grid: { grid_type: 'geohash', requested_grid_level: 4 } }] },
+              changes: { identical: false, first: true, fields: [] },
+              outputs: [{ dataset_id: 'dataset-a', output_version: 'output-1', quality_status: 'pass', grid_cell_count: 120 }],
+            },
+            {
+              submission_id: 'submission-2', attempt_no: 2, requested_by: 'bob', status: 'running',
+              created_at: '2026-09-29T09:30:00+08:00',
+              parameters: { datasets: [{ dataset_id: 'dataset-a', grid: { grid_type: 'geohash', requested_grid_level: 5 } }] },
+              changes: { identical: false, fields: [
+                { field: 'datasets.dataset-a|.grid.requested_grid_level', before: 4, after: 5 },
+                { field: 'worker_container_limit', before: 0, after: 2 },
+              ] },
+              outputs: [],
+            },
+          ],
+          datasets: [],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    const history = wrapper.get('[data-testid="partition-submissions"]');
+    expect(history.text()).toContain('剖分提交历史 2 次');
+    expect(history.text()).toContain('#1 · alice');
+    expect(history.text()).toContain('经纬度格网 · 层级 4');
+    expect(history.text()).toContain('质检通过 · 120 格元');
+    expect(history.text()).toContain('#2 · bob');
+    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('格网层级：4 → 5');
+    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('容器限制：0 → 2');
+  });
+
   it('shows automatic quality rule results for the partition batch', () => {
     const wrapper = mount(PartitionQualityDrawer, {
       props: {

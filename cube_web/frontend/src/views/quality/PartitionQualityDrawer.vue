@@ -4,6 +4,8 @@ import { DownloadOutline } from '@vicons/ionicons5';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
 import StatusTag from '@/components/StatusTag.vue';
+import { gridDefinition, nativeLevelLabel } from '@/utils/grid';
+import { formatShanghaiTime } from '@/utils/time';
 import {
   filterActiveQualityRules,
   qualityErrorLabel,
@@ -118,6 +120,91 @@ function attemptOperationLabel(operation) {
     auto_run: '自动执行',
     manual_retry: '手动重试',
   }[operation] || operation || '剖分执行';
+}
+
+const SUBMISSION_FIELD_LABELS = {
+  source_batch_ids: '来源载入批次',
+  selection_source: '选择来源',
+  worker_container_limit: '容器限制',
+};
+const SUBMISSION_GRID_LABELS = {
+  grid_type: '格网类型',
+  requested_grid_level: '格网层级',
+  partition_method: '剖分方式',
+  cover_mode: '覆盖方式',
+  time_granularity: '时间粒度',
+  max_cells_per_asset: '单资产格元上限',
+  max_observations: '最大观测数',
+};
+const SUBMISSION_QUALITY_LABELS = {
+  pass: '质检通过',
+  warn: '质检告警',
+  fail: '质检失败',
+  error: '质检异常',
+  pending: '等待质检',
+  running: '质检中',
+  cancelled: '质检取消',
+};
+
+function submissionGridLabel(dataset) {
+  const grid = dataset?.grid || {};
+  const name = gridDefinition(grid.grid_type)?.label || grid.grid_type || '格网未定';
+  const level = grid.requested_grid_level === null || grid.requested_grid_level === undefined
+    ? ''
+    : ` · ${nativeLevelLabel(grid.grid_type, grid.requested_grid_level)}`;
+  return `${dataset?.dataset_id || '-'} · ${name}${level}`;
+}
+
+function submissionParameterLabel(submission) {
+  const datasets = submission?.parameters?.datasets || [];
+  return datasets.map(submissionGridLabel).join('；') || '参数未记录';
+}
+
+function submissionFieldLabel(field) {
+  const path = String(field || '');
+  if (SUBMISSION_FIELD_LABELS[path]) return SUBMISSION_FIELD_LABELS[path];
+  const match = path.match(/^datasets\.(.+?)\.(.*)$/);
+  if (!match) return path;
+  const datasetId = match[1].split('|')[0] || '数据集';
+  const rest = match[2];
+  if (rest === 'scene_ids') return `${datasetId} 景选择`;
+  if (rest === 'band_unit_ids') return `${datasetId} 波段选择`;
+  if (rest === 'source_batch_id') return `${datasetId} 来源批次`;
+  if (!rest) return `${datasetId} 数据选择`;
+  const gridField = rest.replace(/^grid\./, '');
+  return `${datasetId} ${SUBMISSION_GRID_LABELS[gridField] || gridField}`;
+}
+
+function submissionChangeValue(value) {
+  if (value === null || value === undefined) return '无';
+  if (Array.isArray(value)) return value.length ? value.join('、') : '空';
+  return String(value);
+}
+
+function submissionChangeText(item) {
+  const before = item?.before;
+  const after = item?.after;
+  if (after === null || after === undefined) return `移除（原 ${submissionChangeValue(before)}）`;
+  if (before === null || before === undefined) return `新增 ${submissionChangeValue(after)}`;
+  return `${submissionChangeValue(before)} → ${submissionChangeValue(after)}`;
+}
+
+function submissionChangeLabels(submission) {
+  const fields = submission?.changes?.fields;
+  if (!Array.isArray(fields) || !fields.length) return [];
+  return fields.slice(0, 6).map((item) => `${submissionFieldLabel(item.field)}：${submissionChangeText(item)}`);
+}
+
+function submissionIsIdentical(submission) {
+  return submission?.changes?.identical === true;
+}
+
+function submissionQualityLabel(submission) {
+  const outputs = submission?.outputs || [];
+  if (!outputs.length) return '';
+  const statuses = [...new Set(outputs.map((item) => SUBMISSION_QUALITY_LABELS[item.quality_status] || item.quality_status).filter(Boolean))];
+  const cells = outputs.reduce((total, item) => total + Number(item.grid_cell_count || 0), 0);
+  return `${statuses.join(' / ') || '等待质检'}${cells ? ` · ${cells.toLocaleString('zh-CN')} 格元` : ''}`;
 }
 
 function attemptErrorLabel(attempt) {
@@ -277,8 +364,20 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
           </div>
         </template>
       </el-tree>
+      <details class="attempt-history" data-testid="partition-submissions">
+        <summary>剖分提交历史 <span>{{ (detail.submissions || []).length }} 次</span></summary>
+        <div v-for="submission in detail.submissions || []" :key="submission.submission_id" class="submission-row" :data-testid="`partition-submission-${submission.attempt_no}`">
+          <span>#{{ submission.attempt_no }} · {{ submission.requested_by || 'system' }}</span>
+          <StatusTag domain="partition" :value="submission.status" size="small" />
+          <small>{{ formatShanghaiTime(submission.created_at) }} · {{ submissionParameterLabel(submission) }}</small>
+          <small v-if="submissionChangeLabels(submission).length" class="submission-changes" :data-testid="`partition-submission-changes-${submission.attempt_no}`">参数差异：{{ submissionChangeLabels(submission).join('；') }}</small>
+          <small v-else-if="submissionIsIdentical(submission)" class="submission-changes">参数与上次相同</small>
+          <small v-if="submissionQualityLabel(submission)" class="submission-quality">{{ submissionQualityLabel(submission) }}</small>
+        </div>
+        <span v-if="!(detail.submissions || []).length" class="quality-pending">暂无提交记录</span>
+      </details>
       <details class="attempt-history">
-        <summary>剖分尝试历史 <span>{{ (detail.attempts || []).length }} 次</span></summary>
+        <summary>剖分执行历史 <span>{{ (detail.attempts || []).length }} 次</span></summary>
         <div v-for="attempt in detail.attempts || []" :key="attempt.task_id" class="attempt-row">
           <span>#{{ attempt.attempt_no }} · {{ attemptOperationLabel(attempt.operation) }}</span>
           <StatusTag domain="partition" :value="attempt.status" size="small" />
@@ -329,6 +428,11 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .quality-log p span { font-weight: 600; }
 .partition-quality-tree { border: 1px solid #dfe4ec; padding: 8px; max-height: 560px; overflow: auto; }
 .attempt-history { margin-top: 12px; border: 1px solid #dfe4ec; padding: 8px 10px; }
+.submission-row { display: grid; grid-template-columns: minmax(140px, 1fr) auto minmax(200px, 2fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid #edf0f4; }
+.submission-row:first-of-type { margin-top: 7px; }
+.submission-row small { color: #667085; overflow-wrap: anywhere; }
+.submission-row .submission-quality { color: #277a52; }
+.submission-changes { grid-column: 3; color: #a06a1b; }
 .attempt-history summary { color: #344054; cursor: pointer; font-weight: 600; }
 .attempt-history summary span { color: #667085; font-size: 12px; font-weight: 400; }
 .attempt-row { display: grid; grid-template-columns: minmax(120px, 1fr) auto minmax(160px, 2fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid #edf0f4; }

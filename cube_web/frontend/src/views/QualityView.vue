@@ -386,6 +386,7 @@ onUnmounted(() => {
         <el-table-column label="完成剖分" min-width="120"><template #default="{ row }">{{ row.partitioned_count }}/{{ row.band_count }}</template></el-table-column>
         <el-table-column label="质检" min-width="130"><template #default="{ row }"><span class="pass-count">{{ row.quality_pass_count }} 通过</span><span v-if="row.quality_failed_count" class="failed-count"> · {{ row.quality_failed_count }} 失败</span></template></el-table-column>
         <el-table-column label="完成入库" min-width="110"><template #default="{ row }">{{ row.ingested_count }}/{{ row.band_count }}</template></el-table-column>
+        <el-table-column label="剖分次数" min-width="118"><template #default="{ row }"><span class="submission-count">{{ Math.max(1, Number(row.submission_count) || 1) }} 次</span><small v-if="row.last_submitted_at" class="submission-last">最近 {{ formatShanghaiTime(row.last_submitted_at) }}</small></template></el-table-column>
         <el-table-column label="批次状态" min-width="130"><template #default="{ row }"><StatusTag domain="partition" :value="row.status" size="small" /></template></el-table-column>
         <el-table-column label="创建时间" min-width="165"><template #default="{ row }">{{ formatShanghaiTime(row.created_at) }}</template></el-table-column>
         <el-table-column label="操作" width="105" fixed="right"><template #default="{ row }"><el-button :data-testid="`quality-task-detail-${row.partition_run_id}`" link type="primary" @click.stop="openBatch(row)">任务详情</el-button></template></el-table-column>
@@ -497,6 +498,8 @@ onUnmounted(() => {
 .dataset-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dataset-cell strong { color: #263247; }
 .pass-count { color: #277a52; }
+.submission-count { color: #263247; }
+.submission-last { display: block; margin-top: 2px; color: #8993a4; font-size: 12px; }
 .failed-count { color: #a53b32; }
 .rule-version { margin-bottom: 14px; color: #667085; font-size: 13px; }
 .applicability-tags { display: flex; flex-wrap: wrap; gap: 5px; }

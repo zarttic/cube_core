@@ -866,6 +866,44 @@ describe('PartitionView map workspace', () => {
     successMessage.mockRestore();
   });
 
+  it('reports a merged repeat submission with the record attempt number', async () => {
+    const store = usePartitionStore();
+    const successMessage = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined);
+    vi.spyOn(store, 'submit').mockResolvedValue({
+      partition_run_id: 'partition-run-open',
+      task_id: 'partition-task-repeat',
+      status: 'queued',
+      merged: true,
+      attempt_no: 2,
+    });
+    store.setDatasets('optical', [{
+      dataset_id: 'dataset-optical',
+      data_type: 'optical',
+      scenes: [{ scene_id: 'scene-optical', source_batch_ids: ['load-optical'] }],
+      assets: [],
+      partition: { grid_type: 'geohash', requested_grid_level: 4, partition_method: 'logical' },
+    }]);
+    const wrapper = mount(PartitionView, {
+      global: {
+        stubs: {
+          ...layoutStubs,
+          GlobeMap: GlobeMapStub,
+          GridParameters: true,
+          BatchAssetsPanel: true,
+          TaskQueuePanel: true,
+          QualityView: true,
+          DataManagementView: true,
+          'el-drawer': { template: '<div><slot /></div>' },
+        },
+      },
+    });
+
+    await wrapper.vm.submit();
+
+    expect(successMessage).toHaveBeenCalledWith('已合并到已有剖分记录（第 2 次剖分）：partition-run-open');
+    successMessage.mockRestore();
+  });
+
   it('preserves product selections changed while submission is in flight', async () => {
     let resolveSubmit;
     const store = usePartitionStore();

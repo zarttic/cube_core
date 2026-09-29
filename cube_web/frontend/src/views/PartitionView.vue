@@ -423,7 +423,14 @@ async function submit() {
     store.clearDatasets(moduleName, contextVersion);
     datasetDrawerVisible.value = false;
     const partitionRunId = response?.partition_run_id || response?.run_id || '';
-    ElMessage.success(partitionRunId ? `剖分任务已提交，剖分批次：${partitionRunId}` : '剖分任务已提交。');
+    if (response?.merged) {
+      const attemptNo = Math.max(1, Number(response?.attempt_no) || 1);
+      ElMessage.success(partitionRunId
+        ? `已合并到已有剖分记录（第 ${attemptNo} 次剖分）：${partitionRunId}`
+        : `已合并到已有剖分记录（第 ${attemptNo} 次剖分）。`);
+    } else {
+      ElMessage.success(partitionRunId ? `剖分任务已提交，剖分批次：${partitionRunId}` : '剖分任务已提交。');
+    }
   } catch (error) {
     notifyApiError(error, { scope: 'PartitionView', message: partitionErrorLabel(error, '提交剖分失败。') });
   }
