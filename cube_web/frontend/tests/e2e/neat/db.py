@@ -129,9 +129,12 @@ def run_counts(run_id: str) -> dict:
                 conn.rollback()
                 result[table] = "n/a"
         try:
-            cur.execute('SELECT status FROM "partition_runs" WHERE "partition_run_id" = %s', (run_id,))
+            cur.execute('SELECT status, merge_state, submission_count FROM "partition_runs" WHERE "partition_run_id" = %s', (run_id,))
             row = cur.fetchone()
-            result["status"] = row[0] if row else None
+            if row:
+                result["status"], result["merge_state"], result["submission_count"] = row[0], row[1], row[2]
+            else:
+                result["status"], result["merge_state"], result["submission_count"] = None, None, None
         except psycopg.errors.UndefinedColumn:
             conn.rollback()
             result["status"] = "n/a"

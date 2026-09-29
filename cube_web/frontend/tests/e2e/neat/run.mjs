@@ -17,7 +17,7 @@ const wanted = process.argv.slice(2);
 const shouldRun = (id) => wanted.length === 0 || wanted.includes(String(id));
 state.startedAt = new Date().toISOString();
 
-const diag = async (page, tag) => {
+export const diag = async (page, tag) => {
   const info = await page.evaluate(() => ({
     url: location.href,
     testids: [...document.querySelectorAll('[data-testid]')].map((e) => e.getAttribute('data-testid')),
@@ -28,7 +28,7 @@ const diag = async (page, tag) => {
   return JSON.stringify(info).slice(0, 500);
 };
 
-async function openPartition(page) {
+export async function openPartition(page) {
   await page.goto(`${APP}/partition`, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
   if (page.url().startsWith('http://10.3.100.182')) await login(page, { entry: `${APP}/partition` });
@@ -36,12 +36,12 @@ async function openPartition(page) {
   await page.waitForTimeout(1500);
 }
 
-async function openDrawer(page) {
+export async function openDrawer(page) {
   await page.getByRole('button', { name: /已载入光学遥感数据/ }).click();
   await page.waitForTimeout(2500);
 }
 
-async function expandDataset(page) {
+export async function expandDataset(page) {
   const node = page.getByTestId(`dataset-tree-${DATASET_BATCH}-${DATASET_ID}`);
   const tree = page.getByTestId(`batch-tree-${DATASET_BATCH}`);
   if (!(await tree.count())) {
@@ -64,9 +64,9 @@ async function expandDataset(page) {
   return node;
 }
 
-function datasetNode(page) { return page.getByTestId(`dataset-tree-${DATASET_BATCH}-${DATASET_ID}`); }
+export function datasetNode(page) { return page.getByTestId(`dataset-tree-${DATASET_BATCH}-${DATASET_ID}`); }
 
-async function selectDataset(page) {
+export async function selectDataset(page) {
   await expandDataset(page);
   const checkbox = datasetNode(page).locator('[data-testid^="select-dataset-"]').first();
   if (!(await checkbox.count())) throw new Error(`dataset checkbox missing; drawer=${await diag(page, 'select-missing-checkbox')}`);
@@ -79,7 +79,7 @@ async function selectDataset(page) {
 // Select exactly one scene (first rendered) so runs stay small; returns scene id.
 const KNOWN_GOOD_SCENE = 'scene-3e2d9d877f1423bace8e58532596d94c671fa26b36cb0038a26e00c113744723';
 
-async function selectSingleScene(page, preferredId = KNOWN_GOOD_SCENE) {
+export async function selectSingleScene(page, preferredId = KNOWN_GOOD_SCENE) {
   const rows = page.locator('[data-testid^="select-scene-"]');
   const total = await rows.count();
   if (!total) throw new Error(`no scene checkboxes; drawer=${await diag(page, 'scene-missing')}`);
@@ -113,7 +113,7 @@ async function selectSingleScene(page, preferredId = KNOWN_GOOD_SCENE) {
   throw new Error(`every scene checkbox is disabled (${total} scenes); drawer=${await diag(page, 'scene-all-disabled')}`);
 }
 
-async function selectGrid(page, grid) {
+export async function selectGrid(page, grid) {
   const select = datasetNode(page).locator('[data-testid^="dataset-grid-"]:not([data-testid^="dataset-grid-level-"])').first();
   if (!(await select.count())) throw new Error(`grid select missing for ${grid.key}; drawer=${await diag(page, 'grid-missing')}`);
   await select.click();
@@ -128,7 +128,7 @@ async function selectGrid(page, grid) {
   return { options, shown: shown.replace(/\s+/g, ' ').trim() };
 }
 
-async function closeDrawer(page) {
+export async function closeDrawer(page) {
   const close = page.locator('.el-drawer__close-btn').first();
   if (await close.count()) {
     await close.click();
@@ -139,7 +139,7 @@ async function closeDrawer(page) {
   return /0 \u4e2a\u6570\u636e\u96c6/.test(await page.getByTestId('selected-load-batches').innerText().catch(() => ''));
 }
 
-async function unlockLevelIfNeeded(page) {
+export async function unlockLevelIfNeeded(page) {
   const unlock = datasetNode(page).locator('[data-testid^="unlock-grid-level-"]').first();
   if (await unlock.count()) {
     await unlock.click();
@@ -149,7 +149,7 @@ async function unlockLevelIfNeeded(page) {
   return false;
 }
 
-async function setLevel(page, levelLabel) {
+export async function setLevel(page, levelLabel) {
   const select = datasetNode(page).locator('[data-testid^="dataset-grid-level-"]').first();
   if (!(await select.count())) throw new Error(`level select missing; drawer=${await diag(page, 'level-missing')}`);
   await select.click();
@@ -163,12 +163,12 @@ async function setLevel(page, levelLabel) {
   return (await select.innerText()).replace(/\s+/g, ' ').trim();
 }
 
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'manual_required']);
+export const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'manual_required']);
 const STATUS_LABELS = [
   ['需要人工处理', 'manual_required'], ['部分失败', 'partial_failure'], ['取消中', 'cancel_requested'], ['已取消', 'cancelled'],
   ['已完成', 'completed'], ['失败', 'failed'], ['运行中', 'running'], ['重试中', 'retrying'], ['已排队', 'queued'], ['等待中', 'pending'],
 ];
-function statusFromRow(text) {
+export function statusFromRow(text) {
   for (const [label, value] of STATUS_LABELS) if (text.includes(label)) return value;
   const english = text.match(/manual_required|cancel_requested|partial_failure|completed|failed|cancelled|running|retrying|queued|pending/);
   return english ? english[0] : null;
@@ -552,4 +552,5 @@ async function main() {
 
 let apiCallsSnapshot = [];
 void DIR; void runDb; void dbCounts; void OUT;
-await main();
+// Importing this module (e.g. from merge_ingest.mjs) must not start the full suite.
+if (import.meta.url === `file://${process.argv[1]}`) { await main(); }
