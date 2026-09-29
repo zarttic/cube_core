@@ -62,8 +62,41 @@ describe('PartitionQualityDrawer', () => {
     expect(history.text()).toContain('经纬度格网 · 层级 4');
     expect(history.text()).toContain('质检通过 · 120 格元');
     expect(history.text()).toContain('#2 · bob');
-    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('格网层级：4 → 5');
-    expect(wrapper.get('[data-testid="partition-submission-changes-2"]').text()).toContain('容器限制：无限制 → 2');
+    const changes = wrapper.get('[data-testid="partition-submission-changes-2"]');
+    expect(changes.text()).toContain('格网层级：4 → 5');
+    expect(changes.text()).toContain('容器限制：无限制 → 2');
+    expect(changes.text()).not.toContain('dataset-a');
+  });
+
+  it('keeps the dataset prefix in change labels for multi-dataset records', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-multi',
+          summary: {},
+          datasets: [],
+          submissions: [{
+            submission_id: 'submission-multi', attempt_no: 1, requested_by: 'alice', status: 'completed',
+            parameters: { datasets: [{ dataset_id: 'dataset-a' }, { dataset_id: 'dataset-b' }] },
+            changes: { identical: false, fields: [
+              { field: 'datasets.dataset-b|.grid.requested_grid_level', before: 1, after: 2 },
+            ] },
+            outputs: [],
+          }],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-testid="partition-submission-changes-1"]').text()).toContain('dataset-b 格网层级：1 → 2');
   });
 
   it('shows automatic quality rule results for the partition batch', () => {

@@ -160,19 +160,23 @@ function submissionParameterLabel(submission) {
   return datasets.map(submissionGridLabel).join('；') || '参数未记录';
 }
 
-function submissionFieldLabel(field) {
+function submissionFieldLabel(field, { hideDataset = false } = {}) {
   const path = String(field || '');
   if (SUBMISSION_FIELD_LABELS[path]) return SUBMISSION_FIELD_LABELS[path];
   const match = path.match(/^datasets\.(.+?)\.(.*)$/);
   if (!match) return path;
   const datasetId = match[1].split('|')[0] || '数据集';
   const rest = match[2];
-  if (rest === 'scene_ids') return `${datasetId} 景选择`;
-  if (rest === 'band_unit_ids') return `${datasetId} 波段选择`;
-  if (rest === 'source_batch_id') return `${datasetId} 来源批次`;
-  if (!rest) return `${datasetId} 数据选择`;
+  // A single-dataset record does not need the dataset id in front of every
+  // changed field; added/removed datasets keep it because the remaining
+  // parameters no longer identify the dataset that changed.
+  const prefix = hideDataset && rest ? '' : `${datasetId} `;
+  if (rest === 'scene_ids') return `${prefix}景选择`;
+  if (rest === 'band_unit_ids') return `${prefix}波段选择`;
+  if (rest === 'source_batch_id') return `${prefix}来源批次`;
+  if (!rest) return `${prefix}数据选择`;
   const gridField = rest.replace(/^grid\./, '');
-  return `${datasetId} ${SUBMISSION_GRID_LABELS[gridField] || gridField}`;
+  return `${prefix}${SUBMISSION_GRID_LABELS[gridField] || gridField}`;
 }
 
 function submissionChangeValue(field, value) {
@@ -196,7 +200,10 @@ function submissionChangeText(item) {
 function submissionChangeLabels(submission) {
   const fields = submission?.changes?.fields;
   if (!Array.isArray(fields) || !fields.length) return [];
-  return fields.slice(0, 6).map((item) => `${submissionFieldLabel(item.field)}：${submissionChangeText(item)}`);
+  const hideDataset = (submission?.parameters?.datasets || []).length <= 1;
+  return fields.slice(0, 6).map((item) => (
+    `${submissionFieldLabel(item.field, { hideDataset })}：${submissionChangeText(item)}`
+  ));
 }
 
 function submissionIsIdentical(submission) {
