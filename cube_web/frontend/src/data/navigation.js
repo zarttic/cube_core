@@ -37,8 +37,8 @@ const defaultNavItems = [
   { label: '分析就绪数据剖分', kind: 'admin', path: '/partition' },
   { label: '剖分数据服务', kind: 'external', url: '/partition' },
   { label: '资源调度', kind: 'external', url: '/dispatch' },
-  { label: '后台管理', kind: 'external', url: '/admin' },
   { label: '全球离散格网模型与编码', kind: 'internal', path: '/encoding' },
+  { label: '后台管理', kind: 'external', url: '/admin' },
 ];
 
 const headerLabelOrder = [
@@ -47,8 +47,8 @@ const headerLabelOrder = [
   '分析就绪数据剖分',
   '剖分数据服务',
   '资源调度',
-  '后台管理',
   '全球离散格网模型与编码',
+  '后台管理',
 ];
 
 function normalizeNavItem(item) {
