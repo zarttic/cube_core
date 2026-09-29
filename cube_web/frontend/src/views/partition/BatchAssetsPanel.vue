@@ -711,7 +711,7 @@ onBeforeUnmount(() => {
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
 
     <div class="partition-batch-picker">
-      <div class="partition-section-title"><strong>待剖分批次</strong><span>{{ batchPage.total }} 个可用批次</span></div>
+      <div class="partition-section-title"><span>{{ batchPage.total }} 个可用批次</span></div>
       <el-form class="batch-filter-toolbar" inline @submit.prevent="applyBatchFilters">
         <el-form-item>
           <el-input v-model="batchKeyword" :prefix-icon="SearchOutline" clearable placeholder="载入批次名称或 ID" @keyup.enter="applyBatchFilters" />
@@ -823,7 +823,7 @@ onBeforeUnmount(() => {
                     :disabled="selectableBandIdsForScene(scene, dataset.data_type, dataset).length === 0"
                     :data-testid="`select-scene-${scene.scene_id}`"
                     @change="toggleSceneSelection(scene, dataset.data_type, dataset, $event)"
-                  >全选该景</el-checkbox>
+                  >全波段</el-checkbox>
                 </div>
                 <el-checkbox-group
                   v-show="!collapsedScenes.has(sceneGroupKey(dataset, scene)) && bandsFor(scene, dataset.data_type).length"

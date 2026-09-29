@@ -15,6 +15,11 @@ import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 defineProps({ embedded: Boolean, title: { type: String, default: '数据入库' } });
 const store = useIngestRunsStore();
 const manualDialogVisible = ref(false);
+const activePane = ref('pending');
+const paneOptions = [
+  { label: '待入库集合', value: 'pending' },
+  { label: '入库记录', value: 'records' },
+];
 const manualCollectionId = ref('');
 const manualBandUnitIds = ref([]);
 const collapsedManualDatasets = ref(new Set());
@@ -187,7 +192,8 @@ async function openManualIngest(partitionRunId = '') {
 <template>
   <section class="ingest-view" :class="{ embedded }">
     <header class="view-header"><div><h2>{{ title }}</h2></div><div class="header-actions"><el-button :icon="RefreshOutline" :loading="store.loading" @click="refresh">刷新</el-button></div></header>
-    <section class="pending-ingest-panel">
+    <el-segmented v-model="activePane" :options="paneOptions" class="ingest-pane-switch" data-testid="ingest-pane-switch" />
+    <section v-show="activePane === 'pending'" class="pending-ingest-panel" data-testid="pending-ingest-panel">
       <div class="pending-ingest-heading"><div><h3>待入库集合 <span>{{ store.manualPageState.total }} 条</span></h3><span>按剖分批次或数据集筛选</span></div></div>
       <el-form class="pending-filter-bar" inline @submit.prevent="applyManualFilters">
         <el-form-item><el-input v-model="store.manualFilters.keyword" :prefix-icon="SearchOutline" clearable placeholder="剖分批次或数据集" /></el-form-item>
@@ -204,8 +210,8 @@ async function openManualIngest(partitionRunId = '') {
       </div>
       <div v-if="store.manualPageState.total" class="pending-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :current-page="store.manualPageState.page" :page-size="store.manualPageState.pageSize" :page-sizes="[10, 20, 50]" :total="store.manualPageState.total" @current-change="setManualPage" @size-change="setManualPageSize" /></div>
     </section>
-    <details class="ingest-history">
-      <summary>入库记录 <span>{{ store.pageState.total }} 条</span></summary>
+    <section v-show="activePane === 'records'" class="ingest-history" data-testid="ingest-history">
+      <div class="ingest-history-heading"><div><h3>入库记录 <span>{{ store.pageState.total }} 条</span></h3></div></div>
       <div class="ingest-history-body">
     <el-form class="filter-bar" label-position="top" @submit.prevent="refresh">
       <el-form-item label="关键词"><el-input v-model="store.filters.keyword" :prefix-icon="SearchOutline" clearable placeholder="剖分批次、运行 ID 或数据集" /></el-form-item>
@@ -224,7 +230,7 @@ async function openManualIngest(partitionRunId = '') {
     </AppTable>
     <IngestRunDetailDrawer :visible="store.detailVisible" :run-id="store.selectedRunId" :detail="store.detail" :loading="store.detailLoading" :action-loading="store.actionLoading" @close="store.closeDetail" @retry-band-units="(bandUnitIds) => store.retryFailedBandUnits(bandUnitIds).catch(() => {})" @cancel="(reason) => store.cancelRun(reason).catch(() => {})" />
       </div>
-    </details>
+    </section>
     <el-dialog v-model="manualDialogVisible" title="手动入库" width="760px" append-to-body>
       <el-form label-width="92px" @submit.prevent="submitManualIngest">
         <el-form-item label="剖分集合"><el-select v-model="manualCollectionId" filterable clearable :loading="store.manualCandidatesLoading" placeholder="选择剖分批次数据集合" style="width: 100%" @change="changeManualCollection">
@@ -288,7 +294,12 @@ async function openManualIngest(partitionRunId = '') {
 .view-header span { color: #748095; font-size: 13px; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .candidate-meta { display: block; margin-top: 2px; color: #8993a4; font-size: 12px; }
+.ingest-pane-switch { margin-bottom: 16px; }
 .pending-ingest-panel { margin-bottom: 18px; padding: 16px; border: 1px solid #dfe4ec; border-radius: 6px; background: #fff; }
+.ingest-history { margin-top: 0; padding: 16px; border: 1px solid #dfe4ec; border-radius: 6px; background: #fff; }
+.ingest-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.ingest-history-heading h3 { margin: 0; color: #263247; font-size: 15px; }
+.ingest-history-heading span { color: #8993a4; font-size: 12px; font-weight: 400; }
 .pending-ingest-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .pending-ingest-heading h3 { margin: 0 0 3px; color: #263247; font-size: 15px; }
 .pending-ingest-heading span, .pending-state { color: #8993a4; font-size: 12px; }
@@ -298,11 +309,7 @@ async function openManualIngest(partitionRunId = '') {
 .pending-ingest-list { display: flex; flex-direction: column; gap: 8px; }
 .pending-ingest-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid #e6eaf0; border-radius: 5px; background: #fafbfd; }
 .pending-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
-.ingest-history { margin-top: 18px; border: 1px solid #dfe4ec; border-radius: 6px; background: #fff; }
-.ingest-history summary { padding: 13px 16px; color: #263247; font-size: 14px; font-weight: 600; cursor: pointer; list-style: none; }
-.ingest-history summary::-webkit-details-marker { display: none; }
-.ingest-history summary span { margin-left: 8px; color: #8993a4; font-size: 12px; font-weight: 400; }
-.ingest-history-body { padding: 0 16px 16px; }
+.ingest-history-body { padding: 0; }
 .filter-bar { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 12px; margin-bottom: 16px; }
 .filter-bar :deep(.el-form-item) { margin-bottom: 12px; }
 .filter-action { align-self: end; }

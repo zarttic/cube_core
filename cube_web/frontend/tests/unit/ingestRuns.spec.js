@@ -14,6 +14,12 @@ import { useIngestRunsStore } from '@/stores/ingestRuns';
 import IngestRunDetailDrawer from '@/views/ingest/IngestRunDetailDrawer.vue';
 import IngestView from '@/views/IngestView.vue';
 
+const segmentedStub = {
+  props: ['modelValue', 'options'],
+  emits: ['update:modelValue'],
+  template: '<div class="el-segmented-stub"><button v-for="option in options" :key="option.value" type="button" @click="$emit(\'update:modelValue\', option.value)">{{ option.label }}</button></div>',
+};
+
 beforeEach(() => {
   setActivePinia(createPinia());
   pendingGets.splice(0);
@@ -138,6 +144,7 @@ describe('ingest run records table', () => {
           AppTable: { template: '<div><slot /></div>' },
           StatusTag: { template: '<span />' },
           IngestRunDetailDrawer: { template: '<div />' },
+          'el-segmented': segmentedStub,
           'el-form': { template: '<form><slot /></form>' },
           'el-form-item': { template: '<div><slot /></div>' },
           'el-select': { template: '<div><slot /></div>' },
@@ -167,6 +174,43 @@ describe('ingest run records table', () => {
     expect(wrapper.find('[data-label="剖分运行"]').exists()).toBe(false);
     expect(wrapper.text()).toContain('ingest-run-auto-3d142c7a');
     expect(wrapper.text()).toContain('partition-run-mu4amci4-2s5mss0ogt');
+  });
+
+  it('switches between pending collections and ingest records in one segmented pane control', async () => {
+    requestGet.mockImplementation(() => Promise.resolve({ items: [], total: 0, page: 1, page_size: 20 }));
+    const wrapper = mount(IngestView, {
+      global: {
+        stubs: {
+          AppTable: { template: '<div><slot /></div>' },
+          StatusTag: { template: '<span />' },
+          IngestRunDetailDrawer: { template: '<div />' },
+          'el-segmented': segmentedStub,
+          'el-icon': { template: '<span><slot /></span>' },
+          'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+          'el-form': { template: '<form><slot /></form>' },
+          'el-form-item': { template: '<div><slot /></div>' },
+          'el-select': { template: '<div><slot /></div>' },
+          'el-option': { template: '<div><slot /></div>' },
+          'el-checkbox-group': { template: '<div><slot /></div>' },
+          'el-checkbox': { template: '<label><slot /></label>' },
+          'el-dialog': { template: '<div><slot /><slot name="footer" /></div>' },
+          'el-alert': { template: '<div />' },
+          'el-progress': { template: '<div />' },
+          'el-table-column': { template: '<div />' },
+          'el-input': { template: '<input />' },
+          'el-pagination': { template: '<div />' },
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="ingest-pane-switch"]').exists()).toBe(true));
+    expect(wrapper.findAll('.el-segmented-stub button').map((button) => button.text())).toEqual(['待入库集合', '入库记录']);
+    expect(wrapper.get('[data-testid="pending-ingest-panel"]').attributes('style') || '').not.toContain('display: none');
+
+    await wrapper.findAll('.el-segmented-stub button').find((button) => button.text() === '入库记录').trigger('click');
+
+    expect(wrapper.get('[data-testid="pending-ingest-panel"]').attributes('style')).toContain('display: none');
+    expect(wrapper.get('[data-testid="ingest-history"]').attributes('style') || '').not.toContain('display: none');
   });
 });
 
@@ -285,6 +329,7 @@ describe('manual ingest selection', () => {
           AppTable: { template: '<div><slot /></div>' },
           StatusTag: { template: '<span />' },
           IngestRunDetailDrawer: { template: '<div />' },
+          'el-segmented': segmentedStub,
           'el-icon': { template: '<span><slot /></span>' },
           'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
           'el-form': { template: '<form><slot /></form>' },
