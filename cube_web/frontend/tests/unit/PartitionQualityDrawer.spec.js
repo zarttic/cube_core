@@ -150,6 +150,41 @@ describe('PartitionQualityDrawer', () => {
     expect(wrapper.text()).not.toContain('quality-run-1');
   });
 
+  it('shows the actual worker execution window', () => {
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-window',
+          summary: { band_count: 1, partitioned_count: 1 },
+          partition_worker_timing: {
+            scope: 'partition_workers',
+            elapsed_sec: 5.366,
+            started_at: '2026-11-17T19:12:57+08:00',
+            finished_at: '2026-11-17T19:13:03+08:00',
+            worker_count: 10,
+          },
+          partition_compute_timing: { elapsed_sec: 6.889 },
+          datasets: [],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    const timing = wrapper.get('[data-testid="partition-timing"]').text();
+    expect(timing).toContain('实际剖分窗口');
+    expect(timing).toContain('5.366 秒');
+    expect(timing).not.toContain('6.889 秒');
+    expect(timing).not.toContain('窗口起止');
+  });
+
   it('allows failed quality units to be repartitioned and exported', async () => {
     const wrapper = mount(PartitionQualityDrawer, {
       props: {
