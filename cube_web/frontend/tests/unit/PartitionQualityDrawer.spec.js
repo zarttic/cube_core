@@ -105,6 +105,7 @@ describe('PartitionQualityDrawer', () => {
         visible: true,
         detail: {
           partition_run_id: 'partition-run-1',
+          status: 'completed',
           summary: { band_count: 1, partitioned_count: 1, quality_pass_count: 1 },
           partition_compute_timing: { elapsed_sec: 2.883303 },
           partition_write_timing: { elapsed_sec: 16.739349 },
@@ -215,12 +216,13 @@ describe('PartitionQualityDrawer', () => {
     expect(wrapper.find('[data-testid="partition-attempt-1"]').exists()).toBe(true);
   });
 
-  it('shows the actual worker execution window', () => {
-    const wrapper = mount(PartitionQualityDrawer, {
+  it('shows partition duration only after the batch is completed', () => {
+    const mountDrawer = (status) => mount(PartitionQualityDrawer, {
       props: {
         visible: true,
         detail: {
           partition_run_id: 'partition-run-window',
+          status,
           summary: { band_count: 1, partitioned_count: 1 },
           partition_worker_timing: {
             scope: 'partition_workers',
@@ -243,11 +245,15 @@ describe('PartitionQualityDrawer', () => {
       },
     });
 
-    const timing = wrapper.get('[data-testid="partition-timing"]').text();
-    expect(timing).toContain('实际剖分窗口');
-    expect(timing).toContain('5.366 秒');
-    expect(timing).not.toContain('6.889 秒');
-    expect(timing).not.toContain('窗口起止');
+    const completed = mountDrawer('completed').get('[data-testid="partition-timing"]').text();
+    expect(completed).toContain('剖分耗时');
+    expect(completed).toContain('5.366 秒');
+    expect(completed).not.toContain('6.889 秒');
+
+    const running = mountDrawer('running').get('[data-testid="partition-timing"]').text();
+    expect(running).toContain('剖分耗时');
+    expect(running).toContain('等待剖分完成');
+    expect(running).not.toContain('5.366 秒');
   });
 
   it('allows failed quality units to be repartitioned and exported', async () => {
@@ -348,6 +354,7 @@ describe('PartitionQualityDrawer', () => {
         visible: true,
         detail: {
           partition_run_id: 'partition-run-2',
+          status: 'running',
           partition_timing: { scope: 'partition_to_ingest', elapsed_sec: null, worker_count: 2 },
           datasets: [{
             dataset_id: 'dataset-2', dataset_code: 'OPTICAL-2', dataset_title: '光学数据集二', scenes: [],
@@ -371,7 +378,7 @@ describe('PartitionQualityDrawer', () => {
     });
 
     expect(wrapper.get('[data-testid="quality-dataset-associations"]').text()).toContain('光学数据集二');
-    expect(wrapper.get('[data-testid="partition-timing"]').text()).toContain('等待入库完成');
+    expect(wrapper.get('[data-testid="partition-timing"]').text()).toContain('等待剖分完成');
     expect(wrapper.get('[data-testid="quality-throughput-quality-run-2"]').text()).toContain('等待质检完成');
     expect(wrapper.text()).not.toContain('编码：');
     expect(wrapper.text()).not.toContain('ID：');

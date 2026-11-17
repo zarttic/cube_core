@@ -29,15 +29,14 @@ const partitionTiming = computed(() => props.detail?.partition_worker_timing
   || props.detail?.partition_compute_timing
   || props.detail?.partition_execution_timing
   || props.detail?.partition_timing);
-const partitionTimingLabel = computed(() => {
-  if (partitionTiming.value?.scope === 'partition_workers') return '实际剖分窗口';
-  if (partitionTiming.value?.scope === 'partition_execution') return '剖分执行时间';
-  return '剖分耗时';
-});
+const partitionCompleted = computed(() => String(props.detail?.status || '') === 'completed');
 const hasPartitionTiming = computed(() => Boolean(partitionTiming.value));
-const partitionPendingLabel = computed(() => partitionTiming.value?.scope === 'partition_to_ingest'
-  ? '等待入库完成'
-  : '等待剖分完成');
+const partitionTimingValue = computed(() => (
+  partitionCompleted.value ? partitionTiming.value?.elapsed_sec : null
+));
+const partitionTimingPendingLabel = computed(() => (
+  partitionCompleted.value ? '无计时记录' : '等待剖分完成'
+));
 const hasFailedPartition = computed(() => Number(summary.value.partition_failed_count || 0) > 0);
 const hasFailedQuality = computed(() => Number(summary.value.quality_failed_count || 0) > 0);
 const activePartition = computed(() => ['pending', 'queued', 'running', 'retrying', 'cancel_requested'].includes(props.detail?.status));
@@ -366,7 +365,7 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
         <div><span>完成入库</span><strong>{{ summary.ingested_count || 0 }}/{{ summary.band_count || 0 }}</strong></div>
       </section>
       <section v-if="hasPartitionTiming" class="partition-timing" data-testid="partition-timing">
-        <div v-if="partitionTiming"><span>{{ partitionTimingLabel }}</span><strong>{{ formatElapsed(partitionTiming.elapsed_sec, partitionPendingLabel) }}</strong></div>
+        <div v-if="partitionTiming"><span>剖分耗时</span><strong>{{ formatElapsed(partitionTimingValue, partitionTimingPendingLabel) }}</strong></div>
       </section>
       <section class="dataset-associations" data-testid="quality-dataset-associations">
         <h3>关联数据集</h3>
