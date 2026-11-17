@@ -26,6 +26,7 @@ from cube_web.services.scene_repository import (
     _partition_execution_timing,
     _partition_scene_idempotency_key,
     _partition_submission_changes,
+    _partition_worker_timing,
     _partition_write_timing,
 )
 from cube_web.services.scene_service import SceneDomainService, build_partition_execution_request
@@ -877,6 +878,54 @@ def test_partition_compute_and_write_timings_are_separated() -> None:
     assert write["elapsed_sec"] == 16.9
     assert "opengauss.start_output" not in write["phases"]
     assert write["phases"]["opengauss.promote_logical_staging"]["elapsed_sec"] == 16.3
+
+
+def test_partition_worker_timing_uses_first_start_and_last_finish() -> None:
+    timing = _partition_worker_timing([{
+        "status": "succeeded",
+        "runner_result": {
+            "datasets": [{
+                "timings": {
+                    "driver": {
+                        "scope": "raster_batch_driver",
+                        "started_at": "2026-08-25T10:00:00Z",
+                        "finished_at": "2026-08-25T10:00:10Z",
+                        "elapsed_sec": 10.0,
+                    },
+                    "units": [{
+                        "workers": [
+                            {
+                                "scope": "raster_worker",
+                                "started_at": "2026-08-25T10:00:01Z",
+                                "finished_at": "2026-08-25T10:00:04Z",
+                                "elapsed_sec": 3.0,
+                            },
+                            {
+                                "scope": "raster_worker",
+                                "started_at": "2026-08-25T10:00:02Z",
+                                "finished_at": "2026-08-25T10:00:06Z",
+                                "elapsed_sec": 4.0,
+                            },
+                        ],
+                    }],
+                    "workers": [{
+                        "scope": "raster_worker",
+                        "started_at": "2026-08-25T10:00:03Z",
+                        "finished_at": "2026-08-25T10:00:05Z",
+                        "elapsed_sec": 2.0,
+                    }],
+                },
+            }],
+        },
+    }])
+
+    assert timing is not None
+    assert timing["scope"] == "partition_workers"
+    assert timing["started_at"] == "2026-08-25T10:00:01Z"
+    assert timing["finished_at"] == "2026-08-25T10:00:06Z"
+    assert timing["elapsed_sec"] == 5.0
+    assert timing["worker_count"] == 3
+    assert timing["attributes"]["worker_scopes"] == ["raster_worker"]
 
 
 def test_partition_quality_failure_can_resubmit_only_failed_band_units(api) -> None:

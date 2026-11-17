@@ -458,6 +458,7 @@ class OpenGaussSceneRepository:
                 ingest_completion = _one(cursor) or {}
         batch = self._partition_quality_summary(run)
         batch["submissions"] = _partition_submissions(submission_rows)
+        batch["partition_worker_timing"] = _partition_worker_timing(attempts)
         batch["partition_compute_timing"] = _partition_compute_timing(attempts)
         batch["partition_write_timing"] = _partition_write_timing(attempts)
         batch["partition_execution_timing"] = _partition_execution_timing(attempts)
@@ -2795,6 +2796,44 @@ def _partition_execution_timing(attempts: list[dict[str, Any]]) -> dict[str, Any
             timing["start_condition"] = "workflow_started"
             timing["end_condition"] = "output_committed"
             return timing
+    return None
+
+
+def _partition_worker_timing(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the actual worker execution window: first start to last finish."""
+    for attempt in reversed(attempts):
+        if str(attempt.get("status") or "") != "succeeded":
+            continue
+        workers = [
+            record
+            for record in _attempt_timing_records(attempt)
+            if str(record.get("scope") or "").endswith("_worker")
+            and record.get("started_at")
+            and record.get("finished_at")
+        ]
+        dated: list[tuple[datetime, datetime]] = []
+        for record in workers:
+            started = _parse_timing_datetime(record.get("started_at"))
+            finished = _parse_timing_datetime(record.get("finished_at"))
+            if started is not None and finished is not None and finished >= started:
+                dated.append((started, finished))
+        if not dated:
+            continue
+        started = min(item[0] for item in dated)
+        finished = max(item[1] for item in dated)
+        return {
+            "schema_version": 1,
+            "scope": "partition_workers",
+            "started_at": _format_timing_datetime(started),
+            "finished_at": _format_timing_datetime(finished),
+            "elapsed_sec": round((finished - started).total_seconds(), 6),
+            "start_condition": "first_worker_started",
+            "end_condition": "last_worker_finished",
+            "worker_count": len(dated),
+            "attributes": {
+                "worker_scopes": sorted({str(record.get("scope")) for record in workers}),
+            },
+        }
     return None
 
 
