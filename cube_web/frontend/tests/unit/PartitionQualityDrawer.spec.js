@@ -150,6 +150,71 @@ describe('PartitionQualityDrawer', () => {
     expect(wrapper.text()).not.toContain('quality-run-1');
   });
 
+  it('sorts and paginates submission and attempt histories newest first', async () => {
+    const submissions = Array.from({ length: 12 }, (_, index) => ({
+      submission_id: `submission-${index + 1}`,
+      attempt_no: index + 1,
+      requested_by: 'alice',
+      status: 'completed',
+      created_at: `2026-09-29T${String(index).padStart(2, '0')}:00:00+08:00`,
+      parameters: { datasets: [] },
+      changes: { fields: [] },
+      outputs: [],
+    }));
+    const attempts = Array.from({ length: 12 }, (_, index) => ({
+      task_id: `task-${index + 1}`,
+      attempt_no: index + 1,
+      operation: 'auto_run',
+      status: 'succeeded',
+      error_message: null,
+    }));
+    const wrapper = mount(PartitionQualityDrawer, {
+      props: {
+        visible: true,
+        detail: {
+          partition_run_id: 'partition-run-history',
+          summary: {},
+          submissions,
+          attempts,
+          datasets: [],
+        },
+      },
+      global: {
+        stubs: {
+          DetailDrawer: { template: '<div><slot /></div>' },
+          StatusTag: { props: ['value'], template: '<span>{{ value }}</span>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-tree': { template: '<div />' },
+        },
+      },
+    });
+
+    expect(wrapper.find('[data-testid="partition-submission-12"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-submission-8"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-submission-7"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="partition-submission-1"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="submission-pagination"]').text()).toContain('1 / 3');
+    expect(wrapper.find('[data-testid="partition-attempt-12"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-attempt-1"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="attempt-pagination"]').text()).toContain('1 / 3');
+
+    await wrapper.get('[data-testid="submission-next"]').trigger('click');
+    expect(wrapper.get('[data-testid="submission-pagination"]').text()).toContain('2 / 3');
+    expect(wrapper.find('[data-testid="partition-submission-7"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-submission-3"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-submission-12"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="submission-next"]').trigger('click');
+    expect(wrapper.get('[data-testid="submission-pagination"]').text()).toContain('3 / 3');
+    expect(wrapper.find('[data-testid="partition-submission-2"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="partition-submission-1"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="attempt-next"]').trigger('click');
+    await wrapper.get('[data-testid="attempt-next"]').trigger('click');
+    expect(wrapper.get('[data-testid="attempt-pagination"]').text()).toContain('3 / 3');
+    expect(wrapper.find('[data-testid="partition-attempt-1"]').exists()).toBe(true);
+  });
+
   it('shows the actual worker execution window', () => {
     const wrapper = mount(PartitionQualityDrawer, {
       props: {

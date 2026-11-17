@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { DownloadOutline } from '@vicons/ionicons5';
 
 import DetailDrawer from '@/components/DetailDrawer.vue';
@@ -57,6 +57,49 @@ const qualityRuns = computed(() => (props.detail?.datasets || []).flatMap((datas
     datasetLabel: dataset.dataset_title || dataset.dataset_code || dataset.dataset_id,
   }))
 ));
+
+const HISTORY_PAGE_SIZE = 5;
+const submissionPage = ref(1);
+const attemptPage = ref(1);
+
+function compareHistory(left, right) {
+  const leftAttempt = Number(left?.attempt_no);
+  const rightAttempt = Number(right?.attempt_no);
+  if (Number.isFinite(leftAttempt) && Number.isFinite(rightAttempt) && leftAttempt !== rightAttempt) {
+    return rightAttempt - leftAttempt;
+  }
+  return String(right?.created_at || '').localeCompare(String(left?.created_at || ''));
+}
+
+const sortedSubmissions = computed(() => [...(props.detail?.submissions || [])].sort(compareHistory));
+const sortedAttempts = computed(() => [...(props.detail?.attempts || [])].sort(compareHistory));
+const submissionPageCount = computed(() => Math.max(1, Math.ceil(sortedSubmissions.value.length / HISTORY_PAGE_SIZE)));
+const attemptPageCount = computed(() => Math.max(1, Math.ceil(sortedAttempts.value.length / HISTORY_PAGE_SIZE)));
+const pagedSubmissions = computed(() => {
+  const start = (submissionPage.value - 1) * HISTORY_PAGE_SIZE;
+  return sortedSubmissions.value.slice(start, start + HISTORY_PAGE_SIZE);
+});
+const pagedAttempts = computed(() => {
+  const start = (attemptPage.value - 1) * HISTORY_PAGE_SIZE;
+  return sortedAttempts.value.slice(start, start + HISTORY_PAGE_SIZE);
+});
+
+watch(
+  () => [props.detail?.partition_run_id, sortedSubmissions.value.length, sortedAttempts.value.length],
+  () => {
+    submissionPage.value = 1;
+    attemptPage.value = 1;
+  },
+);
+
+function setSubmissionPage(page) {
+  submissionPage.value = Math.min(Math.max(1, page), submissionPageCount.value);
+}
+
+function setAttemptPage(page) {
+  attemptPage.value = Math.min(Math.max(1, page), attemptPageCount.value);
+}
+
 
 function isActiveQualityRun(run) {
   return ['pending', 'running'].includes(run?.status);
@@ -382,8 +425,8 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
         </template>
       </el-tree>
       <details class="attempt-history" data-testid="partition-submissions">
-        <summary>剖分提交历史 <span>{{ (detail.submissions || []).length }} 次</span></summary>
-        <div v-for="submission in detail.submissions || []" :key="submission.submission_id" class="submission-row" :data-testid="`partition-submission-${submission.attempt_no}`">
+        <summary>剖分提交历史 <span>{{ sortedSubmissions.length }} 次</span></summary>
+        <div v-for="submission in pagedSubmissions" :key="submission.submission_id" class="submission-row" :data-testid="`partition-submission-${submission.attempt_no}`">
           <span>#{{ submission.attempt_no }} · {{ submission.requested_by || 'system' }}</span>
           <StatusTag domain="partition" :value="submission.status" size="small" />
           <small>{{ formatShanghaiTime(submission.created_at) }} · {{ submissionParameterLabel(submission) }}</small>
@@ -391,14 +434,25 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
           <small v-else-if="submissionIsIdentical(submission)" class="submission-changes">参数与上次相同</small>
           <small v-if="submissionQualityLabel(submission)" class="submission-quality">{{ submissionQualityLabel(submission) }}</small>
         </div>
-        <span v-if="!(detail.submissions || []).length" class="quality-pending">暂无提交记录</span>
+        <span v-if="!sortedSubmissions.length" class="quality-pending">暂无提交记录</span>
+        <div v-if="submissionPageCount > 1" class="history-pagination" data-testid="submission-pagination">
+          <button type="button" data-testid="submission-prev" :disabled="submissionPage <= 1" @click="setSubmissionPage(submissionPage - 1)">上一页</button>
+          <span>{{ submissionPage }} / {{ submissionPageCount }}</span>
+          <button type="button" data-testid="submission-next" :disabled="submissionPage >= submissionPageCount" @click="setSubmissionPage(submissionPage + 1)">下一页</button>
+        </div>
       </details>
       <details class="attempt-history">
-        <summary>剖分执行历史 <span>{{ (detail.attempts || []).length }} 次</span></summary>
-        <div v-for="attempt in detail.attempts || []" :key="attempt.task_id" class="attempt-row">
+        <summary>剖分执行历史 <span>{{ sortedAttempts.length }} 次</span></summary>
+        <div v-for="attempt in pagedAttempts" :key="attempt.task_id" class="attempt-row" :data-testid="`partition-attempt-${attempt.attempt_no}`">
           <span>#{{ attempt.attempt_no }} · {{ attemptOperationLabel(attempt.operation) }}</span>
           <StatusTag domain="partition" :value="attempt.status" size="small" />
           <small>{{ attemptErrorLabel(attempt) }}</small>
+        </div>
+        <span v-if="!sortedAttempts.length" class="quality-pending">暂无执行记录</span>
+        <div v-if="attemptPageCount > 1" class="history-pagination" data-testid="attempt-pagination">
+          <button type="button" data-testid="attempt-prev" :disabled="attemptPage <= 1" @click="setAttemptPage(attemptPage - 1)">上一页</button>
+          <span>{{ attemptPage }} / {{ attemptPageCount }}</span>
+          <button type="button" data-testid="attempt-next" :disabled="attemptPage >= attemptPageCount" @click="setAttemptPage(attemptPage + 1)">下一页</button>
         </div>
       </details>
     </template>
@@ -455,6 +509,10 @@ const tree = computed(() => (props.detail?.datasets || []).map((dataset) => ({
 .attempt-row { display: grid; grid-template-columns: minmax(120px, 1fr) auto minmax(160px, 2fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid #edf0f4; }
 .attempt-row:first-of-type { margin-top: 7px; }
 .attempt-row small { color: #667085; overflow-wrap: anywhere; }
+.history-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 9px; }
+.history-pagination button { border: 1px solid #dfe4ec; background: #fff; color: #1f5f8b; padding: 3px 9px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.history-pagination button:disabled { color: #98a2b3; cursor: not-allowed; background: #f8fafc; }
+.history-pagination span { color: #667085; font-size: 12px; }
 .quality-node { display: flex; align-items: center; gap: 7px; min-height: 28px; min-width: 0; }
 .quality-node > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quality-node small { color: #667085; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
